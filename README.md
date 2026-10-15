@@ -90,8 +90,8 @@ Spatializing stereo sound is beyond this project's scope and will never be avail
 
 This fork has an optional Pro 3 heart-rate session on the main settings page,
 plus a raw movement trace. Sensor support depends on the actual model and public
-firmware version. Live Pro 3 heart-rate readings were confirmed on the test Pixel;
-movement still needs a separate hardware check. See [usage and checks](docs/PIXEL-AUDIO.md).
+firmware version. Live Pro 3 heart-rate readings and changing raw movement reports
+were confirmed on the test Pixel. See [usage and checks](docs/PIXEL-AUDIO.md).
 
 ### Linux
 

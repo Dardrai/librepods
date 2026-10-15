@@ -116,8 +116,10 @@ resume it explicitly. A shared Compose list recomposition defect also hid the
 conditional Stop and Play rows; a runtime regression reproduces and verifies its
 small inline fix. Live Pro 3 heart-rate reports were also observed. Packed firmware
 metadata such as `9442752` is normalized to `9A348` before selecting a movement
-service; late metadata updates reach the existing sensor session. Physical pairing,
-movement, call recipients and extended recovery still need their hardware checks.
+service; late metadata updates reach the existing sensor session. After that fix,
+the signed build displayed changing horizontal/vertical reports and a live trace
+on the Pixel. Both optional sensor toggles were verified off after testing.
+Physical pairing, call recipients and extended recovery still need their hardware checks.
 
 Build the FOSS application with JDK 21 and the SDK/NDK versions pinned in Gradle:
 
