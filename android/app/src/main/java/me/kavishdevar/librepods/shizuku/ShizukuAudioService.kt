@@ -81,11 +81,18 @@ class ShizukuAudioService(context: Context) : IAudioBridge.Stub() {
         channels: Int,
         targetPackage: String,
         forCall: Boolean,
+        selectedAddress: String,
         owner: IBinder,
         callback: IAudioBridgeCallback,
     ): ParcelFileDescriptor {
         enforceCaller()
         requireMicrophonePermission()
+        if (forCall) {
+            check(originalContext.packageManager.checkPermission("android.permission.BLUETOOTH_CONNECT",
+                BuildConfig.APPLICATION_ID) == PackageManager.PERMISSION_GRANTED) {
+                "LibrePods Bluetooth permission was revoked"
+            }
+        }
         AudioBridgeRules.validateFormat(sampleRate, channels)
         synchronized(lock) {
             check(!cleanupFailed.get() && !probing && session == null && playbackRecovery == null) { "An audio test or injection session is already running" }
@@ -97,12 +104,12 @@ class ShizukuAudioService(context: Context) : IAudioBridge.Stub() {
             }
             val identity = Binder.clearCallingIdentity()
             try {
-                val route = if (forCall) routing.callInjection(sampleRate, channels)
+                val route = if (forCall) routing.callInjection(sampleRate, channels, selectedAddress)
                     else routing.injection(sampleRate, channels, targetUid)
                 try {
                     val pipe = ParcelFileDescriptor.createReliablePipe()
                     val created = InjectionSession(owner, callback, pipe[0], route, channels,
-                        if (forCall) "Call uplink" else targetPackage,
+                        if (forCall) "Two-way call" else targetPackage,
                         if (forCall) null else targetPackage, targetUid)
                     session = created
                     try {
@@ -176,14 +183,26 @@ class ShizukuAudioService(context: Context) : IAudioBridge.Stub() {
             Thread({ pump() }, "LibrePods-mic-injection").start()
         }
 
+        @Synchronized private fun duplexReady() {
+            if (!closed.get()) callback.onSessionState("active_unverified",
+                "Call audio is redirected to the selected AirPods. Verify both directions, phone silence and ordinary media playback.")
+        }
+
+        @Synchronized private fun fail(error: Throwable) {
+            if (closed.get()) return
+            if (failure == null) failure = describe(error)
+            close()
+        }
+
         private fun pump() {
             try {
                 Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
                 val track = checkNotNull(route.track)
                 track.play()
                 check(track.playState == AudioTrack.PLAYSTATE_PLAYING) { "Injection track did not start" }
-                callback.onSessionState("active_unverified",
-                    "$target injection started. Confirm the receiving application hears the AirPods microphone.")
+                callback.onSessionState(if (route.call == null) "active_unverified" else "starting",
+                    if (route.call == null) "$target injection started. Confirm the receiving application hears the AirPods microphone."
+                    else "Waiting for AirPods microphone audio before redirecting the cellular call.")
                 val frameBytes = channels * 2
                 val buffer = ByteArray(8192)
                 val poll = StructPollfd().apply { fd = input.fileDescriptor; events = OsConstants.POLLIN.toShort() }
@@ -218,7 +237,10 @@ class ShizukuAudioService(context: Context) : IAudioBridge.Stub() {
                             val bytes = track.write(buffer, written, aligned - written, AudioTrack.WRITE_NON_BLOCKING)
                             check(bytes >= 0) { "Injection write failed ($bytes)" }
                             check(SystemClock.elapsedRealtime() < deadline) { "Injection stalled" }
-                            if (bytes == 0) Thread.sleep(2) else written += bytes
+                            if (bytes == 0) Thread.sleep(2) else {
+                                written += bytes
+                                route.call?.start(::duplexReady, ::fail)
+                            }
                         }
                         carry = total - aligned
                         if (carry > 0) buffer.copyInto(buffer, 0, aligned, total)

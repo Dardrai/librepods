@@ -49,6 +49,8 @@ class ShizukuAudioClient(context: Context) : Closeable {
         val channels: Int,
         val targetPackage: String,
         val forCall: Boolean,
+        val selectedAddress: String,
+        val stillCurrent: () -> Boolean,
     ) {
         val owner = Binder()
         var pcm: ParcelFileDescriptor? = null
@@ -186,8 +188,9 @@ class ShizukuAudioClient(context: Context) : Closeable {
         channels: Int,
         targetPackage: String,
         forCall: Boolean = false,
+        selectedAddress: String = "",
     ): ParcelFileDescriptor? = try {
-        startPreparedInjection(prepareMicrophoneInjection(sampleRate, channels, targetPackage, forCall))
+        startPreparedInjection(prepareMicrophoneInjection(sampleRate, channels, targetPackage, forCall, selectedAddress))
     } catch (error: Exception) {
         if (error is CancellationException) throw error
         synchronized(lock) {
@@ -199,6 +202,7 @@ class ShizukuAudioClient(context: Context) : Closeable {
     /** Reserve synchronously with the controller's generation; Stop can then retire an unopened route. */
     internal fun prepareMicrophoneInjection(
         sampleRate: Int, channels: Int, targetPackage: String, forCall: Boolean,
+        selectedAddress: String = "", stillCurrent: () -> Boolean = { true },
     ): InjectionRequest = synchronized(lock) {
         check(!closed) { "Audio bridge was closed" }
         AudioBridgeRules.validateFormat(sampleRate, channels)
@@ -207,8 +211,14 @@ class ShizukuAudioClient(context: Context) : Closeable {
         }
         check(current == null) { "Stop the current microphone route first" }
         check(!mutableState.value.probing) { "Wait for audio diagnostics to finish" }
+        val address = if (forCall) A2dpRecoveryGuard(selectedAddress).address else {
+            require(selectedAddress.isEmpty()) { "A recording application does not select a Bluetooth output" }
+            ""
+        }
+        check(stillCurrent()) { "The AirPods connection changed. Please retry." }
         cancelPlaybackRecoveryLocked()
-        InjectionRequest(checkNotNull(bridge) { "Connect Shizuku first" }, sampleRate, channels, targetPackage, forCall).also {
+        InjectionRequest(checkNotNull(bridge) { "Connect Shizuku first" }, sampleRate, channels, targetPackage, forCall,
+            address, stillCurrent).also {
             current = it
             mutableState.update { state -> state.copy(session = "starting", detail = "Preparing microphone injection") }
         }
@@ -220,14 +230,23 @@ class ShizukuAudioClient(context: Context) : Closeable {
                 ipc.withLock {
                     drainStops()
                     if (!isCurrent(next)) return@withLock null
+                    check(next.stillCurrent()) { "The AirPods connection changed. Please retry." }
                     val descriptor = next.remote.startMicrophoneInjection(next.sampleRate, next.channels, next.targetPackage, next.forCall,
-                        next.owner, callback(next))
+                        next.selectedAddress, next.owner, callback(next))
                     val accepted = synchronized(lock) {
-                        if (isCurrent(next)) { next.pcm = descriptor; true } else false
+                        if (isCurrent(next) && runCatching { next.stillCurrent() }.getOrDefault(false)) {
+                            next.pcm = descriptor; true
+                        } else false
                     }
                     if (accepted) descriptor else {
                         runCatching { descriptor?.close() }
                         runCatching { next.remote.stopSession(next.owner) }
+                        val wasCurrent = retire(next)
+                        synchronized(lock) {
+                            if (!closed && wasCurrent && current == null) mutableState.update {
+                                it.copy(session = "failed", detail = "The AirPods connection changed. Please retry.")
+                            }
+                        }
                         null
                     }
                 }

@@ -23,16 +23,19 @@ internal class AudioRouting(private val context: Context) {
         val track: AudioTrack? = null,
         val record: AudioRecord? = null,
         private val unregister: () -> Unit = {},
+        val call: CallDuplexRouting? = null,
     ) : Closeable {
         private val closed = AtomicBoolean(false)
         @Synchronized override fun close() {
             if (!closed.compareAndSet(false, true)) return
+            var failure = runCatching { call?.stopStreams() }.exceptionOrNull()
             runCatching { track?.pause() }
             runCatching { track?.flush() }
-            var failure = runCatching { track?.release() }.exceptionOrNull()
+            runCatching { track?.release() }.exceptionOrNull()?.let { if (failure == null) failure = it }
             runCatching { record?.stop() }
             runCatching { record?.release() }.exceptionOrNull()?.let { if (failure == null) failure = it }
             runCatching { unregister() }.exceptionOrNull()?.let { if (failure == null) failure = it }
+            runCatching { call?.releaseMode() }.exceptionOrNull()?.let { if (failure == null) failure = it }
             failure?.let { throw AudioRoutingCleanupException(it) }
         }
     }
@@ -110,18 +113,24 @@ internal class AudioRouting(private val context: Context) {
         }
     }
 
-    fun callInjection(rate: Int, channels: Int): Route {
-        check(manager.mode == AudioManager.MODE_IN_CALL || manager.mode == AudioManager.MODE_IN_COMMUNICATION) {
-            "Start a deliberate VoIP or cellular call first; LibrePods will not force call mode"
+    fun callInjection(rate: Int, channels: Int, selectedAddress: String): Route {
+        require(channels == 1) { "The AirPods call microphone must be mono" }
+        val call = CallDuplexRouting(context, manager, selectedAddress)
+        try {
+            val track = AudioManager::class.java.getMethod("getCallUplinkInjectionAudioTrack", AudioFormat::class.java)
+                .invoke(manager, format(48000, channels)) as AudioTrack // Call formats are capped at 48 kHz.
+            if (track.state != AudioTrack.STATE_INITIALIZED) {
+                track.release()
+                error("Call injection track was not initialized")
+            }
+            applySourceClock(track, rate)
+            return Route(track = track, call = call)
+        } catch (error: Throwable) {
+            var cleanupFailure = runCatching { call.stopStreams() }.exceptionOrNull()
+            runCatching { call.releaseMode() }.exceptionOrNull()?.let { if (cleanupFailure == null) cleanupFailure = it }
+            cleanupFailure?.let { throw AudioRoutingCleanupException(it) }
+            throw error
         }
-        val track = AudioManager::class.java.getMethod("getCallUplinkInjectionAudioTrack", AudioFormat::class.java)
-            .invoke(manager, format(48000, channels)) as AudioTrack // Call-redirection formats are capped at 48 kHz.
-        if (track.state != AudioTrack.STATE_INITIALIZED) {
-            track.release()
-            error("Call injection track was not initialized")
-        }
-        applySourceClock(track, rate)
-        return Route(track = track)
     }
 
     private fun applySourceClock(track: AudioTrack, rate: Int) {

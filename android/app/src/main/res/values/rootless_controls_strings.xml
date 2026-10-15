@@ -20,7 +20,7 @@
     <string name="rootless_mic_recovering">Checking the Bluetooth playback route…</string>
     <string name="rootless_mic_failed">Microphone stopped. Check the message below before retrying.</string>
     <string name="rootless_audio_recipient_check">Open the selected recorder and verify it hears the AirPods microphone. App routing depends on Android. No recording is saved by LibrePods.</string>
-    <string name="rootless_audio_call_consent">Starts only for your current call. Ask the other person to confirm they hear the AirPods microphone.</string>
+    <string name="rootless_audio_call_consent">Turn off Phone calls for this pair in Android Bluetooth settings, leaving Media audio on. Start an unmuted phone call, then use this route. Restore Phone calls after stopping.</string>
     <string name="rootless_check_playback">Audio from other apps</string>
     <string name="rootless_check_microphone">Microphone routing</string>
     <string name="rootless_check_calls">Call routing</string>

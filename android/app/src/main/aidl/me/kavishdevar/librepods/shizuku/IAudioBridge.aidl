@@ -8,7 +8,7 @@ import me.kavishdevar.librepods.shizuku.IPlaybackRecoveryOwner;
 interface IAudioBridge {
     void probe(IAudioBridgeCallback callback) = 0;
     ParcelFileDescriptor startMicrophoneInjection(int sampleRate, int channels,
-        String targetPackage, boolean forCall, IBinder owner,
+        String targetPackage, boolean forCall, String selectedAddress, IBinder owner,
         IAudioBridgeCallback callback) = 1;
     void stopSession(IBinder owner) = 2;
     boolean restoreNativePlayback(String address, IPlaybackRecoveryOwner owner) = 3;

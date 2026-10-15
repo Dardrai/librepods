@@ -63,13 +63,13 @@ class AirPodsMicrophone(
     init { aacp.microphonePacketCallback = packetCallback }
 
     @Synchronized
-    fun start(recordToFile: Boolean = true, sink: PcmSink? = null): Boolean {
+    fun start(recordToFile: Boolean = true, sink: PcmSink? = null, expectedSocket: BluetoothSocket? = null): Boolean {
         if (closed || session != null || (!recordToFile && sink == null)) {
             Log.w("AirPodsMicrophone", "Start rejected: closed=$closed busy=${session != null} recording=$recordToFile sink=${sink != null}")
             return false
         }
         val socket = BluetoothConnectionManager.aacpSocket
-        if (socket == null || !socket.isConnected) {
+        if (socket == null || !socket.isConnected || (expectedSocket != null && socket !== expectedSocket)) {
             Log.w("AirPodsMicrophone", "Start rejected: protocol transport disconnected")
             mutableState.value = MicrophoneState(MicrophonePhase.ERROR, message = "Connect your AirPods first.")
             return false

@@ -12,7 +12,7 @@
     <string name="rootless_audio_share">Share recording</string>
     <string name="rootless_audio_target">Target app package</string>
     <string name="rootless_audio_inject">Use microphone in selected app</string>
-    <string name="rootless_audio_call">Use microphone for this call</string>
+    <string name="rootless_audio_call">Use AirPods for this call</string>
     <string name="rootless_audio_calibration">Experimental. Check the test recording’s duration and pitch before using this microphone in another app. Call audio is processed live and is not saved.</string>
     <string name="rootless_audio_permission">Microphone permission is required.</string>
     <string name="rootless_audio_not_connected">Connect your AirPods to use their microphone.</string>

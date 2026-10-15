@@ -39,21 +39,33 @@ decoder's AAC configuration to 64 kHz would describe a different bitstream.
 To test another app, enter its exact package name and select Use microphone in
 selected app. Start recording in that app and verify the AirPods are the source.
 
-Call routing currently implements experimental microphone uplink injection only.
+Call routing implements experimental two-way cellular audio through Shizuku.
 For the tested Pixel cellular-call setup, turn off Phone calls for the selected
 AirPods in Android Bluetooth settings, leaving Media audio on. Select the phone's
-speaker and keep the call unmuted. Then select Use microphone for this call and
+speaker or earpiece and keep the call unmuted. Then select Use AirPods for this call and
 ask the remote listener to verify the AirPods microphone with the phone away from
 you. Speaker alone did not suffice while the native headset profile remained
 connected. Stop the experimental route and restore Phone calls after the test.
-The app currently requires this manual setup; it does not disconnect that profile
-automatically. The injection API does not guarantee that the phone microphone is
-excluded from the call, and muting the call stops the experimental session.
-Full duplex through
-the AirPods, including caller audio over A2DP, remains unverified: Android may
-suspend A2DP during a cellular call, and a downlink capture alone does not establish
-that phone output is silent. See the [Android call APIs](https://android.googlesource.com/platform/frameworks/base/+/refs/heads/main/media/java/android/media/AudioManager.java)
-and [native call routing and A2DP suspension](https://android.googlesource.com/platform/frameworks/av/+/refs/heads/main/services/audiopolicy/managerdefault/AudioPolicyManager.cpp).
+The app requires this manual setup; it does not disconnect that profile
+automatically. After the first microphone PCM reaches the uplink, the helper owns
+a temporary `MODE_CALL_REDIRECT` request and relays telephony downlink to the exact
+selected A2DP output. Stop closes both directions before releasing that request;
+Telecom retains its original mode ownership. Process death also releases the
+request. Muting the call stops the experimental session. VoIP is not implemented
+by this duplex path.
+
+Two-way AirPods audio and a silent phone were confirmed with a bounded prototype
+on the test Pixel. **Normal-quality music during calls is not yet supported.**
+Outside a call, music and private microphone recording worked together on
+pixel3; the user reported only a small quality drop and substantially better
+sound than native HFP. The severe degradation was reported in the call experiment.
+Android mutes existing media players for a call. A separate one-player experiment
+made YouTube audible alongside the call, but the listener reported telephone-like
+music quality. That experiment is not enabled in the app. The production APK
+uses the same routing approach but still needs its own live-call check; the
+standalone prototype result is not a production-app call acceptance result.
+See the [Android call APIs](https://android.googlesource.com/platform/frameworks/base/+/refs/heads/main/media/java/android/media/AudioManager.java)
+and [native call routing](https://android.googlesource.com/platform/frameworks/av/+/refs/heads/main/services/audiopolicy/managerdefault/AudioPolicyManager.cpp).
 A successful recorder test does not establish VoIP or cellular-call support.
 Call microphone PCM is processed live and is not saved by LibrePods.
 
@@ -110,6 +122,26 @@ foreground-service type. No call audio was saved or exported. This establishes
 AirPods uplink contribution for that setup, not exclusive input, VoIP support,
 AirPods downlink, full duplex or long-call reliability.
 
+Subsequent bounded duplex probes retained that uplink and acquired raw call mode
+5 (`MODE_CALL_REDIRECT`). They delivered 48 kHz mono `VOICE_DOWNLINK` from the
+telephony input to a 48 kHz stereo track routed only to the selected AirPods.
+The listener confirmed both directions used the AirPods and the phone was silent.
+Each completed probe released its mode request and restored Telecom's mode 2.
+No output-stream mute or call PCM file was used. The installed pixel2 app supplied
+the microphone while standalone shell probes supplied the temporary downlink.
+
+During the music-quality failure, the exact YouTube player and caller relay were
+both active on a 48 kHz stereo, floating-point A2DP mixer. There were no active
+effects or music-track underruns. The selected AirPods negotiated AAC at 44.1 kHz,
+16-bit stereo with codec-specific value `0x85` (VBR quality 5, not 133 kbps).
+This metadata does not establish the actual encoder bitrate or acoustic fidelity,
+and it does not explain the reported quality loss. NTPods' successful AAC/microphone
+checks used 48 kHz CBR playback; the selected Pixel device's local/selectable AAC
+and SBC capabilities exposed only 44.1 kHz. The good no-call result means that
+codec difference alone does not establish the cause or a fix.
+The Android 17 focus-isolation client wrapper returned no token; the separate
+typed service API has not been tested. No global focus or codec setting was changed.
+
 The native stack rejected the local PSM `0x19` listening-socket probe with
 `IOException: Error: -1`. This does not establish whether outbound AVDTP can work.
 The Bluetooth module was `com.google.android.bluetooth` version 17 with APEX
@@ -118,8 +150,19 @@ The Bluetooth module was `com.google.android.bluetooth` version 17 with APEX
 The tested platform ELD encoder configuration produced 48 kHz stereo
 **512-sample** frames, so it failed the 480-sample Apple playback requirement.
 An Android software encoder has not been tested. Native Bluetooth playback remains enabled.
-The signed, minified application connected to the paired Pro 3 and Shizuku;
-77 unit tests, debug lint, debug assembly and minified release assembly passed.
+The latest full FOSS validation, `pixel-integration10` (pixel3, versionCode 88),
+passed 86 unit tests in 21 suites, debug lint, debug assembly and minified release
+assembly. It includes the production duplex route and selected-transport and
+cleanup tests; its live-cellular-call acceptance is still pending.
+The signed `1.0.1-pixel3` build (versionCode 88) was installed and connected to
+the selected AirPods and Shizuku. Android was in normal mode with SCO off;
+the selected pair's Phone calls and Media audio settings had both been restored.
+During a subsequent private microphone recording with no call active, the user
+confirmed good music playback with only a small quality drop, far better than
+native HFP. This verifies that simultaneous music and custom microphone capture
+can work outside a call; it does not resolve the call experiment's quality loss.
+The earlier signed, minified pixel2 application connected to the paired Pro 3
+and Shizuku.
 Live capture produced decoded PCM. A 60.006-second capture contained 79.520 seconds
 of samples when interpreted at 48 kHz, corroborating the 64 kHz physical clock
 used by NTPods. After correcting the physical rate, a short capture contained
@@ -161,7 +204,8 @@ metadata such as `9442752` is normalized to `9A348` before selecting a movement
 service; late metadata updates reach the existing sensor session. After that fix,
 the signed build displayed changing horizontal/vertical reports and a live trace
 on the Pixel. Both optional sensor toggles were verified off after testing.
-Physical pairing, VoIP, full duplex and long-duration recovery still need their hardware checks.
+Physical pairing, VoIP, the production duplex route and long-duration recovery
+still need their hardware checks.
 
 Build the FOSS application with JDK 21 and the SDK/NDK versions pinned in Gradle:
 

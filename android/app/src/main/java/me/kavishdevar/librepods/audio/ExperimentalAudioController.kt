@@ -19,6 +19,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import me.kavishdevar.librepods.bluetooth.AACPManager
+import me.kavishdevar.librepods.bluetooth.BluetoothConnectionManager
 import me.kavishdevar.librepods.shizuku.ShizukuAudioClient
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
@@ -124,16 +125,29 @@ class ExperimentalAudioController(
             try {
                 val request = generation.next()
                 opening = request
-                val route = bridge.prepareMicrophoneInjection(AirPodsMicrophoneClock.PHYSICAL_RATE, 1, targetPackage.trim(), forCall)
+                val selected = if (forCall) {
+                    if (context.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED)
+                        throw SecurityException("Allow Bluetooth access before starting call audio.")
+                    val socket = checkNotNull(BluetoothConnectionManager.aacpSocket) { "Connect your AirPods first." }
+                    check(socket.isConnected) { "Connect your AirPods first." }
+                    check(socket.remoteDevice.type in listOf(android.bluetooth.BluetoothDevice.DEVICE_TYPE_CLASSIC,
+                        android.bluetooth.BluetoothDevice.DEVICE_TYPE_DUAL)) { "Connect your Classic AirPods first." }
+                    SelectedCallTransport(request, socket, socket.remoteDevice.address)
+                } else null
+                val route = bridge.prepareMicrophoneInjection(AirPodsMicrophoneClock.PHYSICAL_RATE, 1,
+                    targetPackage.trim(), forCall, selected?.address.orEmpty()) {
+                    selected == null || selected.isCurrent(generation, BluetoothConnectionManager.aacpSocket,
+                        selected.socket.isConnected)
+                }
                 mutableMessage.value = "Opening the microphone route…"
-                request to route
+                Triple(request, route, selected)
             } catch (error: Exception) {
                 opening = null
                 mutableMessage.value = error.message ?: "The microphone route could not start."
                 return
             }
         }
-        val (request, route) = prepared
+        val (request, route, selected) = prepared
         scope.launch(Dispatchers.IO) {
             val descriptor = bridge.startPreparedInjection(route)
             synchronized(lock) {
@@ -152,9 +166,14 @@ class ExperimentalAudioController(
                     return@synchronized
                 }
                 try {
-                    val next = PipeSink(descriptor)
+                    check(selected == null || selected.isCurrent(generation, BluetoothConnectionManager.aacpSocket,
+                        selected.socket.isConnected)) { "The AirPods connection changed. Please retry." }
+                    val next = PipeSink(descriptor) {
+                        selected == null || selected.isCurrent(generation, BluetoothConnectionManager.aacpSocket,
+                            selected.socket.isConnected)
+                    }
                     sink = next
-                    if (!startMicrophoneLocked(request, recordToFile = false, output = next)) {
+                    if (!startMicrophoneLocked(request, recordToFile = false, output = next, expectedSocket = selected?.socket)) {
                         stopBridgeLocked()
                         mutableMessage.value = "The AirPods microphone could not start."
                     } else mutableMessage.value = ""
@@ -167,13 +186,14 @@ class ExperimentalAudioController(
         }
     }
 
-    private fun startMicrophoneLocked(request: Long, recordToFile: Boolean, output: PcmSink? = null): Boolean {
+    private fun startMicrophoneLocked(request: Long, recordToFile: Boolean, output: PcmSink? = null,
+        expectedSocket: android.bluetooth.BluetoothSocket? = null): Boolean {
         var started = false
         try {
             sensors.setSuspended(true)
             onMicrophoneActive(true)
             check(generation.accepts(request) && allowedLocked()) { mutableMessage.value.ifBlank { "Microphone start cancelled" } }
-            started = microphone.start(recordToFile = recordToFile, sink = output)
+            started = microphone.start(recordToFile = recordToFile, sink = output, expectedSocket = expectedSocket)
             return started
         } finally {
             if (!started) {
@@ -222,7 +242,8 @@ class ExperimentalAudioController(
         bridge.stopSession()
     }
 
-    private inner class PipeSink(private val descriptor: ParcelFileDescriptor) : PcmSink {
+    private inner class PipeSink(private val descriptor: ParcelFileDescriptor,
+        private val stillCurrent: () -> Boolean = { true }) : PcmSink {
         private val closed = AtomicBoolean()
         init {
             val flags = Os.fcntlInt(descriptor.fileDescriptor, OsConstants.F_GETFL, 0)
@@ -230,6 +251,7 @@ class ExperimentalAudioController(
         }
 
         override fun onFormat(format: PcmFormat) {
+            check(stillCurrent()) { "The AirPods connection changed. Please retry." }
             check(format.sampleRate == AirPodsMicrophoneClock.PHYSICAL_RATE && format.channels == 1) {
                 "Unexpected microphone format; route stopped."
             }
@@ -239,6 +261,7 @@ class ExperimentalAudioController(
             var offset = 0
             val deadline = SystemClock.elapsedRealtime() + 500
             while (offset < bytes.size) {
+                check(stillCurrent()) { "The AirPods connection changed. Please retry." }
                 check(!closed.get() && SystemClock.elapsedRealtime() < deadline) { "Microphone output stalled." }
                 try {
                     val written = Os.write(descriptor.fileDescriptor, bytes, offset, bytes.size - offset)
