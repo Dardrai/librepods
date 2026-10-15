@@ -117,6 +117,7 @@ import me.kavishdevar.librepods.presentation.components.PressAndHoldSettings
 import me.kavishdevar.librepods.presentation.components.StyledButton
 import me.kavishdevar.librepods.presentation.components.StyledListItem
 import me.kavishdevar.librepods.presentation.components.StyledToggle
+import me.kavishdevar.librepods.presentation.components.RootlessSensorControls
 import me.kavishdevar.librepods.presentation.theme.DesignSystem
 import me.kavishdevar.librepods.presentation.theme.LibrePodsTheme
 import me.kavishdevar.librepods.presentation.theme.LocalDesignSystem
@@ -192,7 +193,8 @@ fun AirPodsSettingsRoute(
             navigateToMicrophoneSettings = navigateToMicrophoneSettings,
 
             activateDemoMode = viewModel::activateDemoMode,
-            reconnectFromSavedMac = viewModel::reconnectFromSavedMac
+            reconnectFromSavedMac = viewModel::reconnectFromSavedMac,
+            sensorContent = { viewModel.experimentalAudio?.let { RootlessSensorControls(it.sensors) } }
         )
     }
 }
@@ -235,6 +237,7 @@ fun AirPodsSettingsScreen(
 
         activateDemoMode: () -> Unit,
         reconnectFromSavedMac: () -> Unit,
+        sensorContent: @Composable () -> Unit = {},
 ) {
     val sharedPreferences = LocalContext.current.getSharedPreferences("settings", MODE_PRIVATE)
     var deviceName by remember {
@@ -444,7 +447,7 @@ fun AirPodsSettingsScreen(
                 val loudSoundReductionCapability =
                     model.capabilities.contains(Capability.LOUD_SOUND_REDUCTION)
                 val adaptiveAudioCapability =
-                    model.capabilities.contains(Capability.ADAPTIVE_VOLUME)
+                    model.capabilities.contains(Capability.ADAPTIVE_AUDIO)
 
                 val adaptiveVolumeChecked =
                     state.controlStates[AACPManager.Companion.ControlCommandIdentifiers.ADAPTIVE_VOLUME_CONFIG]?.getOrNull(
@@ -490,6 +493,7 @@ fun AirPodsSettingsScreen(
             }
 
             item(key = "spacer_connection") { Spacer(modifier = Modifier.height(16.dp)) }
+            item(key = "sensors") { sensorContent() }
             item(key = "connection") {
                 ConnectionSettings(
                     automaticEarDetectionEnabled = state.automaticEarDetectionEnabled,

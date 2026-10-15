@@ -1,0 +1,42 @@
+<!-- shortcut: new fork text uses English fallback until translations are contributed. -->
+<resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="MissingTranslation">
+    <string name="rootless_audio_checking">Checking audio support…</string>
+    <string name="rootless_shizuku_connected">Shizuku connected</string>
+    <string name="rootless_audio_recovery_requires_shizuku">Connect Shizuku to restore playback after recording.</string>
+    <string name="rootless_audio_permission_pending">Waiting for Android’s microphone permission dialog.</string>
+    <string name="rootless_audio_cancel_permission">Cancel permission request</string>
+    <string name="rootless_audio_permission_retry">Microphone permission is ready. Tap the recording or routing action again.</string>
+    <string name="rootless_audio_wait_for_checks">Wait for audio diagnostics to finish.</string>
+    <string name="rootless_audio_wait_for_route">Stop the current microphone route before recording.</string>
+    <string name="rootless_microphone_test">AirPods microphone</string>
+    <string name="rootless_recording_limit">Records a private test for up to one minute.</string>
+    <string name="rootless_recording_duration">Decoded: %1$.1f s · Elapsed: %2$.1f s · %3$d Hz mono</string>
+    <string name="rootless_recording_stop_playback">Stop playback</string>
+    <string name="rootless_recording_play_failed">Could not play the recording. Try recording another test.</string>
+    <string name="rootless_recording_share_failed">Could not share the recording. Try again after recording another test.</string>
+    <string name="rootless_mic_starting">Starting the AirPods microphone…</string>
+    <string name="rootless_mic_capturing">Receiving microphone audio.</string>
+    <string name="rootless_mic_stopping">Stopping the AirPods microphone…</string>
+    <string name="rootless_mic_recovering">Checking the Bluetooth playback route…</string>
+    <string name="rootless_mic_failed">Microphone stopped. Check the message below before retrying.</string>
+    <string name="rootless_audio_recipient_check">Open the selected recorder and verify it hears the AirPods microphone. App routing depends on Android. No recording is saved by LibrePods.</string>
+    <string name="rootless_audio_call_consent">Starts only for your current call. Ask the other person to confirm they hear the AirPods microphone.</string>
+    <string name="rootless_check_playback">Audio from other apps</string>
+    <string name="rootless_check_microphone">Microphone routing</string>
+    <string name="rootless_check_calls">Call routing</string>
+    <string name="rootless_check_transport">Custom Bluetooth transport</string>
+    <string name="rootless_check_encoder">480-sample AAC-ELD encoder</string>
+    <string name="rootless_check_passed">Check passed</string>
+    <string name="rootless_check_blocked">Blocked by Android</string>
+    <string name="rootless_check_unverified">Not verified</string>
+    <string name="rootless_report_copied">Diagnostic report copied</string>
+    <string name="rootless_sensors_title">Live sensors</string>
+    <string name="rootless_heart_rate">Heart rate</string>
+    <string name="rootless_heart_rate_reading">%1$d BPM</string>
+    <string name="rootless_heart_rate_waiting">Wear both AirPods and wait for a reliable reading.</string>
+    <string name="rootless_heart_rate_hint">Readings are for general fitness and are not medical measurements.</string>
+    <string name="rootless_movement">Live movement</string>
+    <string name="rootless_movement_description">Shows raw sensor movement. Values are not calibrated angles.</string>
+    <string name="rootless_movement_waiting">Waiting for movement reports…</string>
+    <string name="rootless_movement_reading">Horizontal: %1$d · Vertical: %2$d</string>
+</resources>

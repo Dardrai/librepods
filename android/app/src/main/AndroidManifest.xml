@@ -35,6 +35,9 @@
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
     <uses-permission android:name="android.permission.ANSWER_PHONE_CALLS" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="moe.shizuku.manager.permission.API_V23" />
 <!--    <uses-permission android:name="android.permission.INTERNET" />-->
 <!--    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"-->
 <!--        android:maxSdkVersion="30" />-->
@@ -55,6 +58,14 @@
         android:theme="@style/Theme.LibrePods"
         android:description="@string/app_description"
         tools:ignore="UnusedAttribute" >
+        <meta-data android:name="moe.shizuku.client.V3_SUPPORT" android:value="true" />
+        <provider
+            android:name="rikka.shizuku.ShizukuProvider"
+            android:authorities="${applicationId}.shizuku"
+            android:multiprocess="false"
+            android:enabled="true"
+            android:exported="true"
+            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
         <receiver
             android:name=".presentation.widgets.NoiseControlWidget"
             android:exported="false">
@@ -110,7 +121,7 @@
             android:name=".services.AirPodsService"
             android:enabled="true"
             android:exported="true"
-            android:foregroundServiceType="connectedDevice"
+            android:foregroundServiceType="connectedDevice|microphone"
             android:permission="android.permission.BLUETOOTH_CONNECT" />
         <service
             android:name=".services.AirPodsQSService"

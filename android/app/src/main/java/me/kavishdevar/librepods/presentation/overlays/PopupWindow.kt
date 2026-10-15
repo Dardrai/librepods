@@ -42,6 +42,7 @@ import android.view.WindowManager
 import android.view.animation.AccelerateInterpolator
 import android.view.animation.DecelerateInterpolator
 import android.widget.ImageButton
+import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.VideoView
@@ -130,12 +131,12 @@ class PopupWindow(
     }
 
     @SuppressLint("InlinedApi", "SetTextI18s")
-    fun open(name: String = "AirPods Pro", batteryNotification: AirPodsNotifications.BatteryNotification) {
+    fun open(name: String = "AirPods Pro", batteryNotification: AirPodsNotifications.BatteryNotification? = null) {
         try {
             if (mView.windowToken == null && mView.parent == null && !isClosing) {
                 mView.findViewById<TextView>(R.id.name).text = name
 
-                updateBatteryStatus(batteryNotification)
+                if (batteryNotification != null) updateBatteryStatus(batteryNotification)
 
                 val vid = mView.findViewById<VideoView>(R.id.video)
                 vid.setAudioFocusRequest(AudioManager.AUDIOFOCUS_NONE)
@@ -166,7 +167,7 @@ class PopupWindow(
                     start()
                 }
 
-                registerBatteryUpdateReceiver()
+                if (batteryNotification != null) registerBatteryUpdateReceiver()
 
                 autoCloseRunnable = Runnable { close() }
                 autoCloseHandler.postDelayed(autoCloseRunnable!!, 12000)
@@ -174,6 +175,25 @@ class PopupWindow(
         } catch (e: Exception) {
             Log.e("PopupWindow", "Error opening popup: ${e.message}")
             onCloseCallback()
+        }
+    }
+
+    fun showPairingActions(message: String, actions: List<Pair<String, () -> Unit>>) {
+        autoCloseRunnable?.let { autoCloseHandler.removeCallbacks(it) }
+        mView.findViewById<TextView>(R.id.pairing_message).apply {
+            text = message
+            visibility = View.VISIBLE
+        }
+        mView.findViewById<LinearLayout>(R.id.pairing_actions).apply {
+            visibility = View.VISIBLE
+            removeAllViews()
+            actions.forEach { (label, action) ->
+                addView(Button(context).apply {
+                    text = label
+                    isAllCaps = false
+                    setOnClickListener { action() }
+                })
+            }
         }
     }
 

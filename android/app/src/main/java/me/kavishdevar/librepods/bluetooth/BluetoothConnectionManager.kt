@@ -25,7 +25,9 @@ import android.os.ParcelUuid
 import android.util.Log
 
 object BluetoothConnectionManager {
+    @Volatile
     var aacpSocket: BluetoothSocket? = null
+    @Volatile
     var attSocket: BluetoothSocket? = null
 }
 

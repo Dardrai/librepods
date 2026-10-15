@@ -35,8 +35,8 @@ class ControlCommandRepository(
     fun setValue(
         id: ControlCommandIdentifiers,
         value: ByteArray
-    ) {
-        aacpManager.sendControlCommand(id.value, value)
+    ): Boolean {
+        return aacpManager.sendControlCommand(id.value, value)
     }
 
 

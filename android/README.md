@@ -12,6 +12,16 @@ LibrePods *may* require root depending on your device/OS and what features you w
 
 ## Installation
 
+### Pixel fork with Shizuku
+
+This fork's signed FOSS APKs will appear in [Ripthulhu/librepods prereleases](https://github.com/Ripthulhu/librepods/releases). Add that repository URL to Obtainium, enable **Include prereleases**, and filter APK assets with `LibrePods-FOSS-.*-release\.apk$`. Ordinary branch builds produce test APKs in Actions; they do not publish releases.
+
+The application ID stays `me.kavishdevar.librepods`. A fork APK signed with a different key cannot update the existing LibrePods installation. Export settings if available, or record them manually, retain the original installer, then uninstall once before installing the fork. Uninstalling can erase settings. Keep using the same fork signing key for all later updates; the Actions debug APK uses a different test key and is not an upgrade path to signed releases.
+
+Start Shizuku after every phone reboot and grant LibrePods access. Shizuku diagnostics and microphone routing are optional; Android's normal AAC playback remains the fallback. A successful diagnostic allocation does not prove that another app or a call recipient hears the intended audio. Test recordings and deliberate calls before relying on those routes.
+
+Maintainers: configure `RELEASE_KEYSTORE_FILE` (base64 of a persistent fork keystore), `RELEASE_STORE_PASSWORD`, `RELEASE_KEY_ALIAS` and `RELEASE_KEY_PASSWORD` as repository Actions secrets. Back up the keystore securely. Publish by pushing a `v*`/`pixel-*` tag, or run **Android CI** with **publish_release** checked and an explicit unused release tag. Missing signing secrets fail the release; root ZIPs and Play bundles are not published by this workflow. Increase `versionCode` for every release so Android and Obtainium can recognize the update.
+
 ### Google Play Store
 
 If you are using a supported device/OS combination, you can install LibrePods from the Google Play Store. You can use the VendorID hook features with root even from the Play Store version.

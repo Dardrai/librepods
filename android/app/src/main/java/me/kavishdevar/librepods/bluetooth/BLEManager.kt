@@ -18,6 +18,8 @@
 
 package me.kavishdevar.librepods.bluetooth
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothManager
 import android.bluetooth.le.BluetoothLeScanner
@@ -58,11 +60,19 @@ class BLEManager(private val context: Context) {
         val isCaseCharging: Boolean = false,
         val lidOpen: Boolean = false,
         val color: String = "Unknown",
-        val connectionState: String = "Unknown"
+        val connectionState: String = "Unknown",
+        val batterySnapshot: BleBatteryCache.Snapshot? = null
     )
 
+    @Synchronized
     fun getMostRecentStatus(): AirPodsStatus? {
-        return deviceStatusMap.values.maxByOrNull { it.lastSeen }
+        val binding = refreshKeyBinding()
+        val status = latestPairedStatus?.let { withBattery(it, batteryCache.snapshot) }
+        if (!binding.isCurrent(sharedPreferences.all)) {
+            refreshKeyBinding()
+            return null
+        }
+        return status
     }
 
     interface AirPodsStatusListener {
@@ -79,16 +89,26 @@ class BLEManager(private val context: Context) {
     private var airPodsStatusListener: AirPodsStatusListener? = null
     private val deviceStatusMap = mutableMapOf<String, AirPodsStatus>()
     private val verifiedAddresses = mutableSetOf<String>()
+    private var keyBinding: BleKeyBinding? = null
+    private val batteryCache = BleBatteryCache()
+    private var latestPairedStatus: AirPodsStatus? = null
     private val sharedPreferences: SharedPreferences = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
     private var currentGlobalLidState: Boolean? = null
     private var lastBroadcastTime: Long = 0
-    private val processedAddresses = mutableSetOf<String>()
+    private val nearbyVisits = NearbyAirPods.Visits()
+    private var nearbyDeviceListener: ((NearbyAirPods.Event) -> Unit)? = null
 
-    private val lastValidCaseBatteryMap = mutableMapOf<String, Int>()
+    fun setNearbyDeviceListener(listener: (NearbyAirPods.Event) -> Unit) {
+        nearbyDeviceListener = listener
+    }
+
     private val modelNames = mapOf(
         0x0E20 to "AirPods Pro",
         0x1420 to "AirPods Pro 2",
         0x2420 to "AirPods Pro 2 (USB-C)",
+        0x2720 to "AirPods Pro 3",
+        0x3020 to "AirPods 5 (Wireless Charging)",
+        0x3620 to "AirPods 5",
         0x0220 to "AirPods 1",
         0x0F20 to "AirPods 2",
         0x1320 to "AirPods 3",
@@ -175,7 +195,6 @@ class BLEManager(private val context: Context) {
                 }
 
                 override fun onBatchScanResults(results: List<ScanResult>) {
-                    processedAddresses.clear()
                     for (result in results) {
                         processScanResult(result)
                     }
@@ -189,6 +208,7 @@ class BLEManager(private val context: Context) {
             mBluetoothLeScanner?.startScan(listOf(scanFilter), scanSettings, mScanCallback)
             Log.d(TAG, "BLE scanner started successfully")
 
+            cleanupHandler.removeCallbacks(cleanupRunnable)
             cleanupHandler.postDelayed(cleanupRunnable, CLEANUP_INTERVAL_MS)
         } catch (t: Throwable) {
             Log.e(TAG, "Error starting BLE scanner", t)
@@ -205,19 +225,20 @@ class BLEManager(private val context: Context) {
             }
 
             cleanupHandler.removeCallbacks(cleanupRunnable)
+            synchronized(this) { nearbyVisits.clear() }
         } catch (t: Throwable) {
             Log.e(TAG, "Error stopping BLE scanner", t)
         }
     }
 
     @OptIn(ExperimentalEncodingApi::class)
-    private fun getEncryptionKeyFromPreferences(): ByteArray? {
-        val keyBase64 = sharedPreferences.getString(AACPManager.Companion.ProximityKeyType.ENC_KEY.name, null)
+    private fun decodeProximityKey(binding: BleKeyBinding, keyBase64: String?): ByteArray? {
+        if (!binding.ownsKeys) return null
         return if (keyBase64 != null) {
             try {
-                Base64.decode(keyBase64)
+                Base64.decode(keyBase64).takeIf { it.size == 16 }
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to decode encryption key", e)
+                Log.w(TAG, "Stored proximity key could not be decoded")
                 null
             }
         } else {
@@ -243,43 +264,63 @@ class BLEManager(private val context: Context) {
         }
     }
 
-    private fun formatBattery(byteVal: Int): Pair<Boolean, Int> {
-        val charging = (byteVal and 0x80) != 0
-        val level = byteVal and 0x7F
+    private fun formatBattery(byteVal: Int): Pair<Boolean, Int?> {
+        val level = (byteVal and 0x7F).takeIf { it <= 100 }
+        val charging = level != null && (byteVal and 0x80) != 0
         return Pair(charging, level)
     }
 
+    @Synchronized
     private fun processScanResult(result: ScanResult) {
+        if (context.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) return
         try {
             val scanRecord = result.scanRecord ?: return
             val address = result.device.address
 
-            if (processedAddresses.contains(address)) {
-                return
-            }
+            val manufacturer = scanRecord.getManufacturerSpecificData(76) ?: return
+            val manufacturerData = NearbyAirPods.proximityRecord(manufacturer) ?: return
+            if (manufacturerData[2].toInt() != 1) return
+            val binding = refreshKeyBinding()
 
-            val manufacturerData = scanRecord.getManufacturerSpecificData(76) ?: return
-            if (manufacturerData.size <= 20) return
+            val irk = decodeProximityKey(binding, binding.irk)
+            val trusted = verifiedAddresses.contains(address) ||
+                (irk != null && BluetoothCryptography.verifyRPA(address, irk))
+            val savedAddress = binding.address
+            val adapter = context.getSystemService(BluetoothManager::class.java).adapter
+            val pairedHere = trusted && adapter?.bondedDevices?.any { it.address == savedAddress } == true
+            NearbyAirPods.lidEvent(manufacturer)?.let { event ->
+                nearbyVisits.observe(event, System.currentTimeMillis(), pairedHere)?.let {
+                    nearbyDeviceListener?.invoke(it)
+                }
+            }
+            if (!pairedHere) return
 
             if (!verifiedAddresses.contains(address)) {
-                val irk = getIrkFromPreferences()
-                if (irk == null || !BluetoothCryptography.verifyRPA(address, irk)) {
+                if (!trusted) {
                     return
                 }
                 verifiedAddresses.add(address)
                 Log.d(TAG, "RPA verified and added to trusted list: $address")
             }
 
-            processedAddresses.add(address)
             lastBroadcastTime = System.currentTimeMillis()
 
-            val encryptionKey = getEncryptionKeyFromPreferences()
+            val encryptionKey = decodeProximityKey(binding, binding.encryptionKey)
             val decryptedData = if (encryptionKey != null) decryptLastBytes(manufacturerData, encryptionKey) else null
-            val parsedStatus = if (decryptedData != null && decryptedData.size == 16) {
+            val decodedStatus = if (decryptedData != null && decryptedData.size == 16) {
                 parseProximityMessageWithDecryption(address, manufacturerData, decryptedData)
             } else {
                 parseProximityMessage(address, manufacturerData)
             }
+            if (!binding.isCurrent(sharedPreferences.all)) {
+                refreshKeyBinding()
+                return
+            }
+            val snapshot = batteryCache.update(decodedStatus.leftBattery, decodedStatus.isLeftCharging,
+                decodedStatus.rightBattery, decodedStatus.isRightCharging, decodedStatus.caseBattery,
+                decodedStatus.isCaseCharging, decodedStatus.lastSeen)
+            val parsedStatus = withBattery(decodedStatus, snapshot)
+            latestPairedStatus = parsedStatus
 
             val previousStatus = deviceStatusMap[address]
             deviceStatusMap[address] = parsedStatus
@@ -287,6 +328,7 @@ class BLEManager(private val context: Context) {
             airPodsStatusListener?.let { listener ->
                 if (previousStatus == null) {
                     listener.onBroadcastFromNewAddress(parsedStatus)
+                    listener.onBatteryChanged(parsedStatus)
                     Log.d(TAG, "New AirPods device detected: $address")
 
                     if (currentGlobalLidState == null || currentGlobalLidState != parsedStatus.lidOpen) {
@@ -358,15 +400,7 @@ class BLEManager(private val context: Context) {
         val (isLeftCharging, leftBattery) = formatBattery(decrypted[leftByteIndex].toInt() and 0xFF)
         val (isRightCharging, rightBattery) = formatBattery(decrypted[rightByteIndex].toInt() and 0xFF)
 
-        val rawCaseBatteryByte = decrypted[3].toInt() and 0xFF
-        val (isCaseCharging, rawCaseBattery) = formatBattery(rawCaseBatteryByte)
-
-        val caseBattery = if (rawCaseBatteryByte == 0xFF || (isCaseCharging && rawCaseBattery == 127)) {
-            lastValidCaseBatteryMap[address]
-        } else {
-            lastValidCaseBatteryMap[address] = rawCaseBattery
-            rawCaseBattery
-        }
+        val (isCaseCharging, caseBattery) = formatBattery(decrypted[3].toInt() and 0xFF)
 
         val lidOpen = ((lid shr 3) and 0x01) == 0
 
@@ -389,8 +423,18 @@ class BLEManager(private val context: Context) {
         )
     }
 
+    @Synchronized
     private fun cleanupStaleDevices() {
+        refreshKeyBinding()
         val now = System.currentTimeMillis()
+        nearbyVisits.expire(now).forEach { nearbyDeviceListener?.invoke(it) }
+        latestPairedStatus?.let { status ->
+            val aged = withBattery(status, batteryCache.snapshot)
+            if (aged != status) {
+                latestPairedStatus = aged
+                airPodsStatusListener?.onBatteryChanged(aged)
+            }
+        }
         val staleCutoff = now - STALE_DEVICE_TIMEOUT_MS
         val hadDevices = deviceStatusMap.isNotEmpty()
 
@@ -415,19 +459,25 @@ class BLEManager(private val context: Context) {
         }
     }
 
-    @OptIn(ExperimentalEncodingApi::class)
-    private fun getIrkFromPreferences(): ByteArray? {
-        val irkBase64 = sharedPreferences.getString(AACPManager.Companion.ProximityKeyType.IRK.name, null)
-        return if (irkBase64 != null) {
-            try {
-                Base64.decode(irkBase64)
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to decode IRK", e)
-                null
-            }
-        } else {
-            null
+    private fun refreshKeyBinding(): BleKeyBinding {
+        val current = BleKeyBinding.from(sharedPreferences.all)
+        if (current != keyBinding) {
+            keyBinding = current
+            verifiedAddresses.clear()
+            deviceStatusMap.clear()
+            batteryCache.clear()
+            latestPairedStatus = null
+            currentGlobalLidState = null
         }
+        return current
+    }
+
+    private fun withBattery(status: AirPodsStatus, snapshot: BleBatteryCache.Snapshot): AirPodsStatus {
+        val now = System.currentTimeMillis()
+        return status.copy(leftBattery = snapshot.left.level, rightBattery = snapshot.right.level,
+            caseBattery = snapshot.case.level, isLeftCharging = snapshot.left.chargingNow(now),
+            isRightCharging = snapshot.right.chargingNow(now), isCaseCharging = snapshot.case.chargingNow(now),
+            batterySnapshot = snapshot)
     }
 
     private fun parseProximityMessage(address: String, data: ByteArray): AirPodsStatus {

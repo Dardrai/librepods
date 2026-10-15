@@ -34,8 +34,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.produceState
+import androidx.compose.material3.Text
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -49,6 +50,7 @@ import me.kavishdevar.librepods.data.Battery
 import me.kavishdevar.librepods.data.BatteryComponent
 import me.kavishdevar.librepods.data.BatteryStatus
 import kotlin.io.encoding.ExperimentalEncodingApi
+import kotlinx.coroutines.delay
 
 @Composable
 fun BatteryView(
@@ -63,8 +65,16 @@ fun BatteryView(
     val leftLevel = left?.level ?: 0
     val rightLevel = right?.level ?: 0
     val caseLevel = case?.level ?: 0
-
-    val singleDisplayed = remember { mutableStateOf(false) }
+    val now = produceState(System.currentTimeMillis()) {
+        while (true) {
+            delay(30_000)
+            value = System.currentTimeMillis()
+        }
+    }.value
+    val leftKnown = left?.updatedAt != null
+    val rightKnown = right?.updatedAt != null
+    val singleDisplayed = leftKnown && rightKnown && left?.isLive(now) == right?.isLive(now) &&
+        left?.status == right?.status && (leftLevel - rightLevel) in -3..3
 
     Box(
         modifier = Modifier.fillMaxWidth(),
@@ -86,43 +96,41 @@ fun BatteryView(
                         .padding(8.dp)
                 )
 
-                if (
-                    left?.status == right?.status &&
-                    (leftLevel - rightLevel) in -3..3
-                ) {
+                if (singleDisplayed) {
                     BatteryIndicator(
                         leftLevel.coerceAtMost(rightLevel),
-                        left?.status ?: BatteryStatus.NOT_CHARGING
+                        if (left?.isLive(now) == true) left.status else BatteryStatus.NOT_CHARGING
                     )
-                    singleDisplayed.value = true
                 } else {
-                    singleDisplayed.value = false
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.Center
                     ) {
-                        if (leftLevel > 0 || left?.status != BatteryStatus.DISCONNECTED) {
+                        if (leftKnown) {
                             BatteryIndicator(
                                 leftLevel,
-                                left?.status ?: BatteryStatus.NOT_CHARGING,
+                                if (left?.isLive(now) == true) left.status else BatteryStatus.NOT_CHARGING,
                                 "\uDBC6\uDCE5"
                             )
                         }
 
-                        if (leftLevel > 0 && rightLevel > 0) {
+                        if (leftKnown && rightKnown) {
                             Spacer(modifier = Modifier.width(16.dp))
                         }
 
-                        if (rightLevel > 0 || right?.status != BatteryStatus.DISCONNECTED) {
+                        if (rightKnown) {
                             BatteryIndicator(
                                 rightLevel,
-                                right?.status ?: BatteryStatus.NOT_CHARGING,
+                                if (right?.isLive(now) == true) right.status else BatteryStatus.NOT_CHARGING,
                                 "\uDBC6\uDCE8"
                             )
                         }
                     }
                 }
+                if (!leftKnown && !rightKnown) Text("—", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                BatteryReadingAge(left, now, stringResource(R.string.left))
+                BatteryReadingAge(right, now, stringResource(R.string.right))
             }
 
             Column(
@@ -137,16 +145,30 @@ fun BatteryView(
                         .padding(8.dp)
                 )
 
-                if (caseLevel > 0 || case?.status != BatteryStatus.DISCONNECTED) {
+                if (case?.updatedAt != null) {
                     BatteryIndicator(
                         caseLevel,
-                        case?.status ?: BatteryStatus.NOT_CHARGING,
-                        prefix = if (!singleDisplayed.value) "\uDBC3\uDE6C" else ""
+                        if (case.isLive(now)) case.status else BatteryStatus.NOT_CHARGING,
+                        prefix = if (!singleDisplayed) "\uDBC3\uDE6C" else ""
                     )
-                }
+                } else Text("—", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                BatteryReadingAge(case, now, "")
             }
         }
     }
+}
+
+@Composable
+private fun BatteryReadingAge(battery: Battery?, now: Long, prefix: String) {
+    val at = battery?.updatedAt ?: return
+    if (battery.isLive(now)) return
+    Text(
+        text = listOf(prefix, stringResource(R.string.battery_cached_age, ((now - at) / 60_000).coerceAtLeast(0)))
+            .filter { it.isNotEmpty() }.joinToString(": "),
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(horizontal = 4.dp)
+    )
 }
 
 @Preview(uiMode = Configuration.UI_MODE_NIGHT_YES)

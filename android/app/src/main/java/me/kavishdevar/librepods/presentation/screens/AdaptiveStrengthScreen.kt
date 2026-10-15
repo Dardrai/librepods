@@ -33,6 +33,8 @@ import androidx.compose.foundation.layout.statusBars
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -50,6 +52,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import me.kavishdevar.librepods.R
 import me.kavishdevar.librepods.bluetooth.AACPManager
+import me.kavishdevar.librepods.data.Capability
 import me.kavishdevar.librepods.presentation.components.StyledButton
 import me.kavishdevar.librepods.presentation.components.StyledSlider
 import me.kavishdevar.librepods.presentation.theme.DesignSystem
@@ -90,20 +93,28 @@ fun AdaptiveStrengthScreen(viewModel: AirPodsViewModel, navigateToPurchase: () -
             }
             Spacer(modifier = Modifier.height(16.dp))
         }
-        val sliderValue = remember {
-            mutableFloatStateOf(100f - (state.controlStates[AACPManager.Companion.ControlCommandIdentifiers.AUTO_ANC_STRENGTH]?.getOrNull(0)?.toFloat() ?: 50f))
-        }
+        val id = AACPManager.Companion.ControlCommandIdentifiers.AUTO_ANC_STRENGTH
+        val reportedValue = 100f - ((state.requestedControls[id] ?: state.controlStates[id])?.getOrNull(0)?.toInt()?.and(255)?.toFloat() ?: 50f)
+        val sliderValue = remember(state.deviceAddress) { mutableFloatStateOf(reportedValue.coerceIn(0f, 100f)) }
         var job by remember { mutableStateOf<Job?>(null) }
         val scope = rememberCoroutineScope()
+        DisposableEffect(state.deviceAddress, state.isLocallyConnected) {
+            onDispose { job?.cancel() }
+        }
+        LaunchedEffect(reportedValue, state.deviceAddress) {
+            if (job?.isActive != true) sliderValue.floatValue = reportedValue.coerceIn(0f, 100f)
+        }
         StyledSlider(
             label = stringResource(R.string.customize_adaptive_audio),
             value = sliderValue.floatValue,
             onValueChange = {
                 sliderValue.floatValue = it
+                val address = state.deviceAddress
                 job?.cancel()
                 job = scope.launch {
                     delay(150)
-                    viewModel.setControlCommandValue(
+                    if (viewModel.uiState.value.deviceAddress == address && viewModel.uiState.value.isLocallyConnected)
+                        viewModel.setControlCommandValue(
                         AACPManager.Companion.ControlCommandIdentifiers.AUTO_ANC_STRENGTH,
                         byteArrayOf((100 - it).toInt().toByte())
                     )
@@ -115,7 +126,7 @@ fun AdaptiveStrengthScreen(viewModel: AirPodsViewModel, navigateToPurchase: () -
             endIcon = "􀊩",
             independent = true,
             description = stringResource(R.string.adaptive_audio_description),
-            enabled = state.isPremium
+            enabled = state.isPremium && state.isLocallyConnected && Capability.ADAPTIVE_AUDIO in state.capabilities
         )
         Spacer(modifier = Modifier.height(bottomPadding))
     }

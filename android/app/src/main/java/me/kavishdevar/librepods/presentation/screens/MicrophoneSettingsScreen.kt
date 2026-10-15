@@ -25,6 +25,7 @@ import me.kavishdevar.librepods.R
 import me.kavishdevar.librepods.bluetooth.AACPManager
 import me.kavishdevar.librepods.presentation.components.StyledList
 import me.kavishdevar.librepods.presentation.components.StyledListItem
+import me.kavishdevar.librepods.presentation.components.RootlessAudioControls
 import me.kavishdevar.librepods.presentation.theme.DesignSystem
 import me.kavishdevar.librepods.presentation.theme.LocalDesignSystem
 import me.kavishdevar.librepods.presentation.viewmodel.AirPodsViewModel
@@ -52,7 +53,8 @@ fun MicrophoneSettingsRoute(
             bottomPadding = bottomPadding,
             onMicrophoneSettingsChanged = {
                 viewModel.setControlCommandInt(id, it)
-            }
+            },
+            extraContent = { viewModel.experimentalAudio?.let { RootlessAudioControls(it, state.isLocallyConnected, state.actualModel) } }
         )
     }
 }
@@ -62,7 +64,8 @@ fun MicrophoneSettingsScreen(
     selectedMode: Int,
     topPadding: Dp = 16.dp,
     bottomPadding: Dp = 16.dp,
-    onMicrophoneSettingsChanged: (Int) -> Unit
+    onMicrophoneSettingsChanged: (Int) -> Unit,
+    extraContent: @Composable () -> Unit = {}
 ) {
     val scrollState = rememberScrollState()
 
@@ -96,6 +99,8 @@ fun MicrophoneSettingsScreen(
             )
         }
 
+        Spacer(modifier = Modifier.height(16.dp))
+        extraContent()
         Spacer(modifier = Modifier.height(bottomPadding))
     }
 }

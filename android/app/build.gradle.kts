@@ -1,6 +1,6 @@
 import java.util.Properties
 
-val appVersionName = "1.0.1-rc1"
+val appVersionName = "1.0.1-pixel1"
 
 plugins {
     alias(libs.plugins.android.application)
@@ -49,7 +49,7 @@ android {
     defaultConfig {
         applicationId = "me.kavishdevar.librepods"
         targetSdk = 37
-        versionCode = 64
+        versionCode = 86
         versionName = appVersionName
     }
     buildTypes {
@@ -98,9 +98,13 @@ android {
         targetCompatibility = JavaVersion.VERSION_21
     }
     buildFeatures {
+        aidl = true
         compose = true
         viewBinding = true
         buildConfig = true
+    }
+    testOptions {
+        unitTests.isReturnDefaultValues = true
     }
     androidResources {
         generateLocaleConfig = true
@@ -123,6 +127,9 @@ android {
 }
 
 dependencies {
+    implementation("dev.rikka.shizuku:api:13.1.5")
+    implementation("dev.rikka.shizuku:provider:13.1.5")
+    testImplementation("junit:junit:4.13.2")
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.accompanist.permissions)
     implementation(libs.androidx.compose.ui.text.google.fonts)
@@ -242,4 +249,8 @@ val collect = tasks.register<Copy>("collectReleaseArtifacts") {
 
 tasks.register("packageReleaseArtifacts") {
     dependsOn(collect)
+}
+
+tasks.register("verifyPixel") {
+    dependsOn("testFossDebugUnitTest", "lintFossDebug", "assembleFossDebug", "assembleFossRelease")
 }

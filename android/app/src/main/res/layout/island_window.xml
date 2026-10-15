@@ -117,6 +117,7 @@
             android:scaleType="centerInside"
             android:src="@drawable/ic_undo"
             android:tint="@android:color/white"
+            tools:ignore="UseAppTint"
             android:elevation="8dp"
             android:translationZ="8dp"
             android:visibility="gone" />

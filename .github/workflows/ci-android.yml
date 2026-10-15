@@ -2,214 +2,182 @@ name: Android CI
 
 on:
   push:
-    branches:
-      - '*'
+    branches: ['**']
+    tags: ['v*', 'pixel-*']
     paths:
       - 'android/**'
-      - 'root-module-manual/**'
       - '.github/workflows/ci-android.yml'
   pull_request:
     paths:
       - 'android/**'
+      - '.github/workflows/ci-android.yml'
   workflow_dispatch:
     inputs:
       branch:
-        description: Branch to build
+        description: Branch or commit to build
+        type: string
         required: true
         default: main
+      publish_release:
+        description: Publish a signed FOSS prerelease (requires fork signing secrets)
+        type: boolean
+        default: false
+      release_tag:
+        description: New v* or pixel-* tag (required when publishing)
+        type: string
+        default: ''
   workflow_call:
+
+permissions:
+  contents: read
 
 jobs:
   build:
     runs-on: ubuntu-latest
     outputs:
-      short_sha: ${{ steps.vars.outputs.short_sha }}
-      app_version: ${{ steps.version.outputs.app_version }}
+      commit: ${{ steps.metadata.outputs.commit }}
+      app_version: ${{ steps.metadata.outputs.app_version }}
+      publish_release: ${{ steps.metadata.outputs.publish_release }}
+      release_tag: ${{ steps.metadata.outputs.release_tag }}
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: true
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.branch || github.ref }}
+          persist-credentials: false
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.branch || github.ref }}
+      - name: Validate build and release metadata
+        id: metadata
+        env:
+          REQUEST_RELEASE: ${{ inputs.publish_release || false }}
+          REQUEST_TAG: ${{ inputs.release_tag || '' }}
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, re, subprocess
+          publish = (os.environ['GITHUB_EVENT_NAME'] == 'push' and os.environ['GITHUB_REF'].startswith('refs/tags/')) or (
+              os.environ['GITHUB_EVENT_NAME'] == 'workflow_dispatch' and os.environ['REQUEST_RELEASE'] == 'true')
+          tag = os.environ['GITHUB_REF'].removeprefix('refs/tags/') if os.environ['GITHUB_EVENT_NAME'] == 'push' and publish else os.environ['REQUEST_TAG']
+          if publish and not re.fullmatch(r'(?:v|pixel-)[A-Za-z0-9][A-Za-z0-9._-]*', tag):
+              raise SystemExit('Publishing requires an explicit v* or pixel-* release tag')
+          source = pathlib.Path('android/app/build.gradle.kts').read_text()
+          version = re.search(r'^val appVersionName = "([A-Za-z0-9][A-Za-z0-9._+-]*)"', source, re.M)
+          if not version:
+              raise SystemExit('Cannot read appVersionName')
+          commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'commit={commit}\napp_version={version[1]}\npublish_release={str(publish).lower()}\nrelease_tag={tag if publish else ""}\n')
+          PY
       - uses: actions/setup-java@v4
         with:
           distribution: zulu
           java-version: 21
       - uses: gradle/actions/setup-gradle@v4
-      - name: Decode keystore
-        if: github.event_name != 'pull_request'
-        run: echo "${{ secrets.RELEASE_KEYSTORE_FILE }}" | base64 --decode > android/release.keystore
-      - name: Setup Android SDK
+        with:
+          cache-read-only: ${{ github.event_name == 'pull_request' }}
+      - name: Set up Android SDK
         uses: android-actions/setup-android@v3
         with:
           packages: platform-tools
-      - name: Accept Licenses
-        run: yes | sdkmanager --licenses
-      - name: Install NDK
-        run: sdkmanager "ndk;30.0.14904198"
-      - name: Create local.properties
-        if: github.event_name != 'pull_request'
-        run: |
-          cat <<EOF > android/local.properties
-          RELEASE_STORE_FILE=../release.keystore
-          RELEASE_STORE_PASSWORD=${{ secrets.RELEASE_STORE_PASSWORD }}
-          RELEASE_KEY_ALIAS=${{ secrets.RELEASE_KEY_ALIAS }}
-          RELEASE_KEY_PASSWORD=${{ secrets.RELEASE_KEY_PASSWORD }}
-          EOF
-      - name: Build debug APK for PRs
-        if: github.event_name == 'pull_request'
-        run: ./gradlew assembleFossDebug
+      - name: Install Android toolchain
+        run: sdkmanager "platforms;android-37.0" "build-tools;36.0.0" "ndk;30.0.14904198"
+      - name: Test, lint and build FOSS debug APK
         working-directory: android
-      - name: Build release artifacts
-        if: github.event_name != 'pull_request'
-        run: ./gradlew packageReleaseArtifacts
-        working-directory: android
-      - name: Get app version
-        id: version
-        run: echo "app_version=$(grep 'appVersionName =' android/app/build.gradle.kts | sed 's/.*= "\(.*\)"/\1/')" >> $GITHUB_OUTPUT
-      - id: vars
-        run: echo "short_sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+        run: ./gradlew --no-daemon testFossDebugUnitTest lintFossDebug assembleFossDebug
       - uses: actions/upload-artifact@v4
-        if: github.event_name != 'pull_request'
+        if: always()
         with:
-          name: apk-release
-          path: release/*release.apk
-
+          name: android-check-results
+          path: |
+            android/app/build/reports/tests/
+            android/app/build/test-results/
+            android/app/build/reports/lint-results-fossDebug.*
+          if-no-files-found: ignore
       - uses: actions/upload-artifact@v4
-        if: github.event_name == 'pull_request'
         with:
           name: apk-debug
           path: android/app/build/outputs/apk/foss/debug/app-foss-debug.apk
-
+          if-no-files-found: error
+      - name: Prepare fork release signing
+        if: steps.metadata.outputs.publish_release == 'true'
+        env:
+          RELEASE_KEYSTORE_FILE: ${{ secrets.RELEASE_KEYSTORE_FILE }}
+          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        run: |
+          python3 - <<'PY'
+          import base64, os, pathlib
+          names = ('RELEASE_KEYSTORE_FILE', 'RELEASE_STORE_PASSWORD', 'RELEASE_KEY_ALIAS', 'RELEASE_KEY_PASSWORD')
+          missing = [name for name in names if not os.environ.get(name)]
+          if missing:
+              raise SystemExit('Signed release requires fork secrets: ' + ', '.join(missing))
+          os.umask(0o077)
+          keystore = base64.b64decode(''.join(os.environ['RELEASE_KEYSTORE_FILE'].split()), validate=True)
+          if not keystore:
+              raise SystemExit('Release keystore is empty')
+          pathlib.Path('android/release.keystore').write_bytes(keystore)
+          values = {'RELEASE_STORE_FILE': '../release.keystore', **{name: os.environ[name] for name in names[1:]}}
+          def escape(value):
+              data = value.encode('utf-16-be').hex()
+              return ''.join('\\u' + data[index:index+4] for index in range(0, len(data), 4))
+          pathlib.Path('android/local.properties').write_text(''.join(f'{name}={escape(value)}\n' for name, value in values.items()))
+          PY
+          keytool -list -keystore android/release.keystore -storepass:env RELEASE_STORE_PASSWORD -alias "$RELEASE_KEY_ALIAS" >/dev/null
+      - name: Build signed FOSS release APK
+        if: steps.metadata.outputs.publish_release == 'true'
+        working-directory: android
+        run: ./gradlew --no-daemon assembleFossRelease
+      - name: Verify and checksum release APK
+        if: steps.metadata.outputs.publish_release == 'true'
+        env:
+          APP_VERSION: ${{ steps.metadata.outputs.app_version }}
+        run: |
+          mkdir -p artifacts
+          apk="artifacts/LibrePods-FOSS-v${APP_VERSION}-release.apk"
+          cp android/app/build/outputs/apk/foss/release/app-foss-release.apk "$apk"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs "$apk"
+          (cd artifacts && sha256sum ./*.apk > SHA256SUMS)
       - uses: actions/upload-artifact@v4
-        if: github.event_name != 'pull_request'
+        if: steps.metadata.outputs.publish_release == 'true'
         with:
-          name: apk-debug
-          path: release/*debug.apk
-
-      - uses: actions/upload-artifact@v4
-        if: github.event_name != 'pull_request'
-        with:
-          name: root-module-release
-          path: release/*release.zip
-
-      - uses: actions/upload-artifact@v4
-        if: github.event_name != 'pull_request'
-        with:
-          name: root-module-debug
-          path: release/*debug.zip
-
-      - uses: actions/upload-artifact@v4
-        if: github.event_name != 'pull_request'
-        with:
-          name: release-bundle
-          path: release/*.aab
+          name: apk-release
+          path: artifacts/*
+          if-no-files-found: error
+      - name: Remove signing material
+        if: always()
+        run: rm -f -- android/release.keystore android/local.properties
 
   release:
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
+    if: needs.build.outputs.publish_release == 'true'
     needs: build
+    runs-on: ubuntu-latest
     permissions:
       contents: write
-
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ needs.build.outputs.commit }}
           fetch-depth: 0
-          fetch-tags: true
+          persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
           name: apk-release
-          path: artifacts/apk-release
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: apk-debug
-          path: artifacts/apk-debug
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: root-module-release
-          path: artifacts/root-module-release
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: root-module-debug
-          path: artifacts/root-module-debug
-      - id: prev
+          path: artifacts
+      - name: Publish signed FOSS prerelease
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
+          RELEASE_COMMIT: ${{ needs.build.outputs.commit }}
+          APP_VERSION: ${{ needs.build.outputs.app_version }}
         run: |
-          TAG=$(gh release list \
-            --limit 1 \
-            --json tagName \
-            --jq '.[0].tagName')
-
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
-      - id: changelog
-        run: |
-          if [ -z "${{ steps.prev.outputs.tag }}" ]; then
-            NOTES=$(git log --pretty=format:"- %s ([%h](https://github.com/kavishdevar/librepods/commit/%H))")
-          else
-            NOTES=$(git log ${{ steps.prev.outputs.tag }}..HEAD --pretty=format:"- %s ([%h](https://github.com/kavishdevar/librepods/commit/%H))")
+          if git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"; then
+            tagged_commit=$(git rev-list -n 1 "refs/tags/$RELEASE_TAG")
+            if [ "$tagged_commit" != "$RELEASE_COMMIT" ]; then
+              echo 'Refusing to publish: the release tag points to a different commit' >&2
+              exit 1
+            fi
           fi
-          echo "notes<<EOF" >> $GITHUB_OUTPUT
-          echo "$NOTES" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-      - id: tag
-        run: echo "tag=nightly-${{ needs.build.outputs.short_sha }}" >> $GITHUB_OUTPUT
-
-      - env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release create "${{ steps.tag.outputs.tag }}" \
-            artifacts/**/* \
-            -t "Nightly ${{ needs.build.outputs.short_sha }}" \
-            --notes "${{ steps.changelog.outputs.notes }}" \
-            --prerelease
-      - name: Get timestamp
-        id: timestamp
-        run: echo "timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_OUTPUT
-      - name: Post to Discord
-        run: |
-          curl -X POST "${{ secrets.DISCORD_ANDROID_CI_URL }}?with_components=true" \
-            -H "Content-Type: application/json" \
-            -d '{
-              "embeds": [
-                {
-                  "title": "LibrePods Nightly Build",
-                  "description": "Download the latest debug and release APKs.",
-                  "color": 253060,
-                  "fields": [
-                    {
-                      "name": "Changelog",
-                      "value": "${{ steps.changelog.outputs.notes }}",
-                      "inline": false
-                    }
-                  ],
-                  "timestamp": "${{ steps.timestamp.outputs.timestamp }}",
-                  "footer": {
-                    "text": "GitHub Actions"
-                  }
-                }
-              ],
-              "components": [
-                {
-                  "type": 1,
-                  "components": [
-                    {
-                      "type": 2,
-                      "label": "Download Release APK",
-                      "style": 5,
-                      "url": "https://github.com/kavishdevar/librepods/releases/download/nightly-${{ needs.build.outputs.short_sha }}/LibrePods-FOSS-v${{ needs.build.outputs.app_version }}-release.apk"
-                    },
-                    {
-                      "type": 2,
-                      "label": "Download Debug APK",
-                      "style": 5,
-                      "url": "https://github.com/kavishdevar/librepods/releases/download/nightly-${{ needs.build.outputs.short_sha }}/LibrePods-FOSS-v${{ needs.build.outputs.app_version }}-debug.apk"
-                    }
-                  ]
-                }
-              ]
-            }'
+          (cd artifacts && sha256sum --check SHA256SUMS)
+          gh release create "$RELEASE_TAG" artifacts/* \
+            --target "$RELEASE_COMMIT" \
+            --title "LibrePods Pixel $APP_VERSION" \
+            --generate-notes --prerelease

@@ -33,6 +33,13 @@ LibrePods allows you to use AirPods features that are exclusive to Apple devices
 
 # Feature availability
 
+This fork adds Pixel/Shizuku work on the main Android app: nearby case pairing,
+per-pair settings, battery freshness, AAC-ELD microphone tests and optional
+heart-rate/movement sessions. See [setup and audio limits](docs/PIXEL-AUDIO.md)
+and [installing this fork](android/README.md#pixel-fork-with-shizuku).
+Playback uses Android's native Bluetooth route; custom AAC-ELD stereo and a
+measured low-latency mode are not enabled.
+
 | Feature                                                     | Linux | Android |
 | ----------------------------------------------------------- | ----- | ------- |
 | Changing Listening Mode                                     | ✅     | ✅       |
@@ -81,19 +88,25 @@ Spatializing stereo sound is beyond this project's scope and will never be avail
 
 ### Android
 
-Available in the `android/rewrite` branch. [builds](https://github.com/librepods-org/librepods/actions/workflows/ci-android.yml?query=branch%3Aandroid%2Frewrite)
+This fork has an optional Pro 3 heart-rate session on the main settings page,
+plus a raw movement trace. Sensor support depends on the actual model and public
+firmware version. See [usage and checks](docs/PIXEL-AUDIO.md).
 
 ### Linux
 
 Not available yet (doesn't seem like something that would be useful on a computer anyway. If you have any suggestions, create a discussion.)
 
 ## High quality two-way audio
-On iOS/iPadOS, you can continue using A2DP while AirPods send the hi-res (AAC-ELD mono 64kHz?) audio stream from its microphone over AACP.
+Compatible AirPods can send an AAC-ELD microphone stream over AACP. This fork
+decodes it as 48 kHz mono; recording duration and pitch still require a device
+check before relying on that configuration.
 
 ### Android
-Record audio within the app using the AirPods' microphone without switching to Headset/Handsfree profile degrading the playback quality. But, making this available to other apps/telephony might need root, if possible at all.
-
-Recorder is work in progress; available in the `android/rewrite` branch. [builds](https://github.com/librepods-org/librepods/actions/workflows/ci-android.yml?query=branch%3Aandroid%2Frewrite)
+Use the Microphone page to record, play and share a short private WAV test.
+Optional Shizuku diagnostics check UID-scoped microphone injection and call
+interception support on the phone. A created audio route does not establish
+that another app or caller receives the microphone. See the separate
+[recorder and call checks](docs/PIXEL-AUDIO.md).
 
 ### Linux
 

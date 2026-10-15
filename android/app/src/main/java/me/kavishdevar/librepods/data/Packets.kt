@@ -21,6 +21,8 @@ package me.kavishdevar.librepods.data
 import android.os.Parcelable
 import android.util.Log
 import kotlinx.parcelize.Parcelize
+import me.kavishdevar.librepods.bluetooth.BLEManager
+import me.kavishdevar.librepods.bluetooth.BleBatteryCache
 
 // TODO: Remove everything but Battery-related stuff
 
@@ -46,7 +48,16 @@ object BatteryStatus {
 }
 
 @Parcelize
-data class Battery(val component: Int, val level: Int, val status: Int) : Parcelable {
+data class Battery(
+    val component: Int,
+    val level: Int,
+    val status: Int,
+    val updatedAt: Long? = if (status != BatteryStatus.DISCONNECTED) System.currentTimeMillis() else null,
+    val live: Boolean = status != BatteryStatus.DISCONNECTED
+) : Parcelable {
+    fun isLive(now: Long = System.currentTimeMillis()): Boolean = live && updatedAt != null &&
+        now >= updatedAt && now - updatedAt < BleBatteryCache.FRESH_MS
+
     fun getComponentName(): String? {
         return when (component) {
             BatteryComponent.LEFT -> "LEFT"
@@ -158,6 +169,12 @@ class AirPodsNotifications {
         private var second: Battery = Battery(BatteryComponent.RIGHT, 0, BatteryStatus.DISCONNECTED)
         private var case: Battery = Battery(BatteryComponent.CASE, 0, BatteryStatus.DISCONNECTED)
 
+        fun clear() {
+            first = Battery(BatteryComponent.LEFT, 0, BatteryStatus.DISCONNECTED)
+            second = Battery(BatteryComponent.RIGHT, 0, BatteryStatus.DISCONNECTED)
+            case = Battery(BatteryComponent.CASE, 0, BatteryStatus.DISCONNECTED)
+        }
+
         fun isBatteryData(data: ByteArray): Boolean {
             if (data.joinToString("") { "%02x".format(it) }.startsWith("040004000400")) {
                 Log.d("BatteryNotification", "Battery data starts with 040004000400. Most likely is a battery packet.")
@@ -185,41 +202,53 @@ class AirPodsNotifications {
             case = Battery(BatteryComponent.CASE, caseLevel, if (caseCharging) BatteryStatus.CHARGING else BatteryStatus.NOT_CHARGING)
         }
 
+        fun setBatteryFromBle(status: BLEManager.AirPodsStatus) {
+            val snapshot = status.batterySnapshot ?: return
+            val now = System.currentTimeMillis()
+            fun battery(component: Int, reading: BleBatteryCache.Reading): Battery = Battery(
+                component, reading.level ?: 0,
+                when {
+                    reading.level == null -> BatteryStatus.DISCONNECTED
+                    reading.chargingNow(now) -> BatteryStatus.CHARGING
+                    else -> BatteryStatus.NOT_CHARGING
+                }, reading.updatedAt, reading.live(now)
+            )
+            first = battery(BatteryComponent.LEFT, snapshot.left)
+            second = battery(BatteryComponent.RIGHT, snapshot.right)
+            case = battery(BatteryComponent.CASE, snapshot.case)
+        }
+
         fun setBattery(data: ByteArray) {
-            if (data.size != 22) {
+            if (data.size != 22 || data[7].toInt() !in setOf(BatteryComponent.LEFT, BatteryComponent.RIGHT) ||
+                data[12].toInt() !in setOf(BatteryComponent.LEFT, BatteryComponent.RIGHT) ||
+                data[7] == data[12] || data[17].toInt() != BatteryComponent.CASE) {
                 return
             }
-//            first = if (data[10].toInt() == BatteryStatus.DISCONNECTED) {
-//                Battery(first.component, first.level, data[10].toInt())
-//            } else {
-//                Battery(data[7].toInt(), data[9].toInt(), data[10].toInt())
-//            }
-//            second = if (data[15].toInt() == BatteryStatus.DISCONNECTED) {
-//                Battery(second.component, second.level, data[15].toInt())
-//            } else {
-//                Battery(data[12].toInt(), data[14].toInt(), data[15].toInt())
-//            }
-//            case = if (data[20].toInt() == BatteryStatus.DISCONNECTED && case.status != BatteryStatus.DISCONNECTED) {
-//                Battery(case.component, case.level, data[20].toInt())
-//            } else {
-//                Battery(data[17].toInt(), data[19].toInt(), data[20].toInt())
-//            }
-//            sometimes it shows battery as -1%, just skip all that and set it normally
-            first = Battery(
-                data[7].toInt(), data[9].toInt(), data[10].toInt()
-            )
-            second = Battery(
-                data[12].toInt(), data[14].toInt(), data[15].toInt()
-            )
-            case = Battery(
-                data[17].toInt(), data[19].toInt(), data[20].toInt()
-            )
+            val previous = listOf(first, second, case)
+            fun read(offset: Int): Battery {
+                val component = data[offset].toInt()
+                val level = data[offset + 2].toInt() and 0xff
+                val status = data[offset + 3].toInt() and 0xff
+                if (level !in 0..100 || status !in setOf(BatteryStatus.CHARGING, BatteryStatus.NOT_CHARGING,
+                        BatteryStatus.OPTIMIZED_CHARGING)) {
+                    return previous.first { it.component == component }.copy(live = false, status = BatteryStatus.DISCONNECTED)
+                }
+                return Battery(component, level, status)
+            }
+            first = read(7)
+            second = read(12)
+            case = read(17)
         }
 
         fun getBattery(): List<Battery> {
             val left = if (first.component == BatteryComponent.LEFT) first else second
             val right = if (first.component == BatteryComponent.LEFT) second else first
-            return listOf(left, right, case)
+            val now = System.currentTimeMillis()
+            return listOf(left, right, case).map {
+                if (it.isLive(now)) it else it.copy(live = false,
+                    status = if (it.status == BatteryStatus.CHARGING || it.status == BatteryStatus.OPTIMIZED_CHARGING)
+                        BatteryStatus.NOT_CHARGING else it.status)
+            }
         }
     }
 

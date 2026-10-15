@@ -1,0 +1,24 @@
+<!-- shortcut: new fork text uses English fallback until translations are contributed. -->
+<resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="MissingTranslation">
+    <string name="setting_send_failed">Could not send the setting. Reconnect your AirPods and try again.</string>
+    <string name="adaptive_mode_not_confirmed">AirPods did not confirm Adaptive mode. Try again after changing the listening mode.</string>
+    <string name="rootless_audio_title">Playback and microphone</string>
+    <string name="rootless_audio_native">Playback uses Android’s Bluetooth audio. Custom AAC-ELD playback is unavailable until the transport and encoder checks pass.</string>
+    <string name="rootless_audio_shizuku">Connect Shizuku</string>
+    <string name="rootless_audio_probe">Check audio support</string>
+    <string name="rootless_audio_record">Record a microphone test</string>
+    <string name="rootless_audio_stop">Stop</string>
+    <string name="rootless_audio_play">Play recording</string>
+    <string name="rootless_audio_share">Share recording</string>
+    <string name="rootless_audio_target">Target app package</string>
+    <string name="rootless_audio_inject">Use microphone in selected app</string>
+    <string name="rootless_audio_call">Use microphone for this call</string>
+    <string name="rootless_audio_calibration">Experimental. Check the test recording’s duration and pitch before using this microphone in another app. Call audio is processed live and is not saved.</string>
+    <string name="rootless_audio_permission">Microphone permission is required.</string>
+    <string name="rootless_audio_not_connected">Connect your AirPods to use their microphone.</string>
+    <string name="rootless_audio_service_unavailable">Open LibrePods again to start the Bluetooth service.</string>
+    <string name="rootless_audio_diagnostics">Audio diagnostics</string>
+    <string name="rootless_audio_copy">Copy report</string>
+    <string name="microphone_session_title">AirPods microphone session</string>
+    <string name="microphone_session_description">Microphone use or playback recovery is active. Stop ends microphone use.</string>
+</resources>
