@@ -54,16 +54,18 @@ Telecom retains its original mode ownership. Process death also releases the
 request. Muting the call stops the experimental session. VoIP is not implemented
 by this duplex path.
 
-Two-way AirPods audio and a silent phone were confirmed with a bounded prototype
-on the test Pixel. **Normal-quality music during calls is not yet supported.**
+Two-way AirPods audio and a silent phone were confirmed with bounded prototypes
+and then with the installed pixel3 application on the test Pixel.
+**Normal-quality music during calls is not yet supported.**
 Outside a call, music and private microphone recording worked together on
 pixel3; the user reported only a small quality drop and substantially better
-sound than native HFP. The severe degradation was reported in the call experiment.
+sound than native HFP with Phone calls both enabled and disabled, keeping Media
+audio enabled. The severe degradation was reported in the call experiment.
 Android mutes existing media players for a call. A separate one-player experiment
 made YouTube audible alongside the call, but the listener reported telephone-like
 music quality. That experiment is not enabled in the app. The production APK
-uses the same routing approach but still needs its own live-call check; the
-standalone prototype result is not a production-app call acceptance result.
+passed a basic cellular-call test; exclusive microphone input, long-call
+reliability and concurrent call/music quality remain unverified.
 See the [Android call APIs](https://android.googlesource.com/platform/frameworks/base/+/refs/heads/main/media/java/android/media/AudioManager.java)
 and [native call routing](https://android.googlesource.com/platform/frameworks/av/+/refs/heads/main/services/audiopolicy/managerdefault/AudioPolicyManager.cpp).
 A successful recorder test does not establish VoIP or cellular-call support.
@@ -130,6 +132,17 @@ Each completed probe released its mode request and restored Telecom's mode 2.
 No output-stream mute or call PCM file was used. The installed pixel2 app supplied
 the microphone while standalone shell probes supplied the temporary downlink.
 
+The installed `1.0.1-pixel3` application then passed its own real cellular-call
+test using Use AirPods for this call. The user confirmed two-way AirPods audio
+and a silent phone. Before Stop, the UI reported about 459.2 seconds of decoded
+64 kHz mono microphone PCM over 460 seconds elapsed, approximately 7.7 minutes.
+The helper owned raw mode 5, with the call-assistant uplink routed to telephony
+and a 48 kHz stereo media track routed to the selected AirPods. Stop released
+the helper's tracks, returned mode 5 to Telecom's mode 2 while the call remained
+active, and dropped the foreground-service mask from `0x90` to `0x10`. No call
+PCM file was created. This establishes basic two-way functionality for that
+setup, not exclusive microphone input, VoIP or long-duration reliability.
+
 During the music-quality failure, the exact YouTube player and caller relay were
 both active on a 48 kHz stereo, floating-point A2DP mixer. There were no active
 effects or music-track underruns. The selected AirPods negotiated AAC at 44.1 kHz,
@@ -139,8 +152,14 @@ and it does not explain the reported quality loss. NTPods' successful AAC/microp
 checks used 48 kHz CBR playback; the selected Pixel device's local/selectable AAC
 and SBC capabilities exposed only 44.1 kHz. The good no-call result means that
 codec difference alone does not establish the cause or a fix.
-The Android 17 focus-isolation client wrapper returned no token; the separate
-typed service API has not been tested. No global focus or codec setting was changed.
+The Android 17 focus-isolation client wrapper returned no token. Later typed
+service probes entered isolation and accepted exit with `LOSE` on both attempts.
+Both relay-gain controllers completed 30 seconds and restored multiplier 1 on
+their captured player. The music comparisons were inconclusive: music was
+paused in the first, and a diagnostic guard failed after an explicit YouTube
+MediaSession play request in the second. The cause of that failure was not
+established. These probes do not demonstrate a music-quality fix. No codec
+setting was changed; media-focus experiments remain outside the application.
 
 The native stack rejected the local PSM `0x19` listening-socket probe with
 `IOException: Error: -1`. This does not establish whether outbound AVDTP can work.
@@ -153,14 +172,17 @@ An Android software encoder has not been tested. Native Bluetooth playback remai
 The latest full FOSS validation, `pixel-integration10` (pixel3, versionCode 88),
 passed 86 unit tests in 21 suites, debug lint, debug assembly and minified release
 assembly. It includes the production duplex route and selected-transport and
-cleanup tests; its live-cellular-call acceptance is still pending.
+cleanup tests. Basic live-cellular-call functionality passed separately as
+described above; the remaining acceptance limits still apply.
 The signed `1.0.1-pixel3` build (versionCode 88) was installed and connected to
 the selected AirPods and Shizuku. Android was in normal mode with SCO off;
 the selected pair's Phone calls and Media audio settings had both been restored.
-During a subsequent private microphone recording with no call active, the user
-confirmed good music playback with only a small quality drop, far better than
-native HFP. This verifies that simultaneous music and custom microphone capture
-can work outside a call; it does not resolve the call experiment's quality loss.
+During private microphone recordings with no call active, the user confirmed
+good music playback with only a small quality drop, far better than native HFP.
+This passed with Phone calls enabled and again with Phone calls disabled while
+Media audio stayed enabled. The profile setting alone therefore does not explain
+the call experiment's quality loss. Simultaneous music and custom microphone
+capture can work outside a call; call-quality acceptance remains separate.
 The earlier signed, minified pixel2 application connected to the paired Pro 3
 and Shizuku.
 Live capture produced decoded PCM. A 60.006-second capture contained 79.520 seconds
@@ -204,8 +226,8 @@ metadata such as `9442752` is normalized to `9A348` before selecting a movement
 service; late metadata updates reach the existing sensor session. After that fix,
 the signed build displayed changing horizontal/vertical reports and a live trace
 on the Pixel. Both optional sensor toggles were verified off after testing.
-Physical pairing, VoIP, the production duplex route and long-duration recovery
-still need their hardware checks.
+Physical pairing, VoIP, multi-pair call routing and long-duration recovery still
+need their hardware checks.
 
 Build the FOSS application with JDK 21 and the SDK/NDK versions pinned in Gradle:
 
