@@ -14,7 +14,8 @@ class ConversationVolume {
 
     fun owns(owner: Any): Boolean = this.owner === owner
 
-    fun begin(current: Int, maximum: Int, percent: Int, relative: Boolean, stage: Int, owner: Any) {
+    fun begin(current: Int, maximum: Int, percent: Int, relative: Boolean, stage: Int, owner: Any): Boolean {
+        if (stage !in 1..3 || (stage != 1 && (!owns(owner) || !speaking))) return false
         if (!owns(owner)) { clear(); this.owner = owner }
         if (!speaking) {
             if (original == null || expected != current) original = current
@@ -22,9 +23,12 @@ class ConversationVolume {
             overridden = false
         }
         speaking = true
-        if (overridden) return
+        if (overridden) return true
         val cap = (if (relative) checkNotNull(original) else maximum) * percent.coerceIn(0, 100) / 100
-        target = minOf(current, if (stage == 2) cap * 60 / 100 else cap).coerceIn(0, maximum)
+        // Stage 3 partially recovers stage 2, without exceeding the conversation's original level.
+        target = minOf(if (stage == 3) checkNotNull(original) else current,
+            if (stage == 2) cap * 60 / 100 else cap).coerceIn(0, maximum)
+        return true
     }
 
     fun end(current: Int, owner: Any): Boolean {

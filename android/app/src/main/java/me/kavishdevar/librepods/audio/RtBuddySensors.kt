@@ -16,7 +16,12 @@ class RtBuddySensors(private var legacyMotionService: Int? = null) {
         val heartRateService: Int?,
         val heartRate: HeartRate?,
         val motion: Motion?,
-    )
+        val legacyMotionAllowed: Boolean = true,
+    ) {
+        internal fun sameMapping(other: Batch) = generation == other.generation &&
+            motionService == other.motionService && heartRateService == other.heartRateService &&
+            legacyMotionAllowed == other.legacyMotionAllowed
+    }
     private data class Field(val id: Int, val number: Long? = null, val bytes: ByteArray? = null)
     private enum class Sensor { MOTION, HEART_RATE }
 
@@ -25,6 +30,8 @@ class RtBuddySensors(private var legacyMotionService: Int? = null) {
     private var generation = 0L
     private var motionService: Int? = null
     private var heartRateService: Int? = null
+    private var motionDescriptorSeen = false
+    private var heartDescriptorSeen = false
 
     @Synchronized
     internal fun setLegacyMotionService(service: Int?) { legacyMotionService = service }
@@ -36,7 +43,7 @@ class RtBuddySensors(private var legacyMotionService: Int? = null) {
         var motion: Motion? = null
         if (chunk.size > 65_535 || carry.size + chunk.size > 81_920) {
             carry = byteArrayOf()
-            return Batch(false, generation, motionService, heartRateService, null, null)
+            return batch(false, null, null)
         }
         val input = carry + chunk
         var cursor = 0
@@ -50,15 +57,23 @@ class RtBuddySensors(private var legacyMotionService: Int? = null) {
             val payload = input.copyOfRange(cursor + 12, end)
             val fields = sensorFields(payload)
             if (fields != null) {
-                changed = discover(fields) || changed
+                if (discover(fields)) {
+                    // Samples preceding a remap belong to the old service table.
+                    heart = null
+                    motion = null
+                    changed = true
+                }
                 heart = heartRate(fields) ?: heart
                 motion = motion(fields) ?: motion
             }
             cursor = end
         }
         carry = input.copyOfRange(cursor, input.size)
-        return Batch(changed, generation, motionService, heartRateService, heart, motion)
+        return batch(changed, heart, motion)
     }
+
+    private fun batch(changed: Boolean, heart: HeartRate?, motion: Motion?) =
+        Batch(changed, generation, motionService, heartRateService, heart, motion, !motionDescriptorSeen)
 
     private fun discover(top: List<Field>): Boolean {
         if (unique(top, 2)?.number !in listOf(1L, 3L)) return false
@@ -72,7 +87,7 @@ class RtBuddySensors(private var legacyMotionService: Int? = null) {
             announced += service to sensor
         }
         if (announced.isEmpty()) return false
-        val sequence = unique(top, 1)?.number ?: return false
+        val sequence = unique(top, 1)?.number?.takeIf { it >= 0 } ?: return false
         val restart = sequence == 1L && (lastSequence ?: 0) > 1
         var nextMotion = if (restart) null else motionService
         var nextHeart = if (restart) null else heartRateService
@@ -85,11 +100,14 @@ class RtBuddySensors(private var legacyMotionService: Int? = null) {
         lastSequence = sequence
         motionService = nextMotion
         heartRateService = nextHeart
+        motionDescriptorSeen = motionDescriptorSeen || nextMotion != null
+        heartDescriptorSeen = heartDescriptorSeen || nextHeart != null
         return changed
     }
 
     private fun heartRate(top: List<Field>): HeartRate? {
         if (unique(top, 2)?.number !in listOf(1L, 3L)) return null
+        if (heartRateService == null && heartDescriptorSeen) return null
         val reports = mutableListOf<ByteArray>()
         fun payloads(bytes: ByteArray, depth: Int) {
             if (reports.size >= 12) return
@@ -103,7 +121,7 @@ class RtBuddySensors(private var legacyMotionService: Int? = null) {
             if (depth > 3 || commands >= 16) return
             val nested = fields(bytes) ?: return
             val service = unique(nested, 1)?.number
-            if (if (heartRateService == null) service in listOf(19L, 20L, 84L)
+            if (if (heartRateService == null) service in listOf(19L, 20L, 84L) && service != motionService?.toLong()
                 else service == heartRateService?.toLong()) {
                 commands++
                 nested.filter { it.id == 3 && it.bytes != null }.forEach {
@@ -127,7 +145,8 @@ class RtBuddySensors(private var legacyMotionService: Int? = null) {
     private fun motion(top: List<Field>): Motion? {
         val log = unique(top, 2)?.number?.takeIf { it in listOf(1L, 3L, 5L) } ?: return null
         if (top.count { it.id == 3 || it.id == 7 } != 1) return null
-        val service = motionService ?: legacyMotionService ?: return null
+        val service = motionService ?: legacyMotionService?.takeUnless { motionDescriptorSeen || it == heartRateService }
+            ?: return null
         val packed = unique(top, 3)?.bytes
         val command = unique(top, 7)?.bytes
         val report = if (packed != null && motionService != null) {

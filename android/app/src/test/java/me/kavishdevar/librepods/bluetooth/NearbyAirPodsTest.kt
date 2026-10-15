@@ -147,4 +147,50 @@ class NearbyAirPodsTest {
         assertTrue(visits.expire(59_998).isEmpty())
         assertEquals(listOf(open.copy(lidOpen = false)), visits.expire(59_999))
     }
+
+    @Test fun retryAndBondAttemptsRejectCallbacksFromEarlierWorkWithoutClosingThePopup() {
+        val session = NearbyAirPods.Session()
+        val invitation = session.open(0x2720)
+        val discovery = session.beginAttempt(invitation)!!
+        val retry = session.beginAttempt(invitation)!!
+        assertTrue(session.isCurrent(invitation))
+        assertFalse(session.isCurrentAttempt(invitation, discovery))
+        assertTrue(session.isCurrentAttempt(invitation, retry))
+        val bond = session.beginAttempt(invitation)!!
+        assertFalse(session.isCurrentAttempt(invitation, retry))
+        assertTrue(session.isCurrentAttempt(invitation, bond))
+        session.close()
+        assertNull(session.beginAttempt(invitation))
+        assertFalse(session.isCurrentAttempt(invitation, bond))
+    }
+
+    @Test fun delayedLidReportsCannotReopenOrCloseANewerVisit() {
+        val visits = NearbyAirPods.Visits()
+        val open = NearbyAirPods.Event(0x2720, true)
+        val closed = open.copy(lidOpen = false)
+        assertEquals(open, visits.observe(open, 100, false))
+        assertNull(visits.observe(closed, 99, false))
+        assertEquals(closed, visits.observe(closed, 200, false))
+        assertNull(visits.observe(open, 150, false))
+        assertEquals(open, visits.observe(open, 201, false))
+    }
+
+    @Test fun recognizingTheAlreadyPairedIdentityClosesAnOutstandingInvitationOnce() {
+        val visits = NearbyAirPods.Visits()
+        val open = NearbyAirPods.Event(0x2720, true)
+        assertEquals(open, visits.observe(open, 0, false))
+        assertEquals(open.copy(lidOpen = false), visits.observe(open, 1, true))
+        assertNull(visits.observe(open, 2, true))
+        assertTrue(visits.expire(30_002).isEmpty())
+    }
+
+    @Test fun scannerShutdownClosesOnlyActiveInvitationsAndClearsTheirDeduplication() {
+        val visits = NearbyAirPods.Visits()
+        val open = NearbyAirPods.Event(0x2720, true)
+        visits.observe(open, 0, false)
+        visits.observe(NearbyAirPods.Event(0x1920, true), 1, true)
+        assertEquals(listOf(open.copy(lidOpen = false)), visits.clear())
+        assertTrue(visits.clear().isEmpty())
+        assertEquals(open, visits.observe(open, 2, false))
+    }
 }

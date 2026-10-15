@@ -62,8 +62,8 @@ object MediaController {
         Log.d("MediaController", "Cleared pausedForOtherDevice after timeout, resuming normal playback monitoring")
     }
 
-    private var relativeVolume: Boolean = false
-    private var conversationalAwarenessVolume: Int = 2
+    private var relativeVolume: Boolean = true
+    private var conversationalAwarenessVolume: Int = 43
     private var conversationalAwarenessPauseMusic: Boolean = false
 
     var recentlyLostOwnership: Boolean = false
@@ -78,20 +78,22 @@ object MediaController {
         this.audioManager = audioManager
         this.sharedPreferences = sharedPreferences
         Log.d("MediaController", "Initializing MediaController")
-        relativeVolume = sharedPreferences.getBoolean("relative_conversational_awareness_volume", false)
+        relativeVolume = sharedPreferences.getBoolean("relative_conversational_awareness_volume", true)
         conversationalAwarenessVolume = sharedPreferences.getInt("conversational_awareness_volume", 43).coerceIn(0, 100)
         conversationalAwarenessPauseMusic = sharedPreferences.getBoolean("conversational_awareness_pause_music", false)
 
         preferenceChangeListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
-            when (key) {
-                "relative_conversational_awareness_volume" -> {
-                    relativeVolume = sharedPreferences.getBoolean("relative_conversational_awareness_volume", false)
-                }
-                "conversational_awareness_volume" -> {
-                    conversationalAwarenessVolume = sharedPreferences.getInt("conversational_awareness_volume", 43).coerceIn(0, 100)
-                }
-                "conversational_awareness_pause_music" -> {
-                    conversationalAwarenessPauseMusic = sharedPreferences.getBoolean("conversational_awareness_pause_music", false)
+            synchronized(this@MediaController) {
+                when (key) {
+                    "relative_conversational_awareness_volume" -> {
+                        relativeVolume = sharedPreferences.getBoolean("relative_conversational_awareness_volume", true)
+                    }
+                    "conversational_awareness_volume" -> {
+                        conversationalAwarenessVolume = sharedPreferences.getInt("conversational_awareness_volume", 43).coerceIn(0, 100)
+                    }
+                    "conversational_awareness_pause_music" -> {
+                        conversationalAwarenessPauseMusic = sharedPreferences.getBoolean("conversational_awareness_pause_music", false)
+                    }
                 }
             }
         }
@@ -317,6 +319,7 @@ object MediaController {
 
     @Synchronized
     fun startSpeaking(stage: Int, owner: Any, address: String) {
+        if (stage !in 1..3 || (stage != 1 && (!conversationVolume.owns(owner) || !conversationVolume.speaking))) return
         if (!conversationVolume.owns(owner)) {
             conversationVolume.owner?.let { cancelConversation(it, restoreVolume = false) }
         }
@@ -347,7 +350,7 @@ object MediaController {
         if (conversationVolume.end(audioManager.getStreamVolume(AudioManager.STREAM_MUSIC), owner)) runVolumeTransition(owner)
         if (wasSpeaking && conversationPausedMedia) {
             conversationPausedMedia = false
-            sendPlay()
+            if (!audioManager.isMusicActive) sendPlay()
             iPausedTheMedia = false
         }
     }
@@ -386,12 +389,20 @@ object MediaController {
                     cancelConversation(owner, restoreVolume = false)
                     return@synchronized
                 }
-                val next = conversationVolume.step(audioManager.getStreamVolume(AudioManager.STREAM_MUSIC), owner)
-                if (next == null) {
-                    volumeTransition = null
-                } else {
-                    audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, next, 0)
-                    handler.postDelayed(this, 50)
+                try {
+                    val next = conversationVolume.step(audioManager.getStreamVolume(AudioManager.STREAM_MUSIC), owner)
+                    if (next != null) {
+                        audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, next, 0)
+                        handler.postDelayed(this, 50)
+                    } else if (conversationVolume.speaking) {
+                        // Keep observing manual volume and route changes after reaching the ducked level.
+                        handler.postDelayed(this, 250)
+                    } else {
+                        volumeTransition = null
+                    }
+                } catch (error: RuntimeException) {
+                    Log.w("MediaController", "Could not adjust conversation volume", error)
+                    cancelConversation(owner, restoreVolume = false)
                 }
             }
         }.also(handler::post)

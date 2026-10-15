@@ -72,6 +72,7 @@ object NearbyAirPods {
 
         fun observe(event: Event, now: Long, alreadyPaired: Boolean): Event? {
             val visit = visits.getOrPut(event.modelId) { Visit(now, false, false) }
+            if (now < visit.at) return null
             if (now - visit.at >= ABSENCE_MS) visit.offered = false
             visit.at = now
             if (!event.lidOpen) {
@@ -80,10 +81,16 @@ object NearbyAirPods {
                 visit.offered = false
                 return event.takeIf { wasOpen }
             }
+            if (alreadyPaired) {
+                val wasOpen = visit.open
+                visit.open = false
+                visit.offered = true
+                return event.copy(lidOpen = false).takeIf { wasOpen }
+            }
             visit.open = true
             if (visit.offered) return null
             visit.offered = true
-            return event.takeUnless { alreadyPaired }
+            return event
         }
 
         fun expire(now: Long): List<Event> = visits.mapNotNull { (model, visit) ->
@@ -94,7 +101,11 @@ object NearbyAirPods {
             } else null
         }
 
-        fun clear() = visits.clear()
+        fun clear(): List<Event> {
+            val closed = visits.filterValues { it.open }.keys.map { Event(it, false) }
+            visits.clear()
+            return closed
+        }
     }
 
     /** A closed/replaced invitation invalidates every discovery and bond callback. */
@@ -103,6 +114,7 @@ object NearbyAirPods {
             private set
         var modelId: Int? = null
             private set
+        private var attempt = 0L
 
         fun open(model: Int): Long {
             generation++
@@ -111,6 +123,10 @@ object NearbyAirPods {
         }
 
         fun isCurrent(token: Long): Boolean = modelId != null && generation == token
+
+        fun beginAttempt(token: Long): Long? = if (isCurrent(token)) ++attempt else null
+
+        fun isCurrentAttempt(token: Long, operation: Long): Boolean = isCurrent(token) && attempt == operation
 
         fun close(model: Int? = null): Boolean {
             if (model != null && modelId != model) return false

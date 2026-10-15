@@ -112,7 +112,8 @@ data class AirPodsUiState(
     val connectionSuccessful: Boolean = false,
     val timeUntilFOSSPremiumExpiry: Long = 0L,
 
-    val customEq: CustomEq = CustomEq(1, 50, 50, 50) // disabled
+    val customEq: CustomEq = CustomEq(1, 50, 50, 50), // disabled
+    val requestedCustomEq: CustomEq? = null
 )
 
 internal fun normalizedControl(value: ByteArray): ByteArray =
@@ -140,6 +141,12 @@ internal fun AirPodsUiState.withControlReport(identifier: ControlCommandIdentifi
             (requests[identifier] ?: value).firstOrNull() == 1.toByte() else dynamicEndOfCharge)
     return next.copy(offListeningMode = offListeningModeAllowed(next))
 }
+
+internal fun AirPodsUiState.withCustomEqReport(report: CustomEq): AirPodsUiState =
+    copy(customEq = report, requestedCustomEq = requestedCustomEq?.takeUnless { it == report })
+
+internal fun controlDeviceMatches(ui: String?, loaded: String?, selected: String?, remote: String?): Boolean =
+    ui != null && ui == loaded && ui == selected && ui == remote
 
 val demoInstance = AirPodsInstance(
     name = "[DEMO] AirPods Pro",
@@ -295,26 +302,44 @@ class AirPodsViewModel(
 //        _cameraAction.value = action
 //    }
 
-    fun setCustomEq(low: Int, mid: Int, high: Int) {
+    fun setCustomEq(low: Int, mid: Int, high: Int): Boolean {
         require(low in 0..100)
         require(mid in 0..100)
         require(high in 0..100)
-        val updatedEq = _uiState.value.customEq.copy(low = low, mid = mid, high = high)
-        service.aacpManager.sendCustomEqPacket(updatedEq)
-        _uiState.update {
-            it.copy(
-                customEq = updatedEq
-            )
-        }
+        val state = _uiState.value
+        return sendCustomEqRequest((state.requestedCustomEq ?: state.customEq).copy(low = low, mid = mid, high = high))
     }
 
-    fun setCustomEqEnabled(enabled: Boolean) {
-        service.aacpManager.sendCustomEqPacket(_uiState.value.customEq.copy(state = if (enabled) 2 else 1))
-        _uiState.update {
-            it.copy(
-                customEq = it.customEq.copy(state = if (enabled) 2 else 1)
-            )
+    fun setCustomEqEnabled(enabled: Boolean): Boolean {
+        val state = _uiState.value
+        return sendCustomEqRequest((state.requestedCustomEq ?: state.customEq).copy(state = if (enabled) 2 else 1))
+    }
+
+    private fun currentControlSocket(): BluetoothSocket? {
+        val socket = controlSocket ?: return null
+        val state = _uiState.value
+        return socket.takeIf { it === BluetoothConnectionManager.aacpSocket && it.isConnected &&
+            state.isLocallyConnected && controlDeviceMatches(state.deviceAddress, controlAddress,
+                service.device?.address, runCatching { it.remoteDevice.address }.getOrNull()) }
+    }
+
+    private fun sendCustomEqRequest(request: CustomEq): Boolean {
+        if (isDemoMode) {
+            _uiState.update { it.withCustomEqReport(request) }
+            return true
         }
+        val socket = currentControlSocket() ?: return false
+        val address = _uiState.value.deviceAddress
+        if (!service.aacpManager.sendSensorPacket(socket, service.aacpManager.createDataPacket(request.toPacket()))) {
+            showControlError(R.string.setting_send_failed)
+            return false
+        }
+        if (currentControlSocket() !== socket) return false
+        _uiState.update { state ->
+            if (state.deviceAddress != address) state else
+                state.copy(requestedCustomEq = request.takeUnless { it == service.aacpManager.customEq })
+        }
+        return true
     }
 
     override fun onCleared() {
@@ -340,7 +365,8 @@ class AirPodsViewModel(
         controlSocket = null
         controlAddress = null
         isReady = false
-        _uiState.update { it.copy(isLocallyConnected = false, controlStates = emptyMap(), requestedControls = emptyMap()) }
+        _uiState.update { it.copy(isLocallyConnected = false, controlStates = emptyMap(), requestedControls = emptyMap(),
+            requestedCustomEq = null) }
     }
 
     private fun loadName() {
@@ -401,7 +427,8 @@ class AirPodsViewModel(
                         controlSocket = null
                         controlAddress = null
                         _uiState.update {
-                            val next = it.copy(isLocallyConnected = false, controlStates = emptyMap(), requestedControls = emptyMap())
+                            val next = it.copy(isLocallyConnected = false, controlStates = emptyMap(), requestedControls = emptyMap(),
+                                requestedCustomEq = null)
                             next.copy(offListeningMode = offListeningModeAllowed(next))
                         }
                     }
@@ -459,7 +486,7 @@ class AirPodsViewModel(
             _uiState.update { it.withControlReport(identifier, value) }
             return true
         }
-        val socket = BluetoothConnectionManager.aacpSocket ?: return false
+        val socket = currentControlSocket() ?: return false
         val address = service.device?.address ?: return false
         if (!socket.isConnected) return false
         val request = normalizedControl(value)
@@ -589,7 +616,9 @@ class AirPodsViewModel(
             observeControl(identifier)
         }
         service.aacpManager.customEqCallback = { customEq ->
-            _uiState.update { it.copy(customEq = customEq) }
+            _uiState.update {
+                if (it.isLocallyConnected && currentControlSocket() != null) it.withCustomEqReport(customEq) else it
+            }
         }
     }
 
@@ -597,7 +626,8 @@ class AirPodsViewModel(
         if (isDemoMode) return
         val socket = BluetoothConnectionManager.aacpSocket
         val address = service.device?.address
-        val connected = socket?.isConnected == true && address != null
+        val connected = socket?.isConnected == true && address != null &&
+            runCatching { socket.remoteDevice.address == address }.getOrDefault(false)
         val changed = socket !== controlSocket || address != controlAddress
         if (changed) {
             cancelAdaptiveRequest()
@@ -620,7 +650,11 @@ class AirPodsViewModel(
             requests.entries.removeAll { (id, value) -> reports[id]?.contentEquals(value) == true }
             val next = previous.copy(deviceAddress = address, isLocallyConnected = connected, battery = service.getBattery(),
                 ancMode = reports[ControlCommandIdentifiers.LISTENING_MODE]?.firstOrNull()?.toInt() ?: 1,
-                controlStates = reports, requestedControls = requests)
+                controlStates = reports, requestedControls = requests,
+                customEq = if (connected) service.aacpManager.customEq else CustomEq(1, 50, 50, 50),
+                requestedCustomEq = previous.requestedCustomEq?.takeUnless {
+                    changed || !connected || it == service.aacpManager.customEq
+                })
             next.copy(offListeningMode = offListeningModeAllowed(next))
         }
     }
@@ -921,7 +955,8 @@ class AirPodsViewModel(
         if (isDemoMode) {
             isDemoMode = false
             _uiState.update {
-                                it.copy(isLocallyConnected = false, controlStates = emptyMap(), requestedControls = emptyMap())
+                                it.copy(isLocallyConnected = false, controlStates = emptyMap(), requestedControls = emptyMap(),
+                                    requestedCustomEq = null)
             }
         } else {
             service.disconnectAirPods()

@@ -56,7 +56,7 @@ class NearbyPairingController(
     }
 
     private fun discover(token: Long) {
-        if (!session.isCurrent(token)) return
+        val attempt = session.beginAttempt(token) ?: return
         stopDiscovery()
         val model = session.modelId ?: return
         val devices = linkedMapOf<String, BluetoothDevice>()
@@ -73,7 +73,7 @@ class NearbyPairingController(
             }
             receiver = object : BroadcastReceiver() {
                 override fun onReceive(context: Context, intent: Intent) {
-                    if (!session.isCurrent(token)) return
+                    if (!session.isCurrentAttempt(token, attempt) || receiver !== this) return
                     try {
                         when (intent.action) {
                             BluetoothDevice.ACTION_FOUND -> {
@@ -88,7 +88,13 @@ class NearbyPairingController(
                                         name ?: "AirPods", device.address), emptyList())
                                 }
                             }
-                            BluetoothAdapter.ACTION_DISCOVERY_FINISHED -> finishDiscovery(token, devices, candidates)
+                            BluetoothAdapter.ACTION_DISCOVERY_FINISHED -> {
+                                // A late completion from an earlier scan must not finish this one.
+                                if (!adapter.isDiscovering) {
+                                    discoveryOwned = false
+                                    finishDiscovery(token, attempt, devices, candidates)
+                                }
+                            }
                         }
                     } catch (e: SecurityException) {
                         permissionDenied(token, e)
@@ -108,7 +114,7 @@ class NearbyPairingController(
             val doubleTap = model in setOf(0x1920, 0x1b20, 0x2720, 0x3020, 0x3620)
             val gesture = context.getString(if (doubleTap) R.string.pairing_double_tap else R.string.pairing_hold_button)
             popup?.showPairingActions("$gesture\n\n${context.getString(R.string.pairing_searching)}", emptyList())
-            timeout = Runnable { finishDiscovery(token, devices, candidates) }.also { handler.postDelayed(it, 15_000) }
+            timeout = Runnable { finishDiscovery(token, attempt, devices, candidates) }.also { handler.postDelayed(it, 15_000) }
         } catch (e: SecurityException) {
             Log.w(TAG, "Nearby pairing requires Bluetooth permission", e)
             stopDiscovery()
@@ -116,8 +122,8 @@ class NearbyPairingController(
         }
     }
 
-    private fun finishDiscovery(token: Long, devices: Map<String, BluetoothDevice>, candidates: NearbyAirPods.Discovery) {
-        if (!session.isCurrent(token)) return
+    private fun finishDiscovery(token: Long, attempt: Long, devices: Map<String, BluetoothDevice>, candidates: NearbyAirPods.Discovery) {
+        if (!session.isCurrentAttempt(token, attempt)) return
         stopDiscovery()
         candidates.finish()
         try {
@@ -130,8 +136,8 @@ class NearbyPairingController(
                 popup?.showPairingActions(context.getString(R.string.pairing_searching_candidate,
                     sole.name ?: "AirPods", sole.address), emptyList())
                 timeout = Runnable {
-                    if (session.isCurrent(token)) {
-                        candidates.automatic(SystemClock.elapsedRealtime())?.let(devices::get)?.let { pair(token, it) }
+                    if (session.isCurrentAttempt(token, attempt)) {
+                        candidates.automatic(SystemClock.elapsedRealtime())?.let(devices::get)?.let { pair(token, attempt, it) }
                     }
                 }
                     .also { handler.postDelayed(it, NearbyAirPods.Discovery.STABLE_MS) }
@@ -140,15 +146,16 @@ class NearbyPairingController(
             popup?.showPairingActions(context.getString(R.string.pairing_choose_device),
                 devices.values.map { device ->
                     // The user selects the Classic identity: a public model advertisement cannot prove it.
-                    "${device.name ?: "AirPods"}\n${device.address}" to { pair(token, device) }
+                    "${device.name ?: "AirPods"}\n${device.address}" to { pair(token, attempt, device) }
                 })
         } catch (e: SecurityException) {
             permissionDenied(token, e)
         }
     }
 
-    private fun pair(token: Long, device: BluetoothDevice) {
-        if (!session.isCurrent(token)) return
+    private fun pair(token: Long, sourceAttempt: Long, device: BluetoothDevice) {
+        if (!session.isCurrentAttempt(token, sourceAttempt)) return
+        val attempt = session.beginAttempt(token) ?: return
         stopDiscovery()
         try {
             if (device.bondState != BluetoothDevice.BOND_NONE) {
@@ -157,7 +164,7 @@ class NearbyPairingController(
             }
             receiver = object : BroadcastReceiver() {
                 override fun onReceive(context: Context, intent: Intent) {
-                    if (!session.isCurrent(token)) return
+                    if (!session.isCurrentAttempt(token, attempt) || receiver !== this) return
                     try {
                         val changed = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
                         if (changed?.address != device.address) return
@@ -166,7 +173,7 @@ class NearbyPairingController(
                                 stopDiscovery()
                                 popup?.showPairingActions(context.getString(R.string.pairing_complete), emptyList())
                                 onPaired(device)
-                                timeout = Runnable { if (session.isCurrent(token)) dismiss() }
+                                timeout = Runnable { if (session.isCurrentAttempt(token, attempt)) dismiss() }
                                     .also { handler.postDelayed(it, 3_000) }
                             }
                             BluetoothDevice.BOND_NONE -> {
@@ -187,7 +194,7 @@ class NearbyPairingController(
             }
             popup?.showPairingActions(context.getString(R.string.pairing_confirm_android, device.name ?: "AirPods", device.address), emptyList())
             timeout = Runnable {
-                if (session.isCurrent(token)) {
+                if (session.isCurrentAttempt(token, attempt)) {
                     stopDiscovery()
                     showRetry(token, R.string.pairing_bond_timeout)
                 }

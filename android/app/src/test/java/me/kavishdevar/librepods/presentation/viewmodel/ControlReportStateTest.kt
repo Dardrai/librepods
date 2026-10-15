@@ -2,6 +2,7 @@ package me.kavishdevar.librepods.presentation.viewmodel
 
 import me.kavishdevar.librepods.bluetooth.AACPManager.Companion.ControlCommandIdentifiers
 import me.kavishdevar.librepods.data.Capability
+import me.kavishdevar.librepods.data.CustomEq
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -42,5 +43,27 @@ class ControlReportStateTest {
         assertSame(state, state.withControlReport(id, byteArrayOf()))
         assertSame(state, state.withControlReport(id, byteArrayOf(101)))
         assertSame(state, state.withControlReport(id, ByteArray(5)))
+    }
+
+    @Test fun olderEqualizerReportsDoNotConfirmOrEraseANewerRequest() {
+        val desired = CustomEq(2, 80, 20, 65)
+        val older = CustomEq(2, 60, 50, 50)
+        val requested = AirPodsUiState(requestedCustomEq = desired)
+        val reported = requested.withCustomEqReport(older)
+        assertEquals(older, reported.customEq)
+        assertEquals(desired, reported.requestedCustomEq)
+        val confirmed = reported.withCustomEqReport(desired)
+        assertEquals(desired, confirmed.customEq)
+        assertNull(confirmed.requestedCustomEq)
+    }
+
+    @Test fun controlWritesRequireAllSelectedAndTransportIdentitiesToAgree() {
+        val a = "12:34:56:78:9A:BC"
+        val b = "12:34:56:78:9A:BD"
+        assertTrue(controlDeviceMatches(a, a, a, a))
+        assertFalse(controlDeviceMatches(a, a, b, a))
+        assertFalse(controlDeviceMatches(b, b, b, a))
+        assertFalse(controlDeviceMatches(a, b, a, a))
+        assertFalse(controlDeviceMatches(null, null, null, null))
     }
 }

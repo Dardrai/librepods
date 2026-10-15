@@ -162,4 +162,67 @@ class RtBuddySensorsTest {
         assertNull(parser.feed(movement(14)).motion)
         assertEquals(RtBuddySensors.Motion(7, 9), parser.feed(movement(27)).motion)
     }
+
+    private fun movement(service: Int): ByteArray {
+        val report = ByteArray(58).apply { this[28] = 7; this[30] = 9 }
+        return frame(byteArrayOf(8, 10, 16, 3) + bytes(7,
+            byteArrayOf(8, service.toByte()) + bytes(3, report)))
+    }
+
+    @Test fun coalescedReportsBeforeARemapCannotLeakIntoTheNewMapping() {
+        val parser = RtBuddySensors(16)
+        val motion = dictionary("devmotion6", RtBuddySensors.MOTION_DESCRIPTOR, 191)
+        parser.feed(announcement(1, 16, motion))
+        parser.feed(announcement(3, 20, dictionary("HeartRate", RtBuddySensors.HEART_DESCRIPTOR, 601)))
+        val result = parser.feed(heart(20) + movement(16) + announcement(1, 27, motion))
+        assertTrue(result.mappingChanged)
+        assertEquals(1L, result.generation)
+        assertNull(result.heartRate)
+        assertNull(result.motion)
+        assertEquals(27, result.motionService)
+        assertEquals(RtBuddySensors.Motion(7, 9), parser.feed(movement(27)).motion)
+    }
+
+    @Test fun descriptorsRetireLegacyFallbackEvenWhenTheNextGenerationHasNoMatchingSensor() {
+        val parser = RtBuddySensors(16)
+        val motion = dictionary("devmotion6", RtBuddySensors.MOTION_DESCRIPTOR, 191)
+        val heart = dictionary("HeartRate", RtBuddySensors.HEART_DESCRIPTOR, 601)
+        parser.feed(announcement(1, 16, motion))
+        parser.feed(announcement(3, 20, heart))
+        val heartOnly = parser.feed(announcement(1, 27, heart))
+        assertNull(heartOnly.motionService)
+        assertFalse(heartOnly.legacyMotionAllowed)
+        assertNull(parser.feed(movement(16)).motion)
+        parser.feed(announcement(3, 27, heart))
+        parser.feed(announcement(1, 16, motion))
+        assertNull(parser.feed(heart(20)).heartRate)
+    }
+
+    @Test fun legacyFallbackCannotInterpretTheOtherDiscoveredSensor() {
+        val heartParser = RtBuddySensors()
+        heartParser.feed(announcement(1, 20, dictionary("devmotion6", RtBuddySensors.MOTION_DESCRIPTOR, 191)))
+        assertNull(heartParser.feed(heart(20)).heartRate)
+        val motionParser = RtBuddySensors(16)
+        motionParser.feed(announcement(1, 16, dictionary("HeartRate", RtBuddySensors.HEART_DESCRIPTOR, 601)))
+        assertNull(motionParser.feed(movement(16)).motion)
+    }
+
+    @Test fun unsignedOverflowSequenceCannotChangeTheServiceTable() {
+        val parser = RtBuddySensors()
+        val motion = dictionary("devmotion6", RtBuddySensors.MOTION_DESCRIPTOR, 191)
+        parser.feed(announcement(1, 16, motion))
+        val invalidSequence = byteArrayOf(8) + ByteArray(9) { 0xff.toByte() } + byteArrayOf(1, 16, 3)
+        val result = parser.feed(frame(invalidSequence + bytes(5, byteArrayOf(8, 27) + bytes(2, motion))))
+        assertFalse(result.mappingChanged)
+        assertEquals(16, result.motionService)
+    }
+
+    @Test fun inFlightCommandsSurviveReportsButNotChangedServiceOwnership() {
+        val owner = RtBuddySensors.Batch(true, 3, 27, 20, null, null, legacyMotionAllowed = false)
+        assertTrue(owner.sameMapping(owner.copy(mappingChanged = false,
+            heartRate = RtBuddySensors.HeartRate(72, 180), motion = RtBuddySensors.Motion(1, 2))))
+        for (changed in listOf(owner.copy(generation = 4), owner.copy(motionService = 16),
+            owner.copy(heartRateService = 19), owner.copy(legacyMotionAllowed = true)))
+            assertFalse(owner.sameMapping(changed))
+    }
 }

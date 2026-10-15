@@ -33,8 +33,8 @@ class BleBatteryCacheTest {
 
     @Test fun partialReportsRetainOnlyEachComponentsOwnPercentageAndAge() {
         val cache = BleBatteryCache()
-        cache.update(80, true, 70, false, 60, true, 100)
-        val next = cache.update(null, true, 65, false, null, true, 200)
+        cache.update(80, true, 70, false, 60, true, 100, 100_000_000)
+        val next = cache.update(null, true, 65, false, null, true, 200, 200_000_000)
         assertEquals(80, next.left.level)
         assertEquals(100L, next.left.updatedAt)
         assertFalse(next.left.present)
@@ -50,7 +50,7 @@ class BleBatteryCacheTest {
 
     @Test fun zeroIsValidUnknownIsNotAndChargingExpires() {
         val cache = BleBatteryCache()
-        val first = cache.update(0, true, 100, true, 255, true, 10)
+        val first = cache.update(0, true, 100, true, 255, true, 10, 10_000_000)
         assertEquals(0, first.left.level)
         assertTrue(first.left.chargingNow(10))
         assertEquals(100, first.right.level)
@@ -65,12 +65,61 @@ class BleBatteryCacheTest {
 
     @Test fun switchingKeyBindingClearsAllRetainedParts() {
         val cache = BleBatteryCache()
-        cache.update(80, true, 70, true, 60, true, 100)
+        cache.update(80, true, 70, true, 60, true, 100, 100_000_000)
         cache.clear()
         assertEquals(BleBatteryCache.Snapshot(), cache.snapshot)
-        val differentPair = cache.update(null, true, 20, false, null, true, 200)
+        val differentPair = cache.update(null, true, 20, false, null, true, 200, 200_000_000)
         assertNull(differentPair.left.level)
         assertNull(differentPair.case.level)
         assertEquals(20, differentPair.right.level)
+    }
+
+    @Test fun anOlderBatchCannotReplaceANewerPercentageOrMarkItsComponentsAbsent() {
+        val cache = BleBatteryCache()
+        val latest = cache.update(80, true, 70, false, 60, true, 200, 200_000_000)
+        assertEquals(latest, cache.update(20, false, null, true, null, true, 100, 100_000_000))
+        assertEquals(200L, cache.snapshot.left.updatedAt)
+        assertTrue(cache.snapshot.left.chargingNow(200))
+        cache.clear()
+        assertEquals(20, cache.update(20, false, null, false, null, false, 100, 100_000_000).left.level)
+    }
+
+    @Test fun clockCorrectionsDoNotBlockNewRadioReportsOrAcceptOlderRadioReports() {
+        val cache = BleBatteryCache()
+        cache.update(80, true, 70, false, 60, true, 100_000, 100_000_000)
+        val newer = cache.update(79, false, 69, false, 59, false, 90_000, 200_000_000)
+        assertEquals(79, newer.left.level)
+        assertEquals(90_000L, newer.left.updatedAt)
+        assertTrue(newer.left.live(90_000))
+        assertEquals(newer, cache.update(20, true, null, false, null, false, 110_000, 150_000_000))
+        assertEquals(newer, cache.update(20, true, null, false, null, false, 110_000, 200_000_000))
+    }
+
+    @Test fun queuedScanCallbacksAreInvalidAfterStopOrReplacement() {
+        val session = BleScanSession()
+        val first = session.begin()
+        assertTrue(session.isCurrent(first))
+        session.end() // Invalidated before Android stopScan, including when it throws.
+        assertFalse(session.active)
+        assertFalse(session.isCurrent(first))
+        val replacement = session.begin()
+        assertTrue(session.active)
+        assertTrue(session.isCurrent(replacement))
+        assertFalse(session.isCurrent(first))
+        session.end()
+        assertFalse(session.isCurrent(replacement))
+    }
+
+    @Test fun delayedObservationsKeepTheirRadioAgeAndStaleOrFutureBatchesAreRejected() {
+        assertEquals(9_500L, bleObservationTime(10_000, 5_000_000_000, 4_500_000_000, 15_000))
+        assertEquals(10_000L, bleObservationTime(10_000, 5_000_000_000, 5_000_000_000, 15_000))
+        assertNull(bleObservationTime(30_000, 30_000_000_000, 15_000_000_000, 15_000))
+        assertNull(bleObservationTime(10_000, 5_000_000_000, 5_000_000_001, 15_000))
+        assertNull(bleObservationTime(10_000, 5_000_000_000, -1, 15_000))
+        val cache = BleBatteryCache()
+        val observed = bleObservationTime(100_000, 100_000_000_000, 90_000_000_000, 15_000)!!
+        val battery = cache.update(80, true, null, false, null, false, observed, 90_000_000_000).left
+        assertEquals(90_000L, battery.updatedAt)
+        assertFalse(battery.live(180_000)) // Delivery at100s must not extend freshness to190s.
     }
 }

@@ -31,6 +31,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import me.kavishdevar.librepods.utils.BluetoothCryptography
 import javax.crypto.Cipher
@@ -66,6 +67,17 @@ class BLEManager(private val context: Context) {
 
     @Synchronized
     fun getMostRecentStatus(): AirPodsStatus? {
+        val observed = lastPairedObservationNanos ?: return null
+        val now = SystemClock.elapsedRealtimeNanos()
+        if (!scanSession.active || now < observed || (now - observed) / 1_000_000 >= STALE_DEVICE_TIMEOUT_MS) return null
+        return currentBatteryStatus()
+    }
+
+    /** Battery UI may retain percentages after radio silence, with their original observation age. */
+    @Synchronized
+    fun getMostRecentBatteryStatus(): AirPodsStatus? = currentBatteryStatus()
+
+    private fun currentBatteryStatus(): AirPodsStatus? {
         val binding = refreshKeyBinding()
         val status = latestPairedStatus?.let { withBattery(it, batteryCache.snapshot) }
         if (!binding.isCurrent(sharedPreferences.all)) {
@@ -95,6 +107,8 @@ class BLEManager(private val context: Context) {
     private val sharedPreferences: SharedPreferences = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
     private var currentGlobalLidState: Boolean? = null
     private var lastBroadcastTime: Long = 0
+    private var lastPairedObservationNanos: Long? = null
+    private val scanSession = BleScanSession()
     private val nearbyVisits = NearbyAirPods.Visits()
     private var nearbyDeviceListener: ((NearbyAirPods.Event) -> Unit)? = null
 
@@ -133,9 +147,12 @@ class BLEManager(private val context: Context) {
     private val cleanupHandler = Handler(Looper.getMainLooper())
     private val cleanupRunnable = object : Runnable {
         override fun run() {
-            cleanupStaleDevices()
-            checkLidStateTimeout()
-            cleanupHandler.postDelayed(this, CLEANUP_INTERVAL_MS)
+            synchronized(this@BLEManager) {
+                if (!scanSession.active) return
+                cleanupStaleDevices()
+                checkLidStateTimeout()
+                cleanupHandler.postDelayed(this, CLEANUP_INTERVAL_MS)
+            }
         }
     }
 
@@ -144,7 +161,9 @@ class BLEManager(private val context: Context) {
     }
 
     @SuppressLint("MissingPermission")
+    @Synchronized
     fun startScanning() {
+        stopScanning()
         try {
             Log.d(TAG, "Starting BLE scanner")
 
@@ -156,17 +175,14 @@ class BLEManager(private val context: Context) {
                 return
             }
 
-            if (mBluetoothLeScanner != null && mScanCallback != null) {
-                mBluetoothLeScanner?.stopScan(mScanCallback)
-                mScanCallback = null
-            }
-
             if (!btAdapter.isEnabled) {
                 Log.d(TAG, "Bluetooth is disabled")
                 return
             }
 
             mBluetoothLeScanner = btAdapter.bluetoothLeScanner
+            if (mBluetoothLeScanner == null) return
+            val scanToken = scanSession.begin()
 
             val scanSettings = ScanSettings.Builder()
                 .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
@@ -191,17 +207,21 @@ class BLEManager(private val context: Context) {
 
             mScanCallback = object : ScanCallback() {
                 override fun onScanResult(callbackType: Int, result: ScanResult) {
-                    processScanResult(result)
+                    processScanResult(result, scanToken)
                 }
 
                 override fun onBatchScanResults(results: List<ScanResult>) {
                     for (result in results) {
-                        processScanResult(result)
+                        processScanResult(result, scanToken)
                     }
                 }
 
                 override fun onScanFailed(errorCode: Int) {
-                    Log.e(TAG, "BLE scan failed with error code: $errorCode")
+                    synchronized(this@BLEManager) {
+                        if (!scanSession.isCurrent(scanToken)) return
+                        Log.e(TAG, "BLE scan failed with error code: $errorCode")
+                        stopScanning()
+                    }
                 }
             }
 
@@ -211,24 +231,31 @@ class BLEManager(private val context: Context) {
             cleanupHandler.removeCallbacks(cleanupRunnable)
             cleanupHandler.postDelayed(cleanupRunnable, CLEANUP_INTERVAL_MS)
         } catch (t: Throwable) {
+            stopScanning()
             Log.e(TAG, "Error starting BLE scanner", t)
         }
     }
 
     @SuppressLint("MissingPermission")
+    @Synchronized
     fun stopScanning() {
+        val scanner = mBluetoothLeScanner
+        val callback = mScanCallback
+        scanSession.end()
+        mScanCallback = null
+        mBluetoothLeScanner = null
+        lastPairedObservationNanos = null
+        cleanupHandler.removeCallbacks(cleanupRunnable)
+        val closedInvitations = nearbyVisits.clear()
         try {
-            if (mBluetoothLeScanner != null && mScanCallback != null) {
+            if (scanner != null && callback != null) {
                 Log.d(TAG, "Stopping BLE scanner")
-                mBluetoothLeScanner?.stopScan(mScanCallback)
-                mScanCallback = null
+                scanner.stopScan(callback)
             }
-
-            cleanupHandler.removeCallbacks(cleanupRunnable)
-            synchronized(this) { nearbyVisits.clear() }
         } catch (t: Throwable) {
             Log.e(TAG, "Error stopping BLE scanner", t)
         }
+        closedInvitations.forEach { nearbyDeviceListener?.invoke(it) }
     }
 
     @OptIn(ExperimentalEncodingApi::class)
@@ -271,7 +298,8 @@ class BLEManager(private val context: Context) {
     }
 
     @Synchronized
-    private fun processScanResult(result: ScanResult) {
+    private fun processScanResult(result: ScanResult, scanToken: Long) {
+        if (!scanSession.isCurrent(scanToken)) return
         if (context.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) return
         try {
             val scanRecord = result.scanRecord ?: return
@@ -280,6 +308,9 @@ class BLEManager(private val context: Context) {
             val manufacturer = scanRecord.getManufacturerSpecificData(76) ?: return
             val manufacturerData = NearbyAirPods.proximityRecord(manufacturer) ?: return
             if (manufacturerData[2].toInt() != 1) return
+            val observationNanos = result.timestampNanos
+            val observedAt = bleObservationTime(System.currentTimeMillis(), SystemClock.elapsedRealtimeNanos(),
+                observationNanos, STALE_DEVICE_TIMEOUT_MS) ?: return
             val binding = refreshKeyBinding()
 
             val irk = decodeProximityKey(binding, binding.irk)
@@ -289,11 +320,12 @@ class BLEManager(private val context: Context) {
             val adapter = context.getSystemService(BluetoothManager::class.java).adapter
             val pairedHere = trusted && adapter?.bondedDevices?.any { it.address == savedAddress } == true
             NearbyAirPods.lidEvent(manufacturer)?.let { event ->
-                nearbyVisits.observe(event, System.currentTimeMillis(), pairedHere)?.let {
+                nearbyVisits.observe(event, observationNanos / 1_000_000, pairedHere)?.let {
                     nearbyDeviceListener?.invoke(it)
                 }
             }
             if (!pairedHere) return
+            if (lastPairedObservationNanos?.let { observationNanos <= it } == true) return
 
             if (!verifiedAddresses.contains(address)) {
                 if (!trusted) {
@@ -303,24 +335,24 @@ class BLEManager(private val context: Context) {
                 Log.d(TAG, "RPA verified and added to trusted list: $address")
             }
 
-            lastBroadcastTime = System.currentTimeMillis()
-
             val encryptionKey = decodeProximityKey(binding, binding.encryptionKey)
             val decryptedData = if (encryptionKey != null) decryptLastBytes(manufacturerData, encryptionKey) else null
-            val decodedStatus = if (decryptedData != null && decryptedData.size == 16) {
+            val decodedStatus = (if (decryptedData != null && decryptedData.size == 16) {
                 parseProximityMessageWithDecryption(address, manufacturerData, decryptedData)
             } else {
                 parseProximityMessage(address, manufacturerData)
-            }
+            }).copy(lastSeen = observedAt)
             if (!binding.isCurrent(sharedPreferences.all)) {
                 refreshKeyBinding()
                 return
             }
             val snapshot = batteryCache.update(decodedStatus.leftBattery, decodedStatus.isLeftCharging,
                 decodedStatus.rightBattery, decodedStatus.isRightCharging, decodedStatus.caseBattery,
-                decodedStatus.isCaseCharging, decodedStatus.lastSeen)
+                decodedStatus.isCaseCharging, decodedStatus.lastSeen, observationNanos)
             val parsedStatus = withBattery(decodedStatus, snapshot)
             latestPairedStatus = parsedStatus
+            lastPairedObservationNanos = observationNanos
+            lastBroadcastTime = observationNanos / 1_000_000
 
             val previousStatus = deviceStatusMap[address]
             deviceStatusMap[address] = parsedStatus
@@ -427,7 +459,7 @@ class BLEManager(private val context: Context) {
     private fun cleanupStaleDevices() {
         refreshKeyBinding()
         val now = System.currentTimeMillis()
-        nearbyVisits.expire(now).forEach { nearbyDeviceListener?.invoke(it) }
+        nearbyVisits.expire(SystemClock.elapsedRealtime()).forEach { nearbyDeviceListener?.invoke(it) }
         latestPairedStatus?.let { status ->
             val aged = withBattery(status, batteryCache.snapshot)
             if (aged != status) {
@@ -451,7 +483,7 @@ class BLEManager(private val context: Context) {
     }
 
     private fun checkLidStateTimeout() {
-        val currentTime = System.currentTimeMillis()
+        val currentTime = SystemClock.elapsedRealtime()
         if (currentTime - lastBroadcastTime > LID_CLOSE_TIMEOUT_MS && currentGlobalLidState == true) {
             Log.d(TAG, "No broadcasts for ${LID_CLOSE_TIMEOUT_MS}ms, forcing lid state to closed")
             currentGlobalLidState = false
@@ -467,6 +499,8 @@ class BLEManager(private val context: Context) {
             deviceStatusMap.clear()
             batteryCache.clear()
             latestPairedStatus = null
+            lastPairedObservationNanos = null
+            lastBroadcastTime = 0
             currentGlobalLidState = null
         }
         return current

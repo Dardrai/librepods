@@ -8,6 +8,18 @@ Ordinary controls and Android Bluetooth playback work without Shizuku on
 supported firmware. Experimental routing requires Shizuku started through ADB
 and permission granted to LibrePods. Start Shizuku again after a phone reboot.
 
+Conversation Awareness handles the start, deeper-duck and partial-recovery
+stages. A continuation cannot start a new conversation or take over another
+connection. Manual volume changes end the app's volume ownership, and a confirmed
+disable restores an active conversation without waiting for a final status packet.
+Route changes stop adjustment before another output's volume is changed.
+
+Opening Accessibility or Equalizer settings does not send default values to the
+AirPods. Settings follow device reports and successful pending requests; Custom EQ
+keeps requested and confirmed values separate. Failed EQ writes restore the graph
+to its known setting. Control writes require the displayed pair, selected pair
+and actual Bluetooth transport to agree.
+
 ## Using the features
 
 Open the case to show the nearby card. Select Connect and follow the case's
@@ -79,6 +91,19 @@ Heart rate and raw movement are optional controls on the main settings page for
 supported models. They stop on disconnect and pause during microphone capture.
 Movement data is not a spatial-audio renderer. Unknown models do not inherit
 Pro 3 sensor or microphone support.
+
+BLE control decisions expire after 15 seconds without a fresh radio observation.
+Battery percentages retain their original component timestamps, including the
+case; keeping a last-known percentage does not make charging or presence current.
+New scans and pairing retries ignore callbacks from retired attempts. Sensor
+remapping discards samples from retired service mappings, and microphone
+suspension prevents new sensor starts until capture ends.
+
+Further ports with a grounded implementation path are per-device readback and
+pending state for existing hearing/transparency controls, where their transport
+is available, and a separate raw-movement capability for additional models in
+the NTPods catalog. Neither is enabled for an untested model by this change.
+Their remaining work is access and device validation, rather than a new codec.
 
 ## What the diagnostics establish
 
@@ -169,11 +194,13 @@ The Bluetooth module was `com.google.android.bluetooth` version 17 with APEX
 The tested platform ELD encoder configuration produced 48 kHz stereo
 **512-sample** frames, so it failed the 480-sample Apple playback requirement.
 An Android software encoder has not been tested. Native Bluetooth playback remains enabled.
-The latest full FOSS validation, `pixel-integration10` (pixel3, versionCode 88),
-passed 86 unit tests in 21 suites, debug lint, debug assembly and minified release
-assembly. It includes the production duplex route and selected-transport and
-cleanup tests. Basic live-cellular-call functionality passed separately as
-described above; the remaining acceptance limits still apply.
+The latest full FOSS validation, `pixel-integration12` (pixel4, versionCode 89),
+passed 112 unit tests in 22 suites, debug lint, debug assembly and minified release
+assembly. It includes the Conversation Awareness, metadata, BLE/pairing, control
+ownership and sensor regressions described above. Pixel4 is prepared as a signed
+APK; it has not been installed or hardware tested. The earlier pixel3 build
+passed 86 tests in 21 suites and the basic live-cellular-call checks described
+above; those hardware results do not establish acceptance of the new changes.
 The signed `1.0.1-pixel3` build (versionCode 88) was installed and connected to
 the selected AirPods and Shizuku. Android was in normal mode with SCO off;
 the selected pair's Phone calls and Media audio settings had both been restored.

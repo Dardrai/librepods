@@ -102,6 +102,7 @@ import me.kavishdevar.librepods.presentation.viewmodel.demoState
 import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlin.time.Duration.Companion.milliseconds
+import kotlinx.coroutines.flow.drop
 
 @Composable
 fun EqualizerRoute(viewModel: AirPodsViewModel) {
@@ -132,10 +133,10 @@ fun EqualizerScreen(
     state: AirPodsUiState,
     topPadding: Dp = 16.dp,
     bottomPadding: Dp = 16.dp,
-    setCustomEqEnabled: (Boolean) -> Unit,
-    setCustomEq: (Int, Int, Int) -> Unit
+    setCustomEqEnabled: (Boolean) -> Boolean,
+    setCustomEq: (Int, Int, Int) -> Boolean
 ) {
-    val customEq = state.customEq
+    val customEq = state.requestedCustomEq ?: state.customEq
 
     val scrollState = rememberScrollState()
 
@@ -148,7 +149,7 @@ fun EqualizerScreen(
         val height = 200.dp
         val maxOffset = with(LocalDensity.current) { height.toPx() } / 2
 
-        val offsets = remember(state.customEq) {
+        val offsets = remember(state.deviceAddress, customEq) {
             listOf(
                 mutableFloatStateOf(lerp(maxOffset, -maxOffset, customEq.low.toFloat() / 100)),
                 mutableFloatStateOf(lerp(maxOffset, -maxOffset, customEq.mid.toFloat() / 100)),
@@ -164,6 +165,7 @@ fun EqualizerScreen(
                     offsets[2].floatValue
                 )
             }
+                .drop(1)
                 .debounce(100.milliseconds) // cool, should've been using this since the very beginning
                 .collect { (lowF, midF, highF) ->
                     val low =
@@ -173,7 +175,12 @@ fun EqualizerScreen(
                     val high =
                         100 - ((highF / (2 * maxOffset) + 0.5f) * 100).roundToInt()
 
-                    setCustomEq(low, mid, high)
+                    if (low == customEq.low && mid == customEq.mid && high == customEq.high) return@collect
+                    if (!setCustomEq(low, mid, high)) {
+                        offsets[0].floatValue = lerp(maxOffset, -maxOffset, customEq.low / 100f)
+                        offsets[1].floatValue = lerp(maxOffset, -maxOffset, customEq.mid / 100f)
+                        offsets[2].floatValue = lerp(maxOffset, -maxOffset, customEq.high / 100f)
+                    }
                 }
         }
 
@@ -213,7 +220,7 @@ fun EqualizerScreen(
                     highOffset = offsets[2]
                 )
 
-                val resetButtonEnabled = remember { derivedStateOf { !offsets.all { it.floatValue == 0f } } }
+                val resetButtonEnabled = remember(offsets) { derivedStateOf { !offsets.all { it.floatValue == 0f } } }
 
                 StyledButton(
                     onClick = {
@@ -733,8 +740,8 @@ fun EqualizerScreenPreviewApple() {
         ) {
             EqualizerScreen(
                 state = demoState,
-                setCustomEqEnabled = { },
-                setCustomEq = {_, _, _ -> }
+                setCustomEqEnabled = { true },
+                setCustomEq = {_, _, _ -> true }
             )
         }
     }
@@ -754,8 +761,8 @@ fun EqualizerScreenPreviewMaterial() {
         ) {
             EqualizerScreen(
                 state = state.value,
-                setCustomEqEnabled = { state.value = state.value.copy(customEq = state.value.customEq.copy(state = if (it) 2 else 1)) },
-                setCustomEq = {low, mid, high -> state.value = state.value.copy(customEq = state.value.customEq.copy(low = low, mid = mid, high = high))}
+                setCustomEqEnabled = { state.value = state.value.copy(customEq = state.value.customEq.copy(state = if (it) 2 else 1)); true },
+                setCustomEq = {low, mid, high -> state.value = state.value.copy(customEq = state.value.customEq.copy(low = low, mid = mid, high = high)); true }
             )
         }
     }

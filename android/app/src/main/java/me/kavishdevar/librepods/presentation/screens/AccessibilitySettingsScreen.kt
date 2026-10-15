@@ -20,7 +20,6 @@ package me.kavishdevar.librepods.presentation.screens
 
 // import me.kavishdevar.librepods.utils.RadareOffsetFinder
 import android.annotation.SuppressLint
-import android.util.Log
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -42,23 +41,15 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.kyant.backdrop.backdrops.rememberLayerBackdrop
 import dev.chrisbanes.haze.materials.ExperimentalHazeMaterialsApi
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.FlowPreview
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.debounce
-import kotlinx.coroutines.launch
 import me.kavishdevar.librepods.R
 import me.kavishdevar.librepods.bluetooth.AACPManager
 import me.kavishdevar.librepods.bluetooth.ATTHandles
@@ -74,11 +65,9 @@ import me.kavishdevar.librepods.presentation.viewmodel.AirPodsViewModel
 import kotlin.io.encoding.ExperimentalEncodingApi
 import kotlin.time.Duration.Companion.milliseconds
 
-private var phoneMediaDebounceJob: Job? = null
-
 @SuppressLint("DefaultLocale")
 @ExperimentalHazeMaterialsApi
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalEncodingApi::class, FlowPreview::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalEncodingApi::class)
 @Composable
 fun AccessibilitySettingsScreen(viewModel: AirPodsViewModel, navigateToPurchase: () -> Unit, navigateToTransparencyCustomization: () -> Unit) {
     val state by viewModel.uiState.collectAsState()
@@ -133,15 +122,10 @@ fun AccessibilitySettingsScreen(viewModel: AirPodsViewModel, navigateToPurchase:
             2.toByte() to stringResource(R.string.slowest)
         )
 
-        val selectedPressSpeedValue =
-            state.controlStates[AACPManager.Companion.ControlCommandIdentifiers.DOUBLE_CLICK_INTERVAL]?.getOrNull(
-                0
-            )
-        var selectedPressSpeed by remember {
-            mutableStateOf(
-                pressSpeedOptions[selectedPressSpeedValue] ?: pressSpeedOptions[0]
-            )
-        }
+        val pressSpeedId = AACPManager.Companion.ControlCommandIdentifiers.DOUBLE_CLICK_INTERVAL
+        val selectedPressSpeed = pressSpeedOptions[
+            (state.requestedControls[pressSpeedId] ?: state.controlStates[pressSpeedId])?.firstOrNull()
+        ] ?: pressSpeedOptions[0]
 
         val pressAndHoldDurationOptions = mapOf(
             0.toByte() to stringResource(R.string.default_option),
@@ -149,57 +133,20 @@ fun AccessibilitySettingsScreen(viewModel: AirPodsViewModel, navigateToPurchase:
             2.toByte() to stringResource(R.string.slowest)
         )
 
-        val selectedPressAndHoldDurationValue =
-            state.controlStates[AACPManager.Companion.ControlCommandIdentifiers.CLICK_HOLD_INTERVAL]?.getOrNull(
-                0
-            )
-        var selectedPressAndHoldDuration by remember {
-            mutableStateOf(
-                pressAndHoldDurationOptions[selectedPressAndHoldDurationValue]
-                    ?: pressAndHoldDurationOptions[0]
-            )
-        }
+        val holdId = AACPManager.Companion.ControlCommandIdentifiers.CLICK_HOLD_INTERVAL
+        val selectedPressAndHoldDuration = pressAndHoldDurationOptions[
+            (state.requestedControls[holdId] ?: state.controlStates[holdId])?.firstOrNull()
+        ] ?: pressAndHoldDurationOptions[0]
 
         val volumeSwipeSpeedOptions = mapOf(
             1.toByte() to stringResource(R.string.default_option),
             2.toByte() to stringResource(R.string.longer),
             3.toByte() to stringResource(R.string.longest)
         )
-        val selectedVolumeSwipeSpeedValue =
-            state.controlStates[AACPManager.Companion.ControlCommandIdentifiers.VOLUME_SWIPE_INTERVAL]?.getOrNull(
-                0
-            )
-        var selectedVolumeSwipeSpeed by remember {
-            mutableStateOf(
-                volumeSwipeSpeedOptions[selectedVolumeSwipeSpeedValue]
-                    ?: volumeSwipeSpeedOptions[1]
-            )
-        }
-
-        val phoneMediaEQ = remember { mutableStateOf(FloatArray(8) { 0.5f }) }
-        val phoneEQEnabled = remember { mutableStateOf(false) }
-        val mediaEQEnabled = remember { mutableStateOf(false) }
-
-        LaunchedEffect(phoneMediaEQ.value, phoneEQEnabled.value, mediaEQEnabled.value) {
-            phoneMediaDebounceJob?.cancel()
-            phoneMediaDebounceJob = CoroutineScope(Dispatchers.IO).launch {
-                delay(150.milliseconds)
-                try {
-                    val phoneByte = if (phoneEQEnabled.value) 0x01.toByte() else 0x02.toByte()
-                    val mediaByte = if (mediaEQEnabled.value) 0x01.toByte() else 0x02.toByte()
-                    Log.d(
-                        "AccessibilitySettingsScreen",
-                        "Sending phone/media EQ (phoneEnabled=${phoneEQEnabled.value}, mediaEnabled=${mediaEQEnabled.value})"
-                    )
-                    viewModel.sendPhoneMediaEQ(phoneMediaEQ.value, phoneByte, mediaByte)
-                } catch (e: Exception) {
-                    Log.w(
-                        "AccessibilitySettingsScreen",
-                        "Error sending phone/media EQ: ${e.message}"
-                    )
-                }
-            }
-        }
+        val swipeId = AACPManager.Companion.ControlCommandIdentifiers.VOLUME_SWIPE_INTERVAL
+        val selectedVolumeSwipeSpeed = volumeSwipeSpeedOptions[
+            (state.requestedControls[swipeId] ?: state.controlStates[swipeId])?.firstOrNull()
+        ] ?: volumeSwipeSpeedOptions[1]
 
         StyledList(
             title = stringResource(R.string.press_speed),
@@ -210,8 +157,6 @@ fun AccessibilitySettingsScreen(viewModel: AirPodsViewModel, navigateToPurchase:
                     name = label,
                     selected = selectedPressSpeed == label,
                     onClick = {
-                        selectedPressSpeed = label
-
                         viewModel.setControlCommandByte(
                             identifier = AACPManager.Companion.ControlCommandIdentifiers.DOUBLE_CLICK_INTERVAL,
                             value = value
@@ -230,8 +175,6 @@ fun AccessibilitySettingsScreen(viewModel: AirPodsViewModel, navigateToPurchase:
                     name = label,
                     selected = selectedPressAndHoldDuration == label,
                     onClick = {
-                        selectedPressAndHoldDuration = label
-
                         viewModel.setControlCommandByte(
                             identifier = AACPManager.Companion.ControlCommandIdentifiers.CLICK_HOLD_INTERVAL,
                             value = value
@@ -279,27 +222,22 @@ fun AccessibilitySettingsScreen(viewModel: AirPodsViewModel, navigateToPurchase:
             )
         }
 
-        val toneVolumeValue = remember { mutableFloatStateOf(state.controlStates[AACPManager.Companion.ControlCommandIdentifiers.CHIME_VOLUME]?.getOrNull(0)?.toFloat() ?: 75f) }
-
-        LaunchedEffect(toneVolumeValue) {
-            snapshotFlow {
-                toneVolumeValue.floatValue
-            }
-                .debounce(100.milliseconds)
-                .collect {
-                    viewModel.setControlCommandValue(
-                        AACPManager.Companion.ControlCommandIdentifiers.CHIME_VOLUME,
-                        byteArrayOf(it.toInt().toByte(), 0x50)
-                    )
-                }
+        val toneId = AACPManager.Companion.ControlCommandIdentifiers.CHIME_VOLUME
+        val reportedTone = (state.requestedControls[toneId] ?: state.controlStates[toneId])
+            ?.firstOrNull()?.toInt()?.and(255)?.takeIf { it in 0..100 }
+        var editedTone by remember(state.deviceAddress, reportedTone) { mutableStateOf<Float?>(null) }
+        LaunchedEffect(state.deviceAddress, editedTone) {
+            val value = editedTone ?: return@LaunchedEffect
+            delay(100.milliseconds)
+            if (!viewModel.setControlCommandValue(toneId, byteArrayOf(value.toInt().toByte(), 0x50))) editedTone = null
         }
 
         StyledSlider(
             label = stringResource(R.string.tone_volume),
             description = stringResource(R.string.tone_volume_description),
-            value = toneVolumeValue.floatValue,
+            value = editedTone ?: reportedTone?.toFloat() ?: 75f,
             onValueChange = {
-                toneVolumeValue.floatValue = it
+                editedTone = it
             },
             valueRange = 0f..100f,
             snapPoints = listOf(75f),
@@ -335,8 +273,6 @@ fun AccessibilitySettingsScreen(viewModel: AirPodsViewModel, navigateToPurchase:
                         name = label,
                         selected = selectedVolumeSwipeSpeed == label,
                         onClick = {
-                            selectedVolumeSwipeSpeed = label
-
                             viewModel.setControlCommandByte(
                                 identifier = AACPManager.Companion.ControlCommandIdentifiers.VOLUME_SWIPE_INTERVAL,
                                 value = value

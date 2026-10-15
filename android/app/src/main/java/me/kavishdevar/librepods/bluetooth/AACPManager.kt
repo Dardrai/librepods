@@ -209,6 +209,7 @@ class AACPManager {
     var eqOnMedia: Boolean = false
         private set
 
+    @Volatile
     var customEq: CustomEq = CustomEq(state = 1, low = 50, mid = 50, high = 50)
         private set
 
@@ -453,10 +454,12 @@ class AACPManager {
             }
 
             Opcodes.EAR_DETECTION -> {
+                if (packet.size < 8) return
                 callback?.onEarDetectionReceived(packet)
             }
 
             Opcodes.CONVERSATION_AWARENESS -> {
+                if (packet.size < 10) return
                 callback?.onConversationAwarenessReceived(packet)
             }
 
@@ -488,17 +491,28 @@ class AACPManager {
                     audioSource = AudioSource(mac, type)
                 } catch (e: Exception) {
                     Log.e(TAG, "Error parsing audio source response: ${e.message}")
+                    return
                 }
                 callback?.onAudioSourceReceived(packet)
             }
 
             Opcodes.CONNECTED_DEVICES -> {
+                val devices = try {
+                    parseConnectedDevicesResponse(packet)
+                } catch (_: IllegalArgumentException) {
+                    Log.w(TAG, "Ignoring malformed connected devices response")
+                    return
+                }
                 oldConnectedDevices = connectedDevices
-                connectedDevices = parseConnectedDevicesResponse(packet)
+                connectedDevices = devices
                 callback?.onConnectedDevicesReceived(connectedDevices)
             }
 
             Opcodes.SMART_ROUTING_RESP -> {
+                if (packet.size < 12) {
+                    Log.w(TAG, "Ignoring truncated smart routing response")
+                    return
+                }
                 val packetString = packet.decodeToString()
                 val sender =
                     packet.sliceArray(6..11).reversedArray().joinToString(":") { "%02X".format(it) }
@@ -575,13 +589,24 @@ class AACPManager {
 
             Opcodes.INFORMATION -> {
                 Log.d(TAG, "Parsing Information Packet")
-                val information = parseInformationPacket(packet)
+                val information = try {
+                    parseInformationPacket(packet)
+                } catch (_: IllegalArgumentException) {
+                    Log.w(TAG, "Ignoring malformed information response")
+                    return
+                }
                 callback?.onDeviceInformationReceived(information)
             }
 
             Opcodes.CUSTOM_EQ -> {
                 Log.d(TAG, "Parsing CUSTOM_EQ: ${packet.toHexString()}")
-                customEq = parseCustomEqPacket(packet)
+                val parsed = try {
+                    parseCustomEqPacket(packet)
+                } catch (_: IllegalArgumentException) {
+                    Log.w(TAG, "Ignoring malformed custom EQ response")
+                    return
+                }
+                customEq = parsed
                 customEqCallback?.invoke(customEq)
                 callback?.onCustomEqReceived(customEq)
             }
@@ -1182,7 +1207,7 @@ class AACPManager {
 
     fun parseAudioSourceResponse(data: ByteArray): Pair<String, AudioSourceType> {
         Log.d(TAG, "Parsing Audio Source Response: ${data.joinToString(" ") { "%02X".format(it) }}")
-        if (data.size < 9) {
+        if (data.size < 13) {
             throw IllegalArgumentException("Data array too short to parse Audio Source Response")
         }
         if (data[4] != Opcodes.AUDIO_SOURCE) {
@@ -1201,29 +1226,23 @@ class AACPManager {
             TAG,
             "Parsing Connected Devices Response: ${data.joinToString(" ") { "%02X".format(it) }}"
         )
-        if (data.size < 8) {
+        if (data.size < 9) {
             throw IllegalArgumentException("Data array too short to parse Connected Devices Response")
         }
         if (data[4] != Opcodes.CONNECTED_DEVICES) {
             throw IllegalArgumentException("Data array does not start with CONNECTED_DEVICES opcode")
         }
-        val deviceCount = data[8].toInt()
+        val deviceCount = data[8].toInt() and 0xFF
+        require(data.size >= 9 + deviceCount * 8) { "Incomplete connected devices response" }
         val devices = mutableListOf<ConnectedDevice>()
 
         var offset = 9
         for (i in 0 until deviceCount) {
-            if (offset + 8 > data.size) {
-                Log.w(
-                    TAG,
-                    "Data array too short to parse all connected devices, returning what we have"
-                )
-                break
-            }
             val macBytes = data.sliceArray(offset until offset + 6)
             val mac = macBytes.joinToString(":") { "%02X".format(it) }
             val info1 = data[offset + 6]
             val info2 = data[offset + 7]
-            val existingDevice = devices.find { it.mac == mac }
+            val existingDevice = connectedDevices.find { it.mac == mac }
             devices.add(ConnectedDevice(mac, info1, info2, existingDevice?.type))
             offset += 8
         }
@@ -1251,9 +1270,14 @@ class AACPManager {
         oldConnectedDevices = listOf()
         connectedDevices = listOf()
         audioSource = null
+        customEq = CustomEq(1, 50, 50, 50)
+        eqData = FloatArray(8)
+        eqOnPhone = false
+        eqOnMedia = false
     }
 
     fun parseInformationPacket(packet: ByteArray): AirPodsInformation {
+        require(packet.size >= 6) { "Information response is truncated" }
         val data = packet.sliceArray(6 until packet.size)
 
         var index = 0
@@ -1271,7 +1295,8 @@ class AACPManager {
             strings.add(str)
         }
 
-        strings.removeAt(0) // I'm too lazy to adjust, just removing the first empty string
+        require(strings.size >= 3) { "Information response lacks a name or model" }
+        strings.removeAt(0)
 
         return AirPodsInformation(
             name = strings.getOrNull(0) ?: "",
@@ -1293,21 +1318,15 @@ class AACPManager {
     }
 
     fun parseCustomEqPacket(packet: ByteArray): CustomEq {
+        require(packet.size >= 13) { "Custom EQ response is truncated" }
         val data = packet.sliceArray(6 until packet.size)
-
-        if (data.size < 7) {
-            Log.e(TAG, "custom EQ packet length less than 7, returning default")
-            return CustomEq(1, 50, 50, 50)
-        }
 
         val lengthLow = data[0].toInt() and 0xFF
         val lengthHigh = data[1].toInt() and 0xFF
 
         val length = (lengthHigh shl 8) or lengthLow
 
-        if (length != 5) {
-            Log.w(TAG, "parseCustomEqPacket: unexpected length ($length). parsing normally")
-        }
+        require(length == 5) { "Unexpected custom EQ response length" }
 
         val state = data[3].toInt()
         val low = data[4].toInt()

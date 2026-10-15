@@ -299,7 +299,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
             }
             Log.d(TAG, "Device status changed")
             if (BluetoothConnectionManager.aacpSocket?.isConnected == true) return
-            bleManager.getMostRecentStatus()?.let(batteryNotification::setBatteryFromBle)
+            bleManager.getMostRecentBatteryStatus()?.let(batteryNotification::setBatteryFromBle)
             updateBattery()
         }
 
@@ -318,7 +318,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                         ?: "AirPods"
                 )
                 if (BluetoothConnectionManager.aacpSocket?.isConnected == true) return
-                bleManager.getMostRecentStatus()?.let(batteryNotification::setBatteryFromBle)
+                bleManager.getMostRecentBatteryStatus()?.let(batteryNotification::setBatteryFromBle)
                 sendBatteryBroadcast()
             } else {
                 Log.d(TAG, "Lid closed")
@@ -338,7 +338,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
 
         override fun onBatteryChanged(device: BLEManager.AirPodsStatus) {
             if (BluetoothConnectionManager.aacpSocket?.isConnected == true) return
-            bleManager.getMostRecentStatus()?.let(batteryNotification::setBatteryFromBle)
+            bleManager.getMostRecentBatteryStatus()?.let(batteryNotification::setBatteryFromBle)
             updateBattery()
             Log.d(TAG, "Battery changed")
         }
@@ -869,11 +869,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
 
             override fun onEarDetectionReceived(earDetection: ByteArray) {
                 sendBroadcast(Intent(AirPodsNotifications.EAR_DETECTION_DATA).apply {
-                    val list = earDetectionNotification.status
-                    val bytes = ByteArray(2)
-                    bytes[0] = list[0]
-                    bytes[1] = list[1]
-                    putExtra("data", bytes)
+                    putExtra("data", earDetection.copyOfRange(6, 8))
                 }.apply {
                     setPackage(packageName)
                 })
@@ -892,7 +888,10 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                     setPackage(packageName)
                 })
 
-                if (conversationAwarenessNotification.status == 1.toByte() || conversationAwarenessNotification.status == 2.toByte()) {
+                val enabled = aacpManager.getControlCommandStatus(
+                    AACPManager.Companion.ControlCommandIdentifiers.CONVERSATION_DETECT_CONFIG
+                )?.value?.firstOrNull() != 2.toByte()
+                if (enabled && conversationAwarenessNotification.status in byteArrayOf(1, 2, 3)) {
                     BluetoothConnectionManager.aacpSocket?.let { owner ->
                         device?.address?.let { address ->
                             MediaController.startSpeaking(conversationAwarenessNotification.status.toInt(), owner, address)
@@ -910,6 +909,10 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
 
             override fun onControlCommandReceived(controlCommand: ByteArray) {
                 val command = AACPManager.ControlCommand.fromByteArray(controlCommand)
+                if (command.identifier == AACPManager.Companion.ControlCommandIdentifiers.CONVERSATION_DETECT_CONFIG.value &&
+                    command.value.firstOrNull() == 2.toByte()) {
+                    BluetoothConnectionManager.aacpSocket?.let(MediaController::stopSpeaking)
+                }
                 if (command.identifier == AACPManager.Companion.ControlCommandIdentifiers.LISTENING_MODE.value) {
                     ancNotification.setStatus(byteArrayOf(command.value.takeIf { it.isNotEmpty() }
                         ?.get(0) ?: 0x00.toByte()))
@@ -2885,9 +2888,16 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
 
     private fun updateSensorCapabilities() {
         if (!::experimentalAudio.isInitialized) return
-        val selected = device?.address ?: return
-        if (sharedPreferences.getString("mac_address", "") != selected) return
-        val model = AirPodsModels.getModelByModelNumber(config.airpodsModelNumber) ?: return
+        if (checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+            experimentalAudio.sensors.onDisconnected()
+            return
+        }
+        val selected = device?.address
+        if (selected == null || sharedPreferences.getString("mac_address", "") != selected) {
+            experimentalAudio.sensors.onDisconnected()
+            return
+        }
+        val model = AirPodsModels.getModelByModelNumber(config.airpodsModelNumber)
         val firmware = AirPodsFirmware.publicVersion(config.airpodsVersion1, config.airpodsVersion3) ?: ""
         experimentalAudio.sensors.onConnected(model?.capabilities?.contains(Capability.HRM) == true,
             model?.capabilities?.contains(Capability.HEAD_GESTURES) == true, firmware)
