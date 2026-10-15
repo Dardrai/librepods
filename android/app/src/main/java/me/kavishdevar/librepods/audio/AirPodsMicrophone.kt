@@ -40,8 +40,10 @@ class AirPodsMicrophone(
     private val outputDirectory: File,
     private val onRecoveryRequired: (Long) -> Unit,
 ) : AutoCloseable {
+    private data class ReceivedPacket(val units: List<MicrophonePacket.AccessUnit>, val receivedNs: Long)
+
     private class Session(val generation: Long, val socket: BluetoothSocket) {
-        val packets = ArrayBlockingQueue<List<MicrophonePacket.AccessUnit>>(32)
+        val packets = ArrayBlockingQueue<ReceivedPacket>(32)
         val stop = AtomicBoolean(false)
         val connected = AtomicBoolean(true)
         val lastPacketMs = AtomicLong(SystemClock.elapsedRealtime())
@@ -111,7 +113,8 @@ class AirPodsMicrophone(
         if (!active.accepting || active.stop.get()) return
         try {
             val units = MicrophonePacket.parse(packet)
-            if (!active.packets.offer(units)) fail(active, "Microphone decoder could not keep up. Please retry.")
+            if (!active.packets.offer(ReceivedPacket(units, SystemClock.elapsedRealtimeNanos())))
+                fail(active, "Microphone decoder could not keep up. Please retry.")
         } catch (_: IllegalArgumentException) {
             fail(active, "AirPods sent an incomplete microphone packet. Please retry.")
         }
@@ -124,7 +127,9 @@ class AirPodsMicrophone(
     }
 
     private fun capture(active: Session, record: Boolean, sink: PcmSink?) {
-        val started = SystemClock.elapsedRealtime()
+        val startedNs = SystemClock.elapsedRealtimeNanos()
+        val started = startedNs / 1_000_000
+        val clock = MicrophoneClockStats(startedNs)
         var lastPcm = started
         var bytesDecoded = 0L
         var writer: PcmWaveWriter? = null
@@ -165,11 +170,14 @@ class AirPodsMicrophone(
             Log.i("AirPodsMicrophone", "Session ${active.generation}: microphone Start sent")
             val deadline = SystemClock.elapsedRealtime() + 5_000
             while (!active.stop.get()) {
-                val units = active.packets.poll(10, TimeUnit.MILLISECONDS)
-                units?.forEach { unit ->
+                val packet = active.packets.poll(10, TimeUnit.MILLISECONDS)
+                packet?.units?.forEach { unit ->
                     if (!active.stop.get()) currentDecoder.decode(unit.bytes) { active.stop.get() }
                 }
                 currentDecoder.drain()
+                if (packet != null && !active.stop.get()) {
+                    clock.packet(packet.units.map { it.timestamp }, packet.receivedNs, currentDecoder.decodedFrames)
+                }
                 val now = SystemClock.elapsedRealtime()
                 check(if (bytesDecoded == 0L) now < deadline else now - lastPcm < 5_000) {
                     "No decoded microphone audio. Please retry."
@@ -185,6 +193,9 @@ class AirPodsMicrophone(
                 active.failure = e.message ?: "Microphone capture failed"
         } finally {
             captureEnded = SystemClock.elapsedRealtime()
+            clock.snapshot()?.let { stats ->
+                Log.i("AirPodsMicrophone", "Session ${active.generation}: clock first_packet_ms=${stats.firstPacketMs} warmup_ms=${stats.warmupMs} steady_ms=${stats.steadyMs} aus=${stats.accessUnits} decoded_frames=${stats.decodedFrames} source_hz=${stats.sourceHz} physical_hz=${AirPodsMicrophoneClock.PHYSICAL_RATE} timestamp_ticks=${stats.timestampTicks} intervals=${stats.timestampIntervals} repeats=${stats.repeats} backwards=${stats.backwards}")
+            }
             active.accepting = false
             active.stop.set(true)
             active.packets.clear()

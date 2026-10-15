@@ -124,7 +124,7 @@ class ExperimentalAudioController(
             try {
                 val request = generation.next()
                 opening = request
-                val route = bridge.prepareMicrophoneInjection(48_000, 1, targetPackage.trim(), forCall)
+                val route = bridge.prepareMicrophoneInjection(AirPodsMicrophoneClock.PHYSICAL_RATE, 1, targetPackage.trim(), forCall)
                 mutableMessage.value = "Opening the microphone route…"
                 request to route
             } catch (error: Exception) {
@@ -230,7 +230,9 @@ class ExperimentalAudioController(
         }
 
         override fun onFormat(format: PcmFormat) {
-            check(format.sampleRate == 48_000 && format.channels == 1) { "Unexpected microphone format; route stopped." }
+            check(format.sampleRate == AirPodsMicrophoneClock.PHYSICAL_RATE && format.channels == 1) {
+                "Unexpected microphone format; route stopped."
+            }
         }
 
         override fun onPcm(bytes: ByteArray, presentationTimeUs: Long) {

@@ -25,8 +25,9 @@ import me.kavishdevar.librepods.presentation.theme.LibrePodsTheme
 import me.kavishdevar.librepods.presentation.theme.LocalDesignSystem
 import me.kavishdevar.librepods.presentation.theme.sectionHeader
 
+// Registration and rendering must share the caller's recomposition scope.
 @Composable
-fun StyledList(
+inline fun StyledList(
     modifier: Modifier = Modifier,
     title: String? = null,
     description: String? = null,
@@ -85,6 +86,7 @@ fun StyledList(
 }
 
 class StyledListScope {
+    @PublishedApi
     internal val items =
         mutableListOf<@Composable (Int, Int) -> Unit>()
 

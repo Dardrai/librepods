@@ -18,14 +18,16 @@ class EldDecoder(
     private val info = MediaCodec.BufferInfo()
     private var format: PcmFormat? = null
     private var queuedSamples = 0L
+    var decodedFrames = 0L
+        private set
 
     init {
         try {
-            val input = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, 48_000, 1)
+            val input = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, AirPodsMicrophoneClock.CODING_RATE, 1)
             input.setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectELD)
             input.setInteger(MediaFormat.KEY_PCM_ENCODING, AudioFormat.ENCODING_PCM_16BIT)
             input.setByteBuffer("csd-0", ByteBuffer.wrap(byteArrayOf(0xf8.toByte(), 0xe6.toByte(), 0x30, 0)))
-            // shortcut: the source presentation clock is uncalibrated; retain 48 kHz until hardware measurements establish it.
+            // The ASC describes coding at 48 kHz; the physical uplink runs at 64 kHz.
             codec.configure(input, null, null, 0)
             codec.start()
         } catch (e: Exception) {
@@ -49,8 +51,8 @@ class EldDecoder(
         input.clear()
         check(input.remaining() >= unit.size) { "AAC-ELD input buffer too small" }
         input.put(unit)
-        codec.queueInputBuffer(index, 0, unit.size, queuedSamples * 1_000_000 / 48_000, 0)
-        queuedSamples += 480
+        codec.queueInputBuffer(index, 0, unit.size, queuedSamples * 1_000_000 / AirPodsMicrophoneClock.CODING_RATE, 0)
+        queuedSamples += AirPodsMicrophoneClock.SAMPLES_PER_UNIT
         drain()
     }
 
@@ -63,8 +65,10 @@ class EldDecoder(
                     val encoding = if (output.containsKey(MediaFormat.KEY_PCM_ENCODING))
                         output.getInteger(MediaFormat.KEY_PCM_ENCODING) else AudioFormat.ENCODING_PCM_16BIT
                     check(encoding == AudioFormat.ENCODING_PCM_16BIT) { "Decoder did not produce PCM16" }
-                    val next = PcmFormat(output.getInteger(MediaFormat.KEY_SAMPLE_RATE),
-                        output.getInteger(MediaFormat.KEY_CHANNEL_COUNT))
+                    check(output.getInteger(MediaFormat.KEY_SAMPLE_RATE) == AirPodsMicrophoneClock.CODING_RATE) {
+                        "Unexpected AAC-ELD coding rate"
+                    }
+                    val next = PcmFormat(AirPodsMicrophoneClock.PHYSICAL_RATE, output.getInteger(MediaFormat.KEY_CHANNEL_COUNT))
                     check(next.channels == 1) { "Microphone decoder did not produce mono" }
                     check(format == null || format == next) { "Microphone format changed during capture" }
                     format = next
@@ -81,7 +85,9 @@ class EldDecoder(
                             output.limit(info.offset + info.size)
                             val bytes = ByteArray(info.size)
                             output.get(bytes)
-                            onPcm(bytes, info.presentationTimeUs)
+                            val timestamp = AirPodsMicrophoneClock.presentationTimeUs(decodedFrames)
+                            decodedFrames += info.size / current.frameSize
+                            onPcm(bytes, timestamp)
                         }
                     } finally {
                         codec.releaseOutputBuffer(index, false)

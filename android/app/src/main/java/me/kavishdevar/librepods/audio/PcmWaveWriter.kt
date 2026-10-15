@@ -12,7 +12,7 @@ data class PcmFormat(val sampleRate: Int, val channels: Int) {
     fun durationMs(bytes: Long): Long = bytes / frameSize * 1000 / sampleRate
 }
 
-/** PCM16 little-endian, with duration based on the decoder's actual output format. */
+/** PCM16 little-endian, with duration based on the physical presentation rate. */
 class PcmWaveWriter(file: File, val format: PcmFormat) : AutoCloseable {
     private val stream = RandomAccessFile(file, "rw")
     var bytesWritten = 0L

@@ -14,6 +14,7 @@ import android.media.MediaFormat
 import android.os.Build
 import android.os.Process
 import android.os.SystemClock
+import me.kavishdevar.librepods.audio.AirPodsMicrophoneClock
 import org.json.JSONArray
 import org.json.JSONObject
 import java.nio.ByteBuffer
@@ -51,13 +52,7 @@ internal class AudioDiagnostics(
                 .put("blocked", blocked).put("checkedAtElapsedRealtimeMs", SystemClock.elapsedRealtime())
         })
         capabilities.put("playbackCapture", attempt { playbackCapture() })
-        capabilities.put("microphonePolicy", attempt {
-            check(!ShellMicrophonePrivacy.isBlocked(context)) { "Android microphone privacy blocks microphone policy testing" }
-            routing.injection(48000, 1, appUid).use {
-                result("untested", "A UID-scoped microphone injection policy and stream were created and released. " +
-                    "End-to-end injection needs a selected recorder and a user-started test.")
-            }
-        })
+        capabilities.put("microphonePolicy", attempt { microphonePolicy() })
         capabilities.put("callAudio", attempt {
             val interceptable = AudioManager::class.java.getMethod("isPstnCallAudioInterceptable")
                 .invoke(routing.manager) as Boolean
@@ -77,6 +72,17 @@ internal class AudioDiagnostics(
             .put("securityPatch", Build.VERSION.SECURITY_PATCH).put("serviceUid", Process.myUid())
             .put("bluetoothModules", modules).put("shellPermissions", permissions)
             .put("capabilities", capabilities).toString(2)
+    }
+
+    fun microphonePolicy(): JSONObject {
+        check(!ShellMicrophonePrivacy.isBlocked(context)) { "Android microphone privacy blocks microphone policy testing" }
+        routing.injection(AirPodsMicrophoneClock.PHYSICAL_RATE, 1, appUid).use { route ->
+            val sampleRate = checkNotNull(route.track).sampleRate
+            check(sampleRate == AirPodsMicrophoneClock.PHYSICAL_RATE) { "Microphone injection track has an unexpected sample rate: $sampleRate" }
+            return result("untested", "A UID-scoped microphone injection policy and $sampleRate Hz mono stream were created and released. " +
+                "End-to-end injection needs a selected recorder and a user-started test.")
+                .put("sampleRate", sampleRate)
+        }
     }
 
     private fun playbackCapture(): JSONObject {

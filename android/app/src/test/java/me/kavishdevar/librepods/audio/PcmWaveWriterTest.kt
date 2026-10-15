@@ -7,6 +7,20 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 class PcmWaveWriterTest {
+    @Test fun writesPhysicalClockWithoutChangingDecodedSamples() {
+        val file = File.createTempFile("microphone-64k-test-", ".wav")
+        try {
+            val pcm = ByteArray(128_000) { it.toByte() }
+            PcmWaveWriter(file, PcmFormat(AirPodsMicrophoneClock.PHYSICAL_RATE, 1)).use { it.write(pcm) }
+            val bytes = file.readBytes()
+            val header = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+            assertEquals(64_000, header.getInt(24))
+            assertEquals(128_000, header.getInt(28))
+            assertEquals(128_000, header.getInt(40))
+            assertArrayEquals(pcm, bytes.copyOfRange(44, bytes.size))
+        } finally { file.delete() }
+    }
+
     @Test fun writesActualPcmFormatAndFinalSizes() {
         val file = File.createTempFile("microphone-test-", ".wav")
         try {

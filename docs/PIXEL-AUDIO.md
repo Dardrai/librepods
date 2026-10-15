@@ -29,6 +29,12 @@ recording duration with the elapsed capture time before relying on the microphon
 An initialized decoder or a quiet stopped stream does not establish calibrated
 audio or healthy stereo playback.
 
+The AAC-ELD configuration describes 48 kHz coding, but the Pro 3 microphone's
+physical PCM clock is 64 kHz: each 480-sample unit lasts 7.5 ms. WAV headers and
+Shizuku injection tracks use that physical rate; Android handles conversion for
+playback and receiving apps. Changing the decoder's AAC configuration to 64 kHz
+would describe a different bitstream.
+
 To test another app, enter its exact package name and select Use microphone in
 selected app. Start recording in that app and verify the AirPods are the source.
 For calls, start a deliberate call, select Use microphone for this call, and ask
@@ -68,7 +74,8 @@ The initial Pixel 10 Pro XL check used Android 17 / SDK 37,
 `CP3A.260905.009` (security patch 2026-09-05), with Shizuku's shell backend.
 Playback copying delivered nonzero stereo PCM while music was playing; both
 temporary AudioPolicies were unregistered afterwards. A UID-scoped microphone
-injection policy allocated successfully. The call API reported PSTN interception
+injection policy and AudioTrack allocated at 64 kHz mono and released successfully.
+The call API reported PSTN interception
 support, with no call running. Neither result establishes a receiving app or
 remote caller's microphone source.
 
@@ -78,18 +85,26 @@ The Bluetooth module was `com.google.android.bluetooth` version 17 with APEX
 
 The ELD encoder produced 48 kHz stereo **512-sample** frames, so it failed the
 480-sample Apple playback requirement. Native Bluetooth playback remains enabled.
-The signed, minified application connected to the paired Pro 3 and Shizuku;
-50 initial unit tests and debug lint passed. During the first microphone UI test,
-one earbud stopped playing; closing the case restored both earbuds. Review found
-an activity binding defect and a recovery check that did not restart the audio
-profile. Physical pairing, pitch, sensors,
-call recipients and extended recovery still need their respective hardware checks.
+The signed, minified application connected to the paired Pro 3 and Shizuku.
+Live capture produced decoded PCM. A 60.006-second capture contained 79.520 seconds
+of samples when interpreted at 48 kHz, corroborating the 64 kHz physical clock
+used by NTPods. A later build labels the actual PCM rate accordingly; recording
+pitch and receiving-app conversion still require their own acceptance checks.
+
+During the first microphone UI test, one earbud stopped playing; closing the case
+restored both earbuds. The activity binding lifetime and selected-pair A2DP recovery
+were fixed. A subsequent one-minute capture stopped its uplink and completed the
+selected-pair recovery in about two seconds. That profile cycle can pause music;
+resume it explicitly. A shared Compose list recomposition defect also hid the
+conditional Stop and Play rows; a runtime regression reproduces and verifies its
+small inline fix. Physical pairing, pitch, sensors, call recipients and extended
+recovery still need their respective hardware checks.
 
 Build the FOSS application with JDK 21 and the SDK/NDK versions pinned in Gradle:
 
 ```sh
 cd android
-./gradlew testFossDebugUnitTest lintFossDebug assembleFossDebug
+./gradlew verifyPixel
 ```
 
 Packet and state tests cover malformed input, per-pair identity, partial battery
