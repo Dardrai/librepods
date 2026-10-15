@@ -40,10 +40,16 @@ To test another app, enter its exact package name and select Use microphone in
 selected app. Start recording in that app and verify the AirPods are the source.
 
 Call routing currently implements experimental microphone uplink injection only.
-For a deliberate cellular-call test, first select the phone's earpiece or speaker
-and verify native Bluetooth SCO is inactive. Then select Use microphone for this
-call and ask the remote listener to verify that the AirPods are the source.
-Native SCO can conflict with the custom microphone stream. Full duplex through
+For the tested Pixel cellular-call setup, turn off Phone calls for the selected
+AirPods in Android Bluetooth settings, leaving Media audio on. Select the phone's
+speaker and keep the call unmuted. Then select Use microphone for this call and
+ask the remote listener to verify the AirPods microphone with the phone away from
+you. Speaker alone did not suffice while the native headset profile remained
+connected. Stop the experimental route and restore Phone calls after the test.
+The app currently requires this manual setup; it does not disconnect that profile
+automatically. The injection API does not guarantee that the phone microphone is
+excluded from the call, and muting the call stops the experimental session.
+Full duplex through
 the AirPods, including caller audio over A2DP, remains unverified: Android may
 suspend A2DP during a cellular call, and a downlink capture alone does not establish
 that phone output is silent. See the [Android call APIs](https://android.googlesource.com/platform/frameworks/base/+/refs/heads/main/media/java/android/media/AudioManager.java)
@@ -89,17 +95,29 @@ exposed an 8 kHz driver fallback when registering a 64 kHz mix: a 6 kHz test ton
 was lost. A 48 kHz mix with the track's effective rate set to 64 kHz preserved
 both 500 Hz and 6 kHz tones and the source duration. These tests used synthetic
 samples only; no user recordings were read or exported.
-The call API reported PSTN interception support, with no call running. Its input
-format is also limited to 48 kHz, so the call path uses the same checked 64 kHz
-source-rate conversion. This still needs verification with a remote listener;
-the synthetic test does not establish a third-party app or caller's source.
+The call API reported PSTN interception support. Its input format is limited to
+48 kHz, so the call path uses the same checked 64 kHz source-rate conversion.
+A subsequent real cellular call on pixel2 verified audible AirPods uplink at
+normal pitch with a remote listener. The first attempt, with Speaker selected
+and SCO inactive but HFP still connected, delivered no PCM and stopped after
+five seconds. Disabling only this pair's Phone calls profile disconnected HFP;
+the retry delivered 129.330 seconds of PCM over 140.217 seconds elapsed, including
+2.367 seconds before the first packet. The user confirmed clear AirPods input
+while the phone was placed away from them. Stop released the route and completed
+selected-pair recovery. After the call, Phone calls was restored and Android
+returned to normal audio mode with no active recording configuration or microphone
+foreground-service type. No call audio was saved or exported. This establishes
+AirPods uplink contribution for that setup, not exclusive input, VoIP support,
+AirPods downlink, full duplex or long-call reliability.
 
-The native stack rejected the PSM `0x19` socket probe with `IOException: Error: -1`.
+The native stack rejected the local PSM `0x19` listening-socket probe with
+`IOException: Error: -1`. This does not establish whether outbound AVDTP can work.
 The Bluetooth module was `com.google.android.bluetooth` version 17 with APEX
 `com.google.android.bt` version 371899999.
 
-The ELD encoder produced 48 kHz stereo **512-sample** frames, so it failed the
-480-sample Apple playback requirement. Native Bluetooth playback remains enabled.
+The tested platform ELD encoder configuration produced 48 kHz stereo
+**512-sample** frames, so it failed the 480-sample Apple playback requirement.
+An Android software encoder has not been tested. Native Bluetooth playback remains enabled.
 The signed, minified application connected to the paired Pro 3 and Shizuku;
 77 unit tests, debug lint, debug assembly and minified release assembly passed.
 Live capture produced decoded PCM. A 60.006-second capture contained 79.520 seconds
@@ -143,7 +161,7 @@ metadata such as `9442752` is normalized to `9A348` before selecting a movement
 service; late metadata updates reach the existing sensor session. After that fix,
 the signed build displayed changing horizontal/vertical reports and a live trace
 on the Pixel. Both optional sensor toggles were verified off after testing.
-Physical pairing, call recipients and long-duration recovery still need their hardware checks.
+Physical pairing, VoIP, full duplex and long-duration recovery still need their hardware checks.
 
 Build the FOSS application with JDK 21 and the SDK/NDK versions pinned in Gradle:
 
