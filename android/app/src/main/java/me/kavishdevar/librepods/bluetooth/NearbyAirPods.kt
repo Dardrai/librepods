@@ -43,8 +43,8 @@ object NearbyAirPods {
         val trimmed = name?.trim() ?: return false
         if (!Regex("\\bAirPods\\b", RegexOption.IGNORE_CASE).containsMatchIn(trimmed)) return false
         val pro = modelNames[modelId]?.contains("Pro") ?: return false
-        return trimmed.contains("Pro", ignoreCase = true) == pro &&
-            !trimmed.contains("Max", ignoreCase = true)
+        return Regex("\\bPro\\b", RegexOption.IGNORE_CASE).containsMatchIn(trimmed) == pro &&
+            !Regex("\\bMax\\b", RegexOption.IGNORE_CASE).containsMatchIn(trimmed)
     }
 
     class Discovery(private val modelId: Int) {

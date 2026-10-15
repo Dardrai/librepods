@@ -893,9 +893,13 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                 })
 
                 if (conversationAwarenessNotification.status == 1.toByte() || conversationAwarenessNotification.status == 2.toByte()) {
-                    MediaController.startSpeaking(conversationAwarenessNotification.status.toInt())
+                    BluetoothConnectionManager.aacpSocket?.let { owner ->
+                        device?.address?.let { address ->
+                            MediaController.startSpeaking(conversationAwarenessNotification.status.toInt(), owner, address)
+                        }
+                    }
                 } else if (conversationAwarenessNotification.status in byteArrayOf(4, 6, 7, 8, 9)) {
-                    MediaController.stopSpeaking()
+                    BluetoothConnectionManager.aacpSocket?.let(MediaController::stopSpeaking)
                 }
 
                 Log.d(
@@ -2814,6 +2818,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
     private fun finishConnection(socket: BluetoothSocket) {
         val att = synchronized(connectionLock) {
             if (BluetoothConnectionManager.aacpSocket !== socket) return
+            MediaController.cancelConversation(socket)
             BluetoothConnectionManager.aacpSocket = null
             val oldAtt = BluetoothConnectionManager.attSocket
             BluetoothConnectionManager.attSocket = null
@@ -2946,7 +2951,10 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
     fun disconnectForCD() {
         cancelPendingConnection()
         experimentalAudio.onDisconnected()
-        BluetoothConnectionManager.aacpSocket?.close()
+        BluetoothConnectionManager.aacpSocket?.let {
+            MediaController.cancelConversation(it)
+            it.close()
+        }
         MediaController.pausedWhileTakingOver = false
         Log.d(TAG, "Disconnected from AirPods, showing island.")
         showIsland(
@@ -3204,6 +3212,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
     @SuppressLint("MissingPermission")
     override fun onDestroy() {
         destroying = true
+        BluetoothConnectionManager.aacpSocket?.let { MediaController.cancelConversation(it) }
         cancelPendingConnection()
         nearbyPairing?.close()
 

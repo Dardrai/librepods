@@ -3,6 +3,8 @@ package me.kavishdevar.librepods.utils
 
 /** The app may restore volume only while its own last write still owns it. */
 class ConversationVolume {
+    var owner: Any? = null
+        private set
     var speaking = false
         private set
     private var original: Int? = null
@@ -10,7 +12,10 @@ class ConversationVolume {
     private var target: Int? = null
     private var overridden = false
 
-    fun begin(current: Int, maximum: Int, percent: Int, relative: Boolean, stage: Int) {
+    fun owns(owner: Any): Boolean = this.owner === owner
+
+    fun begin(current: Int, maximum: Int, percent: Int, relative: Boolean, stage: Int, owner: Any) {
+        if (!owns(owner)) { clear(); this.owner = owner }
         if (!speaking) {
             if (original == null || expected != current) original = current
             expected = current
@@ -22,7 +27,8 @@ class ConversationVolume {
         target = minOf(current, if (stage == 2) cap * 60 / 100 else cap).coerceIn(0, maximum)
     }
 
-    fun end(current: Int): Boolean {
+    fun end(current: Int, owner: Any): Boolean {
+        if (!owns(owner)) return false
         if (!speaking) return false
         speaking = false
         if (overridden || original == null || expected != current) {
@@ -34,7 +40,8 @@ class ConversationVolume {
         return true
     }
 
-    fun step(current: Int): Int? {
+    fun step(current: Int, owner: Any): Int? {
+        if (!owns(owner)) return null
         if (target == null || original == null) return null
         if (expected != current) {
             overridden = true
@@ -47,5 +54,22 @@ class ConversationVolume {
             return null
         }
         return (current + if (current < checkNotNull(target)) 1 else -1).also { expected = it }
+    }
+
+    /** Returns a restore only while this connection still owns its last volume write. */
+    fun cancel(current: Int, owner: Any, restoreAllowed: Boolean = true): Int? {
+        if (!owns(owner)) return null
+        val restore = original?.takeIf { restoreAllowed && !overridden && expected == current && it != current }
+        clear()
+        return restore
+    }
+
+    private fun clear() {
+        owner = null
+        speaking = false
+        original = null
+        expected = null
+        target = null
+        overridden = false
     }
 }

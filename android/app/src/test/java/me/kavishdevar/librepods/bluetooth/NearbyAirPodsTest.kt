@@ -83,6 +83,11 @@ class NearbyAirPodsTest {
         assertFalse(NearbyAirPods.matchesName(0xffff, "AirPods"))
         assertFalse(NearbyAirPods.matchesName(0x2720, null))
         assertFalse(NearbyAirPods.matchesName(0x2720, "Pixel Buds Pro"))
+        assertTrue(NearbyAirPods.matchesName(0x1920, "Proctor’s AirPods"))
+        assertFalse(NearbyAirPods.matchesName(0x2720, "Proctor’s AirPods"))
+        assertTrue(NearbyAirPods.matchesName(0x1920, "Maxwell’s AirPods"))
+        assertTrue(NearbyAirPods.matchesName(0x2720, "Maxwell’s AirPods Pro"))
+        assertFalse(NearbyAirPods.matchesName(0x2720, "AirPods Pro Max"))
     }
 
     @Test fun onlyASoleStableClassicIdentityCanPairAutomatically() {
@@ -105,5 +110,41 @@ class NearbyAirPodsTest {
         discovery.observe("AA:BB:CC:DD:EE:02", "AirPods Pro", 10_000)
         discovery.finish()
         assertNull(discovery.automatic(20_000))
+    }
+
+    @Test fun twoClassicAddressesStayAmbiguousRegardlessOfOrderOrRepeatedNames() {
+        for (addresses in listOf(listOf("AA:BB:CC:DD:EE:01", "AA:BB:CC:DD:EE:02"),
+            listOf("AA:BB:CC:DD:EE:02", "AA:BB:CC:DD:EE:01"))) {
+            val discovery = NearbyAirPods.Discovery(0x2720)
+            for (index in 0..12) {
+                discovery.observe(addresses[index % 2], "AirPods Pro", index * 1_000L)
+            }
+            discovery.finish()
+            assertNull(discovery.automatic(20_000))
+        }
+    }
+
+    @Test fun reopeningTheSameModelInvalidatesPendingDiscoveryAndBondCallbacks() {
+        val session = NearbyAirPods.Session()
+        val oldToken = session.open(0x2720)
+        session.close(0x2720)
+        val newToken = session.open(0x2720)
+        assertFalse(session.isCurrent(oldToken))
+        assertTrue(session.isCurrent(newToken))
+        val replacedToken = session.open(0x2720)
+        assertFalse(session.isCurrent(newToken))
+        assertTrue(session.isCurrent(replacedToken))
+        session.close()
+        assertFalse(session.isCurrent(replacedToken))
+    }
+
+    @Test fun freshPresenceKeepsAnInvitationFromExpiringAtTheOldDeadline() {
+        val visits = NearbyAirPods.Visits()
+        val open = NearbyAirPods.Event(0x2720, true)
+        assertEquals(open, visits.observe(open, 0, false))
+        assertNull(visits.observe(open, 29_999, false))
+        assertTrue(visits.expire(30_000).isEmpty())
+        assertTrue(visits.expire(59_998).isEmpty())
+        assertEquals(listOf(open.copy(lidOpen = false)), visits.expire(59_999))
     }
 }

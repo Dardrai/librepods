@@ -49,18 +49,10 @@ class NearbyPairingController(
             }.also {
                 it.open(name)
                 it.showPairingActions(context.getString(R.string.pairing_nearby_hint), listOf(
-                    context.getString(R.string.pairing_connect) to { prepare(token) }
+                    context.getString(R.string.pairing_connect) to { discover(token) }
                 ))
             }
         }
-    }
-
-    private fun prepare(token: Long) {
-        if (!session.isCurrent(token)) return
-        val doubleTap = session.modelId in setOf(0x1920, 0x1b20, 0x2720, 0x3020, 0x3620)
-        popup?.showPairingActions(context.getString(
-            if (doubleTap) R.string.pairing_double_tap else R.string.pairing_hold_button
-        ), listOf(context.getString(R.string.pairing_find) to { discover(token) }))
     }
 
     private fun discover(token: Long) {
@@ -113,7 +105,9 @@ class NearbyPairingController(
                 showRetry(token, R.string.pairing_discovery_failed)
                 return
             }
-            popup?.showPairingActions(context.getString(R.string.pairing_searching), emptyList())
+            val doubleTap = model in setOf(0x1920, 0x1b20, 0x2720, 0x3020, 0x3620)
+            val gesture = context.getString(if (doubleTap) R.string.pairing_double_tap else R.string.pairing_hold_button)
+            popup?.showPairingActions("$gesture\n\n${context.getString(R.string.pairing_searching)}", emptyList())
             timeout = Runnable { finishDiscovery(token, devices, candidates) }.also { handler.postDelayed(it, 15_000) }
         } catch (e: SecurityException) {
             Log.w(TAG, "Nearby pairing requires Bluetooth permission", e)
@@ -208,7 +202,7 @@ class NearbyPairingController(
     private fun showRetry(token: Long, message: Int) {
         if (!session.isCurrent(token)) return
         popup?.showPairingActions(context.getString(message), listOf(
-            context.getString(R.string.pairing_retry) to { prepare(token) }
+            context.getString(R.string.pairing_retry) to { discover(token) }
         ))
     }
 

@@ -38,9 +38,17 @@ decoder's AAC configuration to 64 kHz would describe a different bitstream.
 
 To test another app, enter its exact package name and select Use microphone in
 selected app. Start recording in that app and verify the AirPods are the source.
-For calls, start a deliberate call, select Use microphone for this call, and ask
-the remote listener to verify the source. These routes are separate tests; a
-successful recorder test does not establish VoIP or cellular-call support.
+
+Call routing currently implements experimental microphone uplink injection only.
+For a deliberate cellular-call test, first select the phone's earpiece or speaker
+and verify native Bluetooth SCO is inactive. Then select Use microphone for this
+call and ask the remote listener to verify that the AirPods are the source.
+Native SCO can conflict with the custom microphone stream. Full duplex through
+the AirPods, including caller audio over A2DP, remains unverified: Android may
+suspend A2DP during a cellular call, and a downlink capture alone does not establish
+that phone output is silent. See the [Android call APIs](https://android.googlesource.com/platform/frameworks/base/+/refs/heads/main/media/java/android/media/AudioManager.java)
+and [native call routing and A2DP suspension](https://android.googlesource.com/platform/frameworks/av/+/refs/heads/main/services/audiopolicy/managerdefault/AudioPolicyManager.cpp).
+A successful recorder test does not establish VoIP or cellular-call support.
 Call microphone PCM is processed live and is not saved by LibrePods.
 
 Use Stop before changing routes. Bluetooth loss, revoked microphone access or
@@ -93,7 +101,7 @@ The Bluetooth module was `com.google.android.bluetooth` version 17 with APEX
 The ELD encoder produced 48 kHz stereo **512-sample** frames, so it failed the
 480-sample Apple playback requirement. Native Bluetooth playback remains enabled.
 The signed, minified application connected to the paired Pro 3 and Shizuku;
-66 unit tests, debug lint, debug assembly and minified release assembly passed.
+77 unit tests, debug lint, debug assembly and minified release assembly passed.
 Live capture produced decoded PCM. A 60.006-second capture contained 79.520 seconds
 of samples when interpreted at 48 kHz, corroborating the 64 kHz physical clock
 used by NTPods. After correcting the physical rate, a short capture contained
@@ -101,12 +109,28 @@ used by NTPods. After correcting the physical rate, a short capture contained
 user confirmed normal voice pitch, working Stop/Play controls and music in both
 earbuds after selected-pair recovery.
 
+Enabling Android's software microphone privacy during active capture terminated
+the capture and completed selected-pair playback recovery. The foreground-service
+type mask dropped from `0x90` (microphone and connected device) to `0x10` (connected
+device only). The privacy toggle was restored to its previous disabled state.
+
+The installed `1.0.1-pixel2` build passed 20 consecutive short microphone
+start/stop cycles, each with decoded PCM, an idle final state and successful
+selected-pair playback recovery. An earlier run stopped on its fourth cycle
+after a two-second incoming-packet gap; recovery succeeded, but the cause was
+not established. No microphone code or timeout changed between those runs.
+The passing repeat does not establish long-duration or full-duplex reliability.
+
 Pixel Recorder did not pass cross-app injection. Its automatic Bluetooth input
 requested native SCO and interrupted the custom uplink; recording stayed at zero.
 With Recorder's Bluetooth input disabled, its timer advanced but it recorded the
 phone microphone. Its original preference was restored after testing. Creating an
 AudioPolicy and AudioTrack does not prove that an app consumes the injected route;
 apps that explicitly select a physical input can bypass the UID policy mix.
+The Pixel's seven built-in-microphone input profiles also exclude remote-submix
+devices, so patching Recorder's existing input stream cannot bridge that gap.
+This UID-scoped route cannot override Recorder's explicit physical-input selection;
+Recorder would need to allow the injected route for this approach to work.
 
 During the first microphone UI test, one earbud stopped playing; closing the case
 restored both earbuds. The activity binding lifetime and selected-pair A2DP recovery
@@ -119,7 +143,7 @@ metadata such as `9442752` is normalized to `9A348` before selecting a movement
 service; late metadata updates reach the existing sensor session. After that fix,
 the signed build displayed changing horizontal/vertical reports and a live trace
 on the Pixel. Both optional sensor toggles were verified off after testing.
-Physical pairing, call recipients and extended recovery still need their hardware checks.
+Physical pairing, call recipients and long-duration recovery still need their hardware checks.
 
 Build the FOSS application with JDK 21 and the SDK/NDK versions pinned in Gradle:
 
