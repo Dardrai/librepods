@@ -77,11 +77,15 @@ internal class AudioDiagnostics(
     fun microphonePolicy(): JSONObject {
         check(!ShellMicrophonePrivacy.isBlocked(context)) { "Android microphone privacy blocks microphone policy testing" }
         routing.injection(AirPodsMicrophoneClock.PHYSICAL_RATE, 1, appUid).use { route ->
-            val sampleRate = checkNotNull(route.track).sampleRate
-            check(sampleRate == AirPodsMicrophoneClock.PHYSICAL_RATE) { "Microphone injection track has an unexpected sample rate: $sampleRate" }
-            return result("untested", "A UID-scoped microphone injection policy and $sampleRate Hz mono stream were created and released. " +
+            val track = checkNotNull(route.track)
+            val mixRate = track.sampleRate
+            val playbackRate = track.playbackRate
+            check(mixRate == 48000 && playbackRate == AirPodsMicrophoneClock.PHYSICAL_RATE) {
+                "Microphone source-rate conversion has unexpected rates: mix=$mixRate source=$playbackRate"
+            }
+            return result("untested", "A UID-scoped microphone policy configured for a $mixRate Hz mix and $playbackRate Hz source playback rate was created and released. " +
                 "End-to-end injection needs a selected recorder and a user-started test.")
-                .put("sampleRate", sampleRate)
+                .put("configuredMixSampleRate", mixRate).put("sourcePlaybackRate", playbackRate)
         }
     }
 

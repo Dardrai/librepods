@@ -90,7 +90,8 @@ Spatializing stereo sound is beyond this project's scope and will never be avail
 
 This fork has an optional Pro 3 heart-rate session on the main settings page,
 plus a raw movement trace. Sensor support depends on the actual model and public
-firmware version. See [usage and checks](docs/PIXEL-AUDIO.md).
+firmware version. Live Pro 3 heart-rate readings were confirmed on the test Pixel;
+movement still needs a separate hardware check. See [usage and checks](docs/PIXEL-AUDIO.md).
 
 ### Linux
 
@@ -98,8 +99,9 @@ Not available yet (doesn't seem like something that would be useful on a compute
 
 ## High quality two-way audio
 Compatible AirPods can send an AAC-ELD microphone stream over AACP. This fork
-decodes it as 48 kHz mono; recording duration and pitch still require a device
-check before relying on that configuration.
+uses 48 kHz AAC coding and 64 kHz physical mono PCM for Pro 3. A short test
+recording confirmed normal voice pitch and the expected duration after startup.
+Other models and receiving-app routes still need their own device checks.
 
 ### Android
 Use the Microphone page to record, play and share a short private WAV test.
@@ -143,12 +145,15 @@ The dissector had not been used in LibrePods for most of the implementation; I h
 
 ## Android app
 
+The following describes the upstream Android app before this fork's Pixel/Shizuku
+changes. The fork's additions and changes were developed with AI coding assistance.
+
 These parts of the app were completely AI-generated: 
 - Head Gestures - all of it, including logic and the UI
 - The offset setup with r2+the xposed module (both versions)
 - Troubleshooter and LogCollector
 
-Rest everything- the background service, the Bluetooth manager classes (AACP and ATT), the entire UI, even the smallest components were written manually.
+The remaining upstream components, including the background service, Bluetooth manager classes (AACP and ATT) and UI, were written manually.
 
 Some parts of the UI components were borrowed from [Kyant0's demo app](https://github.com/Kyant0/AndroidLiquidGlass/tree/master/catalog), which is licensed under [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0).
 

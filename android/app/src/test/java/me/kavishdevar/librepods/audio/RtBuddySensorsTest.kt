@@ -144,7 +144,22 @@ class RtBuddySensorsTest {
         assertEquals(9, RtBuddySensors.publicFirmwareMajor("9A348"))
         assertEquals(8, RtBuddySensors.publicFirmwareMajor(" 8B34 "))
         assertEquals(6, RtBuddySensors.publicFirmwareMajor("6.8.8"))
-        for (value in listOf("", "unknown9", "6619472", "999A1", "0A1", "90.3388000000000000.1786", "8.300.1", "8.2"))
+        assertEquals(9, RtBuddySensors.publicFirmwareMajor("9442752"))
+        for (value in listOf("", "unknown9", "999A1", "0A1", "90.3388000000000000.1786", "8.300.1", "8.2"))
             assertNull(RtBuddySensors.publicFirmwareMajor(value))
+    }
+
+    @Test fun firmwareArrivingLaterUpdatesFallbackWithoutOverridingDescriptors() {
+        val parser = RtBuddySensors()
+        val report = ByteArray(58).apply { this[28] = 7; this[30] = 9 }
+        fun movement(service: Int) = frame(byteArrayOf(8, 1, 16, 3) +
+            bytes(7, byteArrayOf(8, service.toByte()) + bytes(3, report)))
+        assertNull(parser.feed(movement(16)).motion)
+        parser.setLegacyMotionService(16)
+        assertEquals(RtBuddySensors.Motion(7, 9), parser.feed(movement(16)).motion)
+        parser.feed(announcement(3, 27, dictionary("devmotion6", RtBuddySensors.MOTION_DESCRIPTOR, 191)))
+        parser.setLegacyMotionService(14)
+        assertNull(parser.feed(movement(14)).motion)
+        assertEquals(RtBuddySensors.Motion(7, 9), parser.feed(movement(27)).motion)
     }
 }

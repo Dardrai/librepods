@@ -30,10 +30,11 @@ An initialized decoder or a quiet stopped stream does not establish calibrated
 audio or healthy stereo playback.
 
 The AAC-ELD configuration describes 48 kHz coding, but the Pro 3 microphone's
-physical PCM clock is 64 kHz: each 480-sample unit lasts 7.5 ms. WAV headers and
-Shizuku injection tracks use that physical rate; Android handles conversion for
-playback and receiving apps. Changing the decoder's AAC configuration to 64 kHz
-would describe a different bitstream.
+physical PCM clock is 64 kHz: each 480-sample unit lasts 7.5 ms. WAV headers use
+that physical rate. Shizuku injection uses a 48 kHz policy mix and sets the track's
+effective playback rate to 64 kHz, letting Android convert the source samples.
+The remote-submix driver does not support a 64 kHz mix directly. Changing the
+decoder's AAC configuration to 64 kHz would describe a different bitstream.
 
 To test another app, enter its exact package name and select Use microphone in
 selected app. Start recording in that app and verify the AirPods are the source.
@@ -74,10 +75,16 @@ The initial Pixel 10 Pro XL check used Android 17 / SDK 37,
 `CP3A.260905.009` (security patch 2026-09-05), with Shizuku's shell backend.
 Playback copying delivered nonzero stereo PCM while music was playing; both
 temporary AudioPolicies were unregistered afterwards. A UID-scoped microphone
-injection policy and AudioTrack allocated at 64 kHz mono and released successfully.
-The call API reported PSTN interception
-support, with no call running. Neither result establishes a receiving app or
-remote caller's microphone source.
+injection policy and AudioTrack allocated successfully. A synthetic default-input
+recorder test then verified both ends used the same remote-submix device. It
+exposed an 8 kHz driver fallback when registering a 64 kHz mix: a 6 kHz test tone
+was lost. A 48 kHz mix with the track's effective rate set to 64 kHz preserved
+both 500 Hz and 6 kHz tones and the source duration. These tests used synthetic
+samples only; no user recordings were read or exported.
+The call API reported PSTN interception support, with no call running. Its input
+format is also limited to 48 kHz, so the call path uses the same checked 64 kHz
+source-rate conversion. This still needs verification with a remote listener;
+the synthetic test does not establish a third-party app or caller's source.
 
 The native stack rejected the PSM `0x19` socket probe with `IOException: Error: -1`.
 The Bluetooth module was `com.google.android.bluetooth` version 17 with APEX
@@ -85,11 +92,21 @@ The Bluetooth module was `com.google.android.bluetooth` version 17 with APEX
 
 The ELD encoder produced 48 kHz stereo **512-sample** frames, so it failed the
 480-sample Apple playback requirement. Native Bluetooth playback remains enabled.
-The signed, minified application connected to the paired Pro 3 and Shizuku.
+The signed, minified application connected to the paired Pro 3 and Shizuku;
+66 unit tests, debug lint, debug assembly and minified release assembly passed.
 Live capture produced decoded PCM. A 60.006-second capture contained 79.520 seconds
 of samples when interpreted at 48 kHz, corroborating the 64 kHz physical clock
-used by NTPods. A later build labels the actual PCM rate accordingly; recording
-pitch and receiving-app conversion still require their own acceptance checks.
+used by NTPods. After correcting the physical rate, a short capture contained
+10.650 seconds of PCM in 11.056 seconds elapsed, including 408 ms startup. The
+user confirmed normal voice pitch, working Stop/Play controls and music in both
+earbuds after selected-pair recovery.
+
+Pixel Recorder did not pass cross-app injection. Its automatic Bluetooth input
+requested native SCO and interrupted the custom uplink; recording stayed at zero.
+With Recorder's Bluetooth input disabled, its timer advanced but it recorded the
+phone microphone. Its original preference was restored after testing. Creating an
+AudioPolicy and AudioTrack does not prove that an app consumes the injected route;
+apps that explicitly select a physical input can bypass the UID policy mix.
 
 During the first microphone UI test, one earbud stopped playing; closing the case
 restored both earbuds. The activity binding lifetime and selected-pair A2DP recovery
@@ -97,8 +114,10 @@ were fixed. A subsequent one-minute capture stopped its uplink and completed the
 selected-pair recovery in about two seconds. That profile cycle can pause music;
 resume it explicitly. A shared Compose list recomposition defect also hid the
 conditional Stop and Play rows; a runtime regression reproduces and verifies its
-small inline fix. Physical pairing, pitch, sensors, call recipients and extended
-recovery still need their respective hardware checks.
+small inline fix. Live Pro 3 heart-rate reports were also observed. Packed firmware
+metadata such as `9442752` is normalized to `9A348` before selecting a movement
+service; late metadata updates reach the existing sensor session. Physical pairing,
+movement, call recipients and extended recovery still need their hardware checks.
 
 Build the FOSS application with JDK 21 and the SDK/NDK versions pinned in Gradle:
 

@@ -2,8 +2,10 @@
  * Descriptor and report layouts follow NTPods and LibrePods' Android rewrite. */
 package me.kavishdevar.librepods.audio
 
+import me.kavishdevar.librepods.data.AirPodsFirmware
+
 /** Bounded RTBuddy framing and exact device-supplied sensor descriptions. */
-class RtBuddySensors(private val legacyMotionService: Int? = null) {
+class RtBuddySensors(private var legacyMotionService: Int? = null) {
     data class HeartRate(val bpm: Int, val confidence: Int)
     /** Signed sensor units, not calibrated angles or a spatial-audio pose. */
     data class Motion(val horizontal: Int, val vertical: Int)
@@ -23,6 +25,9 @@ class RtBuddySensors(private val legacyMotionService: Int? = null) {
     private var generation = 0L
     private var motionService: Int? = null
     private var heartRateService: Int? = null
+
+    @Synchronized
+    internal fun setLegacyMotionService(service: Int?) { legacyMotionService = service }
 
     @Synchronized
     fun feed(chunk: ByteArray): Batch {
@@ -267,14 +272,6 @@ class RtBuddySensors(private val legacyMotionService: Int? = null) {
             return PREFIX + byteArrayOf(payload.size.toByte(), 0) + payload.toByteArray()
         }
 
-        fun publicFirmwareMajor(firmware: String): Int? {
-            val value = firmware.trim()
-            Regex("""^(\d{1,2})[A-Z]\d+[a-z]?$""").matchEntire(value)?.let {
-                return it.groupValues[1].toIntOrNull()?.takeIf { major -> major in 1..99 }
-            }
-            val parts = value.split('.')
-            return if (parts.size == 3 && parts.all { it.isNotEmpty() && it.all(Char::isDigit) &&
-                    (it.toIntOrNull() ?: -1) in 0..255 }) parts[0].toIntOrNull()?.takeIf { it in 1..99 } else null
-        }
+        fun publicFirmwareMajor(firmware: String): Int? = AirPodsFirmware.major(firmware)
     }
 }

@@ -53,7 +53,8 @@ internal class AudioRouting(private val context: Context) {
         ruleBuilder.javaClass.getMethod("addMixRule", Int::class.javaPrimitiveType, Any::class.java)
             .invoke(ruleBuilder, 4, targetUid) // RULE_MATCH_UID
         val rule = checkNotNull(ruleBuilder.javaClass.getMethod("build").invoke(ruleBuilder))
-        return policyRoute(rule, format(rate, channels), injection = true)
+        // A 64 kHz remote-submix request can silently select an 8 kHz HAL stream.
+        return policyRoute(rule, format(48000, channels), injection = true, playbackRate = rate)
     }
 
     fun playbackCopy(): Route {
@@ -67,7 +68,8 @@ internal class AudioRouting(private val context: Context) {
         return policyRoute(rule, format(48000, 2), injection = false)
     }
 
-    private fun policyRoute(rule: Any, format: AudioFormat, injection: Boolean): Route {
+    private fun policyRoute(rule: Any, format: AudioFormat, injection: Boolean,
+        playbackRate: Int = format.sampleRate): Route {
         val mixBuilder = Class.forName("android.media.audiopolicy.AudioMix\$Builder")
             .getConstructor(ruleClass).newInstance(rule)
         mixBuilder.javaClass.getMethod("setFormat", AudioFormat::class.java).invoke(mixBuilder, format)
@@ -93,6 +95,7 @@ internal class AudioRouting(private val context: Context) {
                     track?.release()
                     error("Recording injection track was not initialized")
                 }
+                applySourceClock(track, playbackRate)
                 return Route(track = track, unregister = unregister)
             }
             val record = policyClass.getMethod("createAudioRecordSink", mixClass).invoke(policy, mix) as? AudioRecord
@@ -112,11 +115,24 @@ internal class AudioRouting(private val context: Context) {
             "Start a deliberate VoIP or cellular call first; LibrePods will not force call mode"
         }
         val track = AudioManager::class.java.getMethod("getCallUplinkInjectionAudioTrack", AudioFormat::class.java)
-            .invoke(manager, format(rate, channels)) as AudioTrack
+            .invoke(manager, format(48000, channels)) as AudioTrack // Call-redirection formats are capped at 48 kHz.
         if (track.state != AudioTrack.STATE_INITIALIZED) {
             track.release()
             error("Call injection track was not initialized")
         }
+        applySourceClock(track, rate)
         return Route(track = track)
+    }
+
+    private fun applySourceClock(track: AudioTrack, rate: Int) {
+        try {
+            // PCM retains its physical source clock; AudioFlinger performs the conversion.
+            check(track.setPlaybackRate(rate) == AudioTrack.SUCCESS && track.playbackRate == rate) {
+                "Microphone source-rate conversion was not accepted"
+            }
+        } catch (error: Throwable) {
+            track.release()
+            throw error
+        }
     }
 }

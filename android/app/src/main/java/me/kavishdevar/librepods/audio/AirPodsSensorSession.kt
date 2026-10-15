@@ -27,7 +27,7 @@ data class SensorState(
 
 /** Optional sensors never reconnect the shared Bluetooth/audio transport. */
 class AirPodsSensorSession(private val aacp: AACPManager) : AutoCloseable {
-    private class Session(val socket: BluetoothSocket, val legacyMotionService: Int?, val parser: RtBuddySensors) {
+    private class Session(val socket: BluetoothSocket, @Volatile var legacyMotionService: Int?, val parser: RtBuddySensors) {
         val running = AtomicBoolean(true)
         val heart = AtomicBoolean(false)
         val motion = AtomicBoolean(false)
@@ -51,16 +51,19 @@ class AirPodsSensorSession(private val aacp: AACPManager) : AutoCloseable {
         if (closed) return
         val socket = BluetoothConnectionManager.aacpSocket ?: return
         if (!socket.isConnected) return
-        if (session?.let { it.running.get() && it.socket === socket } == true) {
-            if (!supportsHeartRate) session?.heart?.set(false)
-            if (!supportsMotion) session?.motion?.set(false)
+        val major = RtBuddySensors.publicFirmwareMajor(firmware)
+        val legacy = major?.takeIf { it > 0 }?.let { if (it >= 8) 16 else 14 }
+        val current = session
+        if (current != null && current.running.get() && current.socket === socket) {
+            current.parser.setLegacyMotionService(legacy)
+            current.legacyMotionService = legacy
+            if (!supportsHeartRate) current.heart.set(false)
+            if (!supportsMotion) current.motion.set(false)
             mutableState.update { it.copy(supportsHeartRate = supportsHeartRate, supportsMotion = supportsMotion,
                 heartRateEnabled = it.heartRateEnabled && supportsHeartRate, motionEnabled = it.motionEnabled && supportsMotion) }
             return
         }
         onDisconnected()
-        val major = RtBuddySensors.publicFirmwareMajor(firmware)
-        val legacy = major?.takeIf { it > 0 }?.let { if (it >= 8) 16 else 14 }
         val next = Session(socket, legacy, RtBuddySensors(legacy))
         session = next
         mutableState.value = SensorState(supportsHeartRate, supportsMotion)
@@ -142,7 +145,7 @@ class AirPodsSensorSession(private val aacp: AACPManager) : AutoCloseable {
         var heartDeadline = 0L
         var motionLive: Int? = null
         var motionNative = false
-        var motionStarted = 0L
+        val motionTimeout = MotionReportTimeout()
         var mappingGeneration = 0L
         var hadMotionDescriptor = false
         fun motionStop() {
@@ -164,10 +167,16 @@ class AirPodsSensorSession(private val aacp: AACPManager) : AutoCloseable {
                     // The old address can now belong to a different sensor; never write its Stop.
                     motionLive = null
                     active.lastMotionMs = 0
+                    motionTimeout.restart(now)
                     mappingGeneration = mapping.generation
                 }
                 if (mapping.motionService != null) hadMotionDescriptor = true
                 val desiredMotion = mapping.motionService ?: active.legacyMotionService.takeUnless { hadMotionDescriptor }
+                if (motionLive != null && motionLive != desiredMotion) {
+                    motionLive = null
+                    active.lastMotionMs = 0
+                    motionTimeout.restart(now)
+                }
                 if (active.lastHeartMs > 0 && now - active.lastHeartMs >= 10_000)
                     mutableState.update { current -> if (session !== active) current else current.copy(
                         heartRate = null, heartRateConfidence = null, heartRateTimestampMs = null) }
@@ -209,14 +218,14 @@ class AirPodsSensorSession(private val aacp: AACPManager) : AutoCloseable {
                     val fifo = !motionNative || command(desiredMotion, 1, report = 4)
                     val interval = command(desiredMotion, if (motionNative) 20_000 else 40_000)
                     motionLive = desiredMotion
-                    motionStarted = now
+                    motionTimeout.restart(now)
                     active.lastMotionMs = 0
                     if (!(fifo && interval)) {
                         active.motion.set(false)
                         update { it.copy(motionEnabled = false, motionError = "Could not start movement reports.") }
                     }
                 }
-                if (motionWanted && now - maxOf(motionStarted, active.lastMotionMs) >= 5_000) {
+                if (motionTimeout.expired(motionWanted, now, active.lastMotionMs)) {
                     active.motion.set(false)
                     update { it.copy(motionEnabled = false, motion = null,
                         motionError = "No movement reports. Please try again.") }

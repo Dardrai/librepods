@@ -157,7 +157,7 @@ class ExperimentalAudioController(
                     if (!startMicrophoneLocked(request, recordToFile = false, output = next)) {
                         stopBridgeLocked()
                         mutableMessage.value = "The AirPods microphone could not start."
-                    } else mutableMessage.value = "Verify the microphone in the receiving app. Audio is not saved."
+                    } else mutableMessage.value = ""
                 } catch (error: Exception) {
                     runCatching { descriptor.close() }
                     stopLocked()

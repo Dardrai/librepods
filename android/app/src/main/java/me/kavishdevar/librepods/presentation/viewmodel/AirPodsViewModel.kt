@@ -43,7 +43,6 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import me.kavishdevar.librepods.BuildConfig
 import me.kavishdevar.librepods.R
-import me.kavishdevar.librepods.audio.RtBuddySensors
 import me.kavishdevar.librepods.billing.BillingManager
 import me.kavishdevar.librepods.bluetooth.AACPManager
 import me.kavishdevar.librepods.bluetooth.AllowOffPolicy
@@ -52,6 +51,7 @@ import me.kavishdevar.librepods.bluetooth.ATTCCCDHandles
 import me.kavishdevar.librepods.bluetooth.ATTHandles
 import me.kavishdevar.librepods.bluetooth.BluetoothConnectionManager
 import me.kavishdevar.librepods.data.AirPodsInstance
+import me.kavishdevar.librepods.data.AirPodsFirmware
 import me.kavishdevar.librepods.data.AirPodsModels
 import me.kavishdevar.librepods.data.AirPodsNotifications
 import me.kavishdevar.librepods.data.Battery
@@ -120,7 +120,7 @@ internal fun normalizedControl(value: ByteArray): ByteArray =
 
 internal fun offListeningModeAllowed(state: AirPodsUiState): Boolean {
     val id = ControlCommandIdentifiers.ALLOW_OFF_OPTION
-    val major = listOf(state.version1, state.version2, state.version3).firstNotNullOfOrNull(RtBuddySensors::publicFirmwareMajor)
+    val major = AirPodsFirmware.publicVersion(state.version1, state.version3)?.let(AirPodsFirmware::major)
     return AllowOffPolicy.allowed(state.requestedControls[id]?.firstOrNull()?.toInt(), state.controlStates[id]?.firstOrNull()?.toInt(),
         state.controlStates[ControlCommandIdentifiers.LISTENING_MODE]?.firstOrNull()?.toInt(),
         Capability.LISTENING_MODE in state.capabilities, Capability.ADAPTIVE_AUDIO in state.capabilities, major)

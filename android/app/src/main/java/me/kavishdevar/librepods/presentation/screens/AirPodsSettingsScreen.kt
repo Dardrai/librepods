@@ -103,6 +103,7 @@ import me.kavishdevar.librepods.R
 import me.kavishdevar.librepods.bluetooth.AACPManager
 import me.kavishdevar.librepods.bluetooth.ATTHandles
 import me.kavishdevar.librepods.data.AirPodsPro3
+import me.kavishdevar.librepods.data.AirPodsFirmware
 import me.kavishdevar.librepods.data.Capability
 import me.kavishdevar.librepods.presentation.MaterialIcons
 import me.kavishdevar.librepods.presentation.components.AboutCard
@@ -584,7 +585,7 @@ fun AirPodsSettingsScreen(
                     modelName = state.modelName,
                     actualModel = state.actualModel,
                     serialNumbers = state.serialNumbers,
-                    version = state.version3,
+                    version = AirPodsFirmware.publicVersion(state.version1, state.version3),
                     navigateToVersion = navigateToVersion
                 )
             }

@@ -91,7 +91,6 @@ import kotlinx.coroutines.withTimeoutOrNull
 import me.kavishdevar.librepods.audio.ExperimentalAudioController
 import me.kavishdevar.librepods.audio.MicrophonePacket
 import me.kavishdevar.librepods.audio.MicrophonePhase
-import me.kavishdevar.librepods.audio.RtBuddySensors
 import me.kavishdevar.librepods.bluetooth.PrivateAacpPacket
 import me.kavishdevar.librepods.bluetooth.AllowOffPolicy
 import me.kavishdevar.librepods.bluetooth.NearbyPairingController
@@ -106,6 +105,7 @@ import me.kavishdevar.librepods.bluetooth.BLEManager
 import me.kavishdevar.librepods.bluetooth.BluetoothConnectionManager
 import me.kavishdevar.librepods.bluetooth.createBluetoothSocket
 import me.kavishdevar.librepods.data.AirPodsInstance
+import me.kavishdevar.librepods.data.AirPodsFirmware
 import me.kavishdevar.librepods.data.AirPodsModels
 import me.kavishdevar.librepods.data.AirPodsNotifications
 import me.kavishdevar.librepods.data.Battery
@@ -2870,8 +2870,8 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         fun confirmed(id: AACPManager.Companion.ControlCommandIdentifiers): Int? =
             aacpManager.getControlCommandStatus(id)?.value?.firstOrNull()?.toInt()?.and(255)
         val model = AirPodsModels.getModelByModelNumber(config.airpodsModelNumber)
-        val firmware = listOf(config.airpodsVersion1, config.airpodsVersion2, config.airpodsVersion3)
-            .firstNotNullOfOrNull(RtBuddySensors::publicFirmwareMajor)
+        val firmware = AirPodsFirmware.publicVersion(config.airpodsVersion1, config.airpodsVersion3)
+            ?.let(AirPodsFirmware::major)
         return AllowOffPolicy.allowed(requested, confirmed(id),
             confirmed(AACPManager.Companion.ControlCommandIdentifiers.LISTENING_MODE),
             model?.capabilities?.contains(Capability.LISTENING_MODE) == true,
@@ -2883,8 +2883,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         val selected = device?.address ?: return
         if (sharedPreferences.getString("mac_address", "") != selected) return
         val model = AirPodsModels.getModelByModelNumber(config.airpodsModelNumber) ?: return
-        val firmware = listOf(config.airpodsVersion1, config.airpodsVersion2, config.airpodsVersion3)
-            .firstOrNull { RtBuddySensors.publicFirmwareMajor(it) != null } ?: ""
+        val firmware = AirPodsFirmware.publicVersion(config.airpodsVersion1, config.airpodsVersion3) ?: ""
         experimentalAudio.sensors.onConnected(model?.capabilities?.contains(Capability.HRM) == true,
             model?.capabilities?.contains(Capability.HEAD_GESTURES) == true, firmware)
     }
