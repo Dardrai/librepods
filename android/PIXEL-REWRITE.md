@@ -161,8 +161,10 @@ Apple input checks use the existing legacy-renderer workaround.
 
 Pixel20 was signed with the existing certificate and installed in place.
 Android confirmed version `2.0.0-alpha.1-pixel20`, code `200000105`, and the
-retained Shizuku grant. Physical checks of repeated case cycles, Allow Off
-after reconnect/restart and Refresh during music playback remain pending.
+retained Shizuku grant. On 2026-10-17, the user confirmed that repeated case
+cycles keep the island's battery and charging indicators updating, Allow Off
+stays selected after reconnecting and reopening LibrePods, and Refresh completes
+without leaving the settings page or interrupting music playback.
 No experimental microphone route or call was started for this update.
 
 Pixel19's `verifyPixel` passed with 183 tests in 36 suites, no failures, errors
