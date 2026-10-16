@@ -157,6 +157,19 @@ class ShizukuAudioService(context: Context) : IAudioBridge.Stub() {
         }
     }
 
+    override fun confirmPairing(address: String, owner: IPlaybackRecoveryOwner): Boolean {
+        enforceCaller()
+        if (cleanupFailed.get() || originalContext.packageManager.checkPermission(
+                "android.permission.BLUETOOTH_CONNECT", BuildConfig.APPLICATION_ID) != PackageManager.PERMISSION_GRANTED)
+            return false
+        val identity = Binder.clearCallingIdentity()
+        return try {
+            ShellPairing.confirm(shellContext, address, owner)
+        } finally {
+            Binder.restoreCallingIdentity(identity)
+        }
+    }
+
     override fun destroy() {
         val caller = Binder.getCallingUid()
         check(caller == expectedUid || caller == 2000 || caller == 0) { "Invalid bridge owner" }

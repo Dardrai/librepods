@@ -115,23 +115,69 @@ class NearbyAirPodsTest {
     @Test fun onlyASoleStableClassicIdentityCanPairAutomatically() {
         val discovery = NearbyAirPods.Discovery(0x2720)
         assertFalse(discovery.observe("unrelated", "Pixel Buds Pro", 0))
+        assertNull(discovery.readyInMillis(10_000))
         assertNull(discovery.automatic(10_000))
         assertTrue(discovery.observe("AA:BB:CC:DD:EE:01", "AirPods Pro", 100))
+        assertEquals(2_000L, discovery.readyInMillis(100))
+        assertEquals(1L, discovery.readyInMillis(2_099))
         assertNull(discovery.automatic(2_099))
         discovery.observe("AA:BB:CC:DD:EE:01", "AirPods Pro", 1_000)
-        assertNull(discovery.automatic(15_000))
+        assertEquals(0L, discovery.readyInMillis(2_100))
+        assertEquals("AA:BB:CC:DD:EE:01", discovery.automatic(2_100))
         discovery.finish()
-        assertEquals("AA:BB:CC:DD:EE:01", discovery.automatic(15_000))
+        assertEquals("AA:BB:CC:DD:EE:01", discovery.automatic(2_100))
         assertFalse(discovery.observe("AA:BB:CC:DD:EE:02", "AirPods Pro", 15_001))
+        assertFalse(discovery.observe("AA:BB:CC:DD:EE:01", "Pixel Buds Pro", 15_002))
+        assertEquals("AA:BB:CC:DD:EE:01", discovery.automatic(15_002))
     }
 
-    @Test fun aSecondCandidateAfterTwoSecondsPreventsAutomaticPairing() {
+    @Test fun aSecondCandidateBeforeTheSoleDeadlinePreventsAutomaticPairing() {
         val discovery = NearbyAirPods.Discovery(0x2720)
         discovery.observe("AA:BB:CC:DD:EE:01", "AirPods Pro", 100)
-        assertNull(discovery.automatic(2_100))
-        discovery.observe("AA:BB:CC:DD:EE:02", "AirPods Pro", 10_000)
+        assertNull(discovery.automatic(2_099))
+        discovery.observe("AA:BB:CC:DD:EE:02", "AirPods Pro", 2_099)
+        assertNull(discovery.readyInMillis(2_100))
         discovery.finish()
         assertNull(discovery.automatic(20_000))
+    }
+
+    @Test fun conflictingClassicNameRemovesOnlyThatCandidateAndRestartsTheSurvivorsDeadline() {
+        val discovery = NearbyAirPods.Discovery(0x2720)
+        discovery.observe("first", "AirPods Pro", 0)
+        discovery.observe("second", "Other AirPods Pro", 1_000)
+        assertTrue(discovery.ambiguous)
+        assertFalse(discovery.observe("second", "Pixel Buds Pro", 2_000))
+        assertFalse(discovery.ambiguous)
+        assertEquals(2_000L, discovery.readyInMillis(2_000))
+        assertNull(discovery.automatic(3_999))
+        assertEquals("first", discovery.automatic(4_000))
+        assertFalse(discovery.observe("first", "AirPods Pro 2", 4_001))
+        assertNull(discovery.readyInMillis(10_000))
+        assertNull(discovery.automatic(10_000))
+        assertTrue(discovery.observe("first", "AirPods Pro 3", 10_001))
+        assertEquals(2_000L, discovery.readyInMillis(10_001))
+        assertNull(discovery.automatic(12_000))
+        assertEquals("first", discovery.automatic(12_001))
+    }
+
+    @Test fun missingNamesAndDuplicateReportsDoNotEraseOrPostponeAKnownClassicCandidate() {
+        val discovery = NearbyAirPods.Discovery(0x2720)
+        assertFalse(discovery.observe("unknown", null, 0))
+        assertTrue(discovery.observe("first", "AirPods Pro 3", 100))
+        assertTrue(discovery.observe("first", null, 1_000))
+        assertTrue(discovery.observe("first", "Renamed AirPods", 2_099))
+        assertEquals(1L, discovery.readyInMillis(2_099))
+        assertEquals("first", discovery.automatic(2_100))
+    }
+
+    @Test fun aClockBeforeTheSoleObservationCannotMakeTheCandidateReady() {
+        val discovery = NearbyAirPods.Discovery(0x2720)
+        discovery.observe("first", "AirPods Pro", 100)
+        assertEquals(2_000L, discovery.readyInMillis(99))
+        assertEquals(2_000L, discovery.readyInMillis(Long.MIN_VALUE))
+        assertNull(discovery.automatic(99))
+        assertNull(discovery.automatic(Long.MIN_VALUE))
+        assertEquals("first", discovery.automatic(Long.MAX_VALUE))
     }
 
     @Test fun twoClassicAddressesStayAmbiguousRegardlessOfOrderOrRepeatedNames() {

@@ -73,6 +73,7 @@ class ShizukuAudioClient(context: Context) : Closeable {
     private val pendingStops = ArrayDeque<InjectionRequest>()
     private var current: InjectionRequest? = null
     private var playbackRequest: PlaybackRequest? = null
+    private var pairingRequest: PlaybackRequest? = null
     @Volatile private var bridge: IAudioBridge? = null
     @Volatile private var closed = false
     private var connecting = false
@@ -343,6 +344,48 @@ class ShizukuAudioClient(context: Context) : Closeable {
         false
     }
 
+    /** Optional consent assistance: never waits for binding, asks permission or starts an audio route. */
+    suspend fun confirmPairing(address: String, stillCurrent: () -> Boolean): Boolean {
+        val remote = bridge ?: return false
+        if (!pairingAllowed(remote) || !runCatching(stillCurrent).getOrDefault(false)) return false
+        val selected = runCatching { A2dpRecoveryGuard(address).address }.getOrNull() ?: return false
+        return try {
+            withTimeoutOrNull(1_200) {
+                val callerJob = currentCoroutineContext()[Job]
+                suspendCancellableCoroutine { continuation ->
+                    val request = synchronized(lock) {
+                        if (closed || bridge !== remote) null else {
+                            pairingRequest?.active?.set(false)
+                            PlaybackRequest(remote, selected,
+                                { pairingAllowed(remote) && stillCurrent() }, callerJob).also { pairingRequest = it }
+                        }
+                    }
+                    if (request == null) { continuation.resume(false); return@suspendCancellableCoroutine }
+                    continuation.invokeOnCancellation { request.active.set(false) }
+                    scope.launch {
+                        val result = try {
+                            if (!request.active.get() || !pairingAllowed(remote)) false
+                            else request.remote.confirmPairing(request.address, request.owner)
+                        } catch (_: Exception) { false }
+                        finally {
+                            request.active.set(false)
+                            synchronized(lock) { if (pairingRequest === request) pairingRequest = null }
+                        }
+                        if (continuation.isActive) continuation.resume(result)
+                    }
+                }
+            } ?: false
+        } catch (error: Exception) {
+            if (error is CancellationException) throw error
+            false
+        }
+    }
+
+    private fun pairingAllowed(remote: IAudioBridge): Boolean = !closed && bridge === remote && runCatching {
+        context.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED &&
+            Shizuku.pingBinder() && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
+    }.getOrDefault(false)
+
     fun cancelPlaybackRecovery() = synchronized(lock) { cancelPlaybackRecoveryLocked() }
 
     /** AACP does not use AudioRecord, so Android's software sensor privacy must be checked explicitly. */
@@ -369,6 +412,8 @@ class ShizukuAudioClient(context: Context) : Closeable {
 
     private fun disconnected(reason: String) {
         synchronized(lock) {
+            pairingRequest?.active?.set(false)
+            pairingRequest = null
             cancelPlaybackRecoveryLocked()
             current?.let {
                 runCatching { it.pcm?.close() }
@@ -388,6 +433,8 @@ class ShizukuAudioClient(context: Context) : Closeable {
         synchronized(lock) {
             if (closed) return
             closed = true
+            pairingRequest?.active?.set(false)
+            pairingRequest = null
             cancelPlaybackRecoveryLocked()
             runCatching { current?.pcm?.close() }
             current = null

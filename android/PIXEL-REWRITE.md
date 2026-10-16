@@ -20,7 +20,7 @@ pair, local behavior choices and correctly owner-bound BLE keys once. Existing
 rewrite database rows are preserved. Unconfirmed device control values are not
 migrated as device reports. The Android Bluetooth bond stays with Android.
 
-The current fork version is `2.0.0-alpha.1-pixel15`, code `200000100`.
+The current fork version is `2.0.0-alpha.1-pixel16`, code `200000101`.
 
 ## Pairing and island latency
 
@@ -29,7 +29,16 @@ The current fork version is `2.0.0-alpha.1-pixel15`, code `200000100`.
   screen-off scanning uses the configured mode. The preference is not changed.
 - Public lid reports display a model invitation without waiting for Classic
   discovery, an audio connection or AACP initialization. Discovery starts only
-  after Connect. Pairing still requires Android's native confirmation.
+  after Connect. A sole matching Classic candidate can proceed after two stable
+  seconds, without waiting for the full inquiry and another fixed delay. Name
+  updates are accepted only for Classic addresses found in that scan; multiple
+  matching addresses prevent automatic selection.
+- With already-authorized Shizuku, Connect warms the shell bridge without
+  delaying discovery. It can confirm only the active selected AirPods request's
+  consent step while Android reports that exact device is bonding. Closing,
+  retrying or revoking permission retires the request. PIN/passkey variants and
+  unavailable Shizuku retain Android's normal confirmation flow. Putting the
+  case into pairing mode remains a physical step.
 - Owned battery/lid reports require a current bond and valid per-device keys.
   Public advertisements cannot establish a Classic identity or overwrite an
   owned device's batteries.
@@ -102,8 +111,15 @@ requests are retained only for the current connection, not presented as reports.
 
 ## Validation on 2026-10-16
 
-`verifyPixel` passed with 149 tests in 33 suites, no failures, errors or skips,
+Pixel16's `verifyPixel` passed with 163 tests in 35 suites, no failures, errors or skips,
 Android lint with no errors, and successful debug/minified release builds.
+Pairing regressions cover the live selection deadline, repeated/name-delayed
+reports, ambiguous or LE candidates, older Android's bond API, discovery
+ownership, canceled receivers and narrowly scoped Shizuku consent. Pixel16 was
+signed with the existing certificate and installed in place; Android confirmed
+its version. After forgetting the old bond, the user confirmed that Pixel16
+pairs automatically and is much faster. No pairing timing logs
+were retained for that attempt, so there is no measured end-to-end duration.
 Native pairing-card captures cover light mode and dark mode with narrow width
 and larger text. Pixel15 was signed with the existing fork certificate and
 installed in place, retaining the app's data. Android confirmed its version.
@@ -131,4 +147,5 @@ the case, despite 32 ms from Android's scan timestamp to the overlay request and
 changes scanning and cached-identity admission. Its owned lid reports reached
 the overlay request in 11–31 ms and first drawing pass in 27–62 ms; those are
 radio-to-frame measurements, not physical lid-to-frame measurements. Fresh
-pairing, sensors and call audio have not been retested on the rewrite.
+pairing was subsequently confirmed on Pixel16; sensors and call audio have not
+been retested on the rewrite.

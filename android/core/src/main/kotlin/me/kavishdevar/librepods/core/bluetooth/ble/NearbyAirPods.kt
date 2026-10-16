@@ -67,14 +67,24 @@ object NearbyAirPods {
         private var complete = false
 
         fun observe(address: String, name: String?, now: Long): Boolean {
-            if (complete || !matchesName(modelId, name)) return false
+            if (complete) return false
+            if (name == null) return address in addresses
+            if (!matchesName(modelId, name)) {
+                if (addresses.remove(address) && addresses.size == 1) soleSince = now
+                return false
+            }
             if (addresses.add(address) && addresses.size == 1) soleSince = now
             return true
         }
 
         fun finish() { complete = true }
 
-        fun automatic(now: Long): String? = addresses.singleOrNull()?.takeIf { complete && now - soleSince >= STABLE_MS }
+        fun readyInMillis(now: Long): Long? {
+            if (addresses.size != 1) return null
+            return if (now <= soleSince) STABLE_MS else (STABLE_MS - (now - soleSince)).coerceAtLeast(0)
+        }
+
+        fun automatic(now: Long): String? = addresses.singleOrNull()?.takeIf { readyInMillis(now) == 0L }
 
         val ambiguous: Boolean get() = addresses.size > 1
 

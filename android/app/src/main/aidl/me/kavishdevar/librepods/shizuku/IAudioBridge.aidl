@@ -13,5 +13,6 @@ interface IAudioBridge {
     void stopSession(IBinder owner) = 2;
     boolean restoreNativePlayback(String address, IPlaybackRecoveryOwner owner) = 3;
     boolean isMicrophonePrivacyBlocked() = 4;
+    boolean confirmPairing(String address, IPlaybackRecoveryOwner owner) = 5;
     void destroy() = 16777114;
 }
