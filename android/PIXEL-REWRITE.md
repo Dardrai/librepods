@@ -136,8 +136,10 @@ propagate an asynchronous pending result's abort flag through its ordered
 receiver chain, so success checks assert that result's abort/completion flags;
 fallback checks retain delivery to a lower-priority receiver. Pixel18 was signed
 with the existing certificate and installed in place; Android confirmed its
-version. The live fresh-pairing continuity check is pending. No audio checks
-were repeated.
+version. After forgetting the old bond, the user confirmed that the card stays
+visible through Connecting to Paired and pairing completes. This verifies the
+handoff on this Pixel/Shizuku setup; receiver order remains platform dependent.
+No audio checks were repeated.
 
 Pixel17's `verifyPixel` passed with 167 tests in 35 suites, no failures, errors
 or skips, lint with no errors, and successful debug/minified release builds.
