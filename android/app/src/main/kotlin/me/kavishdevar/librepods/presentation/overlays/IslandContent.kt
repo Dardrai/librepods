@@ -74,6 +74,14 @@ import me.kavishdevar.librepods.data.app.resolve
 import me.kavishdevar.librepods.presentation.components.apple.NoiseControlSettings
 import me.kavishdevar.librepods.presentation.icons.LocalIcons
 
+internal fun islandInitialSize(settings: IslandSettings, state: IslandState, motionEnabled: Boolean,
+    cameraCapsuleWidth: Float = settings.compactHeight): Pair<Float, Float> = when {
+    state == IslandState.CLOSE -> 0f to settings.compactHeight
+    motionEnabled -> minOf(settings.compactWidth, maxOf(settings.compactHeight, cameraCapsuleWidth)) to settings.compactHeight
+    state == IslandState.EXPANDED -> settings.expandedWidth to settings.expandedHeight
+    else -> settings.compactWidth to settings.compactHeight
+}
+
 @Composable
 fun IslandContent(
     name: String,
@@ -101,6 +109,7 @@ fun IslandContent(
     paired: Boolean = false,
     nearby: Boolean = false,
     cameraPaddingPx: Int = 0,
+    cameraCapsuleWidthPx: Float = islandSettings.compactHeight,
 ) {
     val density = LocalDensity.current
     val cells = islandBatteryCells(model, batteries, batteryNow)
@@ -110,10 +119,12 @@ fun IslandContent(
     val batteryLive = !paired || compactCell?.live == true
     val spec = AirPodsSpecs.getSpec(model)
 
-    val animWidth = remember { Animatable(if (islandState == IslandState.EXPANDED) islandSettings.expandedWidth else islandSettings.compactWidth) }
-    val animHeight = remember { Animatable(if (islandState == IslandState.EXPANDED) islandSettings.expandedHeight else islandSettings.compactHeight) }
-    val animRadius = remember { Animatable(if (islandState == IslandState.EXPANDED) islandSettings.expandedBorderRadius else islandSettings.compactBorderRadius) }
-    val animBorderWidth = remember { Animatable(if (islandState == IslandState.EXPANDED) islandSettings.expandedBorderWidth else islandSettings.compactBorderWidth) }
+    val initialMotionEnabled = remember { ValueAnimator.areAnimatorsEnabled() }
+    val initialSize = remember { islandInitialSize(islandSettings, islandState, initialMotionEnabled, cameraCapsuleWidthPx) }
+    val animWidth = remember { Animatable(initialSize.first) }
+    val animHeight = remember { Animatable(initialSize.second) }
+    val animRadius = remember { Animatable(if (!initialMotionEnabled && islandState == IslandState.EXPANDED) islandSettings.expandedBorderRadius else islandSettings.compactBorderRadius) }
+    val animBorderWidth = remember { Animatable(if (!initialMotionEnabled && islandState == IslandState.EXPANDED) islandSettings.expandedBorderWidth else islandSettings.compactBorderWidth) }
 
     val springSpec = spring<Float>(
         dampingRatio = if (islandState == IslandState.CLOSE) Spring.DampingRatioNoBouncy else Spring.DampingRatioNoBouncy,

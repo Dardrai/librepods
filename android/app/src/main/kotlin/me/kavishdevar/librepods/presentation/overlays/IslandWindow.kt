@@ -33,6 +33,7 @@ import android.view.WindowInsets
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.ComposeView
@@ -98,6 +99,7 @@ class IslandWindow(
     private var batteryNow by mutableStateOf(System.currentTimeMillis())
     private var effectiveSettings by mutableStateOf(appSettings.islandSettings)
     private var cameraPadding by mutableIntStateOf(0)
+    private var cameraCapsuleWidth by mutableFloatStateOf(0f)
     private val ageHandler = Handler(Looper.getMainLooper())
     private val updateAge = object : Runnable {
         override fun run() {
@@ -323,6 +325,8 @@ class IslandWindow(
             expandedHeight = placement.expandedHeight.toFloat(), compactWidth = placement.compactWidth.toFloat(),
             compactHeight = placement.compactHeight.toFloat())
         cameraPadding = placement.contentTop
+        cameraCapsuleWidth = camera?.let { it.width() + 12 * context.resources.displayMetrics.density }
+            ?: placement.compactHeight.toFloat()
         val windowType = if (context is android.accessibilityservice.AccessibilityService) {
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY
         } else {
@@ -350,6 +354,7 @@ class IslandWindow(
         lifecycleOwner = OverlayLifecycleOwner()
 
         composeView = ComposeView(context).apply {
+            val overlayView = this
             isForceDarkAllowed = false
             setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
 
@@ -388,7 +393,7 @@ class IslandWindow(
                             islandState = state
                             if (!updateBefore) updateWindowParams(state)
                         },
-                        onClosed = { cleanupAndRemoveView() },
+                        onClosed = { cleanupAndRemoveView(overlayView) },
                         resetTimer = { resetTimer() },
 
                         showOffListeningMode = showOffListeningMode,
@@ -397,7 +402,8 @@ class IslandWindow(
                         adaptiveStrength = this@IslandWindow.adaptiveStrength,
                         onAdaptiveStrengthChanged = this@IslandWindow.onAdaptiveStrengthChanged,
                         model = model, batteries = batteries, batteryNow = batteryNow,
-                        paired = ownerAddress != null, nearby = nearby, cameraPaddingPx = cameraPadding
+                        paired = ownerAddress != null, nearby = nearby, cameraPaddingPx = cameraPadding,
+                        cameraCapsuleWidthPx = cameraCapsuleWidth
                     )
                 }
             }
@@ -428,7 +434,8 @@ class IslandWindow(
         islandState = IslandState.CLOSE
     }
 
-    private fun cleanupAndRemoveView() {
+    private fun cleanupAndRemoveView(expected: ComposeView) {
+        if (composeView !== expected || islandState != IslandState.CLOSE) return
         try {
             composeView?.let { view ->
                 if (view.parent != null) {

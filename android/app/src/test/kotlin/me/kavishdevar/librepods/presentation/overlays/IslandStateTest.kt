@@ -5,20 +5,68 @@ import android.app.Application
 import android.graphics.Insets
 import android.graphics.Rect
 import android.graphics.RectF
+import androidx.compose.ui.platform.ComposeView
 import me.kavishdevar.librepods.core.devices.AirPodsModel
 import me.kavishdevar.librepods.core.devices.Battery
 import me.kavishdevar.librepods.core.devices.BatteryComponent
 import me.kavishdevar.librepods.core.devices.BatteryStatus
 import me.kavishdevar.librepods.data.app.IslandSettings
+import me.kavishdevar.librepods.database.app.AppSettingsEntity
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import org.robolectric.RuntimeEnvironment
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [37], application = Application::class)
 class IslandStateTest {
+    @Test fun openingStartsWithAnAlreadyVisibleCameraCapsuleForBothDisplayModes() {
+        val settings = IslandSettings(compactWidth = 300f, compactHeight = 132f,
+            expandedWidth = 1248f, expandedHeight = 630f)
+        for (state in listOf(IslandState.EXPANDED, IslandState.COMPACT)) {
+            val first = islandInitialSize(settings, state, motionEnabled = true)
+            assertEquals(132f, first.first, 0f)
+            assertEquals(132f, first.second, 0f)
+            assertTrue(first.first < settings.compactWidth)
+        }
+        val wideCamera = islandInitialSize(settings, IslandState.EXPANDED, true, cameraCapsuleWidth = 210f)
+        assertEquals(210f, wideCamera.first, 0f)
+        assertEquals(132f, wideCamera.second, 0f)
+    }
+
+    @Test fun reducedMotionStartsAtTheRequestedSizeWithoutAnEntranceOrAttachmentDelay() {
+        val settings = IslandSettings(compactWidth = 300f, compactHeight = 132f,
+            expandedWidth = 1248f, expandedHeight = 630f)
+        assertEquals(settings.expandedWidth to settings.expandedHeight,
+            islandInitialSize(settings, IslandState.EXPANDED, motionEnabled = false))
+        assertEquals(settings.compactWidth to settings.compactHeight,
+            islandInitialSize(settings, IslandState.COMPACT, motionEnabled = false))
+        assertEquals(0f to settings.compactHeight,
+            islandInitialSize(settings, IslandState.CLOSE, motionEnabled = true))
+    }
+
+    @Test fun anInterruptedExitCannotRemoveAReopenedOrReplacementOverlay() {
+        val context = RuntimeEnvironment.getApplication()
+        val window = IslandWindow(context, AppSettingsEntity())
+        val first = ComposeView(context)
+        val replacement = ComposeView(context)
+        val field = IslandWindow::class.java.getDeclaredField("composeView").apply { isAccessible = true }
+        val completeExit = IslandWindow::class.java.getDeclaredMethod("cleanupAndRemoveView", ComposeView::class.java)
+            .apply { isAccessible = true }
+        field.set(window, first)
+        window.changeState(IslandState.EXPANDED)
+        completeExit.invoke(window, first)
+        assertSame(first, field.get(window))
+        window.changeState(IslandState.CLOSE)
+        field.set(window, replacement)
+        completeExit.invoke(window, first)
+        assertSame(replacement, field.get(window))
+        completeExit.invoke(window, replacement)
+        assertNull(field.get(window))
+    }
+
     @Test fun physicalCameraUsesAcceptedPixelGeometryAndWiderSafeWidth() {
         val placement = islandPlacement(Rect(0, 0, 1344, 2992), Insets.of(0, 200, 0, 72),
             RectF(623.5f, 52f, 719.5f, 148f), 3f, IslandSettings())

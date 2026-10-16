@@ -20,7 +20,7 @@ pair, local behavior choices and correctly owner-bound BLE keys once. Existing
 rewrite database rows are preserved. Unconfirmed device control values are not
 migrated as device reports. The Android Bluetooth bond stays with Android.
 
-The current fork version is `2.0.0-alpha.1-pixel12`, code `200000097`.
+The current fork version is `2.0.0-alpha.1-pixel13`, code `200000098`.
 
 ## Pairing and island latency
 
@@ -42,9 +42,11 @@ The current fork version is `2.0.0-alpha.1-pixel12`, code `200000097`.
 - Incomplete key responses retain the previous complete IRK/encryption pair;
   a valid replacement changes both together. Cache, metadata and settings
   updates are transactional so concurrent saves cannot overwrite each other.
-- The island attaches in its visible state immediately, wraps the actual camera
-  path and limits its expanded width to 420 dp with screen margins. Passive
-  battery updates retain the original owner and dismissal time.
+- The island attaches immediately as a visible camera-sized capsule and uses
+  the existing spring to open. Remove Animations starts at the requested size.
+  It wraps the actual camera path and limits expanded width to 420 dp with
+  screen margins. Passive battery updates retain the owner and dismissal time;
+  a canceled exit cannot remove a reopened or replacement overlay.
 - Debug timing logs measure Android's radio timestamp to the overlay request
   and the first drawing pass.
   They do not measure when the physical case opened or prove Windows parity.
@@ -90,13 +92,15 @@ requests are retained only for the current connection, not presented as reports.
 
 ## Validation on 2026-10-16
 
-`verifyPixel` passed with 132 tests in 31 suites, no failures, errors or skips,
+`verifyPixel` passed with 135 tests in 31 suites, no failures, errors or skips,
 Android lint with no errors, and successful debug/minified release builds.
 Native pairing-card captures cover light mode and dark mode with narrow width
 and larger text. The release was signed with the existing fork certificate and
-installed in place on the Pixel as Pixel12. Android's scan state confirms
+installed in place on the Pixel as Pixel13. Android's scan state confirms
 unbatched passive low-latency monitoring. The user confirmed the island now
-appears promptly, while reporting that its opening animation had disappeared.
+appears promptly on Pixel12. Pixel13 restores its camera-origin opening
+animation, with regressions for visible initial geometry, reduced motion and
+interrupted exits. Physical animation confirmation is pending.
 
 The first physical Pixel11 check still took roughly ten seconds after opening
 the case, despite 32 ms from Android's scan timestamp to the overlay request and
@@ -104,5 +108,4 @@ the case, despite 32 ms from Android's scan timestamp to the overlay request and
 changes scanning and cached-identity admission. Its owned lid reports reached
 the overlay request in 11–31 ms and first drawing pass in 27–62 ms; those are
 radio-to-frame measurements, not physical lid-to-frame measurements. Fresh
-pairing, sensors and call audio have not been
-retested on the rewrite.
+pairing, sensors and call audio have not been retested on the rewrite.
