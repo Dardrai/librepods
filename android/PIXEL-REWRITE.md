@@ -20,7 +20,7 @@ pair, local behavior choices and correctly owner-bound BLE keys once. Existing
 rewrite database rows are preserved. Unconfirmed device control values are not
 migrated as device reports. The Android Bluetooth bond stays with Android.
 
-The current fork version is `2.0.0-alpha.1-pixel17`, code `200000102`.
+The current fork version is `2.0.0-alpha.1-pixel18`, code `200000103`.
 
 ## Pairing and island latency
 
@@ -39,6 +39,13 @@ The current fork version is `2.0.0-alpha.1-pixel17`, code `200000102`.
   retrying or revoking permission retires the request. PIN/passkey variants and
   unavailable Shizuku retain Android's normal confirmation flow. Putting the
   case into pairing mode remains a physical step.
+- For an ordered consent request from that selected bonding device, the
+  controller briefly holds delivery while Shizuku confirms it. Success or an
+  observed completed bond retires the request before Android opens its dialog;
+  failure, cancellation or a 1.5-second deadline releases the normal prompt.
+  This avoids the system dialog briefly hiding the card when the controller
+  receives the request first. Cross-process receiver order remains platform
+  dependent; unordered requests keep the existing confirmation behavior.
 - The pairing card presents separate nearby, case setup, connecting, retry and
   completion states. Its title follows the current step, busy states use a
   compact progress indicator, and completion offers Continue without delaying
@@ -120,6 +127,18 @@ requests are retained only for the current connection, not presented as reports.
 
 ## Validation on 2026-10-16
 
+Pixel18's `verifyPixel` passed with 173 tests in 35 suites, no failures, errors
+or skips, lint with no errors, and successful debug/minified release builds.
+New regressions cover successful held consent, completed bonding before IPC
+returns, cancellation with a late successful reply, the independent fallback
+deadline, helper failure and unrelated/passkey requests. Robolectric does not
+propagate an asynchronous pending result's abort flag through its ordered
+receiver chain, so success checks assert that result's abort/completion flags;
+fallback checks retain delivery to a lower-priority receiver. Pixel18 was signed
+with the existing certificate and installed in place; Android confirmed its
+version. The live fresh-pairing continuity check is pending. No audio checks
+were repeated.
+
 Pixel17's `verifyPixel` passed with 167 tests in 35 suites, no failures, errors
 or skips, lint with no errors, and successful debug/minified release builds.
 Native Android 17 rendering covers all five pairing states, narrow screens,
@@ -127,8 +146,9 @@ large text and short landscape layouts, plus coordinated sheet motion and
 reduced motion. The Pro clip's 178 decoded frames contain no blank frames; its
 first frame and loading poster match. Pixel17 was signed with the existing
 certificate and installed in place after wireless debugging reconnected; Android
-confirmed its version. The live appearance/motion check is pending. This polish
-does not retest audio.
+confirmed its version. The user reported a brief disappearance and return of the
+card during automatic confirmation, prompting Pixel18's consent handoff fix.
+This polish does not retest audio.
 
 Pixel16's `verifyPixel` passed with 163 tests in 35 suites, no failures, errors or skips,
 Android lint with no errors, and successful debug/minified release builds.

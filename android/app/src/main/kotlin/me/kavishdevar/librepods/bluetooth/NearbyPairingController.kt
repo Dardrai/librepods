@@ -15,6 +15,7 @@ import android.os.Looper
 import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -41,6 +42,8 @@ class NearbyPairingController(
     @Volatile private var receiver: BroadcastReceiver? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var consentJob: Job? = null
+    @Volatile private var pendingConsent: BroadcastReceiver.PendingResult? = null
+    private var consentFallback: Runnable? = null
     private var client: ShizukuAudioClient? = null
     private var discoveryOwned = false
     private var timeout: Runnable? = null
@@ -221,15 +224,41 @@ class NearbyPairingController(
                                 device.bondState != BluetoothDevice.BOND_BONDING) return
                             consentRequested = true
                             val owner = this
+                            // Keep Android's dialog as the fallback until the chosen consent succeeds.
+                            val pending = if (isOrderedBroadcast) goAsync() else null
+                            val consentDeadline = SystemClock.elapsedRealtime() + 1_500
+                            if (pending != null) {
+                                pendingConsent = pending
+                                consentFallback = Runnable {
+                                    if (pendingConsent === pending) {
+                                        consentJob?.cancel()
+                                        consentJob = null
+                                        finishConsent(pending)
+                                    }
+                                }
+                                    .also { handler.postDelayed(it, 1_500) }
+                            }
                             consentJob = scope.launch {
+                                var confirmed = false
                                 val stillCurrent = {
                                     receiver === owner && canContinue(token, attempt) &&
+                                        (pending == null || pendingConsent === pending && SystemClock.elapsedRealtime() < consentDeadline) &&
                                         runCatching { device.bondState == BluetoothDevice.BOND_BONDING }.getOrDefault(false)
                                 }
-                                if (stillCurrent()) {
-                                    val confirmed = confirmConsent?.invoke(device.address, stillCurrent)
-                                        ?: client?.confirmPairing(device.address, stillCurrent) ?: false
-                                    Log.d(TAG, "Consent confirmation available: $confirmed")
+                                try {
+                                    if (stillCurrent()) {
+                                        confirmed = confirmConsent?.invoke(device.address, stillCurrent)
+                                            ?: client?.confirmPairing(device.address, stillCurrent) ?: false
+                                        Log.d(TAG, "Consent confirmation available: $confirmed")
+                                    }
+                                } catch (error: Exception) {
+                                    if (error is CancellationException) throw error
+                                    Log.w(TAG, "Consent confirmation unavailable", error)
+                                } finally {
+                                    if (pending != null) handler.post {
+                                        finishConsent(pending, confirmed && receiver === owner && canContinue(token, attempt) &&
+                                            SystemClock.elapsedRealtime() < consentDeadline)
+                                    }
                                 }
                             }
                             return
@@ -243,6 +272,7 @@ class NearbyPairingController(
                             BluetoothDevice.BOND_BONDED -> {
                                 if (!bondingObserved || device.bondState != BluetoothDevice.BOND_BONDED) return
                                 Log.d(TAG, "Connect to BONDED: ${SystemClock.elapsedRealtime() - requestedAt}ms")
+                                finishConsent(accepted = true)
                                 stopDiscovery()
                                 popup?.showPairingActions(context.getString(R.string.pairing_complete), listOf(
                                     context.getString(R.string.pairing_continue) to {
@@ -266,6 +296,7 @@ class NearbyPairingController(
             context.registerReceiver(receiver, IntentFilter().apply {
                 addAction(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
                 addAction(BluetoothDevice.ACTION_PAIRING_REQUEST)
+                priority = IntentFilter.SYSTEM_HIGH_PRIORITY - 1
             }, Context.RECEIVER_EXPORTED)
             Log.d(TAG, "Connect to createBond: ${SystemClock.elapsedRealtime() - requestedAt}ms")
             val started = if (Build.VERSION.SDK_INT >= 37) device.createBond(BluetoothDevice.TRANSPORT_BREDR)
@@ -331,6 +362,7 @@ class NearbyPairingController(
         receiver = null
         consentJob?.cancel()
         consentJob = null
+        finishConsent()
         selection?.let(handler::removeCallbacks)
         selection = null
         continuation?.let(handler::removeCallbacks)
@@ -350,6 +382,16 @@ class NearbyPairingController(
                 Log.w(TAG, "Bluetooth permission revoked during discovery", e)
             }
         }
+    }
+
+    /** PendingResult is completed only on the main thread, once, including cancellation. */
+    private fun finishConsent(expected: BroadcastReceiver.PendingResult? = pendingConsent, accepted: Boolean = false) {
+        if (expected == null || pendingConsent !== expected) return
+        pendingConsent = null
+        consentFallback?.let(handler::removeCallbacks)
+        consentFallback = null
+        if (accepted) expected.abortBroadcast()
+        expected.finish()
     }
 
     private fun dismiss() {

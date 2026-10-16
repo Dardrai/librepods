@@ -7,13 +7,19 @@ import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
 import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.os.Looper
 import android.os.SystemClock
 import android.provider.Settings
 import android.view.View
 import android.widget.Button
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.withContext
 import me.kavishdevar.librepods.R
 import me.kavishdevar.librepods.core.bluetooth.ble.NearbyAirPods
 import me.kavishdevar.librepods.presentation.overlays.PopupWindow
@@ -30,6 +36,7 @@ import org.robolectric.annotation.Implementation
 import org.robolectric.annotation.Implements
 import org.robolectric.annotation.LooperMode
 import org.robolectric.shadow.api.Shadow
+import org.robolectric.shadows.ShadowBroadcastPendingResult
 import org.robolectric.shadows.ShadowBluetoothDevice
 import org.robolectric.shadows.ShadowSettings
 import java.time.Duration
@@ -45,6 +52,7 @@ class NearbyPairingControllerTest {
     private val context get() = RuntimeEnvironment.getApplication()
     private lateinit var adapter: BluetoothAdapter
     private lateinit var controller: NearbyPairingController
+    private val nativeReceivers = mutableListOf<BroadcastReceiver>()
 
     @Before fun setUp() {
         shadowOf(context).grantPermissions(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
@@ -55,7 +63,10 @@ class NearbyPairingControllerTest {
         controller = newController()
     }
 
-    @After fun tearDown() { controller.close() }
+    @After fun tearDown() {
+        controller.close()
+        nativeReceivers.forEach(context::unregisterReceiver)
+    }
 
     @Test fun soleFreshClassicCandidateBondsAtTwoSecondsWithoutWaitingForInquiryEnd() {
         connect()
@@ -283,6 +294,141 @@ class NearbyPairingControllerTest {
         assertEquals(1, calls.get())
     }
 
+    @Test fun orderedConsentWaitsForConfirmationAndSkipsTheNativeDialogOnlyOnSuccess() {
+        controller.close()
+        val answer = CompletableDeferred<Boolean>()
+        val entered = CountDownLatch(1)
+        controller = NearbyPairingController(context, confirmConsent = { _, _ ->
+            entered.countDown()
+            answer.await()
+        })
+        val native = nativeFallback()
+        val selected = bondingCandidate()
+        orderedPairingRequest(selected, 3)
+        assertTrue(entered.await(2, TimeUnit.SECONDS))
+        val held = field("pendingConsent") as BroadcastReceiver.PendingResult
+        assertEquals(0, native.get())
+
+        answer.complete(true)
+        awaitMainCondition { field("pendingConsent") == null }
+        assertFinishedConsent(held, aborted = true)
+        advance(1_500)
+        assertFinishedConsent(held, aborted = true)
+    }
+
+    @Test fun aBondedResultAbortsHeldConsentBeforeRetiringItsConfirmationJob() {
+        controller.close()
+        val entered = CountDownLatch(1)
+        val canceled = CountDownLatch(1)
+        controller = NearbyPairingController(context, confirmConsent = { _, _ ->
+            entered.countDown()
+            try { awaitCancellation() } finally { canceled.countDown() }
+        })
+        val native = nativeFallback()
+        val selected = bondingCandidate()
+        orderedPairingRequest(selected, 3)
+        assertTrue(entered.await(2, TimeUnit.SECONDS))
+        val held = field("pendingConsent") as BroadcastReceiver.PendingResult
+        assertEquals(0, native.get())
+
+        // Exercise an early bond callback before its confirmation IPC has returned.
+        pairing(selected).setBondState(BluetoothDevice.BOND_BONDED)
+        (field("receiver") as BroadcastReceiver).onReceive(context,
+            Intent(BluetoothDevice.ACTION_BOND_STATE_CHANGED).putExtra(BluetoothDevice.EXTRA_DEVICE, selected)
+                .putExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.BOND_BONDED))
+        idle()
+        assertNull(field("pendingConsent"))
+        assertTrue(canceled.await(2, TimeUnit.SECONDS))
+        idle()
+        assertFinishedConsent(held, aborted = true)
+        assertEquals(PopupWindow.Stage.COMPLETE, stage())
+    }
+
+    @Test fun closingHeldConsentReturnsItToAndroidAndRejectsLateConfirmation() {
+        controller.close()
+        val entered = CountDownLatch(1)
+        val answer = CompletableDeferred<Boolean>()
+        val guard = AtomicReference<(() -> Boolean)?>()
+        controller = NearbyPairingController(context, confirmConsent = { _, stillCurrent ->
+            guard.set(stillCurrent)
+            entered.countDown()
+            withContext(NonCancellable) { answer.await() }
+        })
+        val native = nativeFallback()
+        val selected = bondingCandidate()
+        orderedPairingRequest(selected, 3)
+        assertTrue(entered.await(2, TimeUnit.SECONDS))
+        val held = field("pendingConsent") as BroadcastReceiver.PendingResult
+        val confirming = field("consentJob") as Job
+        controller.cancelPending()
+        idle()
+        assertNull(field("pendingConsent"))
+        assertEquals(1, native.get())
+        assertFalse(requireNotNull(guard.get()).invoke())
+        assertFinishedConsent(held, aborted = false)
+        answer.complete(true)
+        awaitMainCondition { confirming.isCompleted }
+        assertFinishedConsent(held, aborted = false)
+        advance(1_500)
+        assertEquals("Cancellation and timeout must finish a held request only once", 1, native.get())
+    }
+
+    @Test fun heldConsentHasAnIndependentFifteenHundredMillisecondNativeFallback() {
+        controller.close()
+        val entered = CountDownLatch(1)
+        val canceled = CountDownLatch(1)
+        val guard = AtomicReference<(() -> Boolean)?>()
+        controller = NearbyPairingController(context, confirmConsent = { _, stillCurrent ->
+            guard.set(stillCurrent)
+            entered.countDown()
+            try { awaitCancellation() } finally { canceled.countDown() }
+        })
+        val native = nativeFallback()
+        val selected = bondingCandidate()
+        val startedAt = SystemClock.elapsedRealtime()
+        orderedPairingRequest(selected, 3)
+        assertTrue(entered.await(2, TimeUnit.SECONDS))
+        advanceTo(startedAt + 1_499)
+        assertNotNull(field("pendingConsent"))
+        assertEquals(0, native.get())
+        advanceTo(startedAt + 1_500)
+        assertNull(field("pendingConsent"))
+        assertEquals(1, native.get())
+        assertFalse(requireNotNull(guard.get()).invoke())
+        assertTrue(canceled.await(2, TimeUnit.SECONDS))
+    }
+
+    @Test fun deniedOrFailedConfirmationLeavesTheNativeDialogAvailable() {
+        val native = nativeFallback()
+        for (fail in listOf(false, true)) {
+            controller.close()
+            controller = NearbyPairingController(context, confirmConsent = { _, _ ->
+                if (fail) throw IllegalStateException("Bridge unavailable")
+                false
+            })
+            val selected = bondingCandidate()
+            orderedPairingRequest(selected, 3)
+            awaitMainCondition { native.get() == if (fail) 2 else 1 }
+            assertNull(field("pendingConsent"))
+        }
+    }
+
+    @Test fun unrelatedAndNonConsentRequestsNeverWaitForOurConfirmation() {
+        controller.close()
+        val calls = AtomicInteger()
+        controller = NearbyPairingController(context, confirmConsent = { _, _ ->
+            calls.incrementAndGet()
+            true
+        })
+        val native = nativeFallback()
+        val selected = bondingCandidate()
+        orderedPairingRequest(device(2), 3)
+        orderedPairingRequest(selected, 2)
+        assertEquals(2, native.get())
+        assertEquals(0, calls.get())
+        assertNull(field("pendingConsent"))
+    }
+
     private fun connect() {
         controller.onNearbyDevice(NearbyAirPods.Event(0x2720, true))
         idle()
@@ -292,6 +438,32 @@ class NearbyPairingControllerTest {
     }
 
     private fun newController() = NearbyPairingController(context, confirmConsent = { _, _ -> false })
+
+    private fun bondingCandidate(): BluetoothDevice {
+        connect()
+        val selected = device(1)
+        found(selected)
+        advance(2_000)
+        pairing(selected).setBondState(BluetoothDevice.BOND_BONDING)
+        bondChanged(selected, BluetoothDevice.BOND_BONDING)
+        return selected
+    }
+
+    private fun nativeFallback(): AtomicInteger {
+        val received = AtomicInteger()
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) { received.incrementAndGet() }
+        }
+        context.registerReceiver(receiver, IntentFilter(BluetoothDevice.ACTION_PAIRING_REQUEST), Context.RECEIVER_EXPORTED)
+        nativeReceivers += receiver
+        return received
+    }
+
+    private fun assertFinishedConsent(pending: BroadcastReceiver.PendingResult, aborted: Boolean) {
+        // Robolectric 4.17 omits PendingResult's abort flag from its simulated ordered chain.
+        assertEquals(aborted, pending.getAbortBroadcast())
+        assertTrue(Shadow.extract<ShadowBroadcastPendingResult>(pending).future.isDone)
+    }
 
     private fun field(name: String): Any? = NearbyPairingController::class.java.getDeclaredField(name)
         .apply { isAccessible = true }.get(controller)
@@ -336,6 +508,11 @@ class NearbyPairingControllerTest {
         idle()
     }
 
+    private fun orderedPairingRequest(device: BluetoothDevice, variant: Int) {
+        context.sendOrderedBroadcast(request(device, variant), null)
+        idle()
+    }
+
     private fun bondChanged(device: BluetoothDevice, state: Int) {
         context.sendBroadcast(Intent(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
             .putExtra(BluetoothDevice.EXTRA_DEVICE, device).putExtra(BluetoothDevice.EXTRA_BOND_STATE, state))
@@ -349,6 +526,16 @@ class NearbyPairingControllerTest {
         val remaining = target - SystemClock.elapsedRealtime()
         assertTrue("Fixture work crossed the requested timer boundary", remaining >= 0)
         advance(remaining)
+    }
+
+    private fun awaitMainCondition(condition: () -> Boolean) {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+        while (System.nanoTime() < deadline) {
+            idle()
+            if (condition()) return
+            Thread.sleep(5)
+        }
+        assertTrue("Confirmation result did not return to the main thread", condition())
     }
 }
 
