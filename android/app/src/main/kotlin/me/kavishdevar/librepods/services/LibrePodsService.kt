@@ -50,10 +50,14 @@ import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.health.connect.client.permission.HealthPermission
 import androidx.health.connect.client.records.HeartRateRecord
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
@@ -75,6 +79,7 @@ import me.kavishdevar.librepods.core.bluetooth.verifyRPA
 import me.kavishdevar.librepods.core.bluetooth.ble.NearbyAirPods
 import me.kavishdevar.librepods.core.bluetooth.ble.ProximityReport
 import me.kavishdevar.librepods.bluetooth.NearbyPairingController
+import me.kavishdevar.librepods.bluetooth.DeviceSettingsRefreshResult
 import me.kavishdevar.librepods.bluetooth.canLoadAppleDevice
 import me.kavishdevar.librepods.bluetooth.nearbyScanSettings
 import me.kavishdevar.librepods.core.data.heartrate.HeartRateSample
@@ -82,6 +87,7 @@ import me.kavishdevar.librepods.core.data.recording.Recording
 import me.kavishdevar.librepods.core.devices.AppleDevice
 import me.kavishdevar.librepods.core.devices.AppleSettings
 import me.kavishdevar.librepods.core.devices.AppleState
+import me.kavishdevar.librepods.core.devices.effectiveAllowOff
 import me.kavishdevar.librepods.core.devices.Battery
 import me.kavishdevar.librepods.core.devices.BatteryComponent
 import me.kavishdevar.librepods.core.devices.BatteryStatus
@@ -98,6 +104,7 @@ import me.kavishdevar.librepods.presentation.overlays.IslandWindow
 import me.kavishdevar.librepods.presentation.widgets.BatteryWidget
 import me.kavishdevar.librepods.utils.MediaController
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicReference
 import java.time.ZoneOffset
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
@@ -125,6 +132,10 @@ class LibrePodsService: Service() {
     private val audioDevices = ConcurrentHashMap<MacAddress, AppleDevice>()
     private val audioJobs = ConcurrentHashMap<MacAddress, Job>()
     private val sensorSuspensions = ConcurrentHashMap<MacAddress, Channel<Boolean>>()
+    private class SettingsRefresh(val device: AppleDevice, val controller: ExperimentalAudioController) {
+        val failure = AtomicReference<DeviceSettingsRefreshResult?>()
+    }
+    private val settingsRefreshes = ConcurrentHashMap<MacAddress, SettingsRefresh>()
     private var microphonePermissionMonitor: Job? = null
     private val audioControllers get() = (application as LibrePodsApplication).experimentalAudioControllers
 
@@ -186,9 +197,11 @@ class LibrePodsService: Service() {
     }
 
     private var isCallRinging = false
+    @Volatile private var telephonyCallState = TelephonyManager.CALL_STATE_IDLE
 
     private val telephonyCallback = object: TelephonyCallback(), TelephonyCallback.CallStateListener {
         override fun onCallStateChanged(state: Int) {
+            telephonyCallState = state
             if (state == TelephonyManager.CALL_STATE_RINGING) {
                 isCallRinging = true
                 _devices.value.values.firstOrNull { device ->
@@ -346,6 +359,111 @@ class LibrePodsService: Service() {
 
     override fun onBind(intent: Intent?): IBinder = binder
 
+    /** Null means that this exact device can currently refresh its control session. */
+    fun deviceSettingsRefreshReadiness(device: AppleDevice): DeviceSettingsRefreshResult? {
+        if (destroying) return DeviceSettingsRefreshResult.UNAVAILABLE
+        if (settingsRefreshes.containsKey(device.macAddress)) return DeviceSettingsRefreshResult.ALREADY_RUNNING
+        if (!refreshDeviceIsCurrent(device) || device.aacp.captureAudioSocket() == null)
+            return DeviceSettingsRefreshResult.NOT_CONNECTED
+        if (callBlocksSettingsRefresh()) return DeviceSettingsRefreshResult.CALL_ACTIVE
+        val controller = audioControllers[device.macAddress] ?: return DeviceSettingsRefreshResult.UNAVAILABLE
+        if (microphoneOwners.isNotEmpty() || bleCaptureBlocked || device.state.value.recordingState.isRecording ||
+            device.state.value.microphoneState.isActive || !controller.canRefreshSettings())
+            return DeviceSettingsRefreshResult.AUDIO_BUSY
+        return null
+    }
+
+    private fun refreshDeviceIsCurrent(device: AppleDevice): Boolean = runCatching {
+        !destroying && devices.value[device.macAddress] === device && audioDevices[device.macAddress] === device &&
+            device.bluetoothDevice.bondState == BluetoothDevice.BOND_BONDED &&
+            device.connectionState.value == ConnectionState.CONNECTED
+    }.getOrDefault(false)
+
+    @Suppress("DEPRECATION")
+    private fun callBlocksSettingsRefresh(): Boolean {
+        if (telephonyCallState != TelephonyManager.CALL_STATE_IDLE) return true
+        if (runCatching { getSystemService(AudioManager::class.java)?.mode }.getOrNull() != AudioManager.MODE_NORMAL) return true
+        if (checkSelfPermission(Manifest.permission.READ_PHONE_STATE) == PackageManager.PERMISSION_GRANTED) {
+            return runCatching { getSystemService(TelephonyManager::class.java)?.callState != TelephonyManager.CALL_STATE_IDLE }
+                .getOrDefault(true)
+        }
+        return false
+    }
+
+    private fun refreshFailure(operation: SettingsRefresh): DeviceSettingsRefreshResult? {
+        if (destroying) return DeviceSettingsRefreshResult.UNAVAILABLE
+        val device = operation.device
+        if (settingsRefreshes[device.macAddress] !== operation || !refreshDeviceIsCurrent(device) ||
+            audioControllers[device.macAddress] !== operation.controller) return DeviceSettingsRefreshResult.NOT_CONNECTED
+        if (callBlocksSettingsRefresh()) return DeviceSettingsRefreshResult.CALL_ACTIVE
+        if (microphoneOwners.isNotEmpty() || bleCaptureBlocked || device.state.value.recordingState.isRecording ||
+            device.state.value.microphoneState.isActive) return DeviceSettingsRefreshResult.AUDIO_BUSY
+        return null
+    }
+
+    suspend fun refreshDeviceSettings(device: AppleDevice): DeviceSettingsRefreshResult {
+        var reserved: SettingsRefresh? = null
+        var watchdog: Job? = null
+        var request: me.kavishdevar.librepods.core.bluetooth.aacp.AACPManager.ControlSessionRefresh? = null
+        try {
+            val unavailable = withContext(Dispatchers.Main.immediate) {
+                deviceSettingsRefreshReadiness(device)?.let { return@withContext it }
+                val controller = audioControllers[device.macAddress] ?: return@withContext DeviceSettingsRefreshResult.UNAVAILABLE
+                if (!controller.tryBeginSettingsRefresh()) return@withContext DeviceSettingsRefreshResult.AUDIO_BUSY
+                val operation = SettingsRefresh(device, controller)
+                if (settingsRefreshes.putIfAbsent(device.macAddress, operation) != null) {
+                    controller.endSettingsRefresh()
+                    return@withContext DeviceSettingsRefreshResult.ALREADY_RUNNING
+                }
+                reserved = operation
+                null
+            }
+            unavailable?.let { return it }
+            val operation = checkNotNull(reserved)
+            refreshFailure(operation)?.let { return it }
+            val refresh = device.aacp.prepareControlSessionRefresh() ?: return DeviceSettingsRefreshResult.NOT_CONNECTED
+            request = refresh
+            val caller = currentCoroutineContext()[Job]
+            val deadline = SystemClock.elapsedRealtime() + 10_000
+            // This independent job closes a blocked socket.connect(), including caller cancellation.
+            watchdog = serviceScope.launch(Dispatchers.IO) {
+                while (isActive) {
+                    val failure = refreshFailure(operation) ?: when {
+                        caller?.isActive == false || SystemClock.elapsedRealtime() >= deadline -> DeviceSettingsRefreshResult.FAILED
+                        else -> null
+                    }
+                    if (failure != null) {
+                        operation.failure.compareAndSet(null, failure)
+                        device.aacp.cancelControlSessionRefresh(refresh)
+                        break
+                    }
+                    delay(100)
+                }
+            }
+            val reopened = withContext(Dispatchers.IO) {
+                device.aacp.refreshControlSession(refresh) { operation.failure.get() == null && refreshFailure(operation) == null }
+            }
+            watchdog.cancelAndJoin()
+            return operation.failure.get() ?: refreshFailure(operation) ?:
+                if (reopened) DeviceSettingsRefreshResult.RECONNECTED else DeviceSettingsRefreshResult.FAILED
+        } catch (cancelled: CancellationException) {
+            request?.let { device.aacp.cancelControlSessionRefresh(it) }
+            throw cancelled
+        } catch (error: Exception) {
+            request?.let { device.aacp.cancelControlSessionRefresh(it) }
+            Log.w(TAG, "Settings refresh failed: ${error.javaClass.simpleName}")
+            return reserved?.failure?.get() ?: DeviceSettingsRefreshResult.FAILED
+        } finally {
+            withContext(NonCancellable + Dispatchers.Main.immediate) {
+                watchdog?.cancelAndJoin()
+                reserved?.let { operation ->
+                    settingsRefreshes.remove(device.macAddress, operation)
+                    operation.controller.endSettingsRefresh()
+                }
+            }
+        }
+    }
+
     private fun attachExperimentalAudio(device: AppleDevice) {
         val address = device.macAddress
         if (audioDevices[address] === device) return
@@ -401,6 +519,7 @@ class LibrePodsService: Service() {
     private fun setMicrophoneActive(address: MacAddress, active: Boolean) {
         if (active && address in microphoneOwners) return
         if (active) {
+            check(settingsRefreshes.isEmpty()) { "Wait for the settings refresh to finish." }
             check(!destroying && microphonePermissionAllowed(address)) { "Allow microphone access first." }
             if (address !in microphoneOwners) {
                 check(ProcessLifecycleOwner.get().lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
@@ -757,6 +876,7 @@ class LibrePodsService: Service() {
                     if (!destroying && devices.value[device.macAddress] === device &&
                         device.state.value.battery == state.battery) {
                         nearbyPairing?.updatePairingBattery(device.bluetoothDevice, state.battery)
+                        islandWindow.updatePairedBattery(device)
                     }
                 }
             }
@@ -849,24 +969,6 @@ class LibrePodsService: Service() {
 
                     Log.d(TAG, "updating widgets")
                     updateWidgets()
-
-                    Log.d(TAG, "updating island window")
-                    if (islandWindow.isVisible) {
-                        val leftBattery = state.battery.find { it.component == BatteryComponent.LEFT }
-                        val rightBattery = state.battery.find { it.component == BatteryComponent.RIGHT }
-
-                        val leftLevel = leftBattery?.level ?: 0
-                        val rightLevel = rightBattery?.level ?: 0
-
-                        val displayBatteryLevel = when {
-                            leftLevel > 0 && rightLevel > 0 -> minOf(leftLevel, rightLevel)
-                            leftLevel > 0 -> leftLevel
-                            rightLevel > 0 -> rightLevel
-                            else -> 0
-                        }
-
-                        islandWindow.updatePairedBattery(device)
-                    }
 
                     Log.d(TAG, "updating notification")
                     updateDeviceNotification(device = device)
@@ -982,16 +1084,9 @@ class LibrePodsService: Service() {
     }
 
     fun observeAppleSettings(device: AppleDevice): Job = serviceScope.launch(Dispatchers.IO) {
-        var previousSettings = device.settings.value
-
+        // StateFlow emits the current value first, including writes made before this collector starts.
         device.settings.collect { settings ->
-            if (settings != previousSettings) {
-                Log.i(TAG, "settings changed for device ${device.macAddress.toRedactedString()}")
-                Log.d(TAG, "settings: $settings")
-
-                appleRepository.saveSettings(device.macAddress, settings)
-            }
-            previousSettings = settings
+            appleRepository.saveSettings(device.macAddress, settings)
         }
     }
 
@@ -1073,7 +1168,7 @@ class LibrePodsService: Service() {
                             startActivity(intent)
                         },
 
-                        showOffListeningMode = state.controlStates[ControlCommandIdentifier.ALLOW_OFF_OPTION]?.getOrNull(0)?.toInt() == 1,
+                        showOffListeningMode = state.effectiveAllowOff(device.settings.value, metadata.modelNumber) == true,
                         noiseControlModeValue = state.controlStates[ControlCommandIdentifier.LISTENING_MODE]?.getOrNull(0)?.toInt() ?: 3,
                         onNoiseControlModeChanged = {
                             device.setControlCommand(

@@ -12,6 +12,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.channels.Channel
 import me.kavishdevar.librepods.R
 import me.kavishdevar.librepods.LibrePodsApplication
+import me.kavishdevar.librepods.bluetooth.DeviceSettingsRefreshResult
 import me.kavishdevar.librepods.core.bluetooth.MacAddress
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommandIdentifier
 import me.kavishdevar.librepods.data.updates.updates
@@ -88,7 +89,8 @@ fun RenderScreenContent(
     heartRateRepository: HeartRateRepository,
     showReleaseNotes: Boolean,
     updatesShown: () -> Unit,
-    onboardingComplete: () -> Unit
+    onboardingComplete: () -> Unit,
+    refreshDeviceSettings: suspend (AppleDevice) -> DeviceSettingsRefreshResult
 ) {
     val navigate: (Screen) -> Unit = { target -> if (target !in backStack) backStack.add(target) } // prevents multiple clicks while transitioning
     fun navigateToPurchase() = navigate(Screen.Purchase)
@@ -142,6 +144,7 @@ fun RenderScreenContent(
 
             AppleSettingsRoute(
                 viewModel = appleViewModel,
+                refreshDeviceSettings = refreshDeviceSettings,
                 navigateBack = navigateBack,
                 navigateToRename = { navigate(Screen.Rename(screen.macAddress)) },
                 navigateToHearingProtection = { navigate(Screen.HearingProtection(screen.macAddress)) },

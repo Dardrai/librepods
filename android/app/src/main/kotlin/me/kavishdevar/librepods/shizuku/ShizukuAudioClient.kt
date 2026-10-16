@@ -78,6 +78,7 @@ class ShizukuAudioClient(context: Context) : Closeable {
     @Volatile private var closed = false
     private var connecting = false
     private var bound = false
+    private var settingsRefresh = false
     private val args = Shizuku.UserServiceArgs(ComponentName(this.context, ShizukuAudioService::class.java))
         .daemon(false)
         .processNameSuffix("audio_bridge")
@@ -164,8 +165,11 @@ class ShizukuAudioClient(context: Context) : Closeable {
 
     fun probe() {
         scope.launch {
-            val remote = bridge
-            mutableState.update { it.copy(probing = true) }
+            val remote = synchronized(lock) {
+                if (closed || settingsRefresh) return@launch
+                mutableState.update { it.copy(probing = true) }
+                bridge
+            }
             val callback = object : IAudioBridgeCallback.Stub() {
                 override fun onReport(json: String) {
                     synchronized(lock) {
@@ -211,6 +215,7 @@ class ShizukuAudioClient(context: Context) : Closeable {
             "Grant microphone permission before starting injection"
         }
         check(current == null) { "Stop the current microphone route first" }
+        check(!settingsRefresh) { "Wait for the settings refresh to finish" }
         check(!mutableState.value.probing) { "Wait for audio diagnostics to finish" }
         val address = if (forCall) A2dpRecoveryGuard(selectedAddress).address else {
             require(selectedAddress.isEmpty()) { "A recording application does not select a Bluetooth output" }
@@ -309,7 +314,7 @@ class ShizukuAudioClient(context: Context) : Closeable {
             val callerJob = currentCoroutineContext()[Job]
             suspendCancellableCoroutine { continuation ->
                 val request = synchronized(lock) {
-                    check(!closed && current == null && !mutableState.value.probing) { "Another audio operation is active" }
+                    check(!closed && !settingsRefresh && current == null && !mutableState.value.probing) { "Another audio operation is active" }
                     cancelPlaybackRecoveryLocked()
                     PlaybackRequest(checkNotNull(bridge) { "Connect Shizuku to restore playback" },
                         A2dpRecoveryGuard(address).address, stillCurrent, callerJob).also { playbackRequest = it }
@@ -387,6 +392,17 @@ class ShizukuAudioClient(context: Context) : Closeable {
     }.getOrDefault(false)
 
     fun cancelPlaybackRecovery() = synchronized(lock) { cancelPlaybackRecoveryLocked() }
+
+    fun canRefreshSettings(): Boolean = synchronized(lock) {
+        !closed && !settingsRefresh && current == null && pendingStops.isEmpty() && playbackRequest == null &&
+            !mutableState.value.probing && !ipc.isLocked
+    }
+
+    fun tryBeginSettingsRefresh(): Boolean = synchronized(lock) {
+        if (!canRefreshSettings()) false else { settingsRefresh = true; true }
+    }
+
+    fun endSettingsRefresh() = synchronized(lock) { settingsRefresh = false }
 
     /** AACP does not use AudioRecord, so Android's software sensor privacy must be checked explicitly. */
     fun isMicrophonePrivacyBlocked(): Boolean {

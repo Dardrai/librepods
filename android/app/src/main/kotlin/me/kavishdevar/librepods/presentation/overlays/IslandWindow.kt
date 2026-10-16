@@ -56,6 +56,7 @@ import me.kavishdevar.librepods.R
 import me.kavishdevar.librepods.presentation.activities.MainActivity
 import me.kavishdevar.librepods.core.devices.AirPodsModel
 import me.kavishdevar.librepods.core.devices.AppleDevice
+import me.kavishdevar.librepods.core.devices.effectiveAllowOff
 import me.kavishdevar.librepods.core.devices.Battery
 import me.kavishdevar.librepods.core.devices.ConnectionState
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommandIdentifier
@@ -207,7 +208,7 @@ class IslandWindow(
         show(name = device.metadata.value.name, owner = device, ownerModel = model, observedAtNanos = observedAtNanos,
             openApp = { context.startActivity(Intent(context, MainActivity::class.java)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) },
-            showOffListeningMode = state.controlStates[ControlCommandIdentifier.ALLOW_OFF_OPTION]?.firstOrNull()?.toInt() == 1,
+            showOffListeningMode = state.effectiveAllowOff(device.settings.value, device.metadata.value.modelNumber) == true,
             noiseControlModeValue = state.controlStates[ControlCommandIdentifier.LISTENING_MODE]?.firstOrNull()?.toInt() ?: 3,
             onNoiseControlModeChanged = { device.setControlCommand(ControlCommandIdentifier.LISTENING_MODE, it) },
             adaptiveStrength = state.controlStates[ControlCommandIdentifier.AUTO_ANC_STRENGTH]?.firstOrNull()?.toInt() ?: 50,
@@ -222,6 +223,7 @@ class IslandWindow(
         }
         if (!isVisible || ownerAddress != device.macAddress.value) return
         val state = device.state.value
+        showOffListeningMode = state.effectiveAllowOff(device.settings.value, device.metadata.value.modelNumber) == true
         adaptiveStrength = state.controlStates[ControlCommandIdentifier.AUTO_ANC_STRENGTH]?.firstOrNull()?.toInt() ?: 50
         requestedAdaptiveStrength = state.requestedControls[ControlCommandIdentifier.AUTO_ANC_STRENGTH]?.firstOrNull()?.toInt()
     }

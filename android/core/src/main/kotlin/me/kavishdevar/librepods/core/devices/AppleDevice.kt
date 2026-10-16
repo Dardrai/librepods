@@ -70,16 +70,19 @@ class AppleDevice(
     override val connectionNumber = _connectionNumber.asStateFlow()
 
     fun loadInitialState(state: AppleState, settings: AppleSettings, metadata: AppleMetadata) {
-        _state.value = state.copy(aacpPackets = retainedPacketHistory(state.aacpPackets))
+        _state.value = state.copy(aacpPackets = retainedPacketHistory(state.aacpPackets),
+            controlStates = state.cachedControlStates(settings, metadata.modelNumber))
         _settings.value = settings
         _metadata.value = metadata
     }
 
     fun receiveNearbyBattery(batteries: Set<Battery>) {
-        if (connectionState.value == ConnectionState.CONNECTED) return
-        _state.update { it.copy(battery = mergeBatteryReports(it.battery, batteries,
-            settings.value.cacheDisconnectedComponentBattery)) }
-        _connectionState.update { if (it == ConnectionState.DISCONNECTED) ConnectionState.AVAILABLE else it }
+        synchronized(aacp) {
+            if (connectionState.value == ConnectionState.CONNECTED && aacp.captureAudioSocket() != null) return
+            _state.update { it.copy(battery = mergeBatteryReports(it.battery, batteries,
+                settings.value.cacheDisconnectedComponentBattery)) }
+            _connectionState.update { if (it == ConnectionState.DISCONNECTED) ConnectionState.AVAILABLE else it }
+        }
     }
 
     fun expireNearbyBattery(now: Long) {
@@ -121,6 +124,16 @@ class AppleDevice(
         transform: (AppleSettings) -> AppleSettings
     ) {
         _settings.update(transform)
+    }
+
+    /** Call only inside the successful write's current-transport publication. */
+    internal fun rememberAllowOffRequest(value: ByteArray, previousReport: ByteArray?) {
+        _settings.update { it.withAllowOffRequest(metadata.value.modelNumber, state.value, value, previousReport) }
+    }
+
+    /** A fresh report also replaces a silent choice for the next reconnect. */
+    internal fun rememberAllowOffReport(value: ByteArray) {
+        _settings.update { it.withAllowOffReport(metadata.value.modelNumber, value) }
     }
 
     internal suspend fun emitEvent(event: AppleEvent) {

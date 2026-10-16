@@ -20,7 +20,7 @@ pair, local behavior choices and correctly owner-bound BLE keys once. Existing
 rewrite database rows are preserved. Unconfirmed device control values are not
 migrated as device reports. The Android Bluetooth bond stays with Android.
 
-The current fork version is `2.0.0-alpha.1-pixel19`, code `200000104`.
+The current fork version is `2.0.0-alpha.1-pixel20`, code `200000105`.
 
 ## Pairing and island latency
 
@@ -63,6 +63,10 @@ The current fork version is `2.0.0-alpha.1-pixel19`, code `200000104`.
 - Owned battery/lid reports require a current bond and valid per-device keys.
   Public advertisements cannot establish a Classic identity or overwrite an
   owned device's batteries.
+- Repeated case cycles retain known battery percentages when disconnected caching
+  is enabled. Disconnected readings keep their original age and lose their live
+  charging state; unavailable slots cannot fabricate a fresh zero. Battery updates
+  reach the island independently of coalesced capability changes.
 - Bluetooth connection work runs off the UI thread. Construction and connection
   attempts are serialized per device. The cached identity loads before scanning.
 - Saved, still-bonded Apple identities load even when Android's service UUID
@@ -91,6 +95,12 @@ The current fork version is `2.0.0-alpha.1-pixel19`, code `200000104`.
   controls because Pro 3 can accept the write without echoing it. A subsequent
   valid strength report remains authoritative, including rounded values. Merely
   opening the Material slider does not send its initial/default value.
+- Pro 3's Allow Off choice is saved per pair after a successful current-session
+  write. It stays separate from device reports, survives reconnects and app
+  restarts, and is replaced by a valid fresh report. Reopening does not resend it.
+- Refresh device settings reopens only the selected AirPods' control session.
+  It retains the Bluetooth bond and media connection, requests fresh settings,
+  and refuses calls, microphone sessions, audio recovery and concurrent refreshes.
 - Debug timing logs measure Android's radio timestamp to the overlay request
   and the first drawing pass.
   They do not measure when the physical case opened or prove Windows parity.
@@ -131,10 +141,29 @@ does not produce the verified 480-sample configuration.
 
 Upstream rewrite ATT transport is disabled. Safe hearing/transparency codecs and
 read-only handling of unsupported formats do not imply functioning rootless ATT
-access. No fixed ATT handle has been reintroduced. Silent Allow Off/adaptive
-requests are retained only for the current connection, not presented as reports.
+access. No fixed ATT handle has been reintroduced. Live pending requests remain
+connection-owned. Pro 3's saved Allow Off choice is a separate presentation
+fallback, and is not presented as a device report.
 
-## Validation on 2026-10-16
+## Validation
+
+On 2026-10-17, Pixel20's `verifyPixel` passed with 201 tests in 40 suites,
+no failures, errors or skips, lint with 0 errors, 289 warnings and 1 hint,
+and successful debug and minified release builds. New regressions exercise
+Allow Off through real transport writes, Room persistence, app reload and fresh
+contradictory reports; control-only refresh, concurrent/canceled replacement
+sockets and audio reservations; and repeated case cycles with partial battery
+reports, retained zero readings and stale callbacks. The real Refresh touch
+test also caught a shared Apple button's stale enabled-state capture; disabled
+buttons now reject taps and cancel their pressed appearance cleanly. Native
+Refresh captures cover narrow/large-text light and dark Material settings;
+Apple input checks use the existing legacy-renderer workaround.
+
+Pixel20 was signed with the existing certificate and installed in place.
+Android confirmed version `2.0.0-alpha.1-pixel20`, code `200000105`, and the
+retained Shizuku grant. Physical checks of repeated case cycles, Allow Off
+after reconnect/restart and Refresh during music playback remain pending.
+No experimental microphone route or call was started for this update.
 
 Pixel19's `verifyPixel` passed with 183 tests in 36 suites, no failures, errors
 or skips, lint with 0 errors, 289 warnings and 1 hint, and successful debug and

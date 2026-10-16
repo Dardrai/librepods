@@ -53,6 +53,8 @@ import me.kavishdevar.librepods.core.data.apple.BuddyState
 import me.kavishdevar.librepods.core.data.audio.MicrophoneFrame
 import me.kavishdevar.librepods.core.data.heartrate.HeartRateSample
 import me.kavishdevar.librepods.core.devices.AppleDevice
+import me.kavishdevar.librepods.core.devices.BatteryStatus
+import me.kavishdevar.librepods.core.devices.cachedControlStates
 import me.kavishdevar.librepods.core.devices.withControlReport
 import me.kavishdevar.librepods.core.devices.withControlRequest
 import me.kavishdevar.librepods.core.devices.mergeBatteryReports
@@ -65,12 +67,16 @@ import kotlin.time.Clock
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 
-class AACPManager(private val device: AppleDevice) {
+class AACPManager(private val device: AppleDevice,
+    private val socketFactory: () -> BluetoothSocket = {
+        device.createSocket(ParcelUuid.fromString("74ec2172-0bad-4d01-8f77-997b2be0722a"), 4097)
+    }
+) {
     private val TAG = "AACPManager"
 
     @Volatile private var socket: BluetoothSocket? = null
     private var connectionScope: CoroutineScope? = null
-    private val connectLock = Any()
+    private val connectLock = java.util.concurrent.locks.ReentrantLock()
     private val connectionEpoch = AtomicLong()
     private val controlTimeouts = ConcurrentHashMap<ControlCommandIdentifier, Job>()
     private var eqTimeout: Job? = null
@@ -139,18 +145,76 @@ class AACPManager(private val device: AppleDevice) {
 
     fun connect(): Boolean {
         val requestEpoch = connectionEpoch.get()
-        return synchronized(connectLock) {
-            if (requestEpoch != connectionEpoch.get()) false else connect(requestEpoch)
-        }
+        connectLock.lock()
+        return try { if (requestEpoch != connectionEpoch.get()) false else connect(requestEpoch) }
+        finally { connectLock.unlock() }
     }
 
-    private fun connect(requestEpoch: Long): Boolean {
+    class ControlSessionRefresh internal constructor(internal val original: BluetoothSocket) {
+        @Volatile internal var cancelled = false
+        internal var epoch: Long? = null
+    }
+
+    fun prepareControlSessionRefresh(): ControlSessionRefresh? = captureAudioSocket()?.let(::ControlSessionRefresh)
+
+    /** Reopen only AACP; native media/call profiles and the last confirmed settings are retained. */
+    fun refreshControlSession(request: ControlSessionRefresh, stillCurrent: () -> Boolean): Boolean {
+        if (!connectLock.tryLock(10, java.util.concurrent.TimeUnit.SECONDS)) return false
+        try {
+            val sensorState = device.state.value
+            val motionWanted = sensorState.headTrackingState != BuddyState.INACTIVE
+            val heartWanted = sensorState.hrmState != BuddyState.INACTIVE
+            synchronized(this) {
+                if (request.cancelled || !stillCurrent() || !ownsAudioSocket(request.original)) return false
+                request.epoch = connectionEpoch.get() + 1
+            }
+            if (!disconnect(request.original, preserveControlState = true)) return false
+            if (request.cancelled || !stillCurrent()) {
+                cancelControlSessionRefresh(request)
+                return false
+            }
+            val connected = connect(checkNotNull(request.epoch), preserveControlState = true)
+            if (!connected || request.cancelled || !stillCurrent()) {
+                cancelControlSessionRefresh(request)
+                return false
+            }
+            val sensors = synchronized(this) {
+                rtBuddyManager.takeIf {
+                    !request.cancelled && request.epoch == connectionEpoch.get() && stillCurrent() && captureAudioSocket() != null
+                }
+            }
+            if (sensors == null) {
+                cancelControlSessionRefresh(request)
+                return false
+            }
+            // The captured manager only writes to its captured replacement socket.
+            if (motionWanted) sensors.setHeadTrackingEnabled(true)
+            if (heartWanted) sensors.setHeartRateEnabled(true)
+            val current = !request.cancelled && request.epoch == connectionEpoch.get() && stillCurrent() && captureAudioSocket() != null
+            if (!current) cancelControlSessionRefresh(request)
+            return current
+        } finally { connectLock.unlock() }
+    }
+
+    /** Also invalidates a socket creation that has not reached connect() yet. */
+    fun cancelControlSessionRefresh(request: ControlSessionRefresh) {
+        val owned = synchronized(this) {
+            request.cancelled = true
+            if (request.epoch != connectionEpoch.get()) return
+            connectionEpoch.incrementAndGet()
+            socket
+        }
+        disconnect(owned, notifyDevice = true, preserveControlState = true)
+    }
+
+    private fun connect(requestEpoch: Long, preserveControlState: Boolean = false): Boolean {
+        if (requestEpoch != connectionEpoch.get()) return false
         if (socket != null && socket!!.isConnected) {
             Log.i(TAG, "Already connected")
             return true
         }
         val connectingSocket = try {
-            device.createSocket(ParcelUuid.fromString("74ec2172-0bad-4d01-8f77-997b2be0722a"),  4097)
+            socketFactory()
         } catch (e: Exception) {
             Log.e(TAG, "failed to create socket: ${e.javaClass.simpleName}")
             return false
@@ -172,7 +236,12 @@ class AACPManager(private val device: AppleDevice) {
                 socket.connect()
             } catch (e: Exception) {
                 Log.e(TAG, "failed to connect: ${e.javaClass.simpleName}")
-                disconnect(socket)
+                disconnect(socket, notifyDevice = preserveControlState, preserveControlState = preserveControlState)
+                return false
+            }
+
+            if (!socket.isConnected) {
+                disconnect(socket, notifyDevice = preserveControlState, preserveControlState = preserveControlState)
                 return false
             }
 
@@ -329,6 +398,8 @@ class AACPManager(private val device: AppleDevice) {
                                 state.copy(owns = controlCommand.value[0] == 0x01.toByte()) else state
                         }.let { it.copy(aacpPackets = it.aacpPackets + controlCommandPacket) }
                     }
+                    if (sourceSocket != null && controlCommand.identifier == ControlCommandIdentifier.ALLOW_OFF_OPTION)
+                        device.rememberAllowOffReport(controlCommand.value)
                     if (controlCommand.identifier !in device.state.value.requestedControls)
                         controlTimeouts.remove(controlCommand.identifier)?.cancel()
                 }
@@ -592,6 +663,8 @@ class AACPManager(private val device: AppleDevice) {
         if (!sendAudioPacket(originalSocket, packet.rawPacket)) return false
         return publishForTransport(this, originalSocket, ::captureAudioSocket) {
             device.updateState { it.withControlRequest(controlCommand.identifier, value, previousReport) }
+            if (controlCommand.identifier == ControlCommandIdentifier.ALLOW_OFF_OPTION)
+                device.rememberAllowOffRequest(value, previousReport)
             controlTimeouts.remove(controlCommand.identifier)?.cancel()
             val request = device.state.value.requestedControls[controlCommand.identifier]
             if (request != null && controlCommand.identifier !in setOf(ControlCommandIdentifier.ALLOW_OFF_OPTION,
@@ -1012,7 +1085,8 @@ class AACPManager(private val device: AppleDevice) {
         return sendPacket(packet, expected)
     }
 
-    fun disconnect(expected: BluetoothSocket? = socket, notifyDevice: Boolean = false): Boolean {
+    fun disconnect(expected: BluetoothSocket? = socket, notifyDevice: Boolean = false,
+        preserveControlState: Boolean = false): Boolean {
         var retiredSensors: RTBuddyManager? = null
         val retired = retireForTransport(this, expected, { socket }) {
             retiredSensors = rtBuddyManager
@@ -1026,7 +1100,20 @@ class AACPManager(private val device: AppleDevice) {
             eqTimeout?.cancel()
             eqTimeout = null
             device.updateState {
-                it.copy(battery = emptySet(), connectedDevices = emptyList(), controlStates = emptyMap(),
+                val knownBatteries = it.battery.filter { battery ->
+                    battery.level in 0..100 && battery.observedAt != null && battery.observedAt >= 0 &&
+                        battery.status != BatteryStatus.UNKNOWN
+                }
+                val retainedBatteries = when {
+                    preserveControlState && !notifyDevice -> knownBatteries.toSet()
+                    device.settings.value.cacheDisconnectedComponentBattery -> knownBatteries.map { battery ->
+                        battery.copy(status = BatteryStatus.DISCONNECTED, present = false)
+                    }.toSet()
+                    else -> emptySet()
+                }
+                it.copy(battery = retainedBatteries, connectedDevices = emptyList(),
+                    controlStates = if (preserveControlState)
+                        it.cachedControlStates(device.settings.value, device.metadata.value.modelNumber) else emptyMap(),
                     requestedControls = emptyMap(), requestedCustomEq = null, aacpPackets = emptyList(),
                     headTrackingState = BuddyState.INACTIVE, hrmState = BuddyState.INACTIVE, currentHeartRate = null)
             }

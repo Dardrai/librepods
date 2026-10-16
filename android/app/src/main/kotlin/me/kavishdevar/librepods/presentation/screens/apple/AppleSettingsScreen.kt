@@ -46,11 +46,15 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.kyant.backdrop.backdrops.rememberLayerBackdrop
 import me.kavishdevar.librepods.R
+import me.kavishdevar.librepods.bluetooth.DeviceSettingsRefreshResult
+import me.kavishdevar.librepods.core.devices.AppleDevice
+import me.kavishdevar.librepods.core.devices.ConnectionState
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommandIdentifier
 import me.kavishdevar.librepods.core.bluetooth.att.ATTHandle
 import me.kavishdevar.librepods.core.data.apple.BuddyState
 import me.kavishdevar.librepods.core.devices.AirPodsSpecs
 import me.kavishdevar.librepods.core.devices.AppleSettings
+import me.kavishdevar.librepods.core.devices.effectiveAllowOff
 import me.kavishdevar.librepods.core.devices.BaseCapability
 import me.kavishdevar.librepods.presentation.components.apple.AboutCard
 import me.kavishdevar.librepods.presentation.components.apple.AdaptiveAudioStrengthSlider
@@ -76,6 +80,7 @@ import me.kavishdevar.librepods.presentation.viewmodel.AppleViewModel
 @Composable
 fun AppleSettingsRoute(
     viewModel: AppleViewModel,
+    refreshDeviceSettings: suspend (AppleDevice) -> DeviceSettingsRefreshResult,
     navigateBack: (() -> Unit)?,
     navigateToRename: () -> Unit,
     navigateToHearingProtection: () -> Unit,
@@ -94,9 +99,15 @@ fun AppleSettingsRoute(
     navigateToHeartRateScreen: () -> Unit
 ) {
     val uiState by viewModel.uiState.collectAsState()
+    val refreshing by viewModel.refreshingSettings.collectAsState()
+    val connectionState by viewModel.connectionState.collectAsState()
 
     AppleSettingsScreen(
         uiState = uiState,
+        refreshDeviceSettings = { viewModel.refreshDeviceSettings(refreshDeviceSettings) },
+        refreshingSettings = refreshing,
+        canRefreshSettings = connectionState == ConnectionState.CONNECTED &&
+            !uiState.state.microphoneState.isActive && !uiState.state.recordingState.isRecording,
 
         setControlCommandInt = { id, value -> viewModel.setControlCommand(id, value) },
         setControlCommandBoolean = { id, value -> viewModel.setControlCommand(id, value) },
@@ -163,7 +174,10 @@ fun AppleSettingsScreen(
     navigateToMicrophoneSettings: () -> Unit,
     navigateToRecordingScreen: () -> Unit,
     navigateToHeartRateScreen: () -> Unit,
-    navigateToDebugScreen: () -> Unit
+    navigateToDebugScreen: () -> Unit,
+    refreshDeviceSettings: () -> Unit = {},
+    refreshingSettings: Boolean = false,
+    canRefreshSettings: Boolean = false
 ) {
     val state = uiState.state
     val settings = uiState.settings
@@ -230,7 +244,7 @@ fun AppleSettingsScreen(
                 item(key = "noise_control") {
                     NoiseControlSettings(
                         modifier = Modifier.height(100.dp),
-                        showOffListeningMode = state.controlStates[ControlCommandIdentifier.ALLOW_OFF_OPTION]?.getOrNull(0)?.toInt() == 1,
+                        showOffListeningMode = state.effectiveAllowOff(settings, metadata.modelNumber) == true,
                         noiseControlModeValue = state.controlStates[ControlCommandIdentifier.LISTENING_MODE]?.getOrNull(0)?.toInt() ?: 3,
                         onNoiseControlModeChanged = {
                             setControlCommandInt(
@@ -502,7 +516,7 @@ fun AppleSettingsScreen(
                     StyledToggle(
                         label = stringResource(R.string.off_listening_mode),
                         description = stringResource(R.string.off_listening_mode_description),
-                        checked = state.controlStates[id]?.getOrNull(0) == 0x01.toByte(),
+                        checked = state.effectiveAllowOff(settings, metadata.modelNumber) == true,
                         onCheckedChange = { setControlCommandBoolean(id, it) }
                     )
                 }
@@ -519,7 +533,30 @@ fun AppleSettingsScreen(
                 )
             }
 
-            item(key = "spacer_disconnect") { Spacer(modifier = Modifier.height(28.dp)) }
+            item(key = "spacer_refresh") { Spacer(modifier = Modifier.height(28.dp)) }
+            item(key = "refresh_settings") {
+                StyledButton(
+                    onClick = refreshDeviceSettings,
+                    enabled = canRefreshSettings && !refreshingSettings,
+                    isInteractive = false,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)
+                ) {
+                    Text(
+                        text = stringResource(if (refreshingSettings) R.string.refresh_device_settings_busy
+                            else R.string.refresh_device_settings),
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+                Text(
+                    text = stringResource(R.string.refresh_device_settings_description),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
+                )
+            }
+
+            item(key = "spacer_disconnect") { Spacer(modifier = Modifier.height(16.dp)) }
             item(key = "disconnect_button") {
                 StyledButton(
                     onClick = disconnect,

@@ -102,16 +102,17 @@ class CapturedAudioTransportTest {
             assertTrue(manager.sendPacket(AACPPacket.createUnknownPacket(MessageOpcode.MICROPHONE_STREAM, byteArrayOf(0, 0, 2, 0, 3, 1))))
             assertTrue(device.state.value.aacpPackets.isEmpty())
 
-            val connectLock = AACPManager::class.java.getDeclaredField("connectLock").apply { isAccessible = true }.get(manager)
+            val connectLock = AACPManager::class.java.getDeclaredField("connectLock").apply { isAccessible = true }.get(manager) as java.util.concurrent.locks.ReentrantLock
             var queuedResult: Boolean? = null
             val queued = Thread { queuedResult = manager.connect() }
-            synchronized(connectLock) {
+            connectLock.lock()
+            try {
                 queued.start()
                 val deadline = System.nanoTime() + 2_000_000_000L
-                while (queued.state != Thread.State.BLOCKED && System.nanoTime() < deadline) Thread.yield()
-                assertEquals(Thread.State.BLOCKED, queued.state)
+                while (!connectLock.hasQueuedThread(queued) && System.nanoTime() < deadline) Thread.yield()
+                assertTrue("Connect did not wait for the existing operation", connectLock.hasQueuedThread(queued))
                 assertTrue(manager.disconnect(replacement))
-            }
+            } finally { connectLock.unlock() }
             queued.join(1_000)
             assertFalse("Queued connect survived cancellation", queuedResult ?: true)
             assertNull(manager.captureAudioSocket())

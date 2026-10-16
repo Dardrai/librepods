@@ -40,9 +40,25 @@ class ExperimentalAudioController(
     private var closed = false
     private var opening: Long? = null
     private var sink: PipeSink? = null
+    private var settingsRefresh = false
     val isConnected: Boolean get() = aacp.captureAudioSocket() != null
     val isOpening: Boolean get() = synchronized(lock) { opening != null }
     val supportsMicrophone: Boolean get() = device.metadata.value.modelNumber in MICROPHONE_MODELS
+
+    fun canRefreshSettings(): Boolean = synchronized(lock) {
+        !closed && !settingsRefresh && opening == null && sink == null &&
+            microphone.state.value.phase in listOf(MicrophonePhase.IDLE, MicrophonePhase.ERROR) && bridge.canRefreshSettings()
+    }
+
+    fun tryBeginSettingsRefresh(): Boolean = synchronized(lock) {
+        if (!canRefreshSettings() || !bridge.tryBeginSettingsRefresh()) false
+        else { settingsRefresh = true; true }
+    }
+
+    fun endSettingsRefresh() = synchronized(lock) {
+        settingsRefresh = false
+        bridge.endSettingsRefresh()
+    }
 
     init {
         scope.launch {
@@ -77,6 +93,10 @@ class ExperimentalAudioController(
 
     private fun allowedLocked(): Boolean {
         if (closed) return false
+        if (settingsRefresh) {
+            mutableMessage.value = "Wait for the settings refresh to finish."
+            return false
+        }
         if (device.metadata.value.modelNumber !in MICROPHONE_MODELS) {
             mutableMessage.value = "The high-quality microphone has not been verified for this AirPods model."
             return false
@@ -295,6 +315,8 @@ class ExperimentalAudioController(
         synchronized(lock) {
             if (closed) return
             closed = true
+            settingsRefresh = false
+            bridge.endSettingsRefresh()
             generation.close()
             opening = null
             stopBridgeLocked()

@@ -26,6 +26,25 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [37], application = Application::class)
 class AppleDaoTest {
+    @Test fun allowOffChoiceStaysWithItsPairedIdentityAcrossOtherColumnUpdates() = runBlocking {
+        val database = Room.inMemoryDatabaseBuilder(RuntimeEnvironment.getApplication(),
+            LibrePodsDatabase::class.java).build()
+        try {
+            val dao = database.appleDao()
+            val first = MacAddress("12:34:56:78:9A:BC")
+            val second = MacAddress("12:34:56:78:9A:BD")
+            dao.updateSettings(first, AppleSettings(allowOffChoice = true))
+            dao.updateSettings(second, AppleSettings(allowOffChoice = false))
+            dao.updateMetadata(first, AppleMetadata(name = "First pair"))
+            dao.saveCache(first, AppleCache())
+            assertEquals(true, dao.get(first)?.settings?.allowOffChoice)
+            assertEquals(false, dao.get(second)?.settings?.allowOffChoice)
+            assertEquals("First pair", dao.get(first)?.metadata?.name)
+        } finally {
+            database.close()
+        }
+    }
+
     @Test fun concurrentMetadataSettingsAndKeyWritesPreserveAllThreeColumns() = runBlocking {
         val database = Room.inMemoryDatabaseBuilder(RuntimeEnvironment.getApplication(),
             LibrePodsDatabase::class.java).build()

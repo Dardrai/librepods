@@ -24,16 +24,19 @@ import me.kavishdevar.librepods.R
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.transformLatest
 import kotlinx.coroutines.launch
 import me.kavishdevar.librepods.billing.BillingManager
+import me.kavishdevar.librepods.bluetooth.DeviceSettingsRefreshResult
 import me.kavishdevar.librepods.audio.ExperimentalAudioController
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommandIdentifier
 import me.kavishdevar.librepods.core.bluetooth.att.ATTHandle
@@ -81,6 +84,34 @@ class AppleViewModel(
     val billingManager = BillingManager
 
     val events = device.events
+    val connectionState = device.connectionState
+    private val _refreshingSettings = MutableStateFlow(false)
+    val refreshingSettings = _refreshingSettings.asStateFlow()
+
+    fun refreshDeviceSettings(refresh: suspend (AppleDevice) -> DeviceSettingsRefreshResult) {
+        if (!_refreshingSettings.compareAndSet(false, true)) return
+        viewModelScope.launch {
+            try {
+                val result = withContext(Dispatchers.IO) { refresh(device) }
+                val message = when (result) {
+                    DeviceSettingsRefreshResult.RECONNECTED -> R.string.refresh_device_settings_requested
+                    DeviceSettingsRefreshResult.ALREADY_RUNNING -> R.string.refresh_device_settings_running
+                    DeviceSettingsRefreshResult.NOT_CONNECTED -> R.string.refresh_device_settings_disconnected
+                    DeviceSettingsRefreshResult.AUDIO_BUSY -> R.string.refresh_device_settings_audio_busy
+                    DeviceSettingsRefreshResult.CALL_ACTIVE -> R.string.refresh_device_settings_call_active
+                    DeviceSettingsRefreshResult.UNAVAILABLE -> R.string.refresh_device_settings_unavailable
+                    DeviceSettingsRefreshResult.FAILED -> R.string.refresh_device_settings_failed
+                }
+                Toast.makeText(device.context, message, Toast.LENGTH_LONG).show()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                Toast.makeText(device.context, R.string.refresh_device_settings_failed, Toast.LENGTH_LONG).show()
+            } finally {
+                _refreshingSettings.value = false
+            }
+        }
+    }
 
     private var attObserveJob: Job? = null
 

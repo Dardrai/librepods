@@ -2,6 +2,9 @@
 package me.kavishdevar.librepods.presentation.overlays
 
 import android.app.Application
+import android.Manifest
+import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothManager
 import android.graphics.Insets
 import android.graphics.PixelFormat
 import android.graphics.Rect
@@ -10,9 +13,13 @@ import android.view.ContextThemeWrapper
 import android.view.WindowManager
 import androidx.compose.ui.platform.ComposeView
 import me.kavishdevar.librepods.core.devices.AirPodsModel
+import me.kavishdevar.librepods.core.devices.AppleDevice
+import me.kavishdevar.librepods.core.devices.AppleMetadata
+import me.kavishdevar.librepods.core.devices.AppleState
 import me.kavishdevar.librepods.core.devices.Battery
 import me.kavishdevar.librepods.core.devices.BatteryComponent
 import me.kavishdevar.librepods.core.devices.BatteryStatus
+import me.kavishdevar.librepods.core.devices.ConnectionState
 import me.kavishdevar.librepods.data.app.IslandSettings
 import me.kavishdevar.librepods.database.app.AppSettingsEntity
 import org.junit.Assert.*
@@ -21,6 +28,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import org.robolectric.RuntimeEnvironment
+import org.robolectric.Shadows.shadowOf
 import java.util.concurrent.TimeUnit
 
 @RunWith(RobolectricTestRunner::class)
@@ -147,6 +155,63 @@ class IslandStateTest {
         assertSame(replacement, field.get(window))
         completeExit.invoke(window, replacement)
         assertNull(field.get(window))
+    }
+
+    @Test fun rapidPairedReopensKeepTheLatestBatteryAndRejectOldExitCompletion() {
+        val context = RuntimeEnvironment.getApplication()
+        shadowOf(context).grantPermissions(Manifest.permission.BLUETOOTH_CONNECT)
+        val adapter = context.getSystemService(BluetoothManager::class.java).adapter
+        shadowOf(adapter).setState(BluetoothAdapter.STATE_ON)
+        val firstOwner = AppleDevice(context, adapter, adapter.getRemoteDevice("00:11:22:33:44:55"), ConnectionState.DISCONNECTED)
+        val nextOwner = AppleDevice(context, adapter, adapter.getRemoteDevice("00:11:22:33:44:66"), ConnectionState.DISCONNECTED)
+        val window = IslandWindow(context, AppSettingsEntity())
+        val view = ComposeView(context)
+        val field = IslandWindow::class.java.getDeclaredField("composeView").apply { isAccessible = true }
+        val owner = IslandWindow::class.java.getDeclaredField("ownerAddress").apply { isAccessible = true }
+        val generation = IslandWindow::class.java.getDeclaredMethod("getTransitionGeneration").apply { isAccessible = true }
+        val batteries = IslandWindow::class.java.getDeclaredMethod("getBatteries").apply { isAccessible = true }
+        val finish = IslandWindow::class.java.getDeclaredMethod("finishTransition", ComposeView::class.java,
+            Long::class.javaPrimitiveType, IslandState::class.java).apply { isAccessible = true }
+        context.getSystemService(WindowManager::class.java).addView(view, WindowManager.LayoutParams(800, 600,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            PixelFormat.TRANSPARENT))
+        field.set(window, view)
+        @Suppress("UNCHECKED_CAST")
+        fun cells() = islandBatteryCells(AirPodsModel.AIRPODS_PRO_3,
+            batteries.invoke(window) as Set<Battery>, System.currentTimeMillis())
+        try {
+            window.show(owner = firstOwner, ownerModel = AirPodsModel.AIRPODS_PRO_3, keepOpen = true)
+            assertTrue(window.isVisible)
+            assertTrue(cells().all { it.level == null && !it.charging })
+            for ((index, device) in listOf(firstOwner, firstOwner, nextOwner).withIndex()) {
+                window.close()
+                val oldExit = generation.invoke(window) as Long
+                window.show(owner = device, ownerModel = AirPodsModel.AIRPODS_PRO_3, keepOpen = true)
+                assertTrue((generation.invoke(window) as Long) > oldExit)
+                if (device === nextOwner) assertTrue("A new owner cannot inherit another pair's readings", cells().all { it.level == null })
+                val charging = index % 2 == 0
+                val readings = setOf(Battery(BatteryComponent.LEFT, 60 - index,
+                    if (charging) BatteryStatus.CHARGING else BatteryStatus.NOT_CHARGING),
+                    Battery(BatteryComponent.RIGHT, 40 - index,
+                        if (charging) BatteryStatus.NOT_CHARGING else BatteryStatus.CHARGING),
+                    Battery(BatteryComponent.CASE, 90 - index,
+                        if (charging) BatteryStatus.OPTIMIZED_CHARGING else BatteryStatus.NOT_CHARGING))
+                device.loadInitialState(AppleState(battery = readings), device.settings.value,
+                    AppleMetadata(name = "AirPods", model = AirPodsModel.AIRPODS_PRO_3))
+                window.updatePairedBattery(device)
+                if (device === nextOwner) window.updatePairedBattery(firstOwner)
+                finish.invoke(window, view, oldExit, IslandState.CLOSE)
+                assertSame("An old exit cannot detach the reopened window", view, field.get(window))
+                assertEquals(device.macAddress.value, owner.get(window))
+                assertEquals(IslandState.EXPANDED, window.islandState)
+                assertEquals(listOf(60 - index, 40 - index, 90 - index), cells().map { it.level })
+                assertTrue(cells().all { it.live })
+                assertEquals(listOf(charging, !charging, charging), cells().map { it.charging })
+            }
+        } finally {
+            window.close()
+            finish.invoke(window, view, generation.invoke(window) as Long, IslandState.CLOSE)
+        }
     }
 
     @Test fun physicalCameraUsesAcceptedPixelGeometryAndWiderSafeWidth() {
