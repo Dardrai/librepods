@@ -169,7 +169,9 @@ and animations are unchanged; existing rendering and input tests still pass.
 
 Pixel21 was signed with the existing certificate and installed in place.
 Android confirmed version `2.0.0-alpha.1-pixel21`, code `200000106`, and the
-retained Shizuku grant. The fresh-pair battery handoff check remains pending.
+retained Shizuku grant. On 2026-10-17, the user confirmed that after forgetting
+and pairing again, both the success card and island show battery percentages
+immediately, without the temporary dashes.
 A first-ever pair still needs its keys before encrypted LE readings can be
 verified. No experimental microphone route or call was started for this update.
 
