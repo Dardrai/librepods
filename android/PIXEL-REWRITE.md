@@ -148,8 +148,10 @@ native AGSL compiler rejects the existing backdrop shader; Material uses native
 rendering. The expiry test ages its readings before real scheduled callbacks
 because this runner's virtual Handler clock does not advance the wall clock.
 Pixel19 was signed with the existing certificate and installed in place; Android
-confirmed version `2.0.0-alpha.1-pixel19` and the retained Shizuku grant. Physical
-battery-card and slider acceptance are pending. No audio checks were repeated.
+confirmed version `2.0.0-alpha.1-pixel19` and the retained Shizuku grant. On
+2026-10-17, the user confirmed that Adaptive strength holds after release and
+reopening, and that fresh pairing shows AirPods/case percentages on the success
+card until Continue. No audio checks were repeated.
 
 Pixel18's `verifyPixel` passed with 173 tests in 35 suites, no failures, errors
 or skips, lint with no errors, and successful debug/minified release builds.
