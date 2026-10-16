@@ -39,16 +39,19 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.WindowInsets
 import android.view.WindowManager
-import android.view.animation.DecelerateInterpolator
+import android.view.animation.PathInterpolator
 import android.widget.Button
 import android.widget.ImageButton
 import android.widget.TextView
 import me.kavishdevar.librepods.R
+import me.kavishdevar.librepods.core.bluetooth.ble.NearbyAirPods
 import kotlin.math.min
 
 /** A single invitation; Bluetooth work belongs to NearbyPairingController. */
 @SuppressLint("InflateParams", "ClickableViewAccessibility")
 class PopupWindow(private val context: Context, private val onCloseCallback: () -> Unit = {}) {
+    enum class Stage { NEARBY, SETUP, CONNECTING, COMPLETE, RETRY }
+
     private val mView: View = LayoutInflater.from(ContextThemeWrapper(context, R.style.Theme_LibrePods_Pairing))
         .inflate(R.layout.popup_window, null)
     private val windowManager = context.getSystemService(WindowManager::class.java)
@@ -65,6 +68,10 @@ class PopupWindow(private val context: Context, private val onCloseCallback: () 
     private var downY = 0f
     private var downScroll = 0
     private var expansion = 0f
+    private var modelId = 0
+    private var modelName = ""
+    private var stage = Stage.NEARBY
+    private var message = ""
     private var params: WindowManager.LayoutParams? = null
     private val expire = Runnable { close() }
 
@@ -92,6 +99,8 @@ class PopupWindow(private val context: Context, private val onCloseCallback: () 
             handler.post { forceClose() }
             return
         }
+        this.modelId = modelId
+        modelName = name
         mView.findViewById<TextView>(R.id.name).text = name
         val metrics = windowManager.currentWindowMetrics
         val insets = metrics.windowInsets.getInsetsIgnoringVisibility(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
@@ -103,10 +112,12 @@ class PopupWindow(private val context: Context, private val onCloseCallback: () 
         val params = WindowManager.LayoutParams(width, min(mView.measuredHeight, maxHeight),
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-                WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH or WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+                WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH or WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED or
+                WindowManager.LayoutParams.FLAG_DIM_BEHIND,
             PixelFormat.TRANSLUCENT).apply {
                 gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
                 y = dp(16)
+                dimAmount = .28f
             }
         this.params = params
         try {
@@ -123,16 +134,29 @@ class PopupWindow(private val context: Context, private val onCloseCallback: () 
         }
     }
 
-    fun showPairingActions(message: String, actions: List<Pair<String, () -> Unit>>, busy: Boolean = actions.isEmpty()) {
+    fun showPairingActions(message: String, actions: List<Pair<String, () -> Unit>>, busy: Boolean = actions.isEmpty(), stage: Stage = Stage.NEARBY) {
         if (closing || notified) return
+        // Discovery repeats the same instructions; it must not reset the presentation or layout.
+        if (this.stage == stage && this.message == message && actions.isEmpty()) return
+        this.stage = stage
+        this.message = message
+        mView.findViewById<TextView>(R.id.name).text = when (stage) {
+            Stage.SETUP -> context.getString(if (NearbyAirPods.usesDoubleTap(modelId))
+                R.string.pairing_double_tap_title else R.string.pairing_hold_button_title)
+            Stage.CONNECTING -> context.getString(R.string.pairing_connecting_title)
+            else -> modelName
+        }
         mView.findViewById<TextView>(R.id.pairing_message).text = message
         val action = actions.singleOrNull()
         button.text = action?.first ?: context.getString(R.string.pairing_connect)
         button.isEnabled = action != null && !busy
         button.importantForAccessibility = if (busy) View.IMPORTANT_FOR_ACCESSIBILITY_NO else View.IMPORTANT_FOR_ACCESSIBILITY_AUTO
-        button.visibility = if (!busy && action == null) View.INVISIBLE else View.VISIBLE
-        button.setTextColor(if (busy) android.graphics.Color.TRANSPARENT else android.graphics.Color.WHITE)
+        button.visibility = if (busy || action == null) View.GONE else View.VISIBLE
+        button.backgroundTintList = ColorStateList.valueOf(if (stage == Stage.COMPLETE) Color.rgb(242, 242, 247) else Color.WHITE)
+        button.setTextColor(if (stage == Stage.COMPLETE) Color.rgb(28, 28, 30) else Color.rgb(0, 102, 214))
         progress.visibility = if (busy) View.VISIBLE else View.GONE
+        progress.contentDescription = context.getString(if (stage == Stage.CONNECTING)
+            R.string.pairing_connecting_title else R.string.pairing_searching)
         button.setOnClickListener {
             if (!closing && action != null) {
                 interacted = true
@@ -159,7 +183,6 @@ class PopupWindow(private val context: Context, private val onCloseCallback: () 
     fun close() {
         if (closing || notified) return
         closing = true
-        artwork.stop()
         handler.removeCallbacks(expire)
         notifyDismissed()
         if (attached) animate(opening = false) else remove()
@@ -191,7 +214,7 @@ class PopupWindow(private val context: Context, private val onCloseCallback: () 
         render(from)
         animation = ValueAnimator.ofFloat(from, to).apply {
             duration = ((if (opening) 420 else 220) * kotlin.math.abs(to - from)).toLong().coerceAtLeast(1)
-            interpolator = DecelerateInterpolator()
+            interpolator = if (opening) PathInterpolator(.16f, 1f, .3f, 1f) else PathInterpolator(.32f, 0f, .67f, 0f)
             addUpdateListener { render(it.animatedValue as Float) }
             addListener(object : AnimatorListenerAdapter() {
                 override fun onAnimationEnd(animation: Animator) {
@@ -204,12 +227,7 @@ class PopupWindow(private val context: Context, private val onCloseCallback: () 
 
     private fun render(amount: Float) {
         expansion = amount
-        mView.translationY = dp(48) * (1 - amount)
-        mView.alpha = amount
-        mView.scaleX = .96f + .04f * amount
-        mView.scaleY = .96f + .04f * amount
-        mView.findViewById<View>(R.id.popup_artwork_container).alpha = pairingStageOpacity(amount, .12f)
-        mView.findViewById<View>(R.id.pairing_actions).alpha = pairingStageOpacity(amount, .3f)
+        mView.translationY = (mView.measuredHeight + dp(16)) * (1 - amount)
     }
 
     private fun cancelAnimation() {
@@ -227,5 +245,3 @@ class PopupWindow(private val context: Context, private val onCloseCallback: () 
 
     private fun dp(value: Int) = (value * context.resources.displayMetrics.density).toInt()
 }
-
-private fun pairingStageOpacity(amount: Float, start: Float) = ((amount - start) / (1f - start)).coerceIn(0f, 1f)

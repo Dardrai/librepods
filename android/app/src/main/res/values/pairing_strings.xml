@@ -1,8 +1,12 @@
 <!-- shortcut: new fork text uses English fallback until translations are contributed. -->
 <resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="MissingTranslation">
     <string name="battery_cached_age">Last received %1$d min ago</string>
-    <string name="pairing_nearby_hint">AirPods are nearby. Connect to start Android pairing.</string>
+    <string name="pairing_nearby_hint">Connect AirPods to this device.</string>
     <string name="pairing_connect">Connect</string>
+    <string name="pairing_continue">Continue</string>
+    <string name="pairing_double_tap_title">Double-Tap the Case</string>
+    <string name="pairing_hold_button_title">Hold the Setup Button</string>
+    <string name="pairing_connecting_title">Connecting…</string>
     <string name="pairing_preview">Preview pairing popup</string>
     <string name="pairing_preview_hint">Pairing preview</string>
     <string name="pairing_preview_done">Done</string>

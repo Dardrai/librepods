@@ -5,19 +5,20 @@
     android:overScrollMode="never" android:scrollbars="none">
     <LinearLayout android:id="@+id/linear_layout"
         android:layout_width="match_parent" android:layout_height="wrap_content"
-        android:orientation="vertical" android:padding="24dp">
-        <FrameLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:minHeight="48dp">
+        android:orientation="vertical" android:paddingHorizontal="24dp" android:paddingTop="20dp" android:paddingBottom="20dp">
+        <FrameLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:minHeight="64dp">
             <TextView android:id="@+id/name" android:layout_width="match_parent" android:layout_height="wrap_content"
                 android:layout_marginHorizontal="44dp" android:layout_gravity="center" android:gravity="center"
-                android:fontFamily="@font/inter" android:textSize="24sp" android:textColor="#18181B"
-                android:maxLines="2" android:ellipsize="end" />
+                android:fontFamily="@font/inter" android:textSize="26sp" android:textStyle="bold" android:textColor="#1C1C1E"
+                android:includeFontPadding="false" android:accessibilityHeading="true"
+                android:maxLines="3" android:ellipsize="end" />
             <ImageButton android:id="@+id/close_button" android:layout_width="48dp" android:layout_height="48dp"
                 android:layout_gravity="end|top" android:padding="16dp" android:src="@drawable/close"
                 android:background="@drawable/popup_button_shape"
                 android:contentDescription="@string/pairing_close" />
         </FrameLayout>
-        <FrameLayout android:id="@+id/popup_artwork_container" android:layout_width="match_parent" android:layout_height="140dp"
-            android:layout_marginTop="8dp" android:layout_marginBottom="8dp"
+        <FrameLayout android:id="@+id/popup_artwork_container" android:layout_width="match_parent" android:layout_height="160dp"
+            android:layout_marginTop="8dp" android:layout_marginBottom="12dp"
             android:importantForAccessibility="noHideDescendants">
             <TextureView android:id="@+id/popup_video" android:layout_width="match_parent" android:layout_height="match_parent"
                 android:visibility="gone" />
@@ -26,17 +27,18 @@
         </FrameLayout>
         <TextView android:id="@+id/pairing_message" android:layout_width="match_parent" android:layout_height="wrap_content"
             android:minHeight="48dp" android:gravity="center" android:fontFamily="@font/inter"
-            android:textSize="14sp" android:textColor="#636366" android:accessibilityLiveRegion="polite" />
+            android:includeFontPadding="false" android:lineSpacingExtra="3dp"
+            android:textSize="15sp" android:textColor="#636366" android:accessibilityLiveRegion="polite" />
         <FrameLayout android:id="@+id/pairing_actions" android:layout_width="match_parent" android:layout_height="wrap_content"
             android:minHeight="48dp" android:layout_marginTop="12dp">
             <Button android:id="@+id/pairing_primary" android:layout_width="match_parent" android:layout_height="wrap_content"
                 android:minHeight="48dp" android:paddingHorizontal="16dp" android:paddingVertical="12dp"
-                android:background="@drawable/pairing_primary_background" android:backgroundTint="#0066D6"
-                android:stateListAnimator="@null" android:textColor="#FFFFFF" android:textSize="16sp"
+                android:background="@drawable/pairing_primary_background"
+                android:stateListAnimator="@null" android:textColor="#0066D6" android:textSize="17sp"
                 android:fontFamily="@font/inter" android:textAllCaps="false" android:text="@string/pairing_connect" />
             <ProgressBar android:id="@+id/pairing_progress" style="?android:attr/progressBarStyleSmall"
                 android:layout_width="24dp" android:layout_height="24dp" android:layout_gravity="center"
-                android:indeterminateTint="#FFFFFF" android:visibility="gone" />
+                android:indeterminateTint="#636366" android:contentDescription="@string/pairing_connecting_title" android:visibility="gone" />
         </FrameLayout>
     </LinearLayout>
 </ScrollView>

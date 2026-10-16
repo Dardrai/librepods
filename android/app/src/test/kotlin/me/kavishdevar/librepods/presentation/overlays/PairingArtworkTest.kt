@@ -48,7 +48,7 @@ class PairingArtworkTest {
         ShadowMediaPlayer.setCreateListener { player, _ -> media = player }
         val source = DataSource.toDataSource(context,
             Uri.parse("android.resource://${context.packageName}/${R.raw.pairing_spin}"))
-        ShadowMediaPlayer.addMediaInfo(source, ShadowMediaPlayer.MediaInfo(6_000, 100))
+        ShadowMediaPlayer.addMediaInfo(source, ShadowMediaPlayer.MediaInfo(5_933, 100))
     }
 
     @After fun tearDown() {
@@ -60,19 +60,23 @@ class PairingArtworkTest {
     @Test fun staticFallbackCoversOtherModelsAndReducedMotionChangesWhileOpen() {
         artwork.start(0x1320)
         assertNotNull(poster.drawable)
+        assertEquals(OverlayArtwork.pairing(0x1320), shadowOf(poster.drawable).createdFromResId)
         assertEquals(View.GONE, video.visibility)
         artwork.start(0x2720)
         assertEquals(View.VISIBLE, video.visibility)
         assertEquals(View.VISIBLE, poster.visibility)
+        assertEquals(R.drawable.pairing_spin_poster, shadowOf(poster.drawable).createdFromResId)
         assertNull(media)
 
         Settings.Global.putFloat(context.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 0f)
         shadowOf(Looper.getMainLooper()).idle()
         assertEquals(View.GONE, video.visibility)
         assertEquals(View.VISIBLE, poster.visibility)
+        assertEquals(OverlayArtwork.pairing(0x2720), shadowOf(poster.drawable).createdFromResId)
         Settings.Global.putFloat(context.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f)
         shadowOf(Looper.getMainLooper()).idle()
         assertEquals(View.VISIBLE, video.visibility)
+        assertEquals(R.drawable.pairing_spin_poster, shadowOf(poster.drawable).createdFromResId)
 
         artwork.stop()
         Settings.Global.putFloat(context.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 0f)
@@ -89,13 +93,21 @@ class PairingArtworkTest {
         assertEquals(0f, playback.rightVolume, 0.0001f)
         assertTrue(player.isLooping)
         assertEquals(View.VISIBLE, poster.visibility)
-        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(1))
+        assertEquals(R.drawable.pairing_spin_poster, shadowOf(poster.drawable).createdFromResId)
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(100))
+        assertTrue(player.isPlaying)
+        assertEquals("The trimmed clip must start at its first visible frame", 0, player.currentPosition)
+        artwork.onSurfaceTextureUpdated(requireNotNull(video.surfaceTexture))
+        assertEquals(View.VISIBLE, poster.visibility)
         playback.invokeInfoListener(MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START, 0)
+        assertEquals(View.VISIBLE, poster.visibility)
+        artwork.onSurfaceTextureUpdated(requireNotNull(video.surfaceTexture))
         assertEquals(View.INVISIBLE, poster.visibility)
 
         playback.invokeErrorListener(MediaPlayer.MEDIA_ERROR_UNKNOWN, 0)
         assertEquals(ShadowMediaPlayer.State.END, playback.state)
         assertEquals(View.VISIBLE, poster.visibility)
+        assertEquals(OverlayArtwork.pairing(0x2720), shadowOf(poster.drawable).createdFromResId)
         assertEquals(View.GONE, video.visibility)
     }
 
@@ -108,6 +120,7 @@ class PairingArtworkTest {
         artwork.stop()
         prepared.onPrepared(player)
         playback.invokeInfoListener(MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START, 0)
+        artwork.onSurfaceTextureUpdated(requireNotNull(video.surfaceTexture))
         assertEquals(ShadowMediaPlayer.State.END, playback.state)
         assertEquals(View.VISIBLE, poster.visibility)
         assertEquals(View.GONE, video.visibility)

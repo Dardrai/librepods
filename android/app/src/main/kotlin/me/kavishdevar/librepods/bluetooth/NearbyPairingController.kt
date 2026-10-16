@@ -68,7 +68,7 @@ class NearbyPairingController(
                 Log.d(TAG, "Lid advertisement to pairing overlay: ${(SystemClock.elapsedRealtimeNanos() - observedAtNanos) / 1_000_000}ms")
                 it.showPairingActions(context.getString(R.string.pairing_nearby_hint), listOf(
                     context.getString(R.string.pairing_connect) to { discover(token) }
-                ))
+                ), stage = PopupWindow.Stage.NEARBY)
             }
         }
     }
@@ -244,7 +244,11 @@ class NearbyPairingController(
                                 if (!bondingObserved || device.bondState != BluetoothDevice.BOND_BONDED) return
                                 Log.d(TAG, "Connect to BONDED: ${SystemClock.elapsedRealtime() - requestedAt}ms")
                                 stopDiscovery()
-                                popup?.showPairingActions(context.getString(R.string.pairing_complete), emptyList(), busy = false)
+                                popup?.showPairingActions(context.getString(R.string.pairing_complete), listOf(
+                                    context.getString(R.string.pairing_continue) to {
+                                        if (session.isCurrentAttempt(token, attempt)) dismiss()
+                                    }
+                                ), busy = false, stage = PopupWindow.Stage.COMPLETE)
                                 onPaired(device)
                                 timeout = Runnable { if (session.isCurrentAttempt(token, attempt)) dismiss() }
                                     .also { handler.postDelayed(it, 3_000) }
@@ -284,7 +288,7 @@ class NearbyPairingController(
         onInteractionChanged(null)
         popup?.showPairingActions(instructions(message), listOf(
             context.getString(R.string.pairing_retry) to { discover(token) }
-        ))
+        ), stage = PopupWindow.Stage.RETRY)
     }
 
     private fun instructions(message: Int? = null): String {
@@ -293,7 +297,11 @@ class NearbyPairingController(
     }
 
     private fun showInstructions(token: Long, message: Int? = null) {
-        if (session.isCurrent(token)) popup?.showPairingActions(instructions(message), emptyList())
+        if (!session.isCurrent(token)) return
+        val connecting = message == R.string.pairing_confirm_system
+        popup?.showPairingActions(
+            if (connecting) context.getString(R.string.pairing_confirm_system) else instructions(message), emptyList(),
+            stage = if (connecting) PopupWindow.Stage.CONNECTING else PopupWindow.Stage.SETUP)
     }
 
     private fun scheduleScan(token: Long, attempt: Long, message: Int?) {

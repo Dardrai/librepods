@@ -26,6 +26,8 @@ internal class PairingArtwork(private val container: View) : TextureView.Surface
     private var active = false
     private var animatedModel = false
     private var failed = false
+    private var fallbackArt = 0
+    private var rendering = false
     private var observing = false
     private var player: MediaPlayer? = null
     private var surface: Surface? = null
@@ -44,7 +46,8 @@ internal class PairingArtwork(private val container: View) : TextureView.Surface
 
     fun start(modelId: Int) {
         stop()
-        poster.setImageResource(OverlayArtwork.pairing(modelId))
+        fallbackArt = OverlayArtwork.pairing(modelId)
+        poster.setImageResource(fallbackArt)
         animatedModel = modelId in setOf(0x0e20, 0x1420, 0x2420, 0x2720)
         active = true
         failed = false
@@ -68,10 +71,12 @@ internal class PairingArtwork(private val container: View) : TextureView.Surface
     private fun updatePlayback() {
         if (!active || !animatedModel || failed || !ValueAnimator.areAnimatorsEnabled()) {
             releasePlayer()
+            if (fallbackArt != 0) poster.setImageResource(fallbackArt)
             video.visibility = View.GONE
             return
         }
         video.visibility = View.VISIBLE
+        if (player == null) poster.setImageResource(R.drawable.pairing_spin_poster)
         val texture = video.surfaceTexture ?: return
         if (player != null) return
         val next = try { MediaPlayer() } catch (error: RuntimeException) {
@@ -88,19 +93,13 @@ internal class PairingArtwork(private val container: View) : TextureView.Surface
                 if (player === next && active) {
                     try {
                         fit(next.videoWidth, next.videoHeight)
-                        // The bundled clip opens on a blank frame; begin with the products visible.
-                        next.seekTo(500L, MediaPlayer.SEEK_CLOSEST)
+                        next.start()
                     } catch (error: RuntimeException) { fail(error) }
-                }
-            }
-            next.setOnSeekCompleteListener {
-                if (player === next && active) {
-                    try { next.start() } catch (error: RuntimeException) { fail(error) }
                 }
             }
             next.setOnInfoListener { _, info, _ ->
                 if (player === next && active && info == MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START) {
-                    poster.visibility = View.INVISIBLE
+                    rendering = true
                 }
                 false
             }
@@ -117,12 +116,14 @@ internal class PairingArtwork(private val container: View) : TextureView.Surface
         Log.w("PairingArtwork", "Cannot play pairing animation; showing static artwork", error)
         failed = true
         releasePlayer()
+        if (fallbackArt != 0) poster.setImageResource(fallbackArt)
         video.visibility = View.GONE
     }
 
     private fun releasePlayer() {
         val previous = player
         player = null
+        rendering = false
         runCatching { previous?.release() }
         surface?.release()
         surface = null
@@ -148,5 +149,7 @@ internal class PairingArtwork(private val container: View) : TextureView.Surface
         releasePlayer()
         return true
     }
-    override fun onSurfaceTextureUpdated(texture: SurfaceTexture) = Unit
+    override fun onSurfaceTextureUpdated(texture: SurfaceTexture) {
+        if (active && rendering && player != null && texture === video.surfaceTexture) poster.visibility = View.INVISIBLE
+    }
 }

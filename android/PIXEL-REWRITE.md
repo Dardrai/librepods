@@ -20,7 +20,7 @@ pair, local behavior choices and correctly owner-bound BLE keys once. Existing
 rewrite database rows are preserved. Unconfirmed device control values are not
 migrated as device reports. The Android Bluetooth bond stays with Android.
 
-The current fork version is `2.0.0-alpha.1-pixel16`, code `200000101`.
+The current fork version is `2.0.0-alpha.1-pixel17`, code `200000102`.
 
 ## Pairing and island latency
 
@@ -39,6 +39,15 @@ The current fork version is `2.0.0-alpha.1-pixel16`, code `200000101`.
   retrying or revoking permission retires the request. PIN/passkey variants and
   unavailable Shizuku retain Android's normal confirmation flow. Putting the
   case into pairing mode remains a physical step.
+- The pairing card presents separate nearby, case setup, connecting, retry and
+  completion states. Its title follows the current step, busy states use a
+  compact progress indicator, and completion offers Continue without delaying
+  device setup. The white card slides as a single sheet over a subdued backdrop;
+  artwork and text retain their layout instead of scaling or fading separately.
+  The existing Pro spinning video excludes its two blank opening frames and uses
+  a matching first-frame poster until the current decoded texture is available.
+  Unsupported models, reduced motion and playback errors retain model-specific
+  static artwork. The video stays visible through the short exit, then releases.
 - Owned battery/lid reports require a current bond and valid per-device keys.
   Public advertisements cannot establish a Classic identity or overwrite an
   owned device's batteries.
@@ -110,6 +119,16 @@ access. No fixed ATT handle has been reintroduced. Silent Allow Off/adaptive
 requests are retained only for the current connection, not presented as reports.
 
 ## Validation on 2026-10-16
+
+Pixel17's `verifyPixel` passed with 167 tests in 35 suites, no failures, errors
+or skips, lint with no errors, and successful debug/minified release builds.
+Native Android 17 rendering covers all five pairing states, narrow screens,
+large text and short landscape layouts, plus coordinated sheet motion and
+reduced motion. The Pro clip's 178 decoded frames contain no blank frames; its
+first frame and loading poster match. Pixel17 was signed with the existing
+certificate and installed in place after wireless debugging reconnected; Android
+confirmed its version. The live appearance/motion check is pending. This polish
+does not retest audio.
 
 Pixel16's `verifyPixel` passed with 163 tests in 35 suites, no failures, errors or skips,
 Android lint with no errors, and successful debug/minified release builds.

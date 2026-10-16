@@ -59,6 +59,7 @@ class NearbyPairingControllerTest {
 
     @Test fun soleFreshClassicCandidateBondsAtTwoSecondsWithoutWaitingForInquiryEnd() {
         connect()
+        assertEquals(PopupWindow.Stage.SETUP, stage())
         val device = device(1)
         found(device)
         val observedAt = field("firstCandidateAt") as Long
@@ -75,6 +76,7 @@ class NearbyPairingControllerTest {
         assertEquals(BluetoothDevice.TRANSPORT_BREDR, pairing(device).transport)
         assertFalse("Our inquiry must stop before Android pairing starts", pairing(device).discoveringAtBond)
         assertFalse(adapter.isDiscovering)
+        assertEquals(PopupWindow.Stage.CONNECTING, stage())
         advance(15_000)
         assertEquals("The old full-scan callback must not request another bond", 1, pairing(device).requests)
     }
@@ -155,6 +157,7 @@ class NearbyPairingControllerTest {
         adapter.startDiscovery()
         connect()
         assertTrue("Connect must not cancel another app's discovery", adapter.isDiscovering)
+        assertEquals(PopupWindow.Stage.RETRY, stage())
         controller.close()
         assertTrue("Closing the invitation must not cancel another app's discovery", adapter.isDiscovering)
         adapter.cancelDiscovery()
@@ -168,6 +171,53 @@ class NearbyPairingControllerTest {
         assertEquals("Selection must not outlive the global 60s request deadline", 0, pairing(late).requests)
         assertFalse(adapter.isDiscovering)
         assertTrue(button().isEnabled)
+        assertEquals(PopupWindow.Stage.RETRY, stage())
+    }
+
+    @Test fun aConfirmedBondShowsContinueWithoutDeferringThePairedCallback() {
+        controller.close()
+        val paired = mutableListOf<BluetoothDevice>()
+        controller = NearbyPairingController(context, confirmConsent = { _, _ -> false }, onPaired = { paired.add(it) })
+        connect()
+        val selected = device(1)
+        found(selected)
+        advance(2_000)
+        assertEquals(PopupWindow.Stage.CONNECTING, stage())
+        assertTrue(paired.isEmpty())
+
+        pairing(selected).setBondState(BluetoothDevice.BOND_BONDING)
+        bondChanged(selected, BluetoothDevice.BOND_BONDING)
+        pairing(selected).setBondState(BluetoothDevice.BOND_BONDED)
+        bondChanged(selected, BluetoothDevice.BOND_BONDED)
+
+        assertEquals(listOf(selected), paired)
+        assertEquals(PopupWindow.Stage.COMPLETE, stage())
+        assertEquals(context.getString(R.string.pairing_continue), button().text.toString())
+        assertTrue(button().performClick())
+        idle()
+        assertNull(field("popup"))
+        advance(3_000)
+        assertEquals("Continue must not repeat the paired callback", listOf(selected), paired)
+    }
+
+    @Test fun aConfirmedBondStillDismissesAfterThreeSecondsWithoutContinue() {
+        controller.close()
+        var pairedAt = 0L
+        controller = NearbyPairingController(context, confirmConsent = { _, _ -> false }, onPaired = {
+            pairedAt = SystemClock.elapsedRealtime()
+        })
+        connect()
+        val selected = device(1)
+        found(selected)
+        advance(2_000)
+        pairing(selected).setBondState(BluetoothDevice.BOND_BONDING)
+        bondChanged(selected, BluetoothDevice.BOND_BONDING)
+        pairing(selected).setBondState(BluetoothDevice.BOND_BONDED)
+        bondChanged(selected, BluetoothDevice.BOND_BONDED)
+        advanceTo(pairedAt + 2_999)
+        assertEquals(PopupWindow.Stage.COMPLETE, stage())
+        advanceTo(pairedAt + 3_000)
+        assertNull(field("popup"))
     }
 
     @Test
@@ -236,6 +286,7 @@ class NearbyPairingControllerTest {
     private fun connect() {
         controller.onNearbyDevice(NearbyAirPods.Event(0x2720, true))
         idle()
+        assertEquals(PopupWindow.Stage.NEARBY, stage())
         assertTrue(button().performClick())
         idle()
     }
@@ -250,6 +301,9 @@ class NearbyPairingControllerTest {
         val view = PopupWindow::class.java.getDeclaredField("mView").apply { isAccessible = true }.get(popup) as View
         return view.findViewById(R.id.pairing_primary)
     }
+
+    private fun stage(): PopupWindow.Stage = PopupWindow::class.java.getDeclaredField("stage")
+        .apply { isAccessible = true }.get(field("popup")) as PopupWindow.Stage
 
     private fun device(id: Int, name: String? = "AirPods Pro 3", type: Int = BluetoothDevice.DEVICE_TYPE_DUAL): BluetoothDevice =
         adapter.getRemoteDevice("00:11:22:33:44:${id.toString(16).padStart(2, '0')}").also {
