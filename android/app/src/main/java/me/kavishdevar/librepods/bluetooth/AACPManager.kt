@@ -265,9 +265,9 @@ class AACPManager {
             throw IllegalArgumentException("Data array does not start with STEM_PRESS opcode")
         }
         val type = StemPressType.fromByte(data[6])
-            ?: throw IllegalArgumentException("Unknown Stem Press Type: ${data[5]}")
+            ?: throw IllegalArgumentException("Unknown Stem Press Type: ${data[6]}")
         val bud = StemPressBudType.fromByte(data[7])
-            ?: throw IllegalArgumentException("Unknown Stem Press Bud Type: ${data[6]}")
+            ?: throw IllegalArgumentException("Unknown Stem Press Bud Type: ${data[7]}")
         return Pair(type, bud)
     }
 
@@ -482,6 +482,12 @@ class AACPManager {
             }
 
             Opcodes.STEM_PRESS -> {
+                try {
+                    parseStemPressResponse(packet)
+                } catch (_: IllegalArgumentException) {
+                    Log.w(TAG, "Ignoring malformed or unsupported stem press")
+                    return
+                }
                 callback?.onStemPressReceived(packet)
             }
 

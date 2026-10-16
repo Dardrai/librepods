@@ -20,6 +20,12 @@ keeps requested and confirmed values separate. Failed EQ writes restore the grap
 to its known setting. Control writes require the displayed pair, selected pair
 and actual Bluetooth transport to agree.
 
+Hearing and transparency pages send only deliberate edits. They preserve the
+other ear's settings and unknown profile fields; loading a report or opening a
+page sends nothing. Attribute writes are debounced for their original pair and
+connection, and stop when that connection changes. An attribute timeout retires
+that attribute connection so a late reply cannot be mistaken for another setting.
+
 ## Using the features
 
 Open the case to show the nearby card. Select Connect and follow the case's
@@ -38,6 +44,8 @@ Microphone tests require Shizuku for selected-device playback recovery. Record
 a microphone test first. Test recordings are private WAV files, stop after
 one minute, and can be played or shared explicitly. Compare spoken pitch and
 recording duration with the elapsed capture time before relying on the microphone.
+Starting a new recorded test keeps that recording and the two most recent older
+tests, removing earlier diagnostic WAV files from the private test directory.
 An initialized decoder or a quiet stopped stream does not establish calibrated
 audio or healthy stereo playback.
 

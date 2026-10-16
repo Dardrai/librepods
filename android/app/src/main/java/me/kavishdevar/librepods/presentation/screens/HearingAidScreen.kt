@@ -19,7 +19,6 @@
 package me.kavishdevar.librepods.presentation.screens
 
 import android.annotation.SuppressLint
-import android.util.Log
 import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
@@ -38,7 +37,6 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -55,13 +53,11 @@ import androidx.compose.ui.unit.sp
 import com.kyant.backdrop.backdrops.layerBackdrop
 import com.kyant.backdrop.backdrops.rememberLayerBackdrop
 import dev.chrisbanes.haze.materials.ExperimentalHazeMaterialsApi
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 import me.kavishdevar.librepods.R
 import me.kavishdevar.librepods.bluetooth.AACPManager
+import me.kavishdevar.librepods.bluetooth.ATTHandles
 import me.kavishdevar.librepods.data.parseTransparencySettingsResponse
-import me.kavishdevar.librepods.data.sendTransparencySettings
+import me.kavishdevar.librepods.data.disableCustomizedTransparency
 import me.kavishdevar.librepods.presentation.components.ConfirmationDialog
 import me.kavishdevar.librepods.presentation.components.StyledList
 import me.kavishdevar.librepods.presentation.components.StyledListItem
@@ -71,8 +67,6 @@ import me.kavishdevar.librepods.presentation.theme.LocalDesignSystem
 import me.kavishdevar.librepods.presentation.viewmodel.AirPodsViewModel
 import kotlin.io.encoding.ExperimentalEncodingApi
 
-private const val TAG = "AccessibilitySettings"
-
 @SuppressLint("DefaultLocale")
 @ExperimentalHazeMaterialsApi
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalEncodingApi::class)
@@ -81,17 +75,14 @@ fun HearingAidScreen(viewModel: AirPodsViewModel, onNavigateHearingAidAdjustment
     val verticalScrollState  = rememberScrollState()
     val backdrop = rememberLayerBackdrop()
 
-    val showDialog = remember { mutableStateOf(false) }
-    val initialLoad = remember { mutableStateOf(true) }
-
     val state by viewModel.uiState.collectAsState()
-
-    val hearingAidEnabled = remember {
-        val aidStatus = state.controlStates[AACPManager.Companion.ControlCommandIdentifiers.HEARING_AID]
-        val assistStatus = state.controlStates[AACPManager.Companion.ControlCommandIdentifiers.HEARING_ASSIST_CONFIG]
-        mutableStateOf((aidStatus?.getOrNull(1) == 0x01.toByte()) && (assistStatus?.getOrNull(0) == 0x01.toByte()))
-    }
-
+    val deviceAddress = state.deviceAddress
+    val transparencyData = state.requestedATT[ATTHandles.TRANSPARENCY] ?: state.transparencyData
+    val showDialog = remember(deviceAddress) { mutableStateOf(false) }
+    val aidStatus = state.controlStates[AACPManager.Companion.ControlCommandIdentifiers.HEARING_AID]
+    val assistStatus = state.controlStates[AACPManager.Companion.ControlCommandIdentifiers.HEARING_ASSIST_CONFIG]
+    val hearingAidEnabled = aidStatus?.getOrNull(1) == 0x01.toByte() &&
+        assistStatus?.getOrNull(0) == 0x01.toByte()
 
     val m3eEnabled = LocalDesignSystem.current == DesignSystem.Material
     val topPadding = if (m3eEnabled) 0.dp else WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + 84.dp
@@ -112,17 +103,6 @@ fun HearingAidScreen(viewModel: AirPodsViewModel, onNavigateHearingAidAdjustment
 //            val adjustMediaEnabled = remember { mutableStateOf(false) }
 //            val adjustPhoneEnabled = remember { mutableStateOf(false) }
 
-        LaunchedEffect(hearingAidEnabled.value) {
-            if (hearingAidEnabled.value && !initialLoad.value) {
-                showDialog.value = true
-            } else if (!hearingAidEnabled.value && !initialLoad.value) {
-                viewModel.setControlCommandValue(AACPManager.Companion.ControlCommandIdentifiers.HEARING_AID, byteArrayOf(0x01, 0x02))
-                viewModel.setControlCommandByte(AACPManager.Companion.ControlCommandIdentifiers.HEARING_ASSIST_CONFIG, 0x02.toByte())
-                hearingAidEnabled.value = false
-            }
-            initialLoad.value = false
-        }
-
 //            fun onAdjustPhoneChange(value: Boolean) {
 //                // TODO
 //            }
@@ -134,8 +114,16 @@ fun HearingAidScreen(viewModel: AirPodsViewModel, onNavigateHearingAidAdjustment
         StyledList (title = stringResource(R.string.hearing_aid)) {
             StyledToggle(
                 label = stringResource(R.string.hearing_aid),
-                checked = hearingAidEnabled.value,
-                onCheckedChange = { hearingAidEnabled.value = it },
+                checked = hearingAidEnabled,
+                enabled = hearingAidEnabled || parseTransparencySettingsResponse(transparencyData) != null,
+                onCheckedChange = { enabled ->
+                    if (enabled) {
+                        showDialog.value = true
+                    } else {
+                        viewModel.setControlCommandValue(AACPManager.Companion.ControlCommandIdentifiers.HEARING_AID, byteArrayOf(0x01, 0x02))
+                        viewModel.setControlCommandByte(AACPManager.Companion.ControlCommandIdentifiers.HEARING_ASSIST_CONFIG, 0x02.toByte())
+                    }
+                },
             )
             StyledListItem(
                 name = stringResource(R.string.adjustments),
@@ -208,34 +196,15 @@ fun HearingAidScreen(viewModel: AirPodsViewModel, onNavigateHearingAidAdjustment
         dismissText = "Cancel",
         onConfirm = {
             showDialog.value = false
-            val enrolled = state.controlStates[AACPManager.Companion.ControlCommandIdentifiers.HEARING_AID]?.getOrNull(0) == 0x01.toByte()
-            if (!enrolled) {
-                viewModel.setControlCommandValue(AACPManager.Companion.ControlCommandIdentifiers.HEARING_AID, byteArrayOf(0x01, 0x01))
-            } else {
-                viewModel.setControlCommandValue(AACPManager.Companion.ControlCommandIdentifiers.HEARING_AID, byteArrayOf(0x01, 0x01))
-            }
-            viewModel.setControlCommandByte(AACPManager.Companion.ControlCommandIdentifiers.HEARING_ASSIST_CONFIG, 0x01.toByte())
-            hearingAidEnabled.value = true
-            CoroutineScope(Dispatchers.IO).launch {
-                try {
-                    if (state.hearingAidData.isEmpty()) {
-                        Log.w(TAG, "read failed")
-                        return@launch
-                    }
-                    val parsed = parseTransparencySettingsResponse(state.hearingAidData)
-                    if (parsed == null) {
-                        Log.w(TAG, "transparency parse failed")
-                        return@launch
-                    }
-                    val disabledSettings = parsed.copy(enabled = false)
-                    sendTransparencySettings(viewModel::setATTCharacteristicValue, disabledSettings)
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error disabling transparency: ${e.message}")
+            if (parseTransparencySettingsResponse(transparencyData) != null) {
+                disableCustomizedTransparency(transparencyData) { handle, value ->
+                    viewModel.setATTCharacteristicValue(handle, value, deviceAddress)
                 }
+                viewModel.setControlCommandValue(AACPManager.Companion.ControlCommandIdentifiers.HEARING_AID, byteArrayOf(0x01, 0x01))
+                viewModel.setControlCommandByte(AACPManager.Companion.ControlCommandIdentifiers.HEARING_ASSIST_CONFIG, 0x01.toByte())
             }
         },
         onDismiss = {
-            hearingAidEnabled.value = false
             showDialog.value = false
         },
          backdrop = backdrop

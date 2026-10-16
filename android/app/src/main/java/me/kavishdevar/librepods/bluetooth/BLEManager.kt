@@ -21,6 +21,7 @@ package me.kavishdevar.librepods.bluetooth
 import android.Manifest
 import android.content.pm.PackageManager
 import android.annotation.SuppressLint
+import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager
 import android.bluetooth.le.BluetoothLeScanner
 import android.bluetooth.le.ScanCallback
@@ -145,6 +146,11 @@ class BLEManager(private val context: Context) {
     )
 
     private val cleanupHandler = Handler(Looper.getMainLooper())
+    private val retryRunnable = Runnable {
+        synchronized(this@BLEManager) {
+            if (scanSession.requested && !scanSession.active) startScanAttempt()
+        }
+    }
     private val cleanupRunnable = object : Runnable {
         override fun run() {
             synchronized(this@BLEManager) {
@@ -163,7 +169,36 @@ class BLEManager(private val context: Context) {
     @SuppressLint("MissingPermission")
     @Synchronized
     fun startScanning() {
-        stopScanning()
+        scanSession.request()
+        cleanupHandler.removeCallbacks(retryRunnable)
+        startScanAttempt()
+    }
+
+    @Synchronized
+    fun onBluetoothStateChanged(state: Int) {
+        when (state) {
+            BluetoothAdapter.STATE_ON -> {
+                if (scanSession.requested && !scanSession.active) {
+                    cleanupHandler.removeCallbacks(retryRunnable)
+                    startScanAttempt()
+                }
+            }
+            BluetoothAdapter.STATE_TURNING_OFF, BluetoothAdapter.STATE_OFF -> {
+                cleanupHandler.removeCallbacks(retryRunnable)
+                stopActiveScan()
+            }
+        }
+    }
+
+    private fun retryScan() {
+        cleanupHandler.removeCallbacks(retryRunnable)
+        if (scanSession.requested) cleanupHandler.postDelayed(retryRunnable, SCAN_RETRY_MS)
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun startScanAttempt() {
+        stopActiveScan()
+        if (!scanSession.requested) return
         try {
             Log.d(TAG, "Starting BLE scanner")
 
@@ -181,7 +216,10 @@ class BLEManager(private val context: Context) {
             }
 
             mBluetoothLeScanner = btAdapter.bluetoothLeScanner
-            if (mBluetoothLeScanner == null) return
+            if (mBluetoothLeScanner == null) {
+                retryScan()
+                return
+            }
             val scanToken = scanSession.begin()
 
             val scanSettings = ScanSettings.Builder()
@@ -220,7 +258,8 @@ class BLEManager(private val context: Context) {
                     synchronized(this@BLEManager) {
                         if (!scanSession.isCurrent(scanToken)) return
                         Log.e(TAG, "BLE scan failed with error code: $errorCode")
-                        stopScanning()
+                        stopActiveScan()
+                        if (errorCode != ScanCallback.SCAN_FAILED_FEATURE_UNSUPPORTED) retryScan()
                     }
                 }
             }
@@ -230,15 +269,26 @@ class BLEManager(private val context: Context) {
 
             cleanupHandler.removeCallbacks(cleanupRunnable)
             cleanupHandler.postDelayed(cleanupRunnable, CLEANUP_INTERVAL_MS)
-        } catch (t: Throwable) {
-            stopScanning()
+        } catch (t: SecurityException) {
+            stopActiveScan()
+            Log.e(TAG, "Bluetooth scan permission is unavailable", t)
+        } catch (t: Exception) {
+            stopActiveScan()
             Log.e(TAG, "Error starting BLE scanner", t)
+            retryScan()
         }
     }
 
     @SuppressLint("MissingPermission")
     @Synchronized
     fun stopScanning() {
+        scanSession.stop()
+        cleanupHandler.removeCallbacks(retryRunnable)
+        stopActiveScan()
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun stopActiveScan() {
         val scanner = mBluetoothLeScanner
         val callback = mScanCallback
         scanSession.end()
@@ -576,6 +626,7 @@ class BLEManager(private val context: Context) {
     companion object {
         private const val TAG = "AirPodsBLE"
         private const val CLEANUP_INTERVAL_MS = 10000L
+        private const val SCAN_RETRY_MS = 30000L
         private const val STALE_DEVICE_TIMEOUT_MS = 15000L
         private const val LID_CLOSE_TIMEOUT_MS = 2500L
     }

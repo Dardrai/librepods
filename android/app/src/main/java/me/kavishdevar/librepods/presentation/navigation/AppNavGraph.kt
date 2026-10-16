@@ -181,11 +181,6 @@ fun AppNavGraph(
                             AdaptiveStrengthScreen(airPodsViewModel, ::navigateToPurchase)
                         }
 
-//                Screen.CameraControl ->
-//                    NavEntry(screen) {
-//                        CameraControlScreen(airPodsViewModel)
-//                    }
-
                     Screen.OpenSourceLicenses ->
                         NavEntry(screen) {
                             OpenSourceLicensesScreen()

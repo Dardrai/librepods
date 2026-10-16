@@ -147,6 +147,7 @@ class AirPodsMicrophone(
                     if (record) {
                         check(outputDirectory.exists() || outputDirectory.mkdirs()) { "Cannot create recording directory" }
                         outputFile = File.createTempFile("airpods-mic-", ".wav", outputDirectory)
+                        pruneMicrophoneRecordings(outputDirectory, checkNotNull(outputFile))
                         writer = PcmWaveWriter(checkNotNull(outputFile), format)
                     }
                     sink?.onFormat(format)

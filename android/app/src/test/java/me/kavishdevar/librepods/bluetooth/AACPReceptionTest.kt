@@ -87,4 +87,27 @@ class AACPReceptionTest {
         manager.receivePacket(header(Opcodes.CONVERSATION_AWARENESS) + byteArrayOf(2, 0, 0, 1))
         assertEquals(listOf("onEarDetectionReceived", "onConversationAwarenessReceived"), callbacks)
     }
+
+    @Test fun malformedAndUnknownStemReportsAreDroppedBeforeConsumersAndValidEventsStillWork() {
+        val manager = AACPManager()
+        val received = mutableListOf<Pair<AACPManager.Companion.StemPressType, AACPManager.Companion.StemPressBudType>>()
+        manager.setPacketCallback(Proxy.newProxyInstance(
+            AACPManager.PacketCallback::class.java.classLoader,
+            arrayOf(AACPManager.PacketCallback::class.java)
+        ) { _, method, args ->
+            if (method.name == "onStemPressReceived") {
+                received.add(manager.parseStemPressResponse(args!![0] as ByteArray))
+            }
+            null
+        } as AACPManager.PacketCallback)
+        val valid = header(Opcodes.STEM_PRESS) + byteArrayOf(5, 1)
+        for (length in 0 until valid.size) manager.receivePacket(valid.copyOf(length))
+        manager.receivePacket(valid + byteArrayOf(0))
+        manager.receivePacket(header(Opcodes.STEM_PRESS) + byteArrayOf(0, 1))
+        manager.receivePacket(header(Opcodes.STEM_PRESS) + byteArrayOf(5, 3))
+        assertTrue(received.isEmpty())
+        manager.receivePacket(valid)
+        assertEquals(listOf(AACPManager.Companion.StemPressType.SINGLE_PRESS to
+            AACPManager.Companion.StemPressBudType.LEFT), received)
+    }
 }

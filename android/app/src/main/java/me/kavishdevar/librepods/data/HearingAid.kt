@@ -18,20 +18,9 @@
 
 package me.kavishdevar.librepods.data
 
-import android.util.Log
-import androidx.compose.runtime.MutableState
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import me.kavishdevar.librepods.bluetooth.ATTHandles
-import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import kotlin.time.Duration.Companion.milliseconds
-
-private const val TAG = "HearingAidUtils"
 
 data class HearingAidSettings(
     val leftEQ: FloatArray,
@@ -48,6 +37,13 @@ data class HearingAidSettings(
     val balance: Float,
     val ownVoiceAmplification: Float
 ) {
+    fun withAmplification(amplification: Float = netAmplification, balance: Float = this.balance) = copy(
+        leftAmplification = amplification - balance / 2,
+        rightAmplification = amplification + balance / 2,
+        netAmplification = amplification,
+        balance = balance
+    )
+
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (javaClass != other?.javaClass) return false
@@ -88,6 +84,7 @@ data class HearingAidSettings(
 fun parseHearingAidSettingsResponse(data: ByteArray): HearingAidSettings? {
     if (data.size < 104) return null
     val buffer = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN)
+    if ((4 until 104 step 4).any { !buffer.getFloat(it).isFinite() }) return null
 
     buffer.get() // skip 0x02
     buffer.get() // skip 0x02
@@ -115,10 +112,9 @@ fun parseHearingAidSettingsResponse(data: ByteArray): HearingAidSettings? {
 
     val ownVoiceAmplification = buffer.float
 
-    val avg = (leftAmplification + rightAmplification) / 2
-    val amplification = avg.coerceIn(-1f, 1f)
+    val avg = leftAmplification / 2 + rightAmplification / 2
     val diff = rightAmplification - leftAmplification
-    val balance = diff.coerceIn(-1f, 1f)
+    if (!diff.isFinite()) return null
 
     return HearingAidSettings(
         leftEQ = leftEQ,
@@ -131,8 +127,8 @@ fun parseHearingAidSettingsResponse(data: ByteArray): HearingAidSettings? {
         rightConversationBoost = rightConversationBoost,
         leftAmbientNoiseReduction = leftAmbientNoiseReduction,
         rightAmbientNoiseReduction = rightAmbientNoiseReduction,
-        netAmplification = amplification,
-        balance = balance,
+        netAmplification = avg,
+        balance = diff,
         ownVoiceAmplification = ownVoiceAmplification
     )
 }
@@ -140,53 +136,45 @@ fun parseHearingAidSettingsResponse(data: ByteArray): HearingAidSettings? {
 fun sendHearingAidSettings(
     currentData: ByteArray,
     hearingAidSettings: HearingAidSettings,
-    debounceJob: MutableState<Job?>,
     sender: (ATTHandles, ByteArray) -> Unit
 ) {
-    debounceJob.value?.cancel()
-    debounceJob.value = CoroutineScope(Dispatchers.IO).launch {
-        delay(100.milliseconds)
-        try {
-            Log.d(TAG, "Current data before update: ${currentData.joinToString(" ") { String.format("%02X", it) }}")
-            if (currentData.size < 104) {
-                Log.w(TAG, "Current data size ${currentData.size} too small, cannot send settings")
-                return@launch
-            }
-            val buffer = ByteBuffer.wrap(currentData).order(ByteOrder.LITTLE_ENDIAN)
+    val original = parseHearingAidSettingsResponse(currentData) ?: return
+    if (hearingAidSettings.leftEQ.size != 8 || hearingAidSettings.rightEQ.size != 8
+    ) return
+    val buffer = ByteBuffer.wrap(currentData.copyOf()).order(ByteOrder.LITTLE_ENDIAN)
 
-            // for some reason
-            buffer.put(2, 0x64)
+    // Writes use the 0x64 header while reports use 0x60.
+    buffer.put(2, 0x64)
 
-            // Left EQ
-            for (i in 0..7) {
-                buffer.putFloat(4 + i * 4, hearingAidSettings.leftEQ[i])
-            }
-
-            // Left ear adjustments
-            buffer.putFloat(36, hearingAidSettings.leftAmplification)
-            buffer.putFloat(40, hearingAidSettings.leftTone)
-            buffer.putFloat(44, if (hearingAidSettings.leftConversationBoost) 1.0f else 0.0f)
-            buffer.putFloat(48, hearingAidSettings.leftAmbientNoiseReduction)
-
-            // Right EQ
-            for (i in 0..7) {
-                buffer.putFloat(52 + i * 4, hearingAidSettings.rightEQ[i])
-            }
-
-            // Right ear adjustments
-            buffer.putFloat(84, hearingAidSettings.rightAmplification)
-            buffer.putFloat(88, hearingAidSettings.rightTone)
-            buffer.putFloat(92, if (hearingAidSettings.rightConversationBoost) 1.0f else 0.0f)
-            buffer.putFloat(96, hearingAidSettings.rightAmbientNoiseReduction)
-
-            // Own voice amplification
-            buffer.putFloat(100, hearingAidSettings.ownVoiceAmplification)
-
-            Log.d(TAG, "Sending updated settings: ${currentData.joinToString(" ") { String.format("%02X", it) }}")
-
-            sender(ATTHandles.HEARING_AID, currentData)
-        } catch (e: IOException) {
-            e.printStackTrace()
-        }
+    // Left EQ
+    for (i in 0..7) {
+        buffer.putFloat(4 + i * 4, hearingAidSettings.leftEQ[i])
     }
+
+    // Left ear adjustments
+    buffer.putFloat(36, hearingAidSettings.leftAmplification)
+    buffer.putFloat(40, hearingAidSettings.leftTone)
+    if (hearingAidSettings.leftConversationBoost != original.leftConversationBoost) {
+        buffer.putFloat(44, if (hearingAidSettings.leftConversationBoost) 1.0f else 0.0f)
+    }
+    buffer.putFloat(48, hearingAidSettings.leftAmbientNoiseReduction)
+
+    // Right EQ
+    for (i in 0..7) {
+        buffer.putFloat(52 + i * 4, hearingAidSettings.rightEQ[i])
+    }
+
+    // Right ear adjustments
+    buffer.putFloat(84, hearingAidSettings.rightAmplification)
+    buffer.putFloat(88, hearingAidSettings.rightTone)
+    if (hearingAidSettings.rightConversationBoost != original.rightConversationBoost) {
+        buffer.putFloat(92, if (hearingAidSettings.rightConversationBoost) 1.0f else 0.0f)
+    }
+    buffer.putFloat(96, hearingAidSettings.rightAmbientNoiseReduction)
+
+    // Own voice amplification
+    buffer.putFloat(100, hearingAidSettings.ownVoiceAmplification)
+
+    val data = buffer.array()
+    if (parseHearingAidSettingsResponse(data) != null) sender(ATTHandles.HEARING_AID, data)
 }

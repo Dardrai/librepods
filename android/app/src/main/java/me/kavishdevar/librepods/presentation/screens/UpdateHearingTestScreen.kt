@@ -18,7 +18,6 @@
 
 package me.kavishdevar.librepods.presentation.screens
 
-import android.util.Log
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -42,14 +41,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.Saver
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
@@ -62,10 +57,8 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import kotlinx.coroutines.Job
 import me.kavishdevar.librepods.R
 import me.kavishdevar.librepods.bluetooth.ATTHandles
-import me.kavishdevar.librepods.data.HearingAidSettings
 import me.kavishdevar.librepods.data.parseHearingAidSettingsResponse
 import me.kavishdevar.librepods.data.sendHearingAidSettings
 import me.kavishdevar.librepods.presentation.theme.DesignSystem
@@ -75,11 +68,10 @@ import me.kavishdevar.librepods.presentation.viewmodel.AirPodsUiState
 import me.kavishdevar.librepods.presentation.viewmodel.AirPodsViewModel
 import me.kavishdevar.librepods.presentation.viewmodel.demoState
 
-private const val TAG = "UpdateHearingTestScreen"
-
 @Composable
 fun UpdateHearingTestRoute(viewModel: AirPodsViewModel) {
     val state by viewModel.uiState.collectAsState()
+    val deviceAddress = state.deviceAddress
     val m3eEnabled = LocalDesignSystem.current == DesignSystem.Material
     val topPadding = if (m3eEnabled) 0.dp else WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + 84.dp
     val bottomPadding = if (m3eEnabled) 0.dp else WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + 12.dp
@@ -93,7 +85,9 @@ fun UpdateHearingTestRoute(viewModel: AirPodsViewModel) {
             state = state,
             topPadding = topPadding,
             bottomPadding = bottomPadding,
-            setATTCharacteristicValue = viewModel::setATTCharacteristicValue
+            setATTCharacteristicValue = { handle, value ->
+                viewModel.setATTCharacteristicValue(handle, value, deviceAddress)
+            }
         )
     }
 }
@@ -121,98 +115,21 @@ fun UpdateHearingTestScreen(
             style = MaterialTheme.typography.labelMedium,
             textAlign = TextAlign.Center,
         )
-        val tone = rememberSaveable { mutableFloatStateOf(0.5f) }
-        val ambientNoiseReduction = rememberSaveable { mutableFloatStateOf(0.0f) }
-        val ownVoiceAmplification = rememberSaveable { mutableFloatStateOf(0.5f) }
-        val leftAmplification = rememberSaveable { mutableFloatStateOf(0.5f) }
-        val rightAmplification = rememberSaveable { mutableFloatStateOf(0.5f) }
-        val conversationBoostEnabled = rememberSaveable { mutableStateOf(false) }
-        val leftEQ = rememberSaveable(
-            saver = Saver(
-                save = { it.value.toList() },
-                restore = { mutableStateOf(it.toFloatArray()) }
-            )
-        ) {
-            mutableStateOf(FloatArray(8))
+        val data = state.requestedATT[ATTHandles.HEARING_AID] ?: state.hearingAidData
+        val settings = remember(state.deviceAddress, data) {
+            mutableStateOf(parseHearingAidSettingsResponse(data))
         }
-        val rightEQ = rememberSaveable(
-            saver = Saver(
-                save = { it.value.toList() },
-                restore = { mutableStateOf(it.toFloatArray()) }
-            )
-        ) {
-            mutableStateOf(FloatArray(8))
-        }
-
-        val debounceJob = remember { mutableStateOf<Job?>(null) }
-        val initialized = rememberSaveable { mutableStateOf(false) }
-
-        val hearingAidSettings = remember {
-            mutableStateOf(
-                HearingAidSettings(
-                    leftEQ = leftEQ.value,
-                    rightEQ = rightEQ.value,
-                    leftAmplification = leftAmplification.floatValue,
-                    rightAmplification = rightAmplification.floatValue,
-                    leftTone = tone.floatValue,
-                    rightTone = tone.floatValue,
-                    leftConversationBoost = conversationBoostEnabled.value,
-                    rightConversationBoost = conversationBoostEnabled.value,
-                    leftAmbientNoiseReduction = ambientNoiseReduction.floatValue,
-                    rightAmbientNoiseReduction = ambientNoiseReduction.floatValue,
-                    netAmplification = leftAmplification.floatValue + rightAmplification.floatValue / 2,
-                    balance = 0.5f + (rightAmplification.floatValue - leftAmplification.floatValue) / 2,
-                    ownVoiceAmplification = ownVoiceAmplification.floatValue
-                )
-            )
-        }
-
-        LaunchedEffect(state.hearingAidData) {
-            val parsed = parseHearingAidSettingsResponse(state.hearingAidData)
-            if (parsed != null) {
-                leftEQ.value = parsed.leftEQ.copyOf()
-                rightEQ.value = parsed.rightEQ.copyOf()
-                conversationBoostEnabled.value = parsed.leftConversationBoost
-                tone.floatValue = parsed.leftTone
-                ambientNoiseReduction.floatValue = parsed.leftAmbientNoiseReduction
-                ownVoiceAmplification.floatValue = parsed.ownVoiceAmplification
-                leftAmplification.floatValue = parsed.leftAmplification
-                rightAmplification.floatValue = parsed.rightAmplification
-                initialized.value = true
-                Log.d(TAG, "Updated hearing aid settings from notification")
+        fun updateBand(index: Int, value: String, left: Boolean) {
+            val parsed = value.toFloatOrNull()?.takeIf { it.isFinite() } ?: return
+            val current = settings.value ?: return
+            val updated = if (left) {
+                current.copy(leftEQ = current.leftEQ.copyOf().also { it[index] = parsed })
             } else {
-                Log.w(TAG, "Failed to parse hearing aid settings from notification")
+                current.copy(rightEQ = current.rightEQ.copyOf().also { it[index] = parsed })
             }
-        }
-
-        LaunchedEffect(
-            leftEQ.value,
-            rightEQ.value,
-            conversationBoostEnabled.value,
-            leftAmplification.floatValue,
-            rightAmplification.floatValue,
-            tone.floatValue,
-            ambientNoiseReduction.floatValue,
-            ownVoiceAmplification.floatValue
-        ) {
-            if (!initialized.value) return@LaunchedEffect
-            hearingAidSettings.value = HearingAidSettings(
-                leftEQ = leftEQ.value,
-                rightEQ = rightEQ.value,
-                leftAmplification = leftAmplification.floatValue,
-                rightAmplification = rightAmplification.floatValue,
-                leftTone = tone.floatValue,
-                rightTone = tone.floatValue,
-                leftConversationBoost = conversationBoostEnabled.value,
-                rightConversationBoost = conversationBoostEnabled.value,
-                leftAmbientNoiseReduction = ambientNoiseReduction.floatValue,
-                rightAmbientNoiseReduction = ambientNoiseReduction.floatValue,
-                netAmplification = leftAmplification.floatValue + rightAmplification.floatValue / 2,
-                balance = 0.5f + (rightAmplification.floatValue - leftAmplification.floatValue) / 2,
-                ownVoiceAmplification = ownVoiceAmplification.floatValue
-            )
-            Log.d(TAG, "Updated settings: ${hearingAidSettings.value}")
-            sendHearingAidSettings(state.hearingAidData, hearingAidSettings.value, debounceJob, setATTCharacteristicValue)
+            if (updated == current) return
+            settings.value = updated
+            sendHearingAidSettings(data, updated, setATTCharacteristicValue)
         }
 
         val frequencies =
@@ -251,17 +168,8 @@ fun UpdateHearingTestScreen(
                     style = MaterialTheme.typography.labelSmall
                 )
                 OutlinedTextField(
-                    value = leftEQ.value[index].toString(),
-                    onValueChange = { newValue ->
-                        val parsed = newValue.toFloatOrNull()
-                        if (parsed != null) {
-                            val newArray = leftEQ.value.copyOf()
-                            newArray[index] = parsed
-                            leftEQ.value = newArray
-                            Log.d(TAG, "Left EQ updated at index $index to $parsed")
-                        }
-                    },
-//                        label = { Text("Value", fontSize = 14.sp, fontFamily = FontFamily(Font(R.font.sf_pro))) },
+                    value = settings.value?.leftEQ?.get(index)?.toString().orEmpty(),
+                    onValueChange = { updateBand(index, it, left = true) },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                     textStyle = TextStyle(
                         fontFamily = FontFamily(Font(R.font.sf_pro)),
@@ -270,17 +178,8 @@ fun UpdateHearingTestScreen(
                     modifier = Modifier.weight(1f)
                 )
                 OutlinedTextField(
-                    value = rightEQ.value[index].toString(),
-                    onValueChange = { newValue ->
-                        val parsed = newValue.toFloatOrNull()
-                        if (parsed != null) {
-                            val newArray = rightEQ.value.copyOf()
-                            newArray[index] = parsed
-                            rightEQ.value = newArray
-                            Log.d(TAG, "Right EQ updated at index $index to $parsed")
-                        }
-                    },
-//                        label = { Text("Value", fontSize = 14.sp, fontFamily = FontFamily(Font(R.font.sf_pro))) },
+                    value = settings.value?.rightEQ?.get(index)?.toString().orEmpty(),
+                    onValueChange = { updateBand(index, it, left = false) },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                     textStyle = TextStyle(
                         fontFamily = FontFamily(Font(R.font.sf_pro)),

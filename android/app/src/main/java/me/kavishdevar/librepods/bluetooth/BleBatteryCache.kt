@@ -16,8 +16,12 @@ internal data class BleKeyBinding(val address: String?, val owner: String?, val 
 /** Queued Android scan callbacks cannot outlive the scan that produced them. */
 internal class BleScanSession {
     private var generation = 0L
+    var requested = false
+        private set
     var active = false
         private set
+    fun request() { requested = true }
+    fun stop() { requested = false; end() }
     fun begin(): Long { active = true; return ++generation }
     fun end() { active = false; generation++ }
     fun isCurrent(token: Long): Boolean = active && token == generation

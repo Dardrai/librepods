@@ -18,9 +18,7 @@
 
 package me.kavishdevar.librepods.presentation.screens
 
-// import me.kavishdevar.librepods.utils.RadareOffsetFinder
 import android.annotation.SuppressLint
-import android.util.Log
 import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
@@ -47,14 +45,10 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.Saver
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.shadow
@@ -68,6 +62,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.chrisbanes.haze.materials.ExperimentalHazeMaterialsApi
 import me.kavishdevar.librepods.R
+import me.kavishdevar.librepods.bluetooth.ATTHandles
 import me.kavishdevar.librepods.data.TransparencySettings
 import me.kavishdevar.librepods.data.parseTransparencySettingsResponse
 import me.kavishdevar.librepods.data.sendTransparencySettings
@@ -77,8 +72,6 @@ import me.kavishdevar.librepods.presentation.theme.DesignSystem
 import me.kavishdevar.librepods.presentation.theme.LocalDesignSystem
 import me.kavishdevar.librepods.presentation.viewmodel.AirPodsViewModel
 import kotlin.io.encoding.ExperimentalEncodingApi
-
-private const val TAG = "TransparencySettings"
 
 @SuppressLint("DefaultLocale")
 @ExperimentalHazeMaterialsApi
@@ -110,106 +103,37 @@ fun TransparencySettingsScreen(viewModel: AirPodsViewModel) {
         Spacer(modifier = Modifier.height(topPadding))
         val backgroundColor = if (isDarkTheme) Color(0xFF1C1C1E) else Color(0xFFFFFFFF)
 
-        val enabled = rememberSaveable { mutableStateOf(false) }
-        val amplificationSliderValue = rememberSaveable { mutableFloatStateOf(0.5f) }
-        val balanceSliderValue = rememberSaveable { mutableFloatStateOf(0.5f) }
-        val toneSliderValue = rememberSaveable { mutableFloatStateOf(0.5f) }
-        val ambientNoiseReductionSliderValue = rememberSaveable { mutableFloatStateOf(0.0f) }
-        val conversationBoostEnabled = rememberSaveable { mutableStateOf(false) }
-        val eq = rememberSaveable(
-            saver = Saver(
-                save = { it.value.toList() },
-                restore = { mutableStateOf(it.toFloatArray()) }
-            )
-        ) { mutableStateOf(FloatArray(8)) }
-        val phoneMediaEQ = rememberSaveable(
-            saver = Saver(
-                save = { it.value.toList() },
-                restore = { mutableStateOf(it.toFloatArray()) }
-            )
-        ) { mutableStateOf(FloatArray(8) { 0.5f }) }
-
-        val initialized = rememberSaveable { mutableStateOf(false) }
-
-        val transparencySettings = remember {
-            mutableStateOf(
-                TransparencySettings(
-                    enabled = enabled.value,
-                    leftEQ = eq.value,
-                    rightEQ = eq.value,
-                    leftAmplification = amplificationSliderValue.floatValue + (0.5f - balanceSliderValue.floatValue) * amplificationSliderValue.floatValue * 2,
-                    rightAmplification = amplificationSliderValue.floatValue + (balanceSliderValue.floatValue - 0.5f) * amplificationSliderValue.floatValue * 2,
-                    leftTone = toneSliderValue.floatValue,
-                    rightTone = toneSliderValue.floatValue,
-                    leftConversationBoost = conversationBoostEnabled.value,
-                    rightConversationBoost = conversationBoostEnabled.value,
-                    leftAmbientNoiseReduction = ambientNoiseReductionSliderValue.floatValue,
-                    rightAmbientNoiseReduction = ambientNoiseReductionSliderValue.floatValue,
-                    netAmplification = amplificationSliderValue.floatValue,
-                    balance = balanceSliderValue.floatValue
-                )
-            )
+        val deviceAddress = state.deviceAddress
+        val data = state.requestedATT[ATTHandles.TRANSPARENCY] ?: state.transparencyData
+        val settings = remember(deviceAddress, data) {
+            mutableStateOf(parseTransparencySettingsResponse(data))
         }
-
-        LaunchedEffect(
-            enabled.value,
-            amplificationSliderValue.floatValue,
-            balanceSliderValue.floatValue,
-            toneSliderValue.floatValue,
-            conversationBoostEnabled.value,
-            ambientNoiseReductionSliderValue.floatValue,
-            eq.value
-        ) {
-            if (!initialized.value) return@LaunchedEffect
-            transparencySettings.value = TransparencySettings(
-                enabled = enabled.value,
-                leftEQ = eq.value,
-                rightEQ = eq.value,
-                leftAmplification = amplificationSliderValue.floatValue + if (balanceSliderValue.floatValue < 0) -balanceSliderValue.floatValue else 0f,
-                rightAmplification = amplificationSliderValue.floatValue + if (balanceSliderValue.floatValue > 0) balanceSliderValue.floatValue else 0f,
-                leftTone = toneSliderValue.floatValue,
-                rightTone = toneSliderValue.floatValue,
-                leftConversationBoost = conversationBoostEnabled.value,
-                rightConversationBoost = conversationBoostEnabled.value,
-                leftAmbientNoiseReduction = ambientNoiseReductionSliderValue.floatValue,
-                rightAmbientNoiseReduction = ambientNoiseReductionSliderValue.floatValue,
-                netAmplification = amplificationSliderValue.floatValue,
-                balance = balanceSliderValue.floatValue
-            )
-            Log.d("TransparencySettings", "Updated settings: ${transparencySettings.value}")
-            sendTransparencySettings(viewModel::setATTCharacteristicValue, transparencySettings.value)
-        }
-
-        LaunchedEffect(state.transparencyData) {
-            val parsedSettings = parseTransparencySettingsResponse(data = state.transparencyData) ?: return@LaunchedEffect
-            Log.d(TAG, "Initial transparency settings: $parsedSettings")
-            enabled.value = parsedSettings.enabled
-            amplificationSliderValue.floatValue = parsedSettings.netAmplification
-            balanceSliderValue.floatValue = parsedSettings.balance
-            toneSliderValue.floatValue = parsedSettings.leftTone
-            ambientNoiseReductionSliderValue.floatValue =
-                parsedSettings.leftAmbientNoiseReduction
-            conversationBoostEnabled.value = parsedSettings.leftConversationBoost
-            if (!eq.value.contentEquals(parsedSettings.leftEQ)) {
-                eq.value = parsedSettings.leftEQ.copyOf()
+        fun updateSettings(edit: (TransparencySettings) -> TransparencySettings) {
+            val current = settings.value ?: return
+            val updated = edit(current)
+            if (updated == current) return
+            settings.value = updated
+            sendTransparencySettings(data, updated) { handle, value ->
+                viewModel.setATTCharacteristicValue(handle, value, deviceAddress)
             }
-            initialized.value = true
         }
+        val current = settings.value
+        val eq = current?.leftEQ ?: FloatArray(8)
 
         if (state.vendorIdHook) {
             StyledToggle(
                 label = stringResource(R.string.transparency_mode),
-                checked = enabled.value,
+                checked = current?.enabled ?: false,
                 description = stringResource(R.string.customize_transparency_mode_description),
-                onCheckedChange = { enabled.value = it }
+                onCheckedChange = { value -> updateSettings { it.copy(enabled = value) } }
             )
             Spacer(modifier = Modifier.height(4.dp))
             StyledSlider(
                 label = stringResource(R.string.amplification),
                 valueRange = -1f..1f,
-                value = amplificationSliderValue.floatValue,
+                value = (current?.netAmplification ?: 0f).coerceIn(-1f, 1f),
                 onValueChange = {
-                    amplificationSliderValue.floatValue = it
+                    updateSettings { settings -> settings.withAmplification(amplification = it) }
                 },
                 startIcon = "􀊥",
                 endIcon = "􀊩",
@@ -219,9 +143,9 @@ fun TransparencySettingsScreen(viewModel: AirPodsViewModel) {
             StyledSlider(
                 label = stringResource(R.string.balance),
                 valueRange = -1f..1f,
-                value = balanceSliderValue.floatValue,
+                value = (current?.balance ?: 0f).coerceIn(-1f, 1f),
                 onValueChange = {
-                    balanceSliderValue.floatValue = it
+                    updateSettings { settings -> settings.withAmplification(balance = it) }
                 },
                 snapPoints = listOf(-1f, 0f, 1f),
                 startLabel = stringResource(R.string.left),
@@ -232,9 +156,9 @@ fun TransparencySettingsScreen(viewModel: AirPodsViewModel) {
             StyledSlider(
                 label = stringResource(R.string.tone),
                 valueRange = -1f..1f,
-                value = toneSliderValue.floatValue,
+                value = (current?.leftTone ?: 0f).coerceIn(-1f, 1f),
                 onValueChange = {
-                    toneSliderValue.floatValue = it
+                    updateSettings { settings -> settings.copy(leftTone = it, rightTone = it) }
                 },
                 startLabel = stringResource(R.string.darker),
                 endLabel = stringResource(R.string.brighter),
@@ -244,9 +168,9 @@ fun TransparencySettingsScreen(viewModel: AirPodsViewModel) {
             StyledSlider(
                 label = stringResource(R.string.ambient_noise_reduction),
                 valueRange = 0f..1f,
-                value = ambientNoiseReductionSliderValue.floatValue,
+                value = (current?.leftAmbientNoiseReduction ?: 0f).coerceIn(0f, 1f),
                 onValueChange = {
-                    ambientNoiseReductionSliderValue.floatValue = it
+                    updateSettings { settings -> settings.copy(leftAmbientNoiseReduction = it, rightAmbientNoiseReduction = it) }
                 },
                 startLabel = stringResource(R.string.less),
                 endLabel = stringResource(R.string.more),
@@ -255,9 +179,9 @@ fun TransparencySettingsScreen(viewModel: AirPodsViewModel) {
 
             StyledToggle(
                 label = stringResource(R.string.conversation_boost),
-                checked = conversationBoostEnabled.value,
+                checked = current?.leftConversationBoost ?: false,
                 description = stringResource(R.string.conversation_boost_description),
-                onCheckedChange = { conversationBoostEnabled.value = it }
+                onCheckedChange = { value -> updateSettings { it.copy(leftConversationBoost = value, rightConversationBoost = value) } }
             )
 
             Text(
@@ -280,7 +204,7 @@ fun TransparencySettingsScreen(viewModel: AirPodsViewModel) {
                 verticalArrangement = Arrangement.SpaceBetween
             ) {
                 for (i in 0 until 8) {
-                    val eqValue = remember(eq.value[i]) { mutableFloatStateOf(eq.value[i]) }
+                    val eqValue = eq[i].coerceIn(0f, 100f)
                     Row(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically,
@@ -289,19 +213,21 @@ fun TransparencySettingsScreen(viewModel: AirPodsViewModel) {
                             .height(38.dp)
                     ) {
                         Text(
-                            text = String.format("%.2f", eqValue.floatValue),
+                            text = String.format("%.2f", eqValue),
                             fontSize = 12.sp,
                             color = textColor,
                             modifier = Modifier.padding(bottom = 4.dp)
                         )
 
                         Slider(
-                            value = eqValue.floatValue,
+                            value = eqValue,
                             onValueChange = { newVal ->
-                                eqValue.floatValue = newVal
-                                val newEQ = eq.value.copyOf()
-                                newEQ[i] = eqValue.floatValue
-                                eq.value = newEQ
+                                updateSettings { settings ->
+                                    settings.copy(
+                                        leftEQ = settings.leftEQ.copyOf().also { it[i] = newVal },
+                                        rightEQ = settings.rightEQ.copyOf().also { it[i] = newVal }
+                                    )
+                                }
                             },
                             valueRange = 0f..100f,
                             modifier = Modifier
@@ -336,7 +262,7 @@ fun TransparencySettingsScreen(viewModel: AirPodsViewModel) {
                                     )
                                     Box(
                                         modifier = Modifier
-                                            .fillMaxWidth(eqValue.floatValue / 100f)
+                                            .fillMaxWidth(eqValue / 100f)
                                             .height(4.dp)
                                             .background(
                                                 activeTrackColor,

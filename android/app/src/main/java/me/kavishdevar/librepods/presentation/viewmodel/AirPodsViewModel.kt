@@ -35,6 +35,8 @@ import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -47,8 +49,8 @@ import me.kavishdevar.librepods.billing.BillingManager
 import me.kavishdevar.librepods.bluetooth.AACPManager
 import me.kavishdevar.librepods.bluetooth.AllowOffPolicy
 import me.kavishdevar.librepods.bluetooth.AACPManager.Companion.ControlCommandIdentifiers
-import me.kavishdevar.librepods.bluetooth.ATTCCCDHandles
 import me.kavishdevar.librepods.bluetooth.ATTHandles
+import me.kavishdevar.librepods.bluetooth.ATTManagerv2
 import me.kavishdevar.librepods.bluetooth.BluetoothConnectionManager
 import me.kavishdevar.librepods.data.AirPodsInstance
 import me.kavishdevar.librepods.data.AirPodsFirmware
@@ -103,6 +105,7 @@ data class AirPodsUiState(
     val loudSoundReductionEnabled: Boolean = false,
     val transparencyData: ByteArray = byteArrayOf(),
     val hearingAidData: ByteArray = byteArrayOf(),
+    val requestedATT: Map<ATTHandles, ByteArray> = emptyMap(),
 
     val isPremium: Boolean = false,
     val vendorIdHook: Boolean = false,
@@ -147,6 +150,20 @@ internal fun AirPodsUiState.withCustomEqReport(report: CustomEq): AirPodsUiState
 
 internal fun controlDeviceMatches(ui: String?, loaded: String?, selected: String?, remote: String?): Boolean =
     ui != null && ui == loaded && ui == selected && ui == remote
+
+internal fun attWriteMatches(address: String, displayed: String?, selected: String?, controlRemote: String?,
+    attRemote: String?, expectedSession: Any?, currentSession: Any?): Boolean =
+    expectedSession != null && expectedSession === currentSession && address == displayed &&
+        address == selected && address == controlRemote && address == attRemote
+
+internal fun AirPodsUiState.withATTReport(handle: ATTHandles, value: ByteArray): AirPodsUiState {
+    val requests = if (requestedATT[handle]?.contentEquals(value) == true) requestedATT - handle else requestedATT
+    return when (handle) {
+        ATTHandles.LOUD_SOUND_REDUCTION -> copy(loudSoundReductionEnabled = value.firstOrNull() == 1.toByte(), requestedATT = requests)
+        ATTHandles.HEARING_AID -> copy(hearingAidData = value, requestedATT = requests)
+        ATTHandles.TRANSPARENCY -> copy(transparencyData = value, requestedATT = requests)
+    }
+}
 
 val demoInstance = AirPodsInstance(
     name = "[DEMO] AirPods Pro",
@@ -260,8 +277,8 @@ class AirPodsViewModel(
         observeAACP()
         loadCurrentStatus()
         loadEq()
-        loadATT()
         observeATT()
+        loadATT()
         observeSharedPreferences()
         observeBilling()
         if (isDemoMode) activateDemoMode()
@@ -280,6 +297,9 @@ class AirPodsViewModel(
     private var controlAddress: String? = null
     private var preferencesObserver: SharedPreferences.OnSharedPreferenceChangeListener? = null
     private var billingObserver: Job? = null
+    @Volatile private var attSession: ATTManagerv2.Session? = null
+    private var attLoadJob: Job? = null
+    private val attRequests = mutableMapOf<ATTHandles, Job>()
 
     private val listeners =
         mutableMapOf<ControlCommandIdentifiers, AACPManager.ControlCommandListener>()
@@ -349,9 +369,14 @@ class AirPodsViewModel(
 
     private fun stopObservingService() {
         cancelAdaptiveRequest()
+        cancelATTRequests()
         if (::controlRepo.isInitialized) listeners.forEach { (id, listener) -> controlRepo.remove(id, listener) }
         listeners.clear()
-        if (::service.isInitialized) service.aacpManager.customEqCallback = null
+        if (::service.isInitialized) {
+            service.aacpManager.customEqCallback = null
+            service.attManager.setOnNotificationReceived(null)
+            service.attManager.setOnSessionChanged(null)
+        }
         if (::appContext.isInitialized && ::broadcastReceiver.isInitialized)
             runCatching { appContext.unregisterReceiver(broadcastReceiver) }
         preferencesObserver?.let { if (::sharedPreferences.isInitialized) sharedPreferences.unregisterOnSharedPreferenceChangeListener(it) }
@@ -366,7 +391,8 @@ class AirPodsViewModel(
         controlAddress = null
         isReady = false
         _uiState.update { it.copy(isLocallyConnected = false, controlStates = emptyMap(), requestedControls = emptyMap(),
-            requestedCustomEq = null) }
+            requestedCustomEq = null, transparencyData = byteArrayOf(), hearingAidData = byteArrayOf(),
+            loudSoundReductionEnabled = false, requestedATT = emptyMap()) }
     }
 
     private fun loadName() {
@@ -424,11 +450,13 @@ class AirPodsViewModel(
 
                     AirPodsNotifications.AIRPODS_DISCONNECTED -> {
                         cancelAdaptiveRequest()
+                        cancelATTRequests()
                         controlSocket = null
                         controlAddress = null
                         _uiState.update {
                             val next = it.copy(isLocallyConnected = false, controlStates = emptyMap(), requestedControls = emptyMap(),
-                                requestedCustomEq = null)
+                                requestedCustomEq = null, transparencyData = byteArrayOf(), hearingAidData = byteArrayOf(),
+                                loudSoundReductionEnabled = false, requestedATT = emptyMap())
                             next.copy(offListeningMode = offListeningModeAllowed(next))
                         }
                     }
@@ -631,6 +659,7 @@ class AirPodsViewModel(
         val changed = socket !== controlSocket || address != controlAddress
         if (changed) {
             cancelAdaptiveRequest()
+            cancelATTRequests()
             controlSocket = socket
             controlAddress = address
         }
@@ -652,11 +681,16 @@ class AirPodsViewModel(
                 ancMode = reports[ControlCommandIdentifiers.LISTENING_MODE]?.firstOrNull()?.toInt() ?: 1,
                 controlStates = reports, requestedControls = requests,
                 customEq = if (connected) service.aacpManager.customEq else CustomEq(1, 50, 50, 50),
+                transparencyData = if (changed || !connected) byteArrayOf() else previous.transparencyData,
+                hearingAidData = if (changed || !connected) byteArrayOf() else previous.hearingAidData,
+                loudSoundReductionEnabled = connected && !changed && previous.loudSoundReductionEnabled,
+                requestedATT = if (changed || !connected) emptyMap() else previous.requestedATT,
                 requestedCustomEq = previous.requestedCustomEq?.takeUnless {
                     changed || !connected || it == service.aacpManager.customEq
                 })
             next.copy(offListeningMode = offListeningModeAllowed(next))
         }
+        loadATT()
     }
 
     private fun loadSharedPreferences() {
@@ -826,69 +860,96 @@ class AirPodsViewModel(
     }
 
     fun setATTCharacteristicValue(handle: ATTHandles, value: ByteArray) {
-        when (handle) {
-            // ideally should be using a different viewmodel for ATT based things because there are a lot of values, and I am not going to add all to this state, but there's loudsoundreduction.
-            ATTHandles.LOUD_SOUND_REDUCTION -> {
-                _uiState.value = _uiState.value.copy(loudSoundReductionEnabled = value[0].toInt() == 0x01)
-            }
-            ATTHandles.HEARING_AID -> {
-                _uiState.value = _uiState.value.copy(hearingAidData = value)
-            }
-            ATTHandles.TRANSPARENCY -> {
-                _uiState.value = _uiState.value.copy(transparencyData = value)
-            }
+        setATTCharacteristicValue(handle, value, _uiState.value.deviceAddress)
+    }
+
+    fun setATTCharacteristicValue(handle: ATTHandles, value: ByteArray, expectedDeviceAddress: String?) {
+        if (_uiState.value.deviceAddress != expectedDeviceAddress) return
+        attRequests.remove(handle)?.cancel()
+        if (value.isEmpty()) return
+        if (isDemoMode) { updateATTValue(handle, value.copyOf()); return }
+        val control = currentControlSocket() ?: return
+        val active = service.attManager.currentSession() ?: return
+        val address = _uiState.value.deviceAddress ?: return
+        val manager = service.attManager
+        val request = value.copyOf()
+        fun ownsRequest() = currentControlSocket() === control && attWriteMatches(address,
+            _uiState.value.deviceAddress, service.device?.address,
+            runCatching { control.remoteDevice.address }.getOrNull(),
+            runCatching { active.socket.remoteDevice.address }.getOrNull(), active, manager.currentSession())
+        if (!ownsRequest()) return
+        _uiState.update { state ->
+            if (state.deviceAddress != address) state else state.copy(requestedATT = state.requestedATT + (handle to request))
         }
-        viewModelScope.launch(Dispatchers.IO) {
+        attRequests[handle] = viewModelScope.launch(Dispatchers.IO) {
             try {
-                service.attManager.writeCharacteristic(handle, value)
-            } catch (e: Exception) {
-                e.printStackTrace()
+                delay(100)
+                if (!ownsRequest()) return@launch
+                if (manager.writeCharacteristic(handle, request, expectedSession = active,
+                        canSend = { isActive && ownsRequest() }) && isActive && ownsRequest())
+                    updateATTValue(handle, request, active, address)
+            } finally {
+                _uiState.update { state ->
+                    if (state.requestedATT[handle] !== request) state else state.copy(requestedATT = state.requestedATT - handle)
+                }
             }
         }
     }
 
+    private fun updateATTValue(handle: ATTHandles, value: ByteArray,
+        expectedSession: ATTManagerv2.Session? = null, address: String? = null) {
+        _uiState.update { state ->
+            if (expectedSession != null && (service.attManager.currentSession() !== expectedSession ||
+                state.deviceAddress != address || !state.isLocallyConnected)) return@update state
+            state.withATTReport(handle, value)
+        }
+    }
+
+    private fun cancelATTRequests() {
+        attRequests.values.forEach { it.cancel() }
+        attRequests.clear()
+        attLoadJob?.cancel()
+        attLoadJob = null
+        attSession = null
+        _uiState.update { it.copy(requestedATT = emptyMap()) }
+    }
+
     fun loadATT() {
-        val loudSoundReduction = service.attManager.getCharacteristic(ATTHandles.LOUD_SOUND_REDUCTION) ?: byteArrayOf()
-        val loudSoundReductionEnabled = if (loudSoundReduction.isNotEmpty()) {
-            loudSoundReduction[0].toInt() == 1
-        } else false
-        val hearingAidData = service.attManager.getCharacteristic(ATTHandles.HEARING_AID) ?: byteArrayOf()
-        val transparencyData = service.attManager.getCharacteristic(ATTHandles.TRANSPARENCY) ?: byteArrayOf()
-        _uiState.update {
-            it.copy(
-                loudSoundReductionEnabled = loudSoundReductionEnabled,
-                transparencyData = transparencyData,
-                hearingAidData = hearingAidData
-            )
+        if (isDemoMode || !::service.isInitialized) return
+        viewModelScope.launch(Dispatchers.Main.immediate) {
+            val active = service.attManager.currentSession()
+            if (active === attSession) return@launch
+            cancelATTRequests()
+            _uiState.update { it.copy(transparencyData = byteArrayOf(), hearingAidData = byteArrayOf(),
+                loudSoundReductionEnabled = false, requestedATT = emptyMap()) }
+            val control = currentControlSocket() ?: return@launch
+            val address = _uiState.value.deviceAddress ?: return@launch
+            val manager = service.attManager
+            if (active == null || !attWriteMatches(address, _uiState.value.deviceAddress, service.device?.address,
+                runCatching { control.remoteDevice.address }.getOrNull(),
+                runCatching { active.socket.remoteDevice.address }.getOrNull(), active, manager.currentSession())) return@launch
+            attSession = active
+            attLoadJob = viewModelScope.launch(Dispatchers.IO) {
+                for (handle in ATTHandles.entries) {
+                    val value = manager.getCharacteristic(handle, active) ?: continue
+                    if (attSession === active && manager.currentSession() === active && currentControlSocket() === control &&
+                        _uiState.value.deviceAddress == address) updateATTValue(handle, value, active, address)
+                }
+            }
         }
     }
 
     fun observeATT() {
-        viewModelScope.launch(Dispatchers.IO) {
-            service.attManager.enableNotification(ATTCCCDHandles.HEARING_AID)
-            service.attManager.enableNotification(ATTCCCDHandles.TRANSPARENCY)
-        }
-        service.attManager.setOnNotificationReceived { handle, value ->
-            when (handle) {
-                ATTHandles.LOUD_SOUND_REDUCTION.value.toByte() -> {
-                    val loudSoundReductionEnabled = if (value.isNotEmpty()) {
-                        value[0].toInt() == 1
-                    } else false
-                    _uiState.update {
-                        it.copy(loudSoundReductionEnabled = loudSoundReductionEnabled)
-                    }
-                }
-                ATTHandles.HEARING_AID.value.toByte() -> {
-                    _uiState.update {
-                        it.copy(hearingAidData = value)
-                    }
-                }
-                ATTHandles.TRANSPARENCY.value.toByte() -> {
-                    _uiState.update {
-                        it.copy(transparencyData = value)
-                    }
-                }
-            }
+        service.attManager.setOnSessionChanged { loadATT() }
+        service.attManager.setOnNotificationReceived { active, rawHandle, value ->
+            val control = currentControlSocket()
+            val address = _uiState.value.deviceAddress
+            val handle = ATTHandles.entries.firstOrNull { it.value == (rawHandle.toInt() and 255) }
+            if (control != null && address != null && handle != null && service.attManager.currentSession() === active &&
+                attWriteMatches(address, _uiState.value.deviceAddress, service.device?.address,
+                    runCatching { control.remoteDevice.address }.getOrNull(),
+                    runCatching { active.socket.remoteDevice.address }.getOrNull(), active, attSession))
+                updateATTValue(handle, value.copyOf(), active, address)
         }
     }
 
@@ -952,6 +1013,7 @@ class AirPodsViewModel(
 
     fun disconnect() {
         cancelAdaptiveRequest()
+        cancelATTRequests()
         if (isDemoMode) {
             isDemoMode = false
             _uiState.update {

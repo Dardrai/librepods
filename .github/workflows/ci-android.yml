@@ -82,6 +82,8 @@ jobs:
       - name: Test, lint and build FOSS debug APK
         working-directory: android
         run: ./gradlew --no-daemon testFossDebugUnitTest lintFossDebug assembleFossDebug
+      - name: Check native Bluetooth registration
+        run: python3 android/app/src/test/native/test_sdp_hook.py
       - uses: actions/upload-artifact@v4
         if: always()
         with:

@@ -110,6 +110,24 @@ class BleBatteryCacheTest {
         assertFalse(session.isCurrent(replacement))
     }
 
+    @Test fun adapterOffOrScanFailurePausesScanningUntilRecoveryButStopCancelsRecovery() {
+        val session = BleScanSession()
+        session.request() // Requested while the adapter is off.
+        assertTrue(session.requested)
+        assertFalse(session.active)
+        val initial = session.begin() // Adapter on.
+        session.end() // Adapter off or failed scan retires callbacks, but keeps the request.
+        assertTrue(session.requested)
+        assertFalse(session.active)
+        assertFalse(session.isCurrent(initial))
+        val retry = session.begin()
+        assertTrue(session.isCurrent(retry))
+        session.stop() // Service stop prevents later adapter or retry events restarting it.
+        assertFalse(session.requested)
+        assertFalse(session.active)
+        assertFalse(session.isCurrent(retry))
+    }
+
     @Test fun delayedObservationsKeepTheirRadioAgeAndStaleOrFutureBatchesAreRejected() {
         assertEquals(9_500L, bleObservationTime(10_000, 5_000_000_000, 4_500_000_000, 15_000))
         assertEquals(10_000L, bleObservationTime(10_000, 5_000_000_000, 5_000_000_000, 15_000))
