@@ -20,7 +20,7 @@ pair, local behavior choices and correctly owner-bound BLE keys once. Existing
 rewrite database rows are preserved. Unconfirmed device control values are not
 migrated as device reports. The Android Bluetooth bond stays with Android.
 
-The current fork version is `2.0.0-alpha.1-pixel11`, code `200000096`.
+The current fork version is `2.0.0-alpha.1-pixel12`, code `200000097`.
 
 ## Pairing and island latency
 
@@ -35,6 +35,13 @@ The current fork version is `2.0.0-alpha.1-pixel11`, code `200000096`.
   owned device's batteries.
 - Bluetooth connection work runs off the UI thread. Construction and connection
   attempts are serialized per device. The cached identity loads before scanning.
+- Saved, still-bonded Apple identities load even when Android's service UUID
+  cache is empty, so nearby ownership does not wait for Classic discovery.
+  Android 17 uses passive scanning to receive advertisements without waiting
+  for a scan response. Older versions retain their existing scan type.
+- Incomplete key responses retain the previous complete IRK/encryption pair;
+  a valid replacement changes both together. Cache, metadata and settings
+  updates are transactional so concurrent saves cannot overwrite each other.
 - The island attaches in its visible state immediately, wraps the actual camera
   path and limits its expanded width to 420 dp with screen margins. Passive
   battery updates retain the original owner and dismissal time.
@@ -83,12 +90,19 @@ requests are retained only for the current connection, not presented as reports.
 
 ## Validation on 2026-10-16
 
-`verifyPixel` passed with 125 tests in 28 suites, no failures, errors or skips,
+`verifyPixel` passed with 132 tests in 31 suites, no failures, errors or skips,
 Android lint with no errors, and successful debug/minified release builds.
 Native pairing-card captures cover light mode and dark mode with narrow width
 and larger text. The release was signed with the existing fork certificate and
-installed in place on the Pixel; the rewrite opened with the saved AirPods entry.
+installed in place on the Pixel as Pixel12. Android's scan state confirms
+unbatched passive low-latency monitoring. The user confirmed the island now
+appears promptly, while reporting that its opening animation had disappeared.
 
-Physical case-opening timings, a fresh pairing, sensors and call audio have not
-been retested on this build. A call was active after installation, so further
-device/audio changes were left for a later test.
+The first physical Pixel11 check still took roughly ten seconds after opening
+the case, despite 32 ms from Android's scan timestamp to the overlay request and
+58 ms to its first drawing pass. Closing the lid dismissed promptly. Pixel12
+changes scanning and cached-identity admission. Its owned lid reports reached
+the overlay request in 11–31 ms and first drawing pass in 27–62 ms; those are
+radio-to-frame measurements, not physical lid-to-frame measurements. Fresh
+pairing, sensors and call audio have not been
+retested on the rewrite.

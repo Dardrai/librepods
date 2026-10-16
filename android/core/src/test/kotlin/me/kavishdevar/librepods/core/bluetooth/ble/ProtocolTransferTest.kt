@@ -99,5 +99,11 @@ class ProtocolTransferTest {
         assertThrows(IllegalArgumentException::class.java) {
             MagicKeyResponsePacket.parse(byteArrayOf(4, 0, 4, 0, 0x31, 0, 2) + keyRecord(1) + keyRecord(1))
         }
+        for (records in listOf(emptyList(), listOf(keyRecord(1)), listOf(keyRecord(4)),
+            listOf(keyRecord(0x401, 256)), listOf(keyRecord(1), keyRecord(0x401, 256)))) {
+            val incomplete = byteArrayOf(4, 0, 4, 0, 0x31, 0, records.size.toByte()) +
+                records.fold(byteArrayOf()) { bytes, record -> bytes + record }
+            assertThrows(IllegalArgumentException::class.java) { MagicKeyResponsePacket.parse(incomplete) }
+        }
     }
 }

@@ -9,7 +9,9 @@ import android.bluetooth.BluetoothSocket
 import me.kavishdevar.librepods.core.bluetooth.aacp.AACPManager
 import me.kavishdevar.librepods.core.bluetooth.aacp.packet.AACPPacket
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.MessageOpcode
+import me.kavishdevar.librepods.core.bluetooth.aacp.types.MagicKeyType
 import me.kavishdevar.librepods.core.devices.AppleDevice
+import me.kavishdevar.librepods.core.devices.AppleState
 import me.kavishdevar.librepods.core.devices.ConnectionState
 import org.junit.Assert.*
 import org.junit.Test
@@ -24,6 +26,38 @@ import java.io.PipedOutputStream
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [37], application = Application::class)
 class CapturedAudioTransportTest {
+    @Test fun incompleteKeyRepliesLeaveTheCachedPairIntactUntilBothReplacementKeysArrive() {
+        val context = RuntimeEnvironment.getApplication()
+        shadowOf(context).grantPermissions(Manifest.permission.BLUETOOTH_CONNECT)
+        val adapter = context.getSystemService(BluetoothManager::class.java).adapter
+        shadowOf(adapter).setState(BluetoothAdapter.STATE_ON)
+        val device = AppleDevice(context, adapter, adapter.getRemoteDevice("00:11:22:33:44:55"), ConnectionState.DISCONNECTED)
+        val previous = mapOf(MagicKeyType.IRK to ByteArray(16) { 1 }, MagicKeyType.ENC_KEY to ByteArray(16) { 2 })
+        device.loadInitialState(AppleState(magicKeys = previous), device.settings.value, device.metadata.value)
+        val socket = Shadow.newInstanceOf(BluetoothSocket::class.java).apply { connect() }
+        AACPManager::class.java.getDeclaredField("socket").apply { isAccessible = true }.set(device.aacp, socket)
+        fun record(type: Int) = byteArrayOf(type.toByte(), (type shr 8).toByte(), 16, 0) + ByteArray(16) { type.toByte() }
+        fun packet(vararg records: ByteArray) = byteArrayOf(4, 0, 4, 0, 0x31, 0, records.size.toByte()) +
+            records.fold(byteArrayOf()) { bytes, row -> bytes + row }
+        try {
+            for (incomplete in listOf(packet(), packet(record(1)), packet(record(4)), packet(record(0x401)))) {
+                assertThrows(IllegalArgumentException::class.java) { device.aacp.processPacket(incomplete, socket) }
+                assertSame(previous, device.state.value.magicKeys)
+                assertTrue(socket.isConnected)
+            }
+            val irk = ByteArray(16) { 3 }
+            val encryption = ByteArray(16) { 4 }
+            device.aacp.processPacket(packet(byteArrayOf(1, 0, 16, 0) + irk, record(0x401),
+                byteArrayOf(4, 0, 16, 0) + encryption), socket)
+            assertArrayEquals(irk, device.state.value.magicKeys[MagicKeyType.IRK])
+            assertArrayEquals(encryption, device.state.value.magicKeys[MagicKeyType.ENC_KEY])
+            assertTrue(device.state.value.aacpPackets.isEmpty())
+        } finally {
+            device.aacp.disconnect(socket)
+            socket.close()
+        }
+    }
+
     @Test fun delayedCommandsAndPacketsCannotMoveToANewConnectionToTheSameAirPods() {
         val context = RuntimeEnvironment.getApplication()
         shadowOf(context).grantPermissions(Manifest.permission.BLUETOOTH_CONNECT)

@@ -42,6 +42,8 @@ data class MagicKeyResponsePacket(
                 offset += length
             }
             require(offset == payload.size) { "Trailing key response data" }
+            // A rotated IRK and encryption key must replace the previous pair together.
+            require(MagicKeyType.IRK in keys && MagicKeyType.ENC_KEY in keys) { "Incomplete proximity key pair" }
             return MagicKeyResponsePacket(keys, payload)
         }
     }
