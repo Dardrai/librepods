@@ -436,11 +436,9 @@ class AACPManager(private val device: AppleDevice,
 
             MessageOpcode.MAGIC_KEYS_RESPONSE -> {
                 val packet = MagicKeyResponsePacket.parse(packet)
-
-                device.updateState {
-                    it.copy(magicKeys = packet.magicKeys)
+                publishForTransport(this, sourceSocket, ::captureAudioSocket) {
+                    device.updateState { it.copy(magicKeys = packet.magicKeys) }
                 }
-
             }
 
             MessageOpcode.STEM_PRESS -> {

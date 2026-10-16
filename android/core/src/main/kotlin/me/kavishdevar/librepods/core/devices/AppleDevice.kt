@@ -78,9 +78,20 @@ class AppleDevice(
 
     fun receiveNearbyBattery(batteries: Set<Battery>) {
         synchronized(aacp) {
-            if (connectionState.value == ConnectionState.CONNECTED && aacp.captureAudioSocket() != null) return
-            _state.update { it.copy(battery = mergeBatteryReports(it.battery, batteries,
-                settings.value.cacheDisconnectedComponentBattery)) }
+            val keepLive = connectionState.value == ConnectionState.CONNECTED && aacp.captureAudioSocket() != null
+            val now = System.currentTimeMillis()
+            _state.update { state ->
+                // shortcut: keep all live slots; add source arbitration if live BLE refresh is needed during AACP.
+                val reported = if (!keepLive) batteries else batteries.filter { incoming ->
+                    incoming.isLive(now) && incoming.status != BatteryStatus.UNKNOWN &&
+                        incoming.level in 0..100 && state.battery.none { old ->
+                            old.component == incoming.component && old.level in 0..100 &&
+                                old.status != BatteryStatus.UNKNOWN && old.isLive(now)
+                        }
+                }.toSet()
+                state.copy(battery = mergeBatteryReports(state.battery, reported,
+                    settings.value.cacheDisconnectedComponentBattery))
+            }
             _connectionState.update { if (it == ConnectionState.DISCONNECTED) ConnectionState.AVAILABLE else it }
         }
     }

@@ -53,7 +53,7 @@ class NearbyPairingController(
     private var requestedAt = 0L
     private var firstCandidateAt: Long? = null
     private var pairedAddress: String? = null
-    private var pairedAt = 0L
+    private var batteryObservedAfter = 0L
     @Volatile private var closed = false
     @Volatile private var blocked = false
 
@@ -67,6 +67,10 @@ class NearbyPairingController(
             if (!Settings.canDrawOverlays(context)) return@post
             val token = session.open(event.modelId) ?: return@post
             val name = NearbyAirPods.modelNames[event.modelId] ?: return@post
+            val radioAge = (SystemClock.elapsedRealtimeNanos() - observedAtNanos).coerceAtLeast(0L)
+            // Round up the age so decoding the same invitation cannot miss this floor by 1 ms.
+            batteryObservedAfter = System.currentTimeMillis() - radioAge / 1_000_000 -
+                if (radioAge % 1_000_000 == 0L) 0 else 1
             popup = PopupWindow(context) {
                 if (session.isCurrent(token)) dismiss()
             }.also {
@@ -84,6 +88,7 @@ class NearbyPairingController(
         val now = SystemClock.elapsedRealtime()
         val attempt = session.beginAttempt(token, now) ?: return
         pairedAddress = null
+        if (batteryObservedAfter == 0L) batteryObservedAfter = System.currentTimeMillis()
         stopDiscovery()
         requestedAt = now
         firstCandidateAt = null
@@ -279,7 +284,6 @@ class NearbyPairingController(
                                 finishConsent(accepted = true)
                                 stopDiscovery()
                                 pairedAddress = device.address
-                                pairedAt = System.currentTimeMillis()
                                 popup?.showPairingActions(context.getString(R.string.pairing_complete), listOf(
                                     context.getString(R.string.pairing_continue) to {
                                         if (session.isCurrentAttempt(token, attempt)) dismiss()
@@ -319,6 +323,8 @@ class NearbyPairingController(
 
     private fun showRetry(token: Long, message: Int) {
         if (!session.isCurrent(token)) return
+        pairedAddress = null
+        batteryObservedAfter = 0L
         stopDiscovery()
         onInteractionChanged(null)
         popup?.showPairingActions(instructions(message), listOf(
@@ -402,13 +408,14 @@ class NearbyPairingController(
     fun updatePairingBattery(device: BluetoothDevice, batteries: Set<Battery>) {
         if (closed || blocked || pairedAddress != device.address) return
         if (runCatching { device.bondState == BluetoothDevice.BOND_BONDED }.getOrDefault(false)) {
-            // A newly created bond must not inherit readings from an earlier pairing.
-            popup?.updatePairingBattery(batteries.filter { (it.observedAt ?: Long.MIN_VALUE) >= pairedAt }.toSet())
+            // Owned reports from this invitation can be verified after the bond completes.
+            popup?.updatePairingBattery(batteries.filter { (it.observedAt ?: Long.MIN_VALUE) >= batteryObservedAfter }.toSet())
         } else dismiss()
     }
 
     private fun dismiss() {
         pairedAddress = null
+        batteryObservedAfter = 0L
         session.close()
         stopDiscovery()
         onInteractionChanged(null)

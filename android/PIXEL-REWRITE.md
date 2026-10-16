@@ -20,7 +20,7 @@ pair, local behavior choices and correctly owner-bound BLE keys once. Existing
 rewrite database rows are preserved. Unconfirmed device control values are not
 migrated as device reports. The Android Bluetooth bond stays with Android.
 
-The current fork version is `2.0.0-alpha.1-pixel20`, code `200000105`.
+The current fork version is `2.0.0-alpha.1-pixel21`, code `200000106`.
 
 ## Pairing and island latency
 
@@ -57,9 +57,10 @@ The current fork version is `2.0.0-alpha.1-pixel20`, code `200000105`.
   static artwork. The video stays visible through the short exit, then releases.
 - The success card stays open for Continue or a real lid close, and updates its
   AirPods/case battery row from the exact newly bonded device. Readings from
-  before that bond, unknown statuses and unavailable or stale components do not
-  become live percentages. Different bud levels remain separate. Recognizing
-  the new owned BLE identity does not synthesize a close for the active card.
+  earlier invitations or pairing attempts, unknown statuses and unavailable or
+  stale components do not become live percentages. Different bud levels remain
+  separate. Recognizing the new owned BLE identity does not synthesize a close
+  for the active card.
 - Owned battery/lid reports require a current bond and valid per-device keys.
   Public advertisements cannot establish a Classic identity or overwrite an
   owned device's batteries.
@@ -67,6 +68,15 @@ The current fork version is `2.0.0-alpha.1-pixel20`, code `200000105`.
   is enabled. Disconnected readings keep their original age and lose their live
   charging state; unavailable slots cannot fabricate a fresh zero. Battery updates
   reach the island independently of coalesced capability changes.
+- Recent LE advertisements stay in a small memory-only buffer for 15 seconds.
+  When the bonded device's saved keys are available, or its current control
+  connection supplies a complete key pair, matching frames are verified and
+  decoded to fill missing battery readings without waiting for another
+  advertisement or a control battery report. Their original
+  observation times are preserved, and current live component readings win.
+  Pairing completion accepts verified readings from its active invitation and
+  pairing attempt; earlier attempts and foreign devices remain excluded.
+  Replaying a battery reading does not replay lid, reconnect or pairing actions.
 - Bluetooth connection work runs off the UI thread. Construction and connection
   attempts are serialized per device. The cached identity loads before scanning.
 - Saved, still-bonded Apple identities load even when Android's service UUID
@@ -146,6 +156,22 @@ connection-owned. Pro 3's saved Allow Off choice is a separate presentation
 fallback, and is not presented as a device report.
 
 ## Validation
+
+On 2026-10-17, Pixel21's `verifyPixel` passed with 209 tests in 42 suites,
+no failures, errors or skips, lint with 0 errors, 289 warnings and 1 hint,
+and successful debug and minified release builds. New regressions cover raw
+pre-key reports, their original ages, bounded retention, expired/foreign data,
+latest-frame unavailable slots, missing-slot fill during AACP, current device,
+bond, transport and key guards, saved-key replay without a control socket,
+pre-Connect invitation readings, retry boundaries and stale key publication.
+The service replay tests exercise the actual handoff method. Overlay layout
+and animations are unchanged; existing rendering and input tests still pass.
+
+Pixel21 was signed with the existing certificate and installed in place.
+Android confirmed version `2.0.0-alpha.1-pixel21`, code `200000106`, and the
+retained Shizuku grant. The fresh-pair battery handoff check remains pending.
+A first-ever pair still needs its keys before encrypted LE readings can be
+verified. No experimental microphone route or call was started for this update.
 
 On 2026-10-17, Pixel20's `verifyPixel` passed with 201 tests in 40 suites,
 no failures, errors or skips, lint with 0 errors, 289 warnings and 1 hint,

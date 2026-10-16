@@ -78,6 +78,7 @@ import me.kavishdevar.librepods.core.bluetooth.aacp.types.MagicKeyType
 import me.kavishdevar.librepods.core.bluetooth.verifyRPA
 import me.kavishdevar.librepods.core.bluetooth.ble.NearbyAirPods
 import me.kavishdevar.librepods.core.bluetooth.ble.ProximityReport
+import me.kavishdevar.librepods.core.bluetooth.ble.RecentProximityReports
 import me.kavishdevar.librepods.bluetooth.NearbyPairingController
 import me.kavishdevar.librepods.bluetooth.DeviceSettingsRefreshResult
 import me.kavishdevar.librepods.bluetooth.canLoadAppleDevice
@@ -142,6 +143,7 @@ class LibrePodsService: Service() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val bleHandler = Handler(Looper.getMainLooper())
     private val nearbyVisits = NearbyAirPods.Visits()
+    private val recentProximityReports = RecentProximityReports()
     private var pairingModel: Int? = null
     private var nearbyPairing: NearbyPairingController? = null
     private var bleGeneration = 0L
@@ -264,8 +266,17 @@ class LibrePodsService: Service() {
         registerBluetoothReceivers()
 
         nearbyPairing = NearbyPairingController(this, onInteractionChanged = { pairingModel = it }) { paired ->
-            if (paired.uuids.isNullOrEmpty()) paired.fetchUuidsWithSdp()
-            else serviceScope.launch(Dispatchers.IO) { onDeviceConnected(paired) }
+            serviceScope.launch(Dispatchers.IO) {
+                val device = createDevice(paired) as? AppleDevice
+                if (device != null) withContext(Dispatchers.Main.immediate) {
+                    if (!destroying && devices.value[device.macAddress] === device &&
+                        paired.bondState == BluetoothDevice.BOND_BONDED) {
+                        nearbyPairing?.updatePairingBattery(paired, device.state.value.battery)
+                    }
+                }
+                if (paired.uuids.isNullOrEmpty()) paired.fetchUuidsWithSdp()
+                else onDeviceConnected(paired)
+            }
         }
         serviceScope.launch {
             loadDevices()
@@ -277,6 +288,7 @@ class LibrePodsService: Service() {
             }
             while (isActive) {
                 delay(5.seconds)
+                recentProximityReports.expire(SystemClock.elapsedRealtimeNanos())
                 nearbyVisits.expire(SystemClock.elapsedRealtime(), pairingModel).forEach { nearbyPairing?.onNearbyDevice(it) }
                 devices.value.values.filterIsInstance<AppleDevice>().forEach { it.expireNearbyBattery(System.currentTimeMillis()) }
             }
@@ -353,6 +365,7 @@ class LibrePodsService: Service() {
         bleHandler.removeCallbacksAndMessages(null)
         unregisterBluetoothReceivers()
         stopBleScanner()
+        recentProximityReports.clear()
 
         super.onDestroy()
     }
@@ -592,6 +605,7 @@ class LibrePodsService: Service() {
                         stopActiveBleScan()
                         nearbyPairing?.cancelPending()
                         nearbyVisits.clear()
+                        recentProximityReports.clear()
                         pairedLids.clear()
                     }
                     return
@@ -605,6 +619,7 @@ class LibrePodsService: Service() {
                         deviceJobs.remove(address)?.forEach { it.cancel() }
                         _devices.update { it - address }
                         pairedObservations.remove(address)
+                        recentProximityReports.clear()
                         pairedLids.remove(address)
                     }
                 }
@@ -662,6 +677,8 @@ class LibrePodsService: Service() {
         val manufacturer = result.scanRecord?.getManufacturerSpecificData(0x004c) ?: return
         val proximity = NearbyAirPods.proximityRecord(manufacturer) ?: return
         val address = result.device.address
+        val observedAt = System.currentTimeMillis() - (nowNanos - observed) / 1_000_000
+        recentProximityReports.observe(address, manufacturer, observed, observedAt, nowNanos)
         val owned = devices.value.values.filterIsInstance<AppleDevice>().firstOrNull { device ->
             device.bluetoothDevice.bondState == BluetoothDevice.BOND_BONDED &&
                 device.state.value.magicKeys[MagicKeyType.IRK]?.let { verifyRPA(address, it) } == true
@@ -690,8 +707,7 @@ class LibrePodsService: Service() {
         val keys = device.state.value.magicKeys
         val irk = keys[MagicKeyType.IRK] ?: return
         val encryption = keys[MagicKeyType.ENC_KEY] ?: return
-        val report = ProximityReport.decode(address, manufacturer, irk, encryption,
-            System.currentTimeMillis() - (nowNanos - observed) / 1_000_000)
+        val report = ProximityReport.decode(address, manufacturer, irk, encryption, observedAt)
         if (Log.isLoggable(NEARBY_SCAN_TAG, Log.DEBUG)) Log.d(NEARBY_SCAN_TAG, "Owned proximity: decoded=${report != null}")
         if (report == null) return
         if (device.state.value.magicKeys[MagicKeyType.IRK]?.contentEquals(irk) != true ||
@@ -721,6 +737,22 @@ class LibrePodsService: Service() {
                     device.connect()
                 }
             }
+        }
+    }
+
+    private fun replayRecentBattery(device: AppleDevice, socket: android.bluetooth.BluetoothSocket?,
+                                    irk: ByteArray, encryption: ByteArray) {
+        synchronized(device.aacp) {
+            if (destroying || bleCaptureBlocked || devices.value[device.macAddress] !== device ||
+                device.bluetoothDevice.bondState != BluetoothDevice.BOND_BONDED ||
+                device.aacp.captureAudioSocket() !== socket ||
+                device.state.value.magicKeys[MagicKeyType.IRK]?.contentEquals(irk) != true ||
+                device.state.value.magicKeys[MagicKeyType.ENC_KEY]?.contentEquals(encryption) != true) return
+            val observation = recentProximityReports.matching(irk, encryption, SystemClock.elapsedRealtimeNanos()).lastOrNull() ?: return
+            if (observation.observedNanos <= (pairedObservations[device.macAddress] ?: -1L)) return
+            device.receiveNearbyBattery(observation.report.batteries)
+            pairedObservations[device.macAddress] = observation.observedNanos
+            islandWindow.updatePairedBattery(device, observation.report.model)
         }
     }
 
@@ -833,6 +865,11 @@ class LibrePodsService: Service() {
                 else {
                     attachExperimentalAudio(device)
                     deviceJobs[address] = listOf(observeAppleState(device), observeAppleSettings(device), observeAppleMetadata(device))
+                    val keys = device.state.value.magicKeys
+                    val irk = keys[MagicKeyType.IRK]?.copyOf()
+                    val encryption = keys[MagicKeyType.ENC_KEY]?.copyOf()
+                    if (irk != null && encryption != null)
+                        replayRecentBattery(device, device.aacp.captureAudioSocket(), irk, encryption)
                     true
                 }
             }
@@ -889,6 +926,11 @@ class LibrePodsService: Service() {
             }
 
             if (state.magicKeys.isNotEmpty() && state.magicKeys != lastSavedKeys) {
+                val irk = state.magicKeys[MagicKeyType.IRK]?.copyOf()
+                val encryption = state.magicKeys[MagicKeyType.ENC_KEY]?.copyOf()
+                if (irk != null && encryption != null) withContext(Dispatchers.Main.immediate) {
+                    replayRecentBattery(device, modeTransport, irk, encryption)
+                }
                 appleRepository.saveCacheFromState(device.macAddress, state)
                 lastSavedKeys = state.magicKeys
             }

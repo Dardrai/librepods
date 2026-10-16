@@ -238,7 +238,7 @@ class NearbyPairingControllerTest {
 
     @Test fun successBatteryReadingsBelongToTheExactNewBondAndCannotReopenAClosedCard() {
         val selected = bondingCandidate()
-        val oldReading = System.currentTimeMillis() - 1
+        val oldReading = (field("batteryObservedAfter") as Long) - 1
         val old = setOf(Battery(BatteryComponent.CASE, 25, BatteryStatus.NOT_CHARGING, oldReading))
         controller.updatePairingBattery(selected, old)
         pairing(selected).setBondState(BluetoothDevice.BOND_BONDED)
@@ -260,12 +260,78 @@ class NearbyPairingControllerTest {
 
         controller.cancelPending()
         idle()
+        assertEquals(0L, field("batteryObservedAfter"))
         controller.updatePairingBattery(selected, live)
         assertNull(field("popup"))
         connect()
         controller.updatePairingBattery(selected, live)
         assertEquals(PopupWindow.Stage.SETUP, stage())
         assertEquals(View.GONE, popupView().findViewById<View>(R.id.pairing_battery_row).visibility)
+    }
+
+    @Test fun verifiedInvitationAndPreConnectReadingsCanSeedTheCompletedCardBeforeAnotherReport() {
+        controller.close()
+        var verified = emptySet<Battery>()
+        controller = NearbyPairingController(context, confirmConsent = { _, _ -> false }, onPaired = {
+            controller.updatePairingBattery(it, verified)
+        })
+        advance(1_000)
+        controller.onNearbyDevice(NearbyAirPods.Event(0x2720, true), SystemClock.elapsedRealtimeNanos() - 500_000_000L)
+        idle()
+        assertEquals(PopupWindow.Stage.NEARBY, stage())
+        val observed = field("batteryObservedAfter") as Long
+        verified = setOf(Battery(BatteryComponent.LEFT, 82, BatteryStatus.NOT_CHARGING, observed + 100),
+            Battery(BatteryComponent.RIGHT, 82, BatteryStatus.NOT_CHARGING, observed + 100),
+            Battery(BatteryComponent.CASE, 76, BatteryStatus.CHARGING, observed))
+        assertTrue("The replay fixture must precede tapping Connect", verified.all { it.observedAt!! < System.currentTimeMillis() })
+        assertTrue(button().performClick())
+        idle()
+        assertEquals("Initial Connect must retain the accepted invitation's observation floor", observed, field("batteryObservedAfter"))
+        val selected = device(1)
+        found(selected)
+        advance(2_000)
+        pairing(selected).setBondState(BluetoothDevice.BOND_BONDING)
+        bondChanged(selected, BluetoothDevice.BOND_BONDING)
+        controller.updatePairingBattery(selected, verified)
+        assertEquals(PopupWindow.Stage.CONNECTING, stage())
+        assertEquals(View.GONE, popupView().findViewById<View>(R.id.pairing_battery_row).visibility)
+
+        pairing(selected).setBondState(BluetoothDevice.BOND_BONDED)
+        bondChanged(selected, BluetoothDevice.BOND_BONDED)
+        assertEquals(PopupWindow.Stage.COMPLETE, stage())
+        assertEquals("82%", popupView().findViewById<TextView>(R.id.pairing_buds_battery_text).text.toString())
+        assertEquals("76%", popupView().findViewById<TextView>(R.id.pairing_case_battery_text).text.toString())
+        idle()
+        assertEquals("Success must not clear a synchronous verified seed afterward", "76%",
+            popupView().findViewById<TextView>(R.id.pairing_case_battery_text).text.toString())
+        controller.close()
+        assertEquals(0L, field("batteryObservedAfter"))
+        controller.updatePairingBattery(selected, verified)
+        assertNull(field("popup"))
+    }
+
+    @Test fun retryRetiresThePreviousBatteryFloorAndRejectsEarlierReadings() {
+        val selected = bondingCandidate()
+        advance(60_000)
+        assertEquals(PopupWindow.Stage.RETRY, stage())
+        assertEquals(0L, field("batteryObservedAfter"))
+        assertTrue(button().performClick())
+        idle()
+        val observed = field("batteryObservedAfter") as Long
+        assertTrue(observed > 0L)
+        pairing(selected).setBondState(BluetoothDevice.BOND_NONE)
+        found(selected)
+        advance(2_000)
+        pairing(selected).setBondState(BluetoothDevice.BOND_BONDING)
+        bondChanged(selected, BluetoothDevice.BOND_BONDING)
+        pairing(selected).setBondState(BluetoothDevice.BOND_BONDED)
+        bondChanged(selected, BluetoothDevice.BOND_BONDED)
+        controller.updatePairingBattery(selected, setOf(Battery(BatteryComponent.CASE, 25,
+            BatteryStatus.NOT_CHARGING, observed - 1)))
+        assertEquals("—", popupView().findViewById<TextView>(R.id.pairing_case_battery_text).text.toString())
+        controller.updatePairingBattery(selected, setOf(Battery(BatteryComponent.CASE, 73,
+            BatteryStatus.NOT_CHARGING, observed)))
+        assertEquals("73%", popupView().findViewById<TextView>(R.id.pairing_case_battery_text).text.toString())
     }
 
     @Test fun removingTheCompletedBondClosesOnlyItsOwnSuccessCard() {
@@ -277,6 +343,7 @@ class NearbyPairingControllerTest {
         pairing(selected).setBondState(BluetoothDevice.BOND_NONE)
         controller.updatePairingBattery(selected, emptySet())
         assertNull(field("popup"))
+        assertEquals(0L, field("batteryObservedAfter"))
     }
 
     @Test

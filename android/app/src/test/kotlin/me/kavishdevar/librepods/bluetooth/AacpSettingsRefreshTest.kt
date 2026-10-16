@@ -43,6 +43,45 @@ import kotlin.concurrent.thread
 @Config(sdk = [37], application = Application::class,
     shadows = [RefreshSocketShadow::class, RefreshDeviceShadow::class])
 class AacpSettingsRefreshTest {
+    @Test fun retiredTransportCannotPublishKeysAfterItsInitialOwnershipCheck() {
+        val device = createDevice()
+        val manager = device.aacp
+        val original = socket(connected = true)
+        val replacement = socket(connected = true)
+        fun keys(value: Int): ByteArray {
+            fun record(type: Int) = byteArrayOf(type.toByte(), 0, 16, 0) + ByteArray(16) { value.toByte() }
+            return byteArrayOf(4, 0, 4, 0, 0x31, 0, 2) + record(1) + record(4)
+        }
+        bind(manager, original)
+        manager.processPacket(keys(1), original)
+        assertArrayEquals(ByteArray(16) { 1 }, device.state.value.magicKeys[MagicKeyType.IRK])
+        val entered = CountDownLatch(1)
+        var worker: Thread? = null
+        try {
+            synchronized(manager) {
+                val pending = thread {
+                    entered.countDown()
+                    manager.processPacket(keys(2), original)
+                }
+                worker = pending
+                assertTrue(entered.await(2, TimeUnit.SECONDS))
+                val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+                while (pending.state != Thread.State.BLOCKED && pending.isAlive && System.nanoTime() < deadline) Thread.yield()
+                assertEquals("The old report must wait at the transport lifecycle monitor", Thread.State.BLOCKED, pending.state)
+                bind(manager, replacement)
+                manager.processPacket(keys(3), replacement)
+            }
+            val completed = checkNotNull(worker)
+            completed.join(2_000)
+            assertFalse(completed.isAlive)
+            assertArrayEquals(ByteArray(16) { 3 }, device.state.value.magicKeys[MagicKeyType.IRK])
+            assertArrayEquals(ByteArray(16) { 3 }, device.state.value.magicKeys[MagicKeyType.ENC_KEY])
+            manager.processPacket(keys(4), null)
+            assertArrayEquals("A report without a live transport cannot replace pairing keys",
+                ByteArray(16) { 3 }, device.state.value.magicKeys[MagicKeyType.IRK])
+        } finally { manager.disconnect(); original.close(); replacement.close(); worker?.join(2_000) }
+    }
+
     @Test fun refreshReopensOnlyControlTransportAndPreservesConfirmedSettingsAndKeys() {
         val device = createDevice()
         val id = ControlCommandIdentifier.LISTENING_MODE
