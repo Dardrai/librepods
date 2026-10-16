@@ -52,6 +52,10 @@ controls connection and ownership events. Passive battery and metadata updates
 never reopen the capsule or extend its dismissal. Tap or swipe down to open
 controls; swipe up or sideways to dismiss. Android's overlay permission is
 required. Reduced motion is respected and no looping video is used.
+For a centered top camera in portrait, the capsule surrounds the actual camera
+path and reserves space inside for the artwork and text below it. Other display
+shapes use the normal safe top area. The application overlay stays beneath
+Android's system status-bar layer.
 Confirmed noise-control changes use the same capsule; initial readback and
 duplicate reports stay quiet. Some models reuse the existing bundled artwork.
 
@@ -222,12 +226,15 @@ The Bluetooth module was `com.google.android.bluetooth` version 17 with APEX
 The tested platform ELD encoder configuration produced 48 kHz stereo
 **512-sample** frames, so it failed the 480-sample Apple playback requirement.
 An Android software encoder has not been tested. Native Bluetooth playback remains enabled.
-The latest full FOSS validation, `pixel-overlay7` (pixel6, versionCode 91),
-passed 165 tests in 30 suites, debug lint, debug assembly and minified release
-assembly. Eight native host previews passed layout review, including both themes,
-narrow enlarged text and fresh/stale/unknown batteries. Pixel6 is signed with the
-existing fork key; it has not been installed or hardware tested. No Pixel access
-occurred while implementing or verifying these overlays. The earlier pixel5/code90
+The latest full FOSS validation, `pixel-cutout2` (pixel8, versionCode 93),
+passed 167 tests in 30 suites, debug lint, debug assembly and minified release
+assembly. Ten native host previews include camera geometry and safe-area fallback
+alongside both themes, larger text and independent battery readings. Pixel8 is
+signed with the existing fork key and installed on the Pixel 10 Pro XL. The user
+confirmed the preceding pixel7 surrounds the camera; its measured window starts
+at y=34px. Pixel8 keeps that placement and slightly widens the expanded capsule,
+with 16dp side margins on this display. The width still needs a visual check.
+Physical pairing has not been retested. The earlier pixel5/code90
 audit build passed 143 tests and was installed at the user's request; its audit
 fixes remain unverified on hardware. The earlier pixel3 build
 passed 86 tests in 21 suites and the basic live-cellular-call checks described

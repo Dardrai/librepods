@@ -25,6 +25,7 @@ import android.content.Context
 import android.database.ContentObserver
 import android.graphics.Outline
 import android.graphics.PixelFormat
+import android.graphics.RectF
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -77,6 +78,8 @@ class IslandWindow(private val context: Context) {
     private var attached = false
     private var observingAnimations = false
     private var artworkResource = 0
+    private var collapsedWidth = dp(96)
+    private var collapsedHeight = dp(34)
     private var startX = 0f
     private var startY = 0f
     private var dragged = false
@@ -97,8 +100,8 @@ class IslandWindow(private val context: Context) {
         view.clipToOutline = true
         view.outlineProvider = object : ViewOutlineProvider() {
             override fun getOutline(v: View, outline: Outline) {
-                val width = (dp(96) + (v.width - dp(96)) * expansion).toInt().coerceAtMost(v.width)
-                val height = (dp(34) + (v.height - dp(34)) * expansion).toInt().coerceAtMost(v.height)
+                val width = (collapsedWidth + (v.width - collapsedWidth) * expansion).toInt().coerceAtMost(v.width)
+                val height = (collapsedHeight + (v.height - collapsedHeight) * expansion).toInt().coerceAtMost(v.height)
                 val left = (v.width - width) / 2
                 outline.setRoundRect(left, 0, left + width, height, min(dp(28).toFloat(), height / 2f))
             }
@@ -144,12 +147,33 @@ class IslandWindow(private val context: Context) {
             val bounds = metrics.bounds
             val insets = metrics.windowInsets.getInsetsIgnoringVisibility(
                 WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
+            val cutout = metrics.windowInsets.displayCutout
+            val top = cutout?.boundingRectTop
+            val camera = if (cutout != null && top != null && !top.isEmpty &&
+                cutout.boundingRects.size == 1 && bounds.height() > bounds.width()) {
+                val hole = RectF(top)
+                val pathBounds = RectF()
+                cutout.cutoutPath?.computeBounds(pathBounds, true)
+                if (!pathBounds.isEmpty && hole.contains(pathBounds)) hole.set(pathBounds)
+                hole.takeIf { abs(it.centerX() - bounds.width() / 2f) <= dp(24) }
+            } else null
+            val topOffset = camera?.let { (it.top - dp(6)).toInt().coerceAtLeast(dp(6)) } ?: (insets.top + dp(12))
+            collapsedWidth = maxOf(dp(96), camera?.let { (it.width() + dp(12)).toInt() } ?: 0)
+            collapsedHeight = maxOf(dp(34), camera?.let { (it.height() + dp(12)).toInt() } ?: 0)
+            val contentTop = maxOf(dp(18), camera?.let { (it.bottom - topOffset + dp(12)).toInt() } ?: 0)
+            view.setPadding(view.paddingLeft, contentTop, view.paddingRight, view.paddingBottom)
             val params = WindowManager.LayoutParams(
-                min(dp(400), bounds.width() - insets.left - insets.right - dp(32)).coerceAtLeast(1), WindowManager.LayoutParams.WRAP_CONTENT,
+                min(dp(420), bounds.width() - insets.left - insets.right - dp(32)).coerceAtLeast(1), WindowManager.LayoutParams.WRAP_CONTENT,
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
                 PixelFormat.TRANSLUCENT
-            ).apply { gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL; y = dp(12) }
+            ).apply {
+                gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+                y = topOffset
+                // Position against the physical display, then reserve camera space inside the capsule.
+                setFitInsetsTypes(0)
+                layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+            }
             renderExpansion(0f)
             if (runCatching { windowManager.addView(view, params) }.isFailure) {
                 state.hide()

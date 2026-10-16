@@ -7,7 +7,9 @@ import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Insets
 import android.graphics.Outline
+import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.Rect
 import android.graphics.RectF
@@ -15,7 +17,11 @@ import android.os.Looper
 import android.os.SystemClock
 import android.provider.Settings
 import android.view.ContextThemeWrapper
+import android.view.DisplayCutout
 import android.view.View
+import android.view.WindowInsets
+import android.view.WindowManager
+import android.view.WindowMetrics
 import android.widget.Button
 import android.widget.ImageView
 import android.widget.TextView
@@ -35,6 +41,7 @@ import org.robolectric.annotation.GraphicsMode
 import org.robolectric.annotation.LooperMode
 import org.robolectric.shadows.ShadowSettings
 import java.io.File
+import java.lang.reflect.Proxy
 import java.time.Duration
 import kotlin.math.roundToInt
 
@@ -205,6 +212,66 @@ class OverlayRenderingTest {
         }
     }
 
+    @Test fun islandWrapsTheCameraPathInsteadOfTheLargerCutoutSafeArea() {
+        val context = renderContext(night = false, widthDp = 448)
+        val camera = Path().apply { addCircle(448f, 67f, 32f, Path.Direction.CW) }
+        val cutout = DisplayCutout.Builder()
+            .setBoundingRectTop(Rect(412, 0, 484, 134))
+            .setCutoutPath(camera)
+            .setSafeInsets(Insets.of(0, 134, 0, 0))
+            .build()
+        val island = islandWithMetrics(context, Rect(0, 0, 896, 1800), cutout, Insets.of(0, 134, 0, 0))
+        try {
+            island.show(IslandSnapshot("camera-fixture", "AirPods Pro 3", "A3063"))
+            val view = root(island, "view")
+            val params = view.layoutParams as WindowManager.LayoutParams
+            assertEquals(0, params.fitInsetsTypes)
+            assertEquals(WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS, params.layoutInDisplayCutoutMode)
+            assertEquals(23, params.y)
+            assertEquals(100, view.paddingTop)
+            render(view, "island-centered-camera", 448)
+            renderPlacement(view, params, 896, 1800, camera)
+
+            island.javaClass.getDeclaredField("expansion").apply { isAccessible = true }.setFloat(island, 0f)
+            val outline = Outline()
+            view.outlineProvider.getOutline(view, outline)
+            val bounds = Rect()
+            assertTrue(outline.getRect(bounds))
+            assertEquals(192, bounds.width())
+            assertEquals(88, bounds.height())
+            val cameraBounds = RectF().apply { camera.computeBounds(this, true) }
+            val screenOutline = RectF(bounds).apply { offset((896 - view.width) / 2f, params.y.toFloat()) }
+            assertTrue("Collapsed island must surround the camera", screenOutline.contains(cameraBounds))
+        } finally {
+            island.forceClose()
+        }
+    }
+
+    @Test fun noCameraAndLandscapeCutoutsKeepTheIslandBelowTheSafeTop() {
+        val context = renderContext(night = false, widthDp = 448)
+        val landscapeCutout = DisplayCutout.Builder()
+            .setBoundingRectLeft(Rect(0, 412, 134, 484))
+            .setCutoutPath(Path().apply { addCircle(67f, 448f, 32f, Path.Direction.CW) })
+            .setSafeInsets(Insets.of(134, 0, 0, 0))
+            .build()
+        for ((bounds, cutout, insets) in listOf(
+            Triple(Rect(0, 0, 896, 1800), null, Insets.of(0, 66, 0, 0)),
+            Triple(Rect(0, 0, 1800, 896), landscapeCutout, Insets.of(134, 66, 0, 0))
+        )) {
+            val island = islandWithMetrics(context, bounds, cutout, insets)
+            try {
+                island.show(IslandSnapshot("safe-top-fixture", "AirPods Pro 3", "A3063"))
+                val view = root(island, "view")
+                val params = view.layoutParams as WindowManager.LayoutParams
+                assertEquals(0, params.fitInsetsTypes)
+                assertEquals(90, params.y)
+                assertEquals(36, view.paddingTop)
+            } finally {
+                island.forceClose()
+            }
+        }
+    }
+
     @Test fun newEventReversesDismissalAndForceCloseRetiresEntrance() {
         val context = renderContext(night = false, widthDp = 412)
         Settings.Global.putFloat(context.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f)
@@ -242,6 +309,45 @@ class OverlayRenderingTest {
         .apply { isAccessible = true }.get(instance)!!
 
     private fun root(instance: Any, name: String) = field(instance, name) as View
+
+    private fun islandWithMetrics(context: Context, bounds: Rect, cutout: DisplayCutout?, safeInsets: Insets): IslandWindow {
+        val insets = WindowInsets.Builder()
+            .setDisplayCutout(cutout)
+            .setInsetsIgnoringVisibility(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout(), safeInsets)
+            .build()
+        val metrics = WindowMetrics(bounds, insets)
+        val delegate = context.getSystemService(WindowManager::class.java)
+        val manager = Proxy.newProxyInstance(WindowManager::class.java.classLoader, arrayOf(WindowManager::class.java)) { _, method, args ->
+            if (method.name == "getCurrentWindowMetrics") metrics else method.invoke(delegate, *(args ?: emptyArray()))
+        } as WindowManager
+        return IslandWindow(context).also { island ->
+            island.javaClass.getDeclaredField("windowManager").apply { isAccessible = true }.set(island, manager)
+        }
+    }
+
+    private fun renderPlacement(view: View, params: WindowManager.LayoutParams, width: Int, height: Int, camera: Path) {
+        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        try {
+            val canvas = Canvas(bitmap)
+            canvas.drawColor(Color.rgb(222, 229, 233))
+            canvas.save()
+            canvas.translate((width - view.width) / 2f, params.y.toFloat())
+            val outline = Outline()
+            view.outlineProvider.getOutline(view, outline)
+            val bounds = Rect()
+            if (outline.getRect(bounds)) canvas.clipPath(Path().apply {
+                addRoundRect(RectF(bounds), outline.radius, outline.radius, Path.Direction.CW)
+            })
+            view.draw(canvas)
+            canvas.restore()
+            canvas.drawPath(camera, Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.DKGRAY })
+            val output = File("build/overlay-previews", "island-camera-synthetic-placement.png")
+            output.parentFile?.mkdirs()
+            output.outputStream().use { assertTrue(bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)) }
+        } finally {
+            bitmap.recycle()
+        }
+    }
 
     private fun render(view: View, name: String, widthDp: Int) {
         shadowOf(Looper.getMainLooper()).idle()
