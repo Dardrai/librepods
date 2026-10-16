@@ -2,6 +2,9 @@ package me.kavishdevar.librepods
 
 import android.app.Application
 import android.util.Log
+import java.util.concurrent.ConcurrentHashMap
+import me.kavishdevar.librepods.audio.ExperimentalAudioController
+import me.kavishdevar.librepods.core.bluetooth.MacAddress
 import androidx.health.connect.client.HealthConnectClient
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
@@ -20,6 +23,7 @@ import me.kavishdevar.librepods.database.LibrePodsDatabase
 import me.kavishdevar.librepods.presentation.overlays.IslandWindow
 import me.kavishdevar.librepods.repository.AppDataRepository
 import me.kavishdevar.librepods.repository.AppleRepository
+import me.kavishdevar.librepods.repository.LegacySettingsMigration
 import me.kavishdevar.librepods.repository.HeartRateRepository
 import me.kavishdevar.librepods.repository.RecordingRepository
 import me.kavishdevar.librepods.repository.WidgetConfigRepository
@@ -29,6 +33,7 @@ import me.kavishdevar.librepods.utils.XposedServiceHolder
 import me.kavishdevar.librepods.utils.XposedState
 
 class LibrePodsApplication: Application(), XposedServiceHelper.OnServiceListener, DefaultLifecycleObserver {
+    val experimentalAudioControllers = ConcurrentHashMap<MacAddress, ExperimentalAudioController>()
     lateinit var database: LibrePodsDatabase
         private set
 
@@ -65,6 +70,7 @@ class LibrePodsApplication: Application(), XposedServiceHelper.OnServiceListener
         XposedServiceHelper.registerListener(this)
 
         runBlocking(Dispatchers.IO) {
+            LegacySettingsMigration.migrate(this@LibrePodsApplication, database)
             appDataRepository.awaitInitialized()
         }
 

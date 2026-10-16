@@ -300,7 +300,7 @@ fun AppleSettingsScreen(
                 }
             }
 
-            if (metadata.version3.isNotBlank() && metadata.version3.first().digitToInt() >= 8) {
+            if ((metadata.firmwareMajor ?: 0) >= 8) {
                 item(key = "spacer_recording") {
                     Spacer(modifier = Modifier.height(16.dp))
                 }
@@ -406,7 +406,7 @@ fun AppleSettingsScreen(
                     adaptiveVolumeCapability = adaptiveVolumeCapability,
                     conversationAwarenessCapability = conversationAwarenessCapability,
                     loudSoundReductionCapability = loudSoundReductionCapability,
-                    customEqCapability = metadata.version3.isNotBlank() && metadata.version3.first().digitToInt() >= 9,
+                    customEqCapability = metadata.model == me.kavishdevar.librepods.core.devices.AirPodsModel.AIRPODS_PRO_3 && (metadata.firmwareMajor ?: 0) >= 9,
                     adaptiveVolumeChecked = adaptiveVolumeChecked,
                     onAdaptiveVolumeCheckedChange = { checked ->
                         setControlCommandBoolean(
@@ -522,7 +522,7 @@ fun AppleSettingsScreen(
                 )
             }
 
-            if (baseCapabilities.contains(BaseCapability.LOUD_SOUND_REDUCTION) && (metadata.version3.isNotBlank() && metadata.version3.first().digitToInt() >= 8)) {
+            if (baseCapabilities.contains(BaseCapability.LOUD_SOUND_REDUCTION) && (metadata.firmwareMajor ?: 0) >= 8) {
                 item(key = "spacer_off_listening") { Spacer(modifier = Modifier.height(16.dp)) }
                 item(key = "off_listening") {
                     val id = ControlCommandIdentifier.ALLOW_OFF_OPTION
@@ -541,7 +541,7 @@ fun AppleSettingsScreen(
                     modelName = metadata.modelName,
                     actualModel = metadata.modelNumber,
                     serialNumbers = listOf(metadata.serialNumber, metadata.leftSerialNumber, metadata.rightSerialNumber),
-                    version = metadata.version3,
+                    version = metadata.publicFirmware ?: "—",
                     navigateToVersion = navigateToVersion
                 )
             }

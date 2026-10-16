@@ -1,6 +1,7 @@
 package me.kavishdevar.librepods.presentation.overlays
 
 import android.util.Log
+import android.animation.ValueAnimator
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
@@ -31,6 +32,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.requiredHeightIn
 import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.requiredWidth
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -58,14 +60,19 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import kotlinx.coroutines.launch
 import me.kavishdevar.librepods.R
 import me.kavishdevar.librepods.data.app.IslandBatteryStyle
 import me.kavishdevar.librepods.data.app.IslandSettings
+import me.kavishdevar.librepods.core.devices.AirPodsModel
+import me.kavishdevar.librepods.core.devices.AirPodsSpecs
+import me.kavishdevar.librepods.core.devices.Battery
+import me.kavishdevar.librepods.core.devices.BatteryComponent
 import me.kavishdevar.librepods.data.app.resolve
 import me.kavishdevar.librepods.presentation.components.apple.NoiseControlSettings
 import me.kavishdevar.librepods.presentation.icons.LocalIcons
-import me.kavishdevar.librepods.core.R as coreR
 
 @Composable
 fun IslandContent(
@@ -88,13 +95,25 @@ fun IslandContent(
     onNoiseControlModeChanged: (Int) -> Unit,
     adaptiveStrength: Int = 0,
     onAdaptiveStrengthChanged: (Int) -> Unit,
+    model: AirPodsModel = AirPodsModel.UNKNOWN,
+    batteries: Set<Battery> = emptySet(),
+    batteryNow: Long = System.currentTimeMillis(),
+    paired: Boolean = false,
+    nearby: Boolean = false,
+    cameraPaddingPx: Int = 0,
 ) {
     val density = LocalDensity.current
+    val cells = islandBatteryCells(model, batteries, batteryNow)
+    val compactCell = cells.filter { it.component != BatteryComponent.CASE }.filter { it.live && it.level != null }
+        .minByOrNull { it.level!! } ?: cells.firstOrNull { it.component != BatteryComponent.CASE && it.level != null }
+    val displayBatteryLevel = if (paired) compactCell?.level else batteryLevel
+    val batteryLive = !paired || compactCell?.live == true
+    val spec = AirPodsSpecs.getSpec(model)
 
-    val animWidth = remember { Animatable(0f) }
-    val animHeight = remember { Animatable(islandSettings.compactHeight) }
-    val animRadius = remember { Animatable(0f) }
-    val animBorderWidth = remember { Animatable(0f) }
+    val animWidth = remember { Animatable(if (islandState == IslandState.EXPANDED) islandSettings.expandedWidth else islandSettings.compactWidth) }
+    val animHeight = remember { Animatable(if (islandState == IslandState.EXPANDED) islandSettings.expandedHeight else islandSettings.compactHeight) }
+    val animRadius = remember { Animatable(if (islandState == IslandState.EXPANDED) islandSettings.expandedBorderRadius else islandSettings.compactBorderRadius) }
+    val animBorderWidth = remember { Animatable(if (islandState == IslandState.EXPANDED) islandSettings.expandedBorderWidth else islandSettings.compactBorderWidth) }
 
     val springSpec = spring<Float>(
         dampingRatio = if (islandState == IslandState.CLOSE) Spring.DampingRatioNoBouncy else Spring.DampingRatioNoBouncy,
@@ -130,10 +149,10 @@ fun IslandContent(
             IslandState.CLOSE -> islandSettings.compactBorderWidth
         }
 
-        val wJob = launch { animWidth.animateTo(targetW, springSpec) }
-        val hJob = launch { animHeight.animateTo(targetH, springSpec) }
-        val rJob = launch { animRadius.animateTo(targetRadius, springSpec) }
-        val bJob = launch { animBorderWidth.animateTo(targetBorderWidth, springSpec) }
+        val wJob = launch { if (ValueAnimator.areAnimatorsEnabled()) animWidth.animateTo(targetW, springSpec) else animWidth.snapTo(targetW) }
+        val hJob = launch { if (ValueAnimator.areAnimatorsEnabled()) animHeight.animateTo(targetH, springSpec) else animHeight.snapTo(targetH) }
+        val rJob = launch { if (ValueAnimator.areAnimatorsEnabled()) animRadius.animateTo(targetRadius, springSpec) else animRadius.snapTo(targetRadius) }
+        val bJob = launch { if (ValueAnimator.areAnimatorsEnabled()) animBorderWidth.animateTo(targetBorderWidth, springSpec) else animBorderWidth.snapTo(targetBorderWidth) }
 
         wJob.join()
         hJob.join()
@@ -160,7 +179,8 @@ fun IslandContent(
         animationSpec = tween(100)
     )
 
-    val backgroundColor = islandSettings.expandedBackgroundColor.resolve()
+    val backgroundColor = if (paired && islandSettings.expandedBackgroundColor == IslandSettings().expandedBackgroundColor)
+        Color.Black else islandSettings.expandedBackgroundColor.resolve()
 
     val backgroundColorWithAlpha = animateColorAsState(
         targetValue = when (islandState) {
@@ -171,11 +191,11 @@ fun IslandContent(
         animationSpec = tween(100)
     )
 
-    val textColor = contentColorFor(backgroundColor)
+    val textColor = if (islandState != IslandState.EXPANDED || backgroundColor.luminance() < 0.5f) Color.White else contentColorFor(backgroundColor)
     val shape = RoundedCornerShape(with(density) { animRadius.value.toDp() } )
 
     val typeText = when (type) {
-        IslandType.CONNECTED -> stringResource(R.string.island_connected_text)
+        IslandType.CONNECTED -> stringResource(if (nearby) R.string.island_nearby else R.string.island_connected_text)
         IslandType.TAKING_OVER -> stringResource(R.string.island_taking_over_text)
         IslandType.MOVED_TO_REMOTE -> stringResource(R.string.island_moved_to_remote_text)
         IslandType.MOVED_TO_OTHER_DEVICE -> {
@@ -190,17 +210,11 @@ fun IslandContent(
         }
     }
 
-    val listeningModeControlHeight = with(density) { if (islandSettings.showListeningModeControl) 72.dp.toPx() else 0f }
-
-    val bottomAlign = islandSettings.expandedHeight - listeningModeControlHeight > 200f &&
-        islandSettings.offsetY < 150f
-
     val animationCoroutineScope = rememberCoroutineScope()
 
     Box(
         modifier = Modifier
-            .requiredSize(width = widthDp, height = heightDp)
-            .padding(4.dp),
+            .requiredSize(width = widthDp, height = heightDp),
         contentAlignment = Alignment.Center
     ) {
         Column(
@@ -230,8 +244,9 @@ fun IslandContent(
                         )
                     }
                 }
-                .padding(padding.value.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+                .padding(start = padding.value.dp, end = padding.value.dp, bottom = padding.value.dp,
+                    top = if (islandState == IslandState.EXPANDED) maxOf(padding.value.dp, with(density) { cameraPaddingPx.toDp() }) else padding.value.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Row(
                 modifier = Modifier
@@ -283,7 +298,7 @@ fun IslandContent(
                             }
                         )
                     },
-                verticalAlignment = if (bottomAlign && islandState == IslandState.EXPANDED) Alignment.Bottom else Alignment.CenterVertically,
+                verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 val useMonochrome = when (islandState) {
@@ -296,14 +311,14 @@ fun IslandContent(
                 ) {
                     if (it) {
                         Icon(
-                            imageVector = LocalIcons.current.AirPodsPro3,
+                            imageVector = LocalIcons.current.fromName(spec.genericIconName) ?: LocalIcons.current.Headphones,
                             contentDescription = null,
                             tint = textColor,
                             modifier = Modifier.fillMaxHeight(0.8f)
                         )
                     } else {
                         Image(
-                            bitmap = ImageBitmap.imageResource(coreR.drawable.img_airpods_pro_2_buds), // TODO: use correct icon for model
+                            bitmap = ImageBitmap.imageResource(spec.primaryImageRes),
                             contentDescription = null,
                             modifier = Modifier
                                 .heightIn(max = 64.dp)
@@ -351,7 +366,7 @@ fun IslandContent(
                 val showRing = currentBatteryStyle == IslandBatteryStyle.CIRCLE || currentBatteryStyle == IslandBatteryStyle.CIRCLE_TEXT
                 val showText = currentBatteryStyle == IslandBatteryStyle.TEXT || currentBatteryStyle == IslandBatteryStyle.CIRCLE_TEXT
 
-                BoxWithConstraints(
+                if (!paired || islandState != IslandState.EXPANDED) BoxWithConstraints(
                     modifier = Modifier
                         .heightIn(max = 64.dp)
                         .fillMaxHeight(0.8f)
@@ -360,7 +375,8 @@ fun IslandContent(
                 ) {
                     val isDarkTheme = backgroundColor.luminance() < 0.5f
                     val batteryColor =
-                        if (batteryLevel > 25) if (isDarkTheme) Color(0xFF2ED158) else Color(0xFF35C759)
+                        if (!batteryLive || displayBatteryLevel == null) textColor.copy(alpha = 0.5f)
+                        else if (displayBatteryLevel > 25) if (isDarkTheme) Color(0xFF2ED158) else Color(0xFF35C759)
                         else if (isDarkTheme) Color(0xFFFC4244) else Color(0xFFfe373C)
 
                     this@Row.AnimatedVisibility(
@@ -370,7 +386,7 @@ fun IslandContent(
                     ) {
                         val strokeWidthPx = with(LocalDensity.current) { (maxHeight / 10f).toPx() }
 
-                        val progress = batteryLevel / 100f
+                        val progress = (displayBatteryLevel ?: 0) / 100f
 
                         Canvas(
                             modifier = Modifier.fillMaxSize()
@@ -404,7 +420,7 @@ fun IslandContent(
                             (maxHeight / 2.5f).toSp()
                         }
                         Text(
-                            text = batteryLevel.toString(),
+                            text = displayBatteryLevel?.toString() ?: "—",
                             style = MaterialTheme.typography.bodyLarge.copy(
                                 fontSize = fontSize,
                                 fontWeight = FontWeight.SemiBold
@@ -414,6 +430,14 @@ fun IslandContent(
                             softWrap = false,
                             textAlign = TextAlign.Center,
                         )
+                    }
+                }
+            }
+
+            if (paired && islandState == IslandState.EXPANDED && islandSettings.expandedBatteryStyle != IslandBatteryStyle.NONE) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                    cells.forEach { cell ->
+                        IslandBatteryIndicator(cell, islandSettings.expandedBatteryStyle, textColor, Modifier.weight(1f))
                     }
                 }
             }
@@ -438,6 +462,42 @@ fun IslandContent(
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun IslandBatteryIndicator(cell: IslandBatteryCell, style: IslandBatteryStyle, textColor: Color, modifier: Modifier) {
+    val label = stringResource(when (cell.component) {
+        BatteryComponent.LEFT -> R.string.island_battery_left
+        BatteryComponent.RIGHT -> R.string.island_battery_right
+        BatteryComponent.CASE -> R.string.island_battery_case
+        BatteryComponent.HEADSET -> R.string.island_battery_headset
+    })
+    val percentage = cell.level?.let { "$it%" } ?: "—"
+    val age = if (!cell.live && cell.ageSeconds != null)
+        stringResource(R.string.island_battery_cached_age, cell.ageSeconds) else null
+    val description = "$label, $percentage" + (age?.let { ", $it" } ?: "") +
+        if (cell.charging) ", ${stringResource(R.string.island_battery_charging)}" else ""
+    val color = if (!cell.live || cell.level == null) textColor.copy(alpha = 0.5f)
+        else if (cell.level <= 25) Color(0xFFFF453A) else Color(0xFF00D352)
+    Column(modifier.semantics { contentDescription = description }, horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            if (style == IslandBatteryStyle.CIRCLE || style == IslandBatteryStyle.CIRCLE_TEXT) {
+                Box(Modifier.size(28.dp), contentAlignment = Alignment.Center) {
+                    Canvas(Modifier.fillMaxSize().padding(2.dp)) {
+                        val stroke = Stroke(width = 3.dp.toPx(), cap = StrokeCap.Round)
+                        drawArc(color.copy(alpha = 0.2f), 0f, 360f, false, style = stroke)
+                        if (cell.level != null) drawArc(color, -90f, 3.6f * cell.level, false, style = stroke)
+                    }
+                    if (cell.charging) Icon(LocalIcons.current.Bolt, null, tint = color, modifier = Modifier.size(16.dp))
+                }
+            }
+            if (style == IslandBatteryStyle.TEXT || style == IslandBatteryStyle.CIRCLE_TEXT)
+                Text(percentage, color = if (cell.live) textColor else color, fontSize = 17.sp, maxLines = 1)
+        }
+        Text(label, color = textColor.copy(alpha = 0.65f), fontSize = 12.sp, maxLines = 1)
+        if (age != null) Text(age, color = color, fontSize = 10.sp, maxLines = 1)
     }
 }
 

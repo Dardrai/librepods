@@ -19,13 +19,17 @@
 package me.kavishdevar.librepods.presentation.overlays
 
 import android.content.Context
+import android.content.Intent
 import android.graphics.PixelFormat
+import android.graphics.RectF
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
+import android.view.WindowInsets
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -45,10 +49,15 @@ import androidx.savedstate.SavedStateRegistryController
 import androidx.savedstate.SavedStateRegistryOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import me.kavishdevar.librepods.database.app.AppSettingsEntity
+import me.kavishdevar.librepods.presentation.activities.MainActivity
+import me.kavishdevar.librepods.core.devices.AirPodsModel
+import me.kavishdevar.librepods.core.devices.AppleDevice
+import me.kavishdevar.librepods.core.devices.Battery
+import me.kavishdevar.librepods.core.devices.ConnectionState
+import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommandIdentifier
 import me.kavishdevar.librepods.presentation.design.LibrePodsTheme
 import me.kavishdevar.librepods.presentation.design.NightTheme
 import me.kavishdevar.librepods.services.LibrePodsAccessibilityService
-import kotlin.math.roundToInt
 
 enum class IslandType {
     CONNECTED,
@@ -82,6 +91,21 @@ class IslandWindow(
     private var batteryLevel by mutableIntStateOf(70)
     private var reversed by mutableStateOf(false)
     private var otherDeviceName by mutableStateOf(null as String?)
+    private var ownerAddress: String? = null
+    private var model by mutableStateOf(AirPodsModel.UNKNOWN)
+    private var batteries by mutableStateOf(emptySet<Battery>())
+    private var nearby by mutableStateOf(false)
+    private var batteryNow by mutableStateOf(System.currentTimeMillis())
+    private var effectiveSettings by mutableStateOf(appSettings.islandSettings)
+    private var cameraPadding by mutableIntStateOf(0)
+    private val ageHandler = Handler(Looper.getMainLooper())
+    private val updateAge = object : Runnable {
+        override fun run() {
+            if (!isVisible || ownerAddress == null) return
+            batteryNow = System.currentTimeMillis()
+            ageHandler.postDelayed(this, 1000)
+        }
+    }
 
     private var showOffListeningMode by mutableStateOf(false)
     private var noiseControlModeValue by mutableIntStateOf(4)
@@ -103,7 +127,7 @@ class IslandWindow(
         private set
 
     val isVisible: Boolean
-        get() = composeView?.parent != null && composeView?.visibility == View.VISIBLE
+        get() = islandState != IslandState.CLOSE && composeView?.parent != null && composeView?.visibility == View.VISIBLE
 
     fun updateContext(context: Context) {
         if (Looper.myLooper() != Looper.getMainLooper()) {
@@ -111,22 +135,21 @@ class IslandWindow(
             return
         }
 
+        val restore = isVisible
+        val state = islandState
+        composeView?.let { if (it.parent != null) windowManager.removeView(it) }
+        lifecycleOwner?.stop()
+        composeView = null
+        lifecycleOwner = null
         this.context = context
         this.usingAccessibilityService = context is LibrePodsAccessibilityService
         this.windowManager = context.getSystemService(WindowManager::class.java)
 
-        updateWindowParams(islandState)
-
-        composeView?.let { view ->
-            if (view.parent != null) {
-                windowManager.removeView(view)
-            }
-        }
-
+        if (!restore) return
         setupComposeView()
 
         if (composeView?.parent == null) {
-            val params = createLayoutParams(islandState)
+            val params = createLayoutParams(state)
             try {
                 lifecycleOwner?.start()
                 windowManager.addView(composeView, params)
@@ -150,7 +173,34 @@ class IslandWindow(
     }
 
     fun updateBattery(batteryPercentage: Int) {
+        if (ownerAddress != null) return
         this.batteryLevel = batteryPercentage
+    }
+
+    fun updatePairedBattery(device: AppleDevice, model: AirPodsModel = device.metadata.value.model) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            Handler(Looper.getMainLooper()).post { updatePairedBattery(device, model) }
+            return
+        }
+        if (!isVisible || ownerAddress != device.macAddress.value) return
+        this.batteries = device.state.value.battery
+        this.name = device.metadata.value.name
+        if (model != AirPodsModel.UNKNOWN) this.model = model
+        this.nearby = device.connectionState.value != ConnectionState.CONNECTED
+        batteryNow = System.currentTimeMillis()
+    }
+
+    fun showPairedLid(device: AppleDevice, model: AirPodsModel = device.metadata.value.model,
+                      observedAtNanos: Long = SystemClock.elapsedRealtimeNanos()) {
+        val state = device.state.value
+        show(name = device.metadata.value.name, owner = device, ownerModel = model, observedAtNanos = observedAtNanos,
+            openApp = { context.startActivity(Intent(context, MainActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) },
+            showOffListeningMode = state.controlStates[ControlCommandIdentifier.ALLOW_OFF_OPTION]?.firstOrNull()?.toInt() == 1,
+            noiseControlModeValue = state.controlStates[ControlCommandIdentifier.LISTENING_MODE]?.firstOrNull()?.toInt() ?: 3,
+            onNoiseControlModeChanged = { device.setControlCommand(ControlCommandIdentifier.LISTENING_MODE, it) },
+            adaptiveStrength = state.controlStates[ControlCommandIdentifier.AUTO_ANC_STRENGTH]?.firstOrNull()?.toInt() ?: 50,
+            onAdaptiveStrengthChanged = { device.setControlCommand(ControlCommandIdentifier.AUTO_ANC_STRENGTH, it) })
     }
 
     fun updateNoiseControl(mode: Int, strength: Int, showOff: Boolean = showOffListeningMode) {
@@ -186,13 +236,16 @@ class IslandWindow(
         onAdaptiveStrengthChanged: (Int) -> Unit = this.onAdaptiveStrengthChanged,
 
         forcedState: IslandState? = null,
-        keepOpen: Boolean = false
+        keepOpen: Boolean = false,
+        owner: AppleDevice? = null,
+        ownerModel: AirPodsModel = owner?.metadata?.value?.model ?: AirPodsModel.UNKNOWN,
+        observedAtNanos: Long = SystemClock.elapsedRealtimeNanos()
     ) {
         if (Looper.myLooper() != Looper.getMainLooper()) {
             Handler(Looper.getMainLooper()).post {
                 show(name, batteryLevel, type, reversed, otherDeviceName, onReverseAction,
                     openApp, showOffListeningMode, noiseControlModeValue, onNoiseControlModeChanged,
-                    adaptiveStrength, onAdaptiveStrengthChanged, forcedState, keepOpen)
+                    adaptiveStrength, onAdaptiveStrengthChanged, forcedState, keepOpen, owner, ownerModel, observedAtNanos)
             }
             return
         }
@@ -200,6 +253,11 @@ class IslandWindow(
         Log.d("IslandWindow", "Showing island window: accessibility = $usingAccessibilityService")
 
         this.batteryLevel = batteryLevel
+        this.ownerAddress = owner?.macAddress?.value
+        this.model = ownerModel
+        this.batteries = owner?.state?.value?.battery.orEmpty()
+        this.nearby = owner != null && owner.connectionState.value != ConnectionState.CONNECTED
+        this.batteryNow = System.currentTimeMillis()
 
         this.name = name
         this.type = type
@@ -222,9 +280,12 @@ class IslandWindow(
             onAdaptiveStrengthChanged(it)
         }
 
+        islandState = forcedState ?: if (appSettings.islandSettings.enableExpanded) IslandState.EXPANDED else IslandState.COMPACT
+        createLayoutParams(islandState)
         if (composeView == null) {
             setupComposeView()
         }
+        composeView?.logFirstOverlayFrame("island", observedAtNanos)
 
         if (composeView?.parent == null) {
             val params = createLayoutParams(islandState)
@@ -237,8 +298,9 @@ class IslandWindow(
             }
         }
 
-        islandState = forcedState?: if (appSettings.islandSettings.enableExpanded) IslandState.EXPANDED else IslandState.COMPACT
-
+        updateWindowParams(islandState)
+        ageHandler.removeCallbacks(updateAge)
+        if (owner != null) ageHandler.post(updateAge)
         if (!keepOpen) resetTimer()
     }
 
@@ -250,27 +312,37 @@ class IslandWindow(
     }
 
     private fun createLayoutParams(state: IslandState = islandState): WindowManager.LayoutParams {
+        val metrics = windowManager.currentWindowMetrics
+        val cutout = metrics.windowInsets.displayCutout
+        val camera = cutout?.cutoutPath?.let { path -> RectF().also { path.computeBounds(it, true) } }
+            ?.takeIf { !it.isEmpty } ?: cutout?.boundingRects?.firstOrNull()?.let(::RectF)
+        val placement = islandPlacement(metrics.bounds,
+            metrics.windowInsets.getInsetsIgnoringVisibility(WindowInsets.Type.systemBars()),
+            camera, context.resources.displayMetrics.density, appSettings.islandSettings)
+        effectiveSettings = appSettings.islandSettings.copy(expandedWidth = placement.expandedWidth.toFloat(),
+            expandedHeight = placement.expandedHeight.toFloat(), compactWidth = placement.compactWidth.toFloat(),
+            compactHeight = placement.compactHeight.toFloat())
+        cameraPadding = placement.contentTop
         val windowType = if (context is android.accessibilityservice.AccessibilityService) {
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY
         } else {
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
         }
         return WindowManager.LayoutParams(
-            if (state == IslandState.EXPANDED) appSettings.islandSettings.expandedWidth.toInt()
-            else WindowManager.LayoutParams.WRAP_CONTENT,
+            if (state == IslandState.EXPANDED) placement.expandedWidth else placement.compactWidth,
             WindowManager.LayoutParams.WRAP_CONTENT,
             windowType,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_SPLIT_TOUCH or
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
             PixelFormat.TRANSPARENT
         ).apply {
             gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-            x = appSettings.islandSettings.offsetX.roundToInt()
-            y = appSettings.islandSettings.offsetY.roundToInt()
-
-            layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            x = placement.x
+            y = placement.y
+            setFitInsetsTypes(0)
+            layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
         }
     }
 
@@ -278,6 +350,7 @@ class IslandWindow(
         lifecycleOwner = OverlayLifecycleOwner()
 
         composeView = ComposeView(context).apply {
+            isForceDarkAllowed = false
             setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
 
             setViewTreeLifecycleOwner(lifecycleOwner)
@@ -305,7 +378,7 @@ class IslandWindow(
                         reversed = reversed,
                         otherDeviceName = otherDeviceName,
 
-                        islandSettings = currentAppSettings.islandSettings,
+                        islandSettings = effectiveSettings,
                         islandState = islandState,
 
                         openApp = { openApp() },
@@ -322,7 +395,9 @@ class IslandWindow(
                         noiseControlModeValue = noiseControlModeValue,
                         onNoiseControlModeChanged = this@IslandWindow.onNoiseControlModeChanged,
                         adaptiveStrength = this@IslandWindow.adaptiveStrength,
-                        onAdaptiveStrengthChanged = this@IslandWindow.onAdaptiveStrengthChanged
+                        onAdaptiveStrengthChanged = this@IslandWindow.onAdaptiveStrengthChanged,
+                        model = model, batteries = batteries, batteryNow = batteryNow,
+                        paired = ownerAddress != null, nearby = nearby, cameraPaddingPx = cameraPadding
                     )
                 }
             }
@@ -334,7 +409,7 @@ class IslandWindow(
         autoCloseHandler = Handler(Looper.getMainLooper())
         autoCloseRunnable = Runnable {
             if (appSettings.islandSettings.keepCompactVisible) {
-                islandState = IslandState.COMPACT
+                changeState(IslandState.COMPACT)
             } else {
                 close()
             }
@@ -349,6 +424,7 @@ class IslandWindow(
         }
 
         autoCloseRunnable?.let { autoCloseHandler?.removeCallbacks(it) }
+        ageHandler.removeCallbacks(updateAge)
         islandState = IslandState.CLOSE
     }
 
@@ -363,6 +439,8 @@ class IslandWindow(
         } catch (e: Exception) {
             Log.e("IslandWindow", "Error removing view: $e")
         } finally {
+            ageHandler.removeCallbacks(updateAge)
+            ownerAddress = null
             composeView = null
             lifecycleOwner = null
             islandState = IslandState.CLOSE

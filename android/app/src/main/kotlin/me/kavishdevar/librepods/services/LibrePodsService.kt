@@ -7,9 +7,12 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.app.AppOpsManager
 import android.appwidget.AppWidgetManager
 import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager
+import android.bluetooth.le.BluetoothLeScanner
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
@@ -20,11 +23,16 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.content.pm.ServiceInfo
 import android.media.AudioManager
 import android.os.BatteryManager
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
+import android.os.Handler
+import android.os.Looper
+import android.os.PowerManager
+import android.os.SystemClock
 import android.os.ParcelUuid
 import android.os.ext.SdkExtensions
 import android.provider.Settings
@@ -37,24 +45,36 @@ import android.view.View
 import android.widget.RemoteViews
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.health.connect.client.permission.HealthPermission
 import androidx.health.connect.client.records.HeartRateRecord
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.channels.Channel
 import me.kavishdevar.librepods.LibrePodsApplication
 import me.kavishdevar.librepods.R
-import me.kavishdevar.librepods.audio.EldDecoder
-import me.kavishdevar.librepods.audio.WavWriter
+import me.kavishdevar.librepods.audio.ExperimentalAudioController
+import me.kavishdevar.librepods.audio.MicrophonePhase
 import me.kavishdevar.librepods.core.bluetooth.MacAddress
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommandIdentifier
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.MagicKeyType
 import me.kavishdevar.librepods.core.bluetooth.verifyRPA
+import me.kavishdevar.librepods.core.bluetooth.ble.NearbyAirPods
+import me.kavishdevar.librepods.core.bluetooth.ble.ProximityReport
+import me.kavishdevar.librepods.bluetooth.NearbyPairingController
 import me.kavishdevar.librepods.core.data.heartrate.HeartRateSample
 import me.kavishdevar.librepods.core.data.recording.Recording
 import me.kavishdevar.librepods.core.devices.AppleDevice
@@ -73,13 +93,14 @@ import me.kavishdevar.librepods.presentation.overlays.IslandType
 import me.kavishdevar.librepods.presentation.overlays.IslandWindow
 import me.kavishdevar.librepods.presentation.widgets.BatteryWidget
 import me.kavishdevar.librepods.utils.MediaController
-import me.kavishdevar.librepods.utils.calculateLevel
+import java.util.concurrent.ConcurrentHashMap
 import java.time.ZoneOffset
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.toJavaInstant
 
 private const val TAG = "LibrePodsService"
+private const val STOP_MICROPHONE = "me.kavishdevar.librepods.STOP_MICROPHONE"
 
 @SuppressLint("MissingPermission")
 class LibrePodsService: Service() {
@@ -92,15 +113,30 @@ class LibrePodsService: Service() {
     private val _devices = MutableStateFlow<Map<MacAddress, Device<*, *, *>>>(emptyMap())
     val devices = _devices.asStateFlow()
 
-    private val deviceJobs = mutableMapOf<MacAddress, MutableList<Job>>()
+    private val deviceJobs = ConcurrentHashMap<MacAddress, List<Job>>()
+    private val deviceCreationLocks = ConcurrentHashMap<MacAddress, Mutex>()
+    @Volatile private var destroying = false
+    private val microphoneOwners = ConcurrentHashMap.newKeySet<MacAddress>()
+    private val audioDevices = ConcurrentHashMap<MacAddress, AppleDevice>()
+    private val audioJobs = ConcurrentHashMap<MacAddress, Job>()
+    private val sensorSuspensions = ConcurrentHashMap<MacAddress, Channel<Boolean>>()
+    private var microphonePermissionMonitor: Job? = null
+    private val audioControllers get() = (application as LibrePodsApplication).experimentalAudioControllers
 
-    val irkMap = mutableMapOf<MacAddress, ByteArray>()
-    val rpasByPublicMac = mutableMapOf<MacAddress, MutableSet<MacAddress>>()
-
-    val rejectedRandomMac = mutableSetOf<MacAddress>()
-    private val eldDecoder = EldDecoder()
-
-    private val wavWriters = mutableMapOf<Recording, WavWriter>()
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val bleHandler = Handler(Looper.getMainLooper())
+    private val nearbyVisits = NearbyAirPods.Visits()
+    private var pairingModel: Int? = null
+    private var nearbyPairing: NearbyPairingController? = null
+    private var bleGeneration = 0L
+    private var bleRequested = false
+    private var bleReady = false
+    @Volatile private var bleCaptureBlocked = false
+    private var bleScanner: BluetoothLeScanner? = null
+    private var bleScanCallback: ScanCallback? = null
+    private val pairedLids = mutableMapOf<MacAddress, Boolean>()
+    private val pairedObservations = mutableMapOf<MacAddress, Long>()
+    private val bleReconnectAt = mutableMapOf<MacAddress, Long>()
 
     private val appleRepository by lazy {
         (application as LibrePodsApplication).appleRepository
@@ -133,7 +169,7 @@ class LibrePodsService: Service() {
 
     @Suppress("unused")
     private fun observeCameraState() {
-        CoroutineScope(Dispatchers.IO).launch {
+        serviceScope.launch(Dispatchers.IO) {
             LibrePodsAccessibilityService.isCameraOpen.collect { isCamera ->
                 if (isCamera) {
                     Log.d(TAG, "Camera is open")
@@ -209,9 +245,24 @@ class LibrePodsService: Service() {
 
         registerBluetoothReceivers()
 
-        loadDevices()
-
-        startBleScanner()
+        nearbyPairing = NearbyPairingController(this, onInteractionChanged = { pairingModel = it }) { paired ->
+            if (paired.uuids.isNullOrEmpty()) paired.fetchUuidsWithSdp()
+            else serviceScope.launch(Dispatchers.IO) { onDeviceConnected(paired) }
+        }
+        serviceScope.launch {
+            loadDevices()
+            bleReady = true
+            startBleScanner()
+            devices.value.values.forEach { device ->
+                if (runCatching { BluetoothDevice::class.java.getMethod("isConnected").invoke(device.bluetoothDevice) as Boolean }
+                        .getOrDefault(false)) launch(Dispatchers.IO) { onDeviceConnected(device.bluetoothDevice) }
+            }
+            while (isActive) {
+                delay(5.seconds)
+                nearbyVisits.expire(SystemClock.elapsedRealtime(), pairingModel).forEach { nearbyPairing?.onNearbyDevice(it) }
+                devices.value.values.filterIsInstance<AppleDevice>().forEach { it.expireNearbyBattery(System.currentTimeMillis()) }
+            }
+        }
 
         MediaController.initialize(
             audioManager = getSystemService(AudioManager::class.java),
@@ -236,6 +287,7 @@ class LibrePodsService: Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
+            STOP_MICROPHONE -> audioControllers.values.forEach { it.stop() }
             // TODO: make this a sealed class or something, instead of stringly typed. also, make this different for widget so other apps can use it too
             "ACTION_SET_ANC_MODE" -> {
                 val appWidgetId = intent.getIntExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, -1)
@@ -270,6 +322,17 @@ class LibrePodsService: Service() {
     }
 
     override fun onDestroy() {
+        destroying = true
+        setExperimentalAudioBlocked(true)
+        microphonePermissionMonitor?.cancel()
+        audioDevices.keys.toList().forEach(::detachExperimentalAudio)
+        deviceJobs.values.flatten().forEach { it.cancel() }
+        devices.value.values.forEach { it.disconnect() }
+        nearbyPairing?.close()
+        islandWindow.close()
+        runCatching { getSystemService(TelephonyManager::class.java).unregisterTelephonyCallback(telephonyCallback) }
+        serviceScope.cancel()
+        bleHandler.removeCallbacksAndMessages(null)
         unregisterBluetoothReceivers()
         stopBleScanner()
 
@@ -278,104 +341,149 @@ class LibrePodsService: Service() {
 
     override fun onBind(intent: Intent?): IBinder = binder
 
-    private fun onDeviceConnected(bluetoothDevice: BluetoothDevice) {
-        if (devices.value[MacAddress(bluetoothDevice.address)]?.connectionState?.value == ConnectionState.CONNECTED) {
-            Log.d(TAG, "Device already connected: ${bluetoothDevice.address}")
-            return
+    private fun attachExperimentalAudio(device: AppleDevice) {
+        val address = device.macAddress
+        if (audioDevices[address] === device) return
+        detachExperimentalAudio(address)
+        val controller = ExperimentalAudioController(this, device) { active ->
+            setMicrophoneActive(address, active)
         }
-
-        val device = devices.value[MacAddress(bluetoothDevice.address)] ?: createDevice(bluetoothDevice)
-
-        if (device == null) {
-            Log.d(TAG, "Unsupported device connected: ${bluetoothDevice.address}")
-            return
+        audioDevices[address] = device
+        audioControllers[address] = controller
+        val suspensions = Channel<Boolean>(Channel.CONFLATED)
+        sensorSuspensions[address] = suspensions
+        device.recordingHandler = { recording ->
+            if (recording == null) { controller.stop(); true }
+            else controller.startRecording(recording.file)
         }
-
-        when (device) {
-            is AppleDevice -> CoroutineScope(Dispatchers.IO).launch {
-                Log.i(TAG, "Loading device ${device.macAddress.toRedactedString()} from db")
-
-                appleRepository.load(device.macAddress)?.let { entity ->
-                    val cache = entity.cache
-                    Log.i(
-                        TAG,
-                        "Loaded cached state for device ${device.macAddress.toRedactedString()}: $cache"
-                    )
-                    val settings = entity.settings
-                    Log.i(
-                        TAG,
-                        "Loaded settings for device ${device.macAddress.toRedactedString()}: $settings"
-                    )
-                    val metadata = entity.metadata
-                    Log.i(
-                        TAG,
-                        "Loaded metadata for device ${device.macAddress.toRedactedString()}: $metadata"
-                    )
-
-                    device.loadInitialState(
-                        state = AppleState().copy(
-                            capabilities = cache.capabilities,
-                            magicKeys = cache.magicKeys,
-                            controlStates = cache.controlStates,
-                        ),
-                        settings = settings,
-                        metadata = metadata
-                    )
-
-                    if (device.settings.value.hrmAlertEnabled) {
-                        device.startHr()
-                    }
+        audioJobs[address] = serviceScope.launch {
+            launch(Dispatchers.IO) {
+                for (suspended in suspensions) device.setSensorsSuspended(suspended)
+            }
+            controller.microphone.state.collect { state ->
+                device.updateMicrophoneState {
+                    it.copy(isActive = state.phase == MicrophonePhase.CAPTURING,
+                        durationMs = state.pcmDurationMs, packetsReceived = state.receivedPackets,
+                        level = state.level)
                 }
-
-                deviceJobs[MacAddress(bluetoothDevice.address)] = mutableListOf()
-
-                deviceJobs[MacAddress(bluetoothDevice.address)]?.add(observeAppleState(device))
-                deviceJobs[MacAddress(bluetoothDevice.address)]?.add(observeAppleSettings(device))
-                deviceJobs[MacAddress(bluetoothDevice.address)]?.add(observeAppleMetadata(device))
-                deviceJobs[MacAddress(bluetoothDevice.address)]?.add(observeAppleMicrophoneFrames(device))
+                if (state.phase in listOf(MicrophonePhase.IDLE, MicrophonePhase.RECOVERING, MicrophonePhase.ERROR)) {
+                    device.updateRecordingState { it.copy(isRecording = false) }
+                }
             }
         }
+    }
 
+    private fun detachExperimentalAudio(address: MacAddress) {
+        audioDevices.remove(address)?.recordingHandler = null
+        sensorSuspensions.remove(address)?.close()
+        audioJobs.remove(address)?.cancel()
+        audioControllers.remove(address)?.let { it.onDisconnected(); it.close() }
+        setMicrophoneActive(address, false)
+    }
+
+    private fun microphonePermissionAllowed(address: MacAddress? = null): Boolean {
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) return false
+        if (getSystemService(AudioManager::class.java).isMicrophoneMute) return false
+        val owners = if (address == null) microphoneOwners.toSet() else microphoneOwners + address
+        if (owners.any { audioControllers[it]?.bridge?.isMicrophonePrivacyBlocked() != false }) return false
+        return runCatching {
+            val mode = getSystemService(AppOpsManager::class.java)
+                .checkOpNoThrow(AppOpsManager.OPSTR_RECORD_AUDIO, applicationInfo.uid, packageName)
+            mode != AppOpsManager.MODE_IGNORED && mode != AppOpsManager.MODE_ERRORED
+        }.getOrDefault(false)
+    }
+
+    private fun setMicrophoneActive(address: MacAddress, active: Boolean) {
+        if (active && address in microphoneOwners) return
+        if (active) {
+            check(!destroying && microphonePermissionAllowed(address)) { "Allow microphone access first." }
+            if (address !in microphoneOwners) {
+                check(ProcessLifecycleOwner.get().lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+                    "Open LibrePods before starting the microphone."
+                }
+                microphoneOwners += address
+                try { startForegroundNotification() } catch (error: Exception) {
+                    microphoneOwners -= address
+                    throw error
+                }
+            }
+        } else if (!microphoneOwners.remove(address)) return
+        sensorSuspensions[address]?.trySend(active)
+        val anyActive = microphoneOwners.isNotEmpty()
+        MediaController.setMicrophoneCaptureActive(anyActive)
+        setExperimentalAudioBlocked(anyActive || destroying)
+        if (!destroying) startForegroundNotification()
+        if (!anyActive) {
+            microphonePermissionMonitor?.cancel()
+            microphonePermissionMonitor = null
+        } else if (microphonePermissionMonitor?.isActive != true) {
+            microphonePermissionMonitor = serviceScope.launch {
+                while (isActive && !destroying) {
+                    if (!microphonePermissionAllowed()) {
+                        audioControllers.values.forEach { it.onPermissionRevoked() }
+                        break
+                    }
+                    delay(250)
+                }
+            }
+        }
+    }
+
+    private suspend fun onDeviceConnected(bluetoothDevice: BluetoothDevice) {
+        if (destroying || bluetoothDevice.bondState != BluetoothDevice.BOND_BONDED) return
+        val device = createDevice(bluetoothDevice) ?: return
+        if (destroying || device.bluetoothDevice.bondState != BluetoothDevice.BOND_BONDED ||
+            device.connectionState.value == ConnectionState.CONNECTED) return
+        if (device is AppleDevice) withContext(Dispatchers.Main.immediate) {
+            if (!destroying && devices.value[device.macAddress] === device) attachExperimentalAudio(device)
+        }
+        if (destroying || devices.value[device.macAddress] !== device) return
         device.connect()
-
-        Log.i(
-            TAG,
-            "Device connected: ${device.macAddress.toRedactedString()} (${device.javaClass.simpleName})"
-        )
-
-        _devices.update { it + (device.macAddress to device) }
     }
 
     private fun onDeviceDisconnected(mac: MacAddress) {
-        Log.i(TAG, "Device disconnected: $mac")
-        deviceJobs[mac]?.forEach { it.cancel() }
+        detachExperimentalAudio(mac)
+        Log.i(TAG, "Device disconnected: ${mac.toRedactedString()}")
         devices.value[mac]?.disconnect()
         updateDeviceNotification(device = devices.value[mac] ?: return)
     }
 
-    private fun loadDevices() {
-        val bluetoothAdapter = getSystemService(BluetoothManager::class.java).adapter
-        val bondedDevices = bluetoothAdapter.bondedDevices
-
-        bondedDevices.forEach { bluetoothDevice ->
-            val device = createDevice(bluetoothDevice)
-            if (device != null) {
-                val notificationManager = getSystemService(NotificationManager::class.java)
-                val channel = NotificationChannel(
-                    "device_${device.macAddress}",
-                    "Device ${device.metadata.value.name}",
-                    NotificationManager.IMPORTANCE_LOW
-                )
-                notificationManager.createNotificationChannel(channel)
-
-                _devices.update { it + (device.macAddress to device) }
-            }
-        }
+    private suspend fun loadDevices() {
+        val adapter = getSystemService(BluetoothManager::class.java).adapter ?: return
+        for (bluetoothDevice in adapter.bondedDevices) createDevice(bluetoothDevice)
     }
 
     private val bluetoothReceiver = object : BroadcastReceiver() {
         @SuppressLint("MissingPermission")
         override fun onReceive(context: Context?, intent: Intent) {
+            when (intent.action) {
+                Intent.ACTION_SCREEN_ON, Intent.ACTION_SCREEN_OFF -> {
+                    if (bleRequested) startBleScanner()
+                    return
+                }
+                BluetoothAdapter.ACTION_STATE_CHANGED -> {
+                    if (intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR) == BluetoothAdapter.STATE_ON) {
+                        if (bleRequested) serviceScope.launch { loadDevices(); startBleScanner() }
+                    } else {
+                        stopActiveBleScan()
+                        nearbyPairing?.cancelPending()
+                        nearbyVisits.clear()
+                        pairedLids.clear()
+                    }
+                    return
+                }
+                BluetoothDevice.ACTION_BOND_STATE_CHANGED -> {
+                    val changed = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
+                    if (changed != null && changed.bondState == BluetoothDevice.BOND_NONE) {
+                        val address = MacAddress(changed.address)
+                        onDeviceDisconnected(address)
+                        deviceJobs.remove(address)?.forEach { it.cancel() }
+                        _devices.update { it - address }
+                        pairedObservations.remove(address)
+                        pairedLids.remove(address)
+                    }
+                }
+            }
             val bluetoothDevice = intent.getParcelableExtra(
                 "android.bluetooth.device.extra.DEVICE",
                 BluetoothDevice::class.java
@@ -388,7 +496,7 @@ class LibrePodsService: Service() {
                         if (bluetoothDevice.uuids == null) {
                             bluetoothDevice.fetchUuidsWithSdp()
                         } else {
-                            onDeviceConnected(bluetoothDevice)
+                            serviceScope.launch(Dispatchers.IO) { onDeviceConnected(bluetoothDevice) }
                         }
                     }
 
@@ -398,7 +506,7 @@ class LibrePodsService: Service() {
                         )
                     )
 
-                    BluetoothDevice.ACTION_UUID -> onDeviceConnected(bluetoothDevice)
+                    BluetoothDevice.ACTION_UUID -> serviceScope.launch(Dispatchers.IO) { onDeviceConnected(bluetoothDevice) }
                 }
             }
         }
@@ -409,6 +517,10 @@ class LibrePodsService: Service() {
             addAction("android.bluetooth.device.action.ACL_CONNECTED")
             addAction("android.bluetooth.device.action.ACL_DISCONNECTED")
             addAction("android.bluetooth.device.action.UUID")
+            addAction(BluetoothAdapter.ACTION_STATE_CHANGED)
+            addAction(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
+            addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_SCREEN_OFF)
         }
 
         registerReceiver(bluetoothReceiver, intentFilter, RECEIVER_EXPORTED)
@@ -418,231 +530,182 @@ class LibrePodsService: Service() {
         unregisterReceiver(bluetoothReceiver)
     }
 
-    private val bleScanCallback = object : ScanCallback() {
-        override fun onScanResult(callbackType: Int, result: ScanResult) {
-            Log.d(TAG,
-                "${result.device.address} " +
-                    "sid=${result.advertisingSid} " +
-                    "legacy=${result.isLegacy} " +
-                    "phy=${result.primaryPhy} " +
-                    "rssi=${result.rssi}"
-            )
-            handleScanResult(result)
-        }
-
-        override fun onBatchScanResults(results: List<ScanResult?>?) {
-            if (results == null) return
-            for (result in results) {
-                if (result != null) {
-                    handleScanResult(result)
-                }
-            }
-        }
-    }
-
     private fun handleScanResult(result: ScanResult) {
-        val macAddress = MacAddress(result.device.address)
-
-        if (rejectedRandomMac.contains(macAddress)) return
-
-        val device = getDeviceFromBleMac(macAddress)?: return
-
-        Log.d(TAG, "Scan result for device ${device.macAddress.toRedactedString()}")
-
-        when (device) {
-            is AppleDevice -> {
-                val manufacturerData = result.scanRecord?.getManufacturerSpecificData(0x004C) ?: return
-
-                Log.i(TAG, "Apple device scan result: ${manufacturerData.toHexString()}")
-                // hell. TODO: do stuff
+        val nowNanos = SystemClock.elapsedRealtimeNanos()
+        val observed = result.timestampNanos
+        if (observed < 0 || observed > nowNanos || nowNanos - observed >= 15_000_000_000L) return
+        val manufacturer = result.scanRecord?.getManufacturerSpecificData(0x004c) ?: return
+        if (NearbyAirPods.proximityRecord(manufacturer) == null) return
+        val address = result.device.address
+        val owned = devices.value.values.filterIsInstance<AppleDevice>().firstOrNull { device ->
+            device.bluetoothDevice.bondState == BluetoothDevice.BOND_BONDED &&
+                device.state.value.magicKeys[MagicKeyType.IRK]?.let { verifyRPA(address, it) } == true
+        }
+        NearbyAirPods.lidEvent(manufacturer)?.let { event ->
+            nearbyVisits.observe(event, observed / 1_000_000, owned != null)?.let {
+                nearbyPairing?.onNearbyDevice(it, observed)
+            }
+        }
+        val device = owned ?: return
+        val previousObservation = pairedObservations[device.macAddress]
+        if (previousObservation != null && observed <= previousObservation) return
+        if (previousObservation != null && observed - previousObservation >= 30_000_000_000L) pairedLids.remove(device.macAddress)
+        val keys = device.state.value.magicKeys
+        val irk = keys[MagicKeyType.IRK] ?: return
+        val encryption = keys[MagicKeyType.ENC_KEY] ?: return
+        val report = ProximityReport.decode(address, manufacturer, irk, encryption,
+            System.currentTimeMillis() - (nowNanos - observed) / 1_000_000) ?: return
+        if (device.state.value.magicKeys[MagicKeyType.IRK]?.contentEquals(irk) != true ||
+            device.state.value.magicKeys[MagicKeyType.ENC_KEY]?.contentEquals(encryption) != true ||
+            device.bluetoothDevice.bondState != BluetoothDevice.BOND_BONDED) return
+        pairedObservations[device.macAddress] = observed
+        device.receiveNearbyBattery(report.batteries)
+        islandWindow.updatePairedBattery(device, report.model)
+        report.lidOpen?.let { open ->
+            val previous = pairedLids.put(device.macAddress, open)
+            if (open && previous != true && device.settings.value.showIslandPopup) {
+                islandWindow.showPairedLid(device, report.model, observed)
+                Log.d(TAG, "Lid advertisement to paired overlay: ${(SystemClock.elapsedRealtimeNanos() - observed) / 1_000_000}ms")
+            }
+        }
+        if (report.mayReconnect && report.connection == 0 && device.settings.value.takeoverWhenDisconnected &&
+            device.connectionState.value in setOf(ConnectionState.DISCONNECTED, ConnectionState.AVAILABLE) && !bleCaptureBlocked &&
+            SystemClock.elapsedRealtime() - (bleReconnectAt[device.macAddress] ?: -60_000L) >= 60_000L) {
+            bleReconnectAt[device.macAddress] = SystemClock.elapsedRealtime()
+            serviceScope.launch(Dispatchers.IO) {
+                if (!destroying && !bleCaptureBlocked && devices.value[device.macAddress] === device &&
+                    device.bluetoothDevice.bondState == BluetoothDevice.BOND_BONDED &&
+                    device.settings.value.takeoverWhenDisconnected &&
+                    device.connectionState.value in setOf(ConnectionState.DISCONNECTED, ConnectionState.AVAILABLE) &&
+                    device.state.value.magicKeys[MagicKeyType.IRK]?.contentEquals(irk) == true &&
+                    device.state.value.magicKeys[MagicKeyType.ENC_KEY]?.contentEquals(encryption) == true) {
+                    device.connect()
+                }
             }
         }
     }
 
-    private fun getDeviceFromBleMac(bleMac: MacAddress): Device<*, *, *>? {
-        var deviceMac: MacAddress? = devices.value[bleMac]?.macAddress
-
-        if (deviceMac == null) {
-            Log.d(TAG, "BLE random address found: $bleMac")
-            rpasByPublicMac.forEach { (address, addresses) ->
-                if (addresses.contains(bleMac)) {
-                    deviceMac = address
-                }
-            }
+    fun setExperimentalAudioBlocked(active: Boolean) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            bleHandler.post { setExperimentalAudioBlocked(active) }
+            return
         }
-
-        if (deviceMac == null) {
-            irkMap.forEach { (macAddress, irk) ->
-                Log.d(TAG, "Verifiying $bleMac against ${irk.toHexString()}")
-                if (verifyRPA(bleMac.value, irk)) {
-                    Log.i(TAG, "New RPA for device ${macAddress.toRedactedString()}")
-                    deviceMac = macAddress
-                    val newSet = rpasByPublicMac[macAddress] ?: mutableSetOf()
-                    newSet.add(bleMac)
-                    rpasByPublicMac[macAddress] = newSet
-                }
-            }
-        }
-
-        if (deviceMac == null) {
-            rejectedRandomMac.add(bleMac)
-        }
-
-        return devices.value.values.firstOrNull { it.macAddress == deviceMac }
+        if (destroying || bleCaptureBlocked == active) return
+        bleCaptureBlocked = active
+        nearbyPairing?.setBlocked(active)
+        if (active) stopActiveBleScan() else if (bleRequested) startBleScanner()
     }
 
     private fun startBleScanner() {
-        val bluetoothManager = getSystemService(BluetoothManager::class.java)
-        val bluetoothAdapter = bluetoothManager.adapter
-
-        val bleScanner = bluetoothAdapter.bluetoothLeScanner
-
-        if (bleScanner == null) {
-            Log.w(TAG, "startBleScanner: ble scanner not available")
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            bleHandler.post { startBleScanner() }
             return
         }
-
-        val appSettings = appDataRepository.settings.value
-
-        val scanSettings = ScanSettings.Builder()
-            .setScanMode(appSettings.bleScanMode)
-            .setMatchMode(ScanSettings.MATCH_MODE_AGGRESSIVE)
+        if (destroying) return
+        bleRequested = true
+        if (bleCaptureBlocked || !bleReady) return
+        stopActiveBleScan()
+        val adapter = getSystemService(BluetoothManager::class.java).adapter ?: return
+        if (!adapter.isEnabled) return
+        val scanner = adapter.bluetoothLeScanner ?: return
+        val generation = ++bleGeneration
+        val interactive = getSystemService(PowerManager::class.java).isInteractive
+        val mode = if (interactive) ScanSettings.SCAN_MODE_LOW_LATENCY else appDataRepository.settings.value.bleScanMode
+        val settings = ScanSettings.Builder().setScanMode(mode)
             .setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
-            .setNumOfMatches(ScanSettings.MATCH_NUM_MAX_ADVERTISEMENT)
-            .setReportDelay(appSettings.bleReportDelay)
-            .build()
-
-        val manufacturerData = byteArrayOf(0x07, 0x19)
-        val manufacturerMask = byteArrayOf(
-            0xFF.toByte(),
-            0xFF.toByte()
-        )
-
-        val filter = ScanFilter.Builder()
-            .setManufacturerData(
-                0x004C,
-                manufacturerData,
-                manufacturerMask
-            )
-            .build()
-
-        try {
-            bleScanner.startScan(listOf(filter), scanSettings, bleScanCallback)
-            Log.i(TAG, "Started BLE scan with user-set params: scanMode: ${appSettings.bleScanMode}, reportDelay: ${appSettings.bleReportDelay}")
-        } catch (e: Exception) {
-            if (e.message?.contains("too frequently") == true) {
-                CoroutineScope(Dispatchers.IO).launch {
-                    delay(5.seconds)
-                    startBleScanner()
+            .setMatchMode(ScanSettings.MATCH_MODE_AGGRESSIVE)
+            .setReportDelay(0).build()
+        val filter = ScanFilter.Builder().setManufacturerData(0x004c, byteArrayOf()).build()
+        val callback = object : ScanCallback() {
+            override fun onScanResult(callbackType: Int, result: ScanResult) {
+                bleHandler.post {
+                    if (!destroying && generation == bleGeneration) try { handleScanResult(result) }
+                    catch (_: SecurityException) { stopActiveBleScan() }
                 }
-            } else {
-                Log.e(TAG, "Error starting BLE scan", e)
+            }
+            override fun onBatchScanResults(results: MutableList<ScanResult>) {
+                results.sortedBy { it.timestampNanos }.forEach { onScanResult(ScanSettings.CALLBACK_TYPE_ALL_MATCHES, it) }
+            }
+            override fun onScanFailed(errorCode: Int) {
+                bleHandler.post {
+                    if (generation != bleGeneration || destroying) return@post
+                    stopActiveBleScan()
+                    Log.w(TAG, "BLE scan failed: $errorCode")
+                    if (errorCode != ScanCallback.SCAN_FAILED_FEATURE_UNSUPPORTED) bleHandler.postDelayed({
+                        if (bleRequested && !destroying) startBleScanner()
+                    }, 30_000)
+                }
             }
         }
+        bleScanner = scanner
+        bleScanCallback = callback
+        try {
+            scanner.startScan(listOf(filter), settings, callback)
+            Log.d(TAG, "BLE lid monitoring started: mode=$mode, reportDelay=0")
+        } catch (_: SecurityException) {
+            stopActiveBleScan()
+            Log.w(TAG, "Nearby devices permission is unavailable")
+        } catch (_: Exception) {
+            stopActiveBleScan()
+            bleHandler.postDelayed({ if (bleRequested && !destroying) startBleScanner() }, 30_000)
+        }
+    }
+
+    private fun stopActiveBleScan() {
+        bleGeneration++
+        val scanner = bleScanner
+        val callback = bleScanCallback
+        bleScanner = null
+        bleScanCallback = null
+        if (scanner != null && callback != null) runCatching { scanner.stopScan(callback) }
     }
 
     private fun stopBleScanner() {
-        val bluetoothManager = getSystemService(BluetoothManager::class.java)
-        val bluetoothAdapter = bluetoothManager.adapter
-
-        val bleScanner = bluetoothAdapter.bluetoothLeScanner
-
-        if (bleScanner == null) {
-            Log.w(TAG, "stopBleScanner: ble scanner not available")
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            bleHandler.post { stopBleScanner() }
             return
         }
-
-        try {
-            bleScanner.stopScan(bleScanCallback)
-            Log.i(TAG, "Stopped BLE scan")
-        } catch (e: Exception) {
-            Log.e(TAG, "Error stopping BLE scan", e)
-        }
+        bleRequested = false
+        stopActiveBleScan()
+        nearbyVisits.clear().forEach { nearbyPairing?.onNearbyDevice(it) }
     }
-
-    private fun createDevice(
-        bluetoothDevice: BluetoothDevice
-    ): Device<*, *, *>? {
-
-        val aacpUuid = ParcelUuid.fromString("74ec2172-0bad-4d01-8f77-997b2be0722a")
-
-        val bluetoothManager = getSystemService(BluetoothManager::class.java)
-        val bluetoothAdapter = bluetoothManager.adapter
-
-        val isConnectedMethod = BluetoothDevice::class.java.getMethod("isConnected")
-        isConnectedMethod.isAccessible = true
-
-        val device = when {
-            bluetoothDevice.uuids?.contains(aacpUuid) == true -> {
-                Log.i(TAG, "Apple device detected: ${bluetoothDevice.address.redactMac()}")
-                AppleDevice(
-                    context = this,
-                    bluetoothAdapter = bluetoothAdapter,
-                    bluetoothDevice = bluetoothDevice,
-                    currentState = if (isConnectedMethod.invoke(bluetoothDevice) as Boolean) ConnectionState.AVAILABLE else ConnectionState.DISCONNECTED
-                )
+    private suspend fun createDevice(bluetoothDevice: BluetoothDevice): Device<*, *, *>? {
+        val address = MacAddress(bluetoothDevice.address)
+        return deviceCreationLocks.computeIfAbsent(address) { Mutex() }.withLock {
+            devices.value[address]?.let { return@withLock it }
+            if (destroying || bluetoothDevice.bondState != BluetoothDevice.BOND_BONDED ||
+                bluetoothDevice.uuids?.contains(ParcelUuid.fromString("74ec2172-0bad-4d01-8f77-997b2be0722a")) != true)
+                return@withLock null
+            val entity = appleRepository.load(address)
+            if (destroying || bluetoothDevice.bondState != BluetoothDevice.BOND_BONDED) return@withLock null
+            val device = AppleDevice(this, getSystemService(BluetoothManager::class.java).adapter,
+                bluetoothDevice, ConnectionState.DISCONNECTED)
+            entity?.let {
+                device.loadInitialState(AppleState(capabilities = it.cache.capabilities, magicKeys = it.cache.magicKeys,
+                    controlStates = it.cache.controlStates), it.settings, it.metadata)
             }
-
-            else -> null
-        }
-
-        when (device) {
-            is AppleDevice -> CoroutineScope(Dispatchers.IO).launch {
-                Log.i(TAG, "Loading device ${device.macAddress.toRedactedString()} from db")
-
-                appleRepository.load(device.macAddress)?.let { entity ->
-                    val cache = entity.cache
-
-                    // load irk at the earliest so we can start parsing
-                    val irk = entity.cache.magicKeys[MagicKeyType.IRK]
-                    if (irk != null) {
-                        irkMap[device.macAddress] = irk
-                        rejectedRandomMac.clear()
-                        Log.d(TAG, "Loaded IRK for device ${device.macAddress.toRedactedString()}")
-                    }
-
-                    Log.i(
-                        TAG,
-                        "Loaded cached state for device ${device.macAddress.toRedactedString()}: $cache"
-                    )
-                    val settings = entity.settings
-                    Log.i(
-                        TAG,
-                        "Loaded settings for device ${device.macAddress.toRedactedString()}: $settings"
-                    )
-                    val metadata = entity.metadata
-                    Log.i(
-                        TAG,
-                        "Loaded metadata for device ${device.macAddress.toRedactedString()}: $metadata"
-                    )
-
-                    device.loadInitialState(
-                        state = AppleState().copy(
-                            capabilities = cache.capabilities,
-                            magicKeys = cache.magicKeys,
-                            controlStates = cache.controlStates,
-                        ),
-                        settings = settings,
-                        metadata = metadata
-                    )
+            if (destroying || bluetoothDevice.bondState != BluetoothDevice.BOND_BONDED) return@withLock null
+            _devices.update { it + (address to device) }
+            val notificationManager = getSystemService(NotificationManager::class.java)
+            notificationManager.createNotificationChannel(NotificationChannel("device_$address",
+                "Device ${device.metadata.value.name}", NotificationManager.IMPORTANCE_LOW))
+            val installed = withContext(Dispatchers.Main.immediate) {
+                if (destroying || devices.value[address] !== device || bluetoothDevice.bondState != BluetoothDevice.BOND_BONDED) false
+                else {
+                    attachExperimentalAudio(device)
+                    deviceJobs[address] = listOf(observeAppleState(device), observeAppleSettings(device), observeAppleMetadata(device))
+                    true
                 }
-
-                // assuming that the device is not already in the map
-                deviceJobs[MacAddress(bluetoothDevice.address)] = mutableListOf()
-
-                deviceJobs[MacAddress(bluetoothDevice.address)]?.add(observeAppleState(device))
-                deviceJobs[MacAddress(bluetoothDevice.address)]?.add(observeAppleSettings(device))
-                deviceJobs[MacAddress(bluetoothDevice.address)]?.add(observeAppleMetadata(device))
             }
+            if (!installed) return@withLock null
+            device
         }
-
-        return device
     }
 
     fun observeAppSettings(): Job {
         var oldAppSettings: AppSettingsEntity = appDataRepository.settings.value
 
-        return CoroutineScope(Dispatchers.IO).launch {
+        return serviceScope.launch(Dispatchers.IO) {
             appDataRepository.settings.collect { settings ->
                 if (oldAppSettings.bleReportDelay != settings.bleReportDelay || oldAppSettings.bleScanMode != settings.bleScanMode) {
                     Log.d(TAG, "BLE settings changed: $settings, restarting scanner")
@@ -655,11 +718,37 @@ class LibrePodsService: Service() {
         }
     }
 
-    fun observeAppleState(device: AppleDevice): Job = CoroutineScope(Dispatchers.IO).launch {
+    fun observeAppleState(device: AppleDevice): Job = serviceScope.launch(Dispatchers.IO) {
         var previousState = device.state.value
+        var conversationOwner: Any? = null
 
+        try {
         device.state.collect { state ->
             val deviceSettings = device.settings.value
+
+            if (state.magicKeys.isNotEmpty() && state.magicKeys != previousState.magicKeys) {
+                appleRepository.saveCacheFromState(device.macAddress, state)
+            }
+
+            val conversationSocket = device.aacp.captureAudioSocket()
+            if (conversationOwner !== conversationSocket) {
+                conversationOwner?.let { MediaController.cancelConversation(it) }
+                conversationOwner = conversationSocket
+            }
+            if (conversationSocket == null || state.controlStates[ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG]
+                    ?.firstOrNull() == 2.toByte()) {
+                conversationOwner?.let { MediaController.cancelConversation(it) }
+            } else if (state.conversationAwarenessState != previousState.conversationAwarenessState) {
+                when (state.conversationAwarenessState) {
+                    1, 2, 3 -> MediaController.startSpeaking(state.conversationAwarenessState,
+                        conversationSocket, device.macAddress.value,
+                        deviceSettings.conversationAwarenessVolume.toInt(),
+                        deviceSettings.relativeConversationAwarenessVolumeEnabled,
+                        deviceSettings.conversationAwarenessPauseMusicEnabled,
+                        deviceSettings.conversationAwarenessReducedVolume.toInt())
+                    4, 6, 7, 8, 9 -> MediaController.stopSpeaking(conversationSocket)
+                }
+            }
 
 
             if (state.aacpPackets != previousState.aacpPackets) {
@@ -709,7 +798,7 @@ class LibrePodsService: Service() {
                             else -> 0
                         }
 
-                        islandWindow.updateBattery(displayBatteryLevel)
+                        islandWindow.updatePairedBattery(device)
                     }
 
                     Log.d(TAG, "updating notification")
@@ -802,42 +891,6 @@ class LibrePodsService: Service() {
                     updateDeviceNotification(device = device)
                 }
 
-                state.conversationAwarenessState != previousState.conversationAwarenessState -> {
-                    Log.i(
-                        TAG,
-                        "conversation awareness state changed for device ${device.macAddress.toRedactedString()}"
-                    )
-                    Log.d(
-                        TAG,
-                        "conversation awareness state: ${state.conversationAwarenessState}"
-                    )
-
-                    when (state.conversationAwarenessState) {
-                        1 -> {
-                            MediaController.startSpeaking()
-                            MediaController.setVolume(
-                                deviceSettings.conversationAwarenessVolume.toInt()
-                            )
-                        }
-
-                        2 -> {
-                            MediaController.setVolume(
-                                deviceSettings.conversationAwarenessReducedVolume.toInt()
-                            )
-                        }
-
-                        3 -> {
-                            MediaController.setVolume(
-                                deviceSettings.conversationAwarenessVolume.toInt()
-                            )
-                        }
-
-                        6, 7, 8, 9 -> {
-                            MediaController.stopSpeaking()
-                        }
-                    }
-                }
-
                 state.currentHeartRate?.timestamp != previousState.currentHeartRate?.timestamp -> {
                     state.currentHeartRate?.let { heartRateSample ->
                         Log.i(
@@ -857,35 +910,15 @@ class LibrePodsService: Service() {
                     }
                 }
 
-                state.recordingState != previousState.recordingState -> {
-                    Log.i(
-                        TAG,
-                        "recording state changed for device ${device.macAddress.toRedactedString()}"
-                    )
-                    Log.d(TAG, "recording state: ${state.recordingState}")
-                    if (previousState.recordingState.isRecording && !state.recordingState.isRecording) {
-                        previousState.recordingState.recording?.let { recording ->
-                            wavWriters[recording]?.close()
-                        }
-                    } else if (!previousState.recordingState.isRecording && state.recordingState.isRecording) {
-                        state.recordingState.recording?.let { recording ->
-                            try {
-                                val wavWriter = WavWriter(recording.file)
-                                wavWriters[recording] = wavWriter
-                            } catch (e: Exception) {
-                                Log.e(TAG, "Failed to create WavWriter for recording: ${recording.file}", e)
-                            }
-                        }
-                    } else {
-                        Log.w(TAG, "Recording state changed but no action taken. previous: ${previousState.recordingState}, current: ${state.recordingState}")
-                    }
-                }
             }
             previousState = state
         }
+        } finally {
+            conversationOwner?.let { MediaController.cancelConversation(it) }
+        }
     }
 
-    fun observeAppleSettings(device: AppleDevice): Job = CoroutineScope(Dispatchers.IO).launch {
+    fun observeAppleSettings(device: AppleDevice): Job = serviceScope.launch(Dispatchers.IO) {
         var previousSettings = device.settings.value
 
         device.settings.collect { settings ->
@@ -899,7 +932,7 @@ class LibrePodsService: Service() {
         }
     }
 
-    fun observeAppleMetadata(device: AppleDevice): Job = CoroutineScope(Dispatchers.IO).launch {
+    fun observeAppleMetadata(device: AppleDevice): Job = serviceScope.launch(Dispatchers.IO) {
         var previousMetadata = device.metadata.value
 
         device.metadata.collect { metadata ->
@@ -918,29 +951,6 @@ class LibrePodsService: Service() {
                 notificationManager.createNotificationChannel(channel)
             }
             previousMetadata = metadata
-        }
-    }
-
-    fun observeAppleMicrophoneFrames(device: AppleDevice): Job = CoroutineScope(Dispatchers.IO).launch {
-        device.microphoneFrames.collect { frame ->
-            val state = device.state.value
-
-            if (state.recordingState.isRecording) {
-                eldDecoder.decode(
-                    accessUnit = frame.accessUnit
-                ) { pcm ->
-                    wavWriters[state.recordingState.recording]?.write(pcm)
-
-                    device.updateMicrophoneState {
-                        it.copy(
-                            isActive = true,
-                            packetsReceived = it.packetsReceived + 1,
-                            durationMs = it.durationMs + 30,
-                            level = calculateLevel(pcm)
-                        )
-                    }
-                }
-            }
         }
     }
 
@@ -980,6 +990,7 @@ class LibrePodsService: Service() {
                     val batteryPercentage = leftBattery.coerceAtMost(rightBattery)
 
                     islandWindow.show(
+                        owner = device,
                         name = metadata.name,
                         batteryLevel = batteryPercentage,
                         type = type,
@@ -1126,6 +1137,9 @@ class LibrePodsService: Service() {
         val notificationManager = getSystemService(NotificationManager::class.java)
         notificationManager.createNotificationChannel(disconnectedNotificationChannel)
         notificationManager.createNotificationChannel(hrmAlertChannel)
+        val microphoneActive = microphoneOwners.isNotEmpty()
+        if (microphoneActive) notificationManager.createNotificationChannel(NotificationChannel(
+            "microphone_session", getString(R.string.pixel_microphone_title), NotificationManager.IMPORTANCE_LOW))
 
         val notificationSettingsIntent = Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS).apply {
             putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
@@ -1139,15 +1153,28 @@ class LibrePodsService: Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val notification = NotificationCompat.Builder(this, "foreground_service_status")
+        val notification = NotificationCompat.Builder(this, if (microphoneActive) "microphone_session" else "foreground_service_status")
             .setSmallIcon(R.drawable.ic_airpods).setContentTitle(getString(R.string.service_running))
             .setContentText(getString(R.string.foreground_notification_description))
             .setContentIntent(pendingIntentNotifDisable).setCategory(Notification.CATEGORY_SERVICE)
-            .setPriority(NotificationCompat.PRIORITY_LOW).setOngoing(true).build()
+            .setPriority(NotificationCompat.PRIORITY_LOW).setOngoing(true)
+            .apply {
+                if (microphoneActive) {
+                    setContentTitle(getString(R.string.pixel_microphone_title))
+                    setContentText(getString(R.string.pixel_microphone_active))
+                    val stop = PendingIntent.getService(this@LibrePodsService, 58,
+                        Intent(this@LibrePodsService, LibrePodsService::class.java).setAction(STOP_MICROPHONE),
+                        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+                    addAction(0, getString(R.string.pixel_microphone_stop), stop)
+                }
+            }.build()
 
         try {
-            startForeground(1, notification)
+            val types = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or
+                (if (microphoneActive) ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE else 0)
+            startForeground(1, notification, types)
         } catch (e: Exception) {
+            if (microphoneActive) throw e
             e.printStackTrace()
         }
     }
@@ -1325,7 +1352,7 @@ class LibrePodsService: Service() {
     }
 
     private fun processHeartRateSample(heartRateSample: HeartRateSample, interval: Duration, alertThreshold: Int) {
-        CoroutineScope(Dispatchers.IO).launch {
+        serviceScope.launch(Dispatchers.IO) {
             Log.d(TAG, "inserting to local db")
             heartRateRepository.insert(heartRateSample)
         }
@@ -1355,7 +1382,7 @@ class LibrePodsService: Service() {
             }
         }
 
-        CoroutineScope(Dispatchers.IO).launch {
+        serviceScope.launch(Dispatchers.IO) {
             if (SdkExtensions.getExtensionVersion(Build.VERSION_CODES.UPSIDE_DOWN_CAKE) >= 7) {
                 if (checkSelfPermission(HealthPermission.getWritePermission(HeartRateRecord::class)) != PackageManager.PERMISSION_GRANTED) return@launch
                 val healthConnectHeartRateSample = HeartRateRecord.Sample(
@@ -1378,7 +1405,7 @@ class LibrePodsService: Service() {
                 )
 
                 if (healthConnectClient != null) {
-                    CoroutineScope(Dispatchers.IO).launch {
+                    serviceScope.launch(Dispatchers.IO) {
                         try {
                             healthConnectClient!!.insertRecords(listOf(heartRateRecord))
                         } catch (e: Exception) {

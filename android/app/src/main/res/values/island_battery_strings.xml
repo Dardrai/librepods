@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- shortcut: fork text uses English fallback until translations are contributed. -->
+<resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="MissingTranslation">
+    <string name="island_battery_left">Left</string>
+    <string name="island_battery_right">Right</string>
+    <string name="island_battery_case">Case</string>
+    <string name="island_battery_headset">Headphones</string>
+    <string name="island_battery_cached_age">%1$ds ago</string>
+</resources>
