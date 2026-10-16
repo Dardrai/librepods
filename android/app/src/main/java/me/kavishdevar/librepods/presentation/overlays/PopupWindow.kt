@@ -40,7 +40,6 @@ import android.view.WindowManager
 import android.view.animation.DecelerateInterpolator
 import android.widget.Button
 import android.widget.ImageButton
-import android.widget.ImageView
 import android.widget.TextView
 import me.kavishdevar.librepods.R
 import kotlin.math.min
@@ -53,6 +52,7 @@ class PopupWindow(private val context: Context, private val onCloseCallback: () 
     private val handler = Handler(Looper.getMainLooper())
     private val button = mView.findViewById<Button>(R.id.pairing_primary)
     private val progress = mView.findViewById<View>(R.id.pairing_progress)
+    private val artwork = PairingArtwork(mView.findViewById(R.id.popup_artwork_container))
     private var attached = false
     private var closing = false
     private var notified = false
@@ -90,7 +90,6 @@ class PopupWindow(private val context: Context, private val onCloseCallback: () 
             return
         }
         mView.findViewById<TextView>(R.id.name).text = name
-        mView.findViewById<ImageView>(R.id.popup_artwork).setImageResource(OverlayArtwork.pairing(modelId))
         val metrics = windowManager.currentWindowMetrics
         val insets = metrics.windowInsets.getInsetsIgnoringVisibility(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
         val bounds = metrics.bounds
@@ -101,7 +100,7 @@ class PopupWindow(private val context: Context, private val onCloseCallback: () 
         val params = WindowManager.LayoutParams(width, min(mView.measuredHeight, maxHeight),
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-                WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
+                WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH or WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
             PixelFormat.TRANSLUCENT).apply {
                 gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
                 y = dp(16)
@@ -110,6 +109,7 @@ class PopupWindow(private val context: Context, private val onCloseCallback: () 
         try {
             windowManager.addView(mView, params)
             attached = true
+            artwork.start(modelId)
             animate(opening = true)
             handler.postDelayed(expire, 12_000)
         } catch (e: RuntimeException) {
@@ -155,6 +155,7 @@ class PopupWindow(private val context: Context, private val onCloseCallback: () 
     fun close() {
         if (closing || notified) return
         closing = true
+        artwork.stop()
         handler.removeCallbacks(expire)
         notifyDismissed()
         if (attached) animate(opening = false) else remove()
@@ -162,6 +163,7 @@ class PopupWindow(private val context: Context, private val onCloseCallback: () 
 
     fun forceClose() {
         closing = true
+        artwork.stop()
         handler.removeCallbacks(expire)
         cancelAnimation()
         notifyDismissed()
@@ -202,7 +204,7 @@ class PopupWindow(private val context: Context, private val onCloseCallback: () 
         mView.alpha = amount
         mView.scaleX = .96f + .04f * amount
         mView.scaleY = .96f + .04f * amount
-        mView.findViewById<View>(R.id.popup_artwork).alpha = islandStageOpacity(amount, .12f)
+        mView.findViewById<View>(R.id.popup_artwork_container).alpha = islandStageOpacity(amount, .12f)
         mView.findViewById<View>(R.id.pairing_actions).alpha = islandStageOpacity(amount, .3f)
     }
 
@@ -213,6 +215,7 @@ class PopupWindow(private val context: Context, private val onCloseCallback: () 
     }
 
     private fun remove() {
+        artwork.stop()
         cancelAnimation()
         if (attached) runCatching { windowManager.removeViewImmediate(mView) }
         attached = false

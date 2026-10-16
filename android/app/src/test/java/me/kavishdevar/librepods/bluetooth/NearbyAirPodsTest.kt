@@ -85,10 +85,31 @@ class NearbyAirPodsTest {
         assertFalse(NearbyAirPods.matchesName(0x2720, null))
         assertFalse(NearbyAirPods.matchesName(0x2720, "Pixel Buds Pro"))
         assertTrue(NearbyAirPods.matchesName(0x1920, "Proctor’s AirPods"))
-        assertFalse(NearbyAirPods.matchesName(0x2720, "Proctor’s AirPods"))
+        assertTrue(NearbyAirPods.matchesName(0x2720, "Proctor’s AirPods"))
         assertTrue(NearbyAirPods.matchesName(0x1920, "Maxwell’s AirPods"))
         assertTrue(NearbyAirPods.matchesName(0x2720, "Maxwell’s AirPods Pro"))
         assertFalse(NearbyAirPods.matchesName(0x2720, "AirPods Pro Max"))
+    }
+
+    @Test fun renamedProWithoutAFamilySuffixRemainsAnEligibleClassicCandidate() {
+        val discovery = NearbyAirPods.Discovery(0x2720)
+        assertTrue(discovery.observe("AA:BB:CC:DD:EE:01", "Dylan's Airpods", 100))
+        discovery.finish()
+        assertEquals("AA:BB:CC:DD:EE:01", discovery.automatic(2_100))
+        assertTrue(NearbyAirPods.matchesName(0x2720, "AirPods"))
+        assertTrue(NearbyAirPods.matchesName(0x2720, "Max’s AirPods"))
+        assertTrue(NearbyAirPods.matchesName(0x1920, "Pro’s AirPods"))
+        assertFalse(NearbyAirPods.matchesName(0x2720, "Dylan’s AirPods 3"))
+        assertFalse(NearbyAirPods.matchesName(0x2720, "Dylan’s AirPods Pro 2"))
+    }
+
+    @Test fun renamedAndExplicitProCandidatesAreStillAmbiguous() {
+        val discovery = NearbyAirPods.Discovery(0x2720)
+        discovery.observe("AA:BB:CC:DD:EE:01", "Dylan's Airpods", 100)
+        discovery.observe("AA:BB:CC:DD:EE:02", "Other AirPods Pro 3", 200)
+        discovery.finish()
+        assertTrue(discovery.ambiguous)
+        assertNull(discovery.automatic(20_000))
     }
 
     @Test fun onlyASoleStableClassicIdentityCanPairAutomatically() {

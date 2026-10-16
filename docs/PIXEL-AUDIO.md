@@ -32,11 +32,16 @@ Open the case to show the nearby card. Select Connect and follow the case's
 pairing gesture. One stable discoverable AirPods candidate pairs automatically;
 multiple matching candidates ask you to close the other cases and try again. Android can still request pairing
 confirmation. The public advertisement identifies a model, not a trusted Classic
-address. Closing the lid cancels the invitation. Renamed or ambiguous devices can
-still be paired in Android Bluetooth settings.
+address. Closing the lid cancels the invitation. Names such as “Dylan’s Airpods”
+can be candidates even when they omit “Pro”; explicit conflicting models remain
+excluded. Completely renamed or ambiguous devices can still be paired in Android
+Bluetooth settings.
 
 The nearby invitation follows NTPods' white pairing card in both themes, with
-case artwork, one Connect action and the model's setup gesture. Discovery and
+the original spinning buds-and-case clip for Pro models, one Connect action and
+the model's setup gesture. Other models, reduced motion and playback errors use
+static model artwork. The silent loop stops as soon as the card closes and does
+not request audio focus. Discovery and
 bonding share a 60-second request; closing the card or lid retires LibrePods'
 scan and callbacks. Android owns its confirmation dialog and may finish a bond
 after the card closes. Microphone capture and playback recovery block new
@@ -226,15 +231,21 @@ The Bluetooth module was `com.google.android.bluetooth` version 17 with APEX
 The tested platform ELD encoder configuration produced 48 kHz stereo
 **512-sample** frames, so it failed the 480-sample Apple playback requirement.
 An Android software encoder has not been tested. Native Bluetooth playback remains enabled.
-The latest full FOSS validation, `pixel-cutout2` (pixel8, versionCode 93),
-passed 167 tests in 30 suites, debug lint, debug assembly and minified release
-assembly. Ten native host previews include camera geometry and safe-area fallback
-alongside both themes, larger text and independent battery readings. Pixel8 is
-signed with the existing fork key and installed on the Pixel 10 Pro XL. The user
+The latest full FOSS validation, `pixel-pairing-spin2` (pixel9, versionCode 94),
+passed 172 tests in 31 suites, debug lint, debug assembly and minified release
+assembly. Regressions cover custom names without a Pro suffix, conflicting models,
+ambiguous candidates, muted looping, first-frame fallback, decode failure,
+reduced-motion changes and late media callbacks after dismissal. Ten native host
+previews include both themes, larger text, independent battery readings and camera
+geometry. Pixel9 is signed with the existing fork key and installed on the
+Pixel 10 Pro XL. Its physical pairing and animation check is pending.
+Read-only Pixel diagnostics established that the old name filter rejected the
+discoverable, unbonded “Dylan's Airpods” before requesting an Android bond.
+The user
 confirmed the preceding pixel7 surrounds the camera; its measured window starts
 at y=34px. Pixel8 keeps that placement and slightly widens the expanded capsule,
 with 16dp side margins on this display. The width still needs a visual check.
-Physical pairing has not been retested. The earlier pixel5/code90
+The earlier pixel5/code90
 audit build passed 143 tests and was installed at the user's request; its audit
 fixes remain unverified on hardware. The earlier pixel3 build
 passed 86 tests in 21 suites and the basic live-cellular-call checks described

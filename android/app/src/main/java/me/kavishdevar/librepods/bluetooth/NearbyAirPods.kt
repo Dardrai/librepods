@@ -43,11 +43,13 @@ object NearbyAirPods {
         val trimmed = name?.trim() ?: return false
         if (!Regex("\\bAirPods\\b", RegexOption.IGNORE_CASE).containsMatchIn(trimmed)) return false
         val pro = modelNames[modelId]?.contains("Pro") ?: return false
-        if (Regex("\\bPro\\b", RegexOption.IGNORE_CASE).containsMatchIn(trimmed) != pro ||
-            Regex("\\bMax\\b", RegexOption.IGNORE_CASE).containsMatchIn(trimmed)) return false
+        val namedPro = Regex("\\bAirPods\\s+Pro\\b", RegexOption.IGNORE_CASE).containsMatchIn(trimmed)
+        if ((namedPro && !pro) ||
+            Regex("\\bAirPods\\s+(?:Pro\\s+)?Max\\b", RegexOption.IGNORE_CASE).containsMatchIn(trimmed)) return false
+        // A custom name can omit the family, but an explicit generation still identifies it.
         val generation = Regex("\\bAirPods\\s+(?:Pro\\s+)?([1-5])\\b", RegexOption.IGNORE_CASE)
             .find(trimmed)?.groupValues?.get(1)?.toInt() ?: return true
-        return generation == when (modelId) {
+        return namedPro == pro && generation == when (modelId) {
             0x0220, 0x0e20 -> 1
             0x0f20, 0x1420, 0x2420 -> 2
             0x1320, 0x2720 -> 3

@@ -139,6 +139,7 @@ class NearbyPairingController(
         if (!canContinue(token, attempt)) return
         stopScan()
         candidates.finish()
+        Log.d(TAG, "Classic discovery finished with ${devices.size} matching unpaired candidates")
         val sole = devices.values.singleOrNull()
         if (sole != null) {
             continuation = Runnable {
