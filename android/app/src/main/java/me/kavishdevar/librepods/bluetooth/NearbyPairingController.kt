@@ -21,6 +21,7 @@ import me.kavishdevar.librepods.presentation.overlays.PopupWindow
 @SuppressLint("MissingPermission")
 class NearbyPairingController(
     private val context: Context,
+    private val onInteractionChanged: (Int?) -> Unit = {},
     private val onPaired: (BluetoothDevice) -> Unit = {}
 ) {
     private val handler = Handler(Looper.getMainLooper())
@@ -30,24 +31,25 @@ class NearbyPairingController(
     private var receiver: BroadcastReceiver? = null
     private var discoveryOwned = false
     private var timeout: Runnable? = null
-    private var closed = false
+    private var continuation: Runnable? = null
+    @Volatile private var closed = false
+    @Volatile private var blocked = false
 
     fun onNearbyDevice(event: NearbyAirPods.Event) {
         handler.post {
-            if (closed) return@post
+            if (closed || blocked) return@post
             if (!event.lidOpen) {
                 if (session.modelId == event.modelId) dismiss()
                 return@post
             }
             if (!context.getSharedPreferences("settings", Context.MODE_PRIVATE)
                     .getBoolean("show_bottom_sheet_popup", true) || !Settings.canDrawOverlays(context)) return@post
-            dismiss()
-            val token = session.open(event.modelId)
+            val token = session.open(event.modelId) ?: return@post
             val name = NearbyAirPods.modelNames[event.modelId] ?: return@post
             popup = PopupWindow(context) {
                 if (session.isCurrent(token)) dismiss()
             }.also {
-                it.open(name)
+                it.openPairing(name, event.modelId)
                 it.showPairingActions(context.getString(R.string.pairing_nearby_hint), listOf(
                     context.getString(R.string.pairing_connect) to { discover(token) }
                 ))
@@ -56,8 +58,22 @@ class NearbyPairingController(
     }
 
     private fun discover(token: Long) {
-        val attempt = session.beginAttempt(token) ?: return
+        if (closed || blocked) return
+        val attempt = session.beginAttempt(token, SystemClock.elapsedRealtime()) ?: return
         stopDiscovery()
+        onInteractionChanged(session.modelId)
+        timeout = Runnable {
+            if (session.isCurrentAttempt(token, attempt)) {
+                stopDiscovery()
+                showRetry(token, R.string.pairing_request_timeout)
+            }
+        }.also { handler.postDelayed(it, NearbyAirPods.Session.REQUEST_MS) }
+        startScan(token, attempt)
+    }
+
+    private fun startScan(token: Long, attempt: Long) {
+        if (!canContinue(token, attempt)) return
+        stopScan()
         val model = session.modelId ?: return
         val devices = linkedMapOf<String, BluetoothDevice>()
         val candidates = NearbyAirPods.Discovery(model)
@@ -73,7 +89,7 @@ class NearbyPairingController(
             }
             receiver = object : BroadcastReceiver() {
                 override fun onReceive(context: Context, intent: Intent) {
-                    if (!session.isCurrentAttempt(token, attempt) || receiver !== this) return
+                    if (!canContinue(token, attempt) || receiver !== this) return
                     try {
                         when (intent.action) {
                             BluetoothDevice.ACTION_FOUND -> {
@@ -84,8 +100,7 @@ class NearbyPairingController(
                                     device.type != BluetoothDevice.DEVICE_TYPE_LE &&
                                     candidates.observe(device.address, name, SystemClock.elapsedRealtime())) {
                                     devices[device.address] = device
-                                    popup?.showPairingActions(context.getString(R.string.pairing_searching_candidate,
-                                        name ?: "AirPods", device.address), emptyList())
+                                    showInstructions(token, if (candidates.ambiguous) R.string.pairing_multiple_cases else null)
                                 }
                             }
                             BluetoothAdapter.ACTION_DISCOVERY_FINISHED -> {
@@ -107,14 +122,12 @@ class NearbyPairingController(
             }, Context.RECEIVER_EXPORTED)
             discoveryOwned = adapter.startDiscovery()
             if (!discoveryOwned) {
-                stopDiscovery()
-                showRetry(token, R.string.pairing_discovery_failed)
+                scheduleScan(token, attempt, R.string.pairing_discovery_failed)
                 return
             }
-            val doubleTap = model in setOf(0x1920, 0x1b20, 0x2720, 0x3020, 0x3620)
-            val gesture = context.getString(if (doubleTap) R.string.pairing_double_tap else R.string.pairing_hold_button)
-            popup?.showPairingActions("$gesture\n\n${context.getString(R.string.pairing_searching)}", emptyList())
-            timeout = Runnable { finishDiscovery(token, attempt, devices, candidates) }.also { handler.postDelayed(it, 15_000) }
+            showInstructions(token)
+            continuation = Runnable { finishDiscovery(token, attempt, devices, candidates) }
+                .also { handler.postDelayed(it, minOf(15_000L, session.remainingMillis(token, attempt, SystemClock.elapsedRealtime()))) }
         } catch (e: SecurityException) {
             Log.w(TAG, "Nearby pairing requires Bluetooth permission", e)
             stopDiscovery()
@@ -123,62 +136,50 @@ class NearbyPairingController(
     }
 
     private fun finishDiscovery(token: Long, attempt: Long, devices: Map<String, BluetoothDevice>, candidates: NearbyAirPods.Discovery) {
-        if (!session.isCurrentAttempt(token, attempt)) return
-        stopDiscovery()
+        if (!canContinue(token, attempt)) return
+        stopScan()
         candidates.finish()
-        try {
-            if (devices.isEmpty()) {
-                showRetry(token, R.string.pairing_not_found)
-                return
-            }
-            if (devices.size == 1) {
-                val sole = devices.values.single()
-                popup?.showPairingActions(context.getString(R.string.pairing_searching_candidate,
-                    sole.name ?: "AirPods", sole.address), emptyList())
-                timeout = Runnable {
-                    if (session.isCurrentAttempt(token, attempt)) {
-                        candidates.automatic(SystemClock.elapsedRealtime())?.let(devices::get)?.let { pair(token, attempt, it) }
-                    }
+        val sole = devices.values.singleOrNull()
+        if (sole != null) {
+            continuation = Runnable {
+                if (canContinue(token, attempt)) {
+                    candidates.automatic(SystemClock.elapsedRealtime())?.let(devices::get)?.let { pair(token, attempt, it) }
                 }
-                    .also { handler.postDelayed(it, NearbyAirPods.Discovery.STABLE_MS) }
-                return
             }
-            popup?.showPairingActions(context.getString(R.string.pairing_choose_device),
-                devices.values.map { device ->
-                    // The user selects the Classic identity: a public model advertisement cannot prove it.
-                    "${device.name ?: "AirPods"}\n${device.address}" to { pair(token, attempt, device) }
-                })
-        } catch (e: SecurityException) {
-            permissionDenied(token, e)
+                .also { handler.postDelayed(it, NearbyAirPods.Discovery.STABLE_MS) }
+        } else {
+            scheduleScan(token, attempt, if (candidates.ambiguous) R.string.pairing_multiple_cases else null)
         }
     }
 
-    private fun pair(token: Long, sourceAttempt: Long, device: BluetoothDevice) {
-        if (!session.isCurrentAttempt(token, sourceAttempt)) return
-        val attempt = session.beginAttempt(token) ?: return
-        stopDiscovery()
+    private fun pair(token: Long, attempt: Long, device: BluetoothDevice) {
+        if (!canContinue(token, attempt)) return
+        stopScan()
         try {
             if (device.bondState != BluetoothDevice.BOND_NONE) {
                 showRetry(token, R.string.pairing_device_changed)
                 return
             }
+            var bondingObserved = false
             receiver = object : BroadcastReceiver() {
                 override fun onReceive(context: Context, intent: Intent) {
-                    if (!session.isCurrentAttempt(token, attempt) || receiver !== this) return
+                    if (!canContinue(token, attempt) || receiver !== this) return
                     try {
                         val changed = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
                         if (changed?.address != device.address) return
                         when (intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.ERROR)) {
+                            BluetoothDevice.BOND_BONDING -> bondingObserved = true
                             BluetoothDevice.BOND_BONDED -> {
+                                if (!bondingObserved || device.bondState != BluetoothDevice.BOND_BONDED) return
                                 stopDiscovery()
-                                popup?.showPairingActions(context.getString(R.string.pairing_complete), emptyList())
+                                popup?.showPairingActions(context.getString(R.string.pairing_complete), emptyList(), busy = false)
                                 onPaired(device)
                                 timeout = Runnable { if (session.isCurrentAttempt(token, attempt)) dismiss() }
                                     .also { handler.postDelayed(it, 3_000) }
                             }
                             BluetoothDevice.BOND_NONE -> {
-                                stopDiscovery()
-                                showRetry(token, R.string.pairing_bond_failed)
+                                if (!bondingObserved || device.bondState != BluetoothDevice.BOND_NONE) return
+                                scheduleScan(token, attempt, R.string.pairing_bond_failed)
                             }
                         }
                     } catch (e: SecurityException) {
@@ -188,17 +189,10 @@ class NearbyPairingController(
             }
             context.registerReceiver(receiver, IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED), Context.RECEIVER_EXPORTED)
             if (!device.createBond()) {
-                stopDiscovery()
-                showRetry(token, R.string.pairing_bond_failed)
+                scheduleScan(token, attempt, R.string.pairing_bond_failed)
                 return
             }
-            popup?.showPairingActions(context.getString(R.string.pairing_confirm_android, device.name ?: "AirPods", device.address), emptyList())
-            timeout = Runnable {
-                if (session.isCurrentAttempt(token, attempt)) {
-                    stopDiscovery()
-                    showRetry(token, R.string.pairing_bond_timeout)
-                }
-            }.also { handler.postDelayed(it, 60_000) }
+            showInstructions(token, R.string.pairing_confirm_system)
         } catch (e: SecurityException) {
             Log.w(TAG, "Pairing permission denied", e)
             stopDiscovery()
@@ -208,10 +202,31 @@ class NearbyPairingController(
 
     private fun showRetry(token: Long, message: Int) {
         if (!session.isCurrent(token)) return
-        popup?.showPairingActions(context.getString(message), listOf(
+        stopDiscovery()
+        onInteractionChanged(null)
+        popup?.showPairingActions(instructions(message), listOf(
             context.getString(R.string.pairing_retry) to { discover(token) }
         ))
     }
+
+    private fun instructions(message: Int? = null): String {
+        val gesture = if (NearbyAirPods.usesDoubleTap(session.modelId ?: 0)) R.string.pairing_double_tap else R.string.pairing_hold_button
+        return context.getString(gesture) + (message?.let { "\n\n${context.getString(it)}" } ?: "")
+    }
+
+    private fun showInstructions(token: Long, message: Int? = null) {
+        if (session.isCurrent(token)) popup?.showPairingActions(instructions(message), emptyList())
+    }
+
+    private fun scheduleScan(token: Long, attempt: Long, message: Int?) {
+        if (!canContinue(token, attempt)) return
+        stopScan()
+        showInstructions(token, message)
+        continuation = Runnable { startScan(token, attempt) }.also { handler.postDelayed(it, NearbyAirPods.Discovery.STABLE_MS) }
+    }
+
+    private fun canContinue(token: Long, attempt: Long): Boolean = !closed && !blocked &&
+        session.remainingMillis(token, attempt, SystemClock.elapsedRealtime()) > 0
 
     private fun permissionDenied(token: Long, error: SecurityException) {
         Log.w(TAG, "Bluetooth permission revoked during pairing", error)
@@ -222,9 +237,19 @@ class NearbyPairingController(
     private fun stopDiscovery() {
         timeout?.let(handler::removeCallbacks)
         timeout = null
+        stopScan()
+    }
+
+    private fun stopScan() {
+        continuation?.let(handler::removeCallbacks)
+        continuation = null
         receiver?.let {
-            context.unregisterReceiver(it)
             receiver = null
+            try {
+                context.unregisterReceiver(it)
+            } catch (e: IllegalArgumentException) {
+                Log.w(TAG, "Pairing receiver was not registered", e)
+            }
         }
         if (discoveryOwned) {
             discoveryOwned = false
@@ -239,9 +264,10 @@ class NearbyPairingController(
     private fun dismiss() {
         session.close()
         stopDiscovery()
+        onInteractionChanged(null)
         val old = popup
         popup = null
-        old?.close()
+        if (closed) old?.forceClose() else old?.close()
     }
 
     fun close() {
@@ -250,6 +276,14 @@ class NearbyPairingController(
     }
 
     fun cancelPending() { handler.post { dismiss() } }
+
+    fun setBlocked(value: Boolean) {
+        blocked = value
+        handler.post {
+            session.setBlocked(value)
+            if (value) dismiss()
+        }
+    }
 
     private companion object { const val TAG = "NearbyPairing" }
 }

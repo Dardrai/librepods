@@ -20,4 +20,13 @@
     <string name="pairing_confirm_android">Complete Android’s pairing dialog for %1$s (%2$s). Closing this card stops LibrePods waiting; Android may still finish pairing.</string>
     <string name="pairing_bond_timeout">Android has not completed pairing. Check its pairing dialog or Bluetooth settings before retrying.</string>
     <string name="pairing_retry">Try again</string>
+    <string name="pairing_close">Close pairing invitation</string>
+    <string name="pairing_multiple_cases">Close the other AirPods cases, then keep this case open.</string>
+    <string name="pairing_confirm_system">Confirm pairing in Android if asked.</string>
+    <string name="pairing_request_timeout">Pairing timed out. Keep the case open and try again.</string>
+    <string name="island_battery_charging">Charging</string>
+    <string name="island_open_controls">Open AirPods controls</string>
+    <string name="island_battery_unavailable">Unavailable</string>
+    <string name="island_battery_description">%1$s, %2$s</string>
+    <string name="island_nearby">Nearby</string>
 </resources>

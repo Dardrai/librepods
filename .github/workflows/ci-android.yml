@@ -91,6 +91,7 @@ jobs:
           path: |
             android/app/build/reports/tests/
             android/app/build/test-results/
+            android/app/build/overlay-previews/
             android/app/build/reports/lint-results-fossDebug.*
           if-no-files-found: ignore
       - uses: actions/upload-artifact@v4

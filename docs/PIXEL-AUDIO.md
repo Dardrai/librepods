@@ -30,10 +30,30 @@ that attribute connection so a late reply cannot be mistaken for another setting
 
 Open the case to show the nearby card. Select Connect and follow the case's
 pairing gesture. One stable discoverable AirPods candidate pairs automatically;
-multiple matching candidates need a selection. Android can still request pairing
+multiple matching candidates ask you to close the other cases and try again. Android can still request pairing
 confirmation. The public advertisement identifies a model, not a trusted Classic
 address. Closing the lid cancels the invitation. Renamed or ambiguous devices can
 still be paired in Android Bluetooth settings.
+
+The nearby invitation follows NTPods' white pairing card in both themes, with
+case artwork, one Connect action and the model's setup gesture. Discovery and
+bonding share a 60-second request; closing the card or lid retires LibrePods'
+scan and callbacks. Android owns its confirmation dialog and may finish a bond
+after the card closes. Microphone capture and playback recovery block new
+invitations. Active pairing is protected from synthetic BLE absence expiry;
+physical lid closure still cancels it.
+
+The Dynamic Island follows the Windows black capsule, with staged motion,
+model artwork and separate left, right and case battery rings (one for Max).
+Unknown readings show an em dash. Cached readings retain their age, dim, and
+cannot show charging. An existing pair's lid event uses this battery capsule;
+the nearby-card preference controls those lid events, and the island preference
+controls connection and ownership events. Passive battery and metadata updates
+never reopen the capsule or extend its dismissal. Tap or swipe down to open
+controls; swipe up or sideways to dismiss. Android's overlay permission is
+required. Reduced motion is respected and no looping video is used.
+Confirmed noise-control changes use the same capsule; initial readback and
+duplicate reports stay quiet. Some models reuse the existing bundled artwork.
 
 Open Microphone in the AirPods settings for Playback and microphone. Connect
 Shizuku, then select Check audio support. Play a recognizable test sound in
@@ -202,11 +222,14 @@ The Bluetooth module was `com.google.android.bluetooth` version 17 with APEX
 The tested platform ELD encoder configuration produced 48 kHz stereo
 **512-sample** frames, so it failed the 480-sample Apple playback requirement.
 An Android software encoder has not been tested. Native Bluetooth playback remains enabled.
-The latest full FOSS validation, `pixel-integration12` (pixel4, versionCode 89),
-passed 112 unit tests in 22 suites, debug lint, debug assembly and minified release
-assembly. It includes the Conversation Awareness, metadata, BLE/pairing, control
-ownership and sensor regressions described above. Pixel4 is prepared as a signed
-APK; it has not been installed or hardware tested. The earlier pixel3 build
+The latest full FOSS validation, `pixel-overlay7` (pixel6, versionCode 91),
+passed 165 tests in 30 suites, debug lint, debug assembly and minified release
+assembly. Eight native host previews passed layout review, including both themes,
+narrow enlarged text and fresh/stale/unknown batteries. Pixel6 is signed with the
+existing fork key; it has not been installed or hardware tested. No Pixel access
+occurred while implementing or verifying these overlays. The earlier pixel5/code90
+audit build passed 143 tests and was installed at the user's request; its audit
+fixes remain unverified on hardware. The earlier pixel3 build
 passed 86 tests in 21 suites and the basic live-cellular-call checks described
 above; those hardware results do not establish acceptance of the new changes.
 The signed `1.0.1-pixel3` build (versionCode 88) was installed and connected to
@@ -270,6 +293,12 @@ Build the FOSS application with JDK 21 and the SDK/NDK versions pinned in Gradle
 cd android
 ./gradlew verifyPixel
 ```
+
+The overlay tests render the production Android Views with Robolectric's native
+graphics into `android/app/build/overlay-previews`; CI includes these with check
+results. They cover both themes, a narrow screen with larger text, individual
+fresh/stale/unknown batteries, Max, expiry and interruption. These host renders
+do not verify actual overlay permission, camera cutouts or physical pairing.
 
 Packet and state tests cover malformed input, per-pair identity, partial battery
 updates, control reports, descriptor remapping, audio framing and session ownership.

@@ -60,8 +60,9 @@ class NearbyAirPodsTest {
 
     @Test fun closingOneModelDoesNotCancelANewerInvitation() {
         val state = NearbyAirPods.Session()
-        val first = state.open(0x2720)
-        val second = state.open(0x1920)
+        val first = state.open(0x2720)!!
+        state.close()
+        val second = state.open(0x1920)!!
         assertFalse(state.isCurrent(first))
         assertTrue(state.isCurrent(second))
         assertFalse(state.close(0x2720))
@@ -126,12 +127,15 @@ class NearbyAirPodsTest {
 
     @Test fun reopeningTheSameModelInvalidatesPendingDiscoveryAndBondCallbacks() {
         val session = NearbyAirPods.Session()
-        val oldToken = session.open(0x2720)
+        val oldToken = session.open(0x2720)!!
         session.close(0x2720)
-        val newToken = session.open(0x2720)
+        val newToken = session.open(0x2720)!!
         assertFalse(session.isCurrent(oldToken))
         assertTrue(session.isCurrent(newToken))
-        val replacedToken = session.open(0x2720)
+        assertNull(session.open(0x2720))
+        assertTrue(session.isCurrent(newToken))
+        session.close()
+        val replacedToken = session.open(0x2720)!!
         assertFalse(session.isCurrent(newToken))
         assertTrue(session.isCurrent(replacedToken))
         session.close()
@@ -150,7 +154,7 @@ class NearbyAirPodsTest {
 
     @Test fun retryAndBondAttemptsRejectCallbacksFromEarlierWorkWithoutClosingThePopup() {
         val session = NearbyAirPods.Session()
-        val invitation = session.open(0x2720)
+        val invitation = session.open(0x2720)!!
         val discovery = session.beginAttempt(invitation)!!
         val retry = session.beginAttempt(invitation)!!
         assertTrue(session.isCurrent(invitation))
@@ -192,5 +196,105 @@ class NearbyAirPodsTest {
         assertEquals(listOf(open.copy(lidOpen = false)), visits.clear())
         assertTrue(visits.clear().isEmpty())
         assertEquals(open, visits.observe(open, 2, false))
+    }
+
+    @Test fun duplicateAndDifferentModelReportsCannotReplaceAnOpenInvitation() {
+        val session = NearbyAirPods.Session()
+        assertNull(session.open(0xffff))
+        val token = session.open(0x2720)!!
+        val attempt = session.beginAttempt(token, 100)!!
+        assertNull(session.open(0x2720))
+        assertNull(session.open(0x1920))
+        assertEquals(0x2720, session.modelId)
+        assertTrue(session.isCurrentAttempt(token, attempt))
+    }
+
+    @Test fun microphoneOrRecoveryBlockRetiresWorkAndDoesNotReopenItAfterUnblocking() {
+        val session = NearbyAirPods.Session()
+        val token = session.open(0x2720)!!
+        val attempt = session.beginAttempt(token, 100)!!
+        session.setBlocked(true)
+        assertNull(session.modelId)
+        assertFalse(session.isCurrentAttempt(token, attempt))
+        assertEquals(0L, session.remainingMillis(token, attempt, 101))
+        assertNull(session.open(0x2720))
+        assertNull(session.beginAttempt(token, 102))
+        session.setBlocked(false)
+        assertFalse(session.isCurrent(token))
+        val reopened = session.open(0x2720)!!
+        assertNotEquals(token, reopened)
+        assertTrue(session.isCurrent(reopened))
+    }
+
+    @Test fun discoveryAndBondingShareOneSixtySecondRequestUntilExplicitRetry() {
+        val session = NearbyAirPods.Session()
+        val token = session.open(0x2720)!!
+        val attempt = session.beginAttempt(token, 10_000)!!
+        assertEquals(60_000L, session.remainingMillis(token, attempt, 10_000))
+        assertEquals(45_000L, session.remainingMillis(token, attempt, 25_000))
+        assertEquals(1L, session.remainingMillis(token, attempt, 69_999))
+        assertEquals(0L, session.remainingMillis(token, attempt, 70_000))
+        assertEquals(0L, session.remainingMillis(token, attempt, Long.MAX_VALUE))
+        assertEquals(60_000L, session.remainingMillis(token, attempt, 9_999))
+        val retry = session.beginAttempt(token, 80_000)!!
+        assertEquals(0L, session.remainingMillis(token, attempt, 80_000))
+        assertEquals(60_000L, session.remainingMillis(token, retry, 80_000))
+    }
+
+    @Test fun closingThenReopeningDuringOldDismissalCannotRetireTheNewAttempt() {
+        val session = NearbyAirPods.Session()
+        val old = session.open(0x2720)!!
+        val oldAttempt = session.beginAttempt(old, 0)!!
+        session.close(0x2720)
+        val current = session.open(0x2720)!!
+        val attempt = session.beginAttempt(current, 10)!!
+        assertFalse(session.isCurrent(old))
+        assertFalse(session.isCurrentAttempt(old, oldAttempt))
+        assertEquals(0L, session.remainingMillis(old, oldAttempt, 20))
+        assertTrue(session.isCurrentAttempt(current, attempt))
+    }
+
+    @Test fun closingOtherCasesAllowsAFreshUnambiguousDiscoveryRound() {
+        val ambiguous = NearbyAirPods.Discovery(0x2720)
+        ambiguous.observe("first", "AirPods Pro 3", 0)
+        ambiguous.observe("second", "Other AirPods Pro", 1)
+        ambiguous.finish()
+        assertTrue(ambiguous.ambiguous)
+        assertNull(ambiguous.automatic(10_000))
+        val next = NearbyAirPods.Discovery(0x2720)
+        next.observe("first", "AirPods Pro 3", 12_000)
+        next.finish()
+        assertFalse(next.ambiguous)
+        assertNull(next.automatic(13_999))
+        assertEquals("first", next.automatic(14_000))
+        assertNull(ambiguous.automatic(14_000))
+    }
+
+    @Test fun modelSelectsGestureAndRejectsExplicitlyDifferentClassicGenerations() {
+        for (model in listOf(0x1920, 0x1b20, 0x2720, 0x3020, 0x3620)) {
+            assertTrue(NearbyAirPods.usesDoubleTap(model))
+        }
+        for (model in listOf(0x0220, 0x0f20, 0x1320, 0x0e20, 0x1420, 0x2420)) {
+            assertFalse(NearbyAirPods.usesDoubleTap(model))
+        }
+        assertFalse(NearbyAirPods.matchesName(0x2720, "Dylan’s AirPods Pro 2"))
+        assertFalse(NearbyAirPods.matchesName(0x1920, "AirPods 3"))
+        assertTrue(NearbyAirPods.matchesName(0x2420, "AirPods Pro 2"))
+        assertTrue(NearbyAirPods.matchesName(0x1b20, "AirPods 4"))
+        assertTrue(NearbyAirPods.matchesName(0x2720, "Dylan’s AirPods Pro"))
+    }
+
+    @Test fun interactionPausesAbsenceExpiryButNeverSuppressesPhysicalLidClose() {
+        val visits = NearbyAirPods.Visits()
+        val active = NearbyAirPods.Event(0x2720, true)
+        val other = NearbyAirPods.Event(0x1920, true)
+        visits.observe(active, 0, false)
+        visits.observe(other, 1, false)
+        assertEquals(listOf(other.copy(lidOpen = false)), visits.expire(30_001, active.modelId))
+        assertTrue(visits.expire(60_000, active.modelId).isEmpty())
+        assertEquals(active.copy(lidOpen = false), visits.observe(active.copy(lidOpen = false), 60_001, false))
+        assertEquals(active, visits.observe(active, 60_002, false))
+        assertTrue(visits.expire(90_002, active.modelId).isEmpty())
+        assertEquals(listOf(active.copy(lidOpen = false)), visits.expire(90_002))
     }
 }

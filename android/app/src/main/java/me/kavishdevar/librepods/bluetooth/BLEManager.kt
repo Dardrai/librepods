@@ -112,6 +112,7 @@ class BLEManager(private val context: Context) {
     private val scanSession = BleScanSession()
     private val nearbyVisits = NearbyAirPods.Visits()
     private var nearbyDeviceListener: ((NearbyAirPods.Event) -> Unit)? = null
+    @Volatile var nearbyPairingModel: Int? = null
 
     fun setNearbyDeviceListener(listener: (NearbyAirPods.Event) -> Unit) {
         nearbyDeviceListener = listener
@@ -509,7 +510,7 @@ class BLEManager(private val context: Context) {
     private fun cleanupStaleDevices() {
         refreshKeyBinding()
         val now = System.currentTimeMillis()
-        nearbyVisits.expire(SystemClock.elapsedRealtime()).forEach { nearbyDeviceListener?.invoke(it) }
+        nearbyVisits.expire(SystemClock.elapsedRealtime(), nearbyPairingModel).forEach { nearbyDeviceListener?.invoke(it) }
         latestPairedStatus?.let { status ->
             val aged = withBattery(status, batteryCache.snapshot)
             if (aged != status) {

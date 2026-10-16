@@ -21,290 +21,202 @@ package me.kavishdevar.librepods.presentation.overlays
 
 import android.animation.Animator
 import android.animation.AnimatorListenerAdapter
-import android.animation.ObjectAnimator
-import android.animation.PropertyValuesHolder
+import android.animation.ValueAnimator
 import android.annotation.SuppressLint
-import android.content.BroadcastReceiver
 import android.content.Context
-import android.content.Intent
-import android.content.IntentFilter
+import android.content.res.ColorStateList
+import android.graphics.Color
 import android.graphics.PixelFormat
-import android.media.AudioManager
-import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.util.Log
 import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.MotionEvent
 import android.view.View
+import android.view.WindowInsets
 import android.view.WindowManager
-import android.view.animation.AccelerateInterpolator
 import android.view.animation.DecelerateInterpolator
-import android.widget.ImageButton
 import android.widget.Button
-import android.widget.LinearLayout
+import android.widget.ImageButton
+import android.widget.ImageView
 import android.widget.TextView
-import android.widget.VideoView
 import me.kavishdevar.librepods.R
-import me.kavishdevar.librepods.data.AirPodsNotifications
-import me.kavishdevar.librepods.data.Battery
-import me.kavishdevar.librepods.data.BatteryComponent
-import me.kavishdevar.librepods.data.BatteryStatus
+import kotlin.math.min
 
+/** A single invitation; Bluetooth work belongs to NearbyPairingController. */
 @SuppressLint("InflateParams", "ClickableViewAccessibility")
-class PopupWindow(
-    private val context: Context,
-    private val onCloseCallback: () -> Unit = {}
-) {
-    private val mView: View
-    private var isClosing = false
-    private var autoCloseHandler = Handler(Looper.getMainLooper())
-    private var autoCloseRunnable: Runnable? = null
-    private var batteryUpdateReceiver: BroadcastReceiver? = null
-
-    @Suppress("DEPRECATION")
-    private val mParams: WindowManager.LayoutParams = WindowManager.LayoutParams().apply {
-        height = WindowManager.LayoutParams.WRAP_CONTENT
-        val displayMetrics = context.resources.displayMetrics
-        val screenWidthDp = displayMetrics.widthPixels / displayMetrics.density
-        width = if (screenWidthDp >= 600) {
-            (400 * displayMetrics.density).toInt()
-        } else {
-            WindowManager.LayoutParams.MATCH_PARENT
-        }
-        type = WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-        format = PixelFormat.TRANSLUCENT
-        gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-        dimAmount = 0.3f
-        flags = WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
-            WindowManager.LayoutParams.FLAG_FULLSCREEN or
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-            WindowManager.LayoutParams.FLAG_DIM_BEHIND or
-            WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH
-    }
-
-    private val mWindowManager: WindowManager
+class PopupWindow(private val context: Context, private val onCloseCallback: () -> Unit = {}) {
+    private val mView: View = LayoutInflater.from(context).inflate(R.layout.popup_window, null)
+    private val windowManager = context.getSystemService(WindowManager::class.java)
+    private val handler = Handler(Looper.getMainLooper())
+    private val button = mView.findViewById<Button>(R.id.pairing_primary)
+    private val progress = mView.findViewById<View>(R.id.pairing_progress)
+    private var attached = false
+    private var closing = false
+    private var notified = false
+    private var interacted = false
+    private var animation: ValueAnimator? = null
+    private var generation = 0L
+    private var downY = 0f
+    private var downScroll = 0
+    private var expansion = 0f
+    private var params: WindowManager.LayoutParams? = null
+    private val expire = Runnable { close() }
 
     init {
-        val layoutInflater = context.getSystemService(Context.LAYOUT_INFLATER_SERVICE) as LayoutInflater
-        mView = layoutInflater.inflate(R.layout.popup_window, null)
-        mParams.x = 0
-        mParams.y = 0
-
-        mView.setOnClickListener {
-            close()
+        mView.clipToOutline = true
+        mView.findViewById<ImageButton>(R.id.close_button).apply {
+            imageTintList = ColorStateList.valueOf(Color.rgb(99, 99, 102))
+            setOnClickListener { close() }
         }
-
-        mView.findViewById<ImageButton>(R.id.close_button).setOnClickListener {
-            close()
-        }
-
-        val ll = mView.findViewById<LinearLayout>(R.id.linear_layout)
-        ll.setOnClickListener {
-            close()
-        }
-
-        @Suppress("DEPRECATION")
-        mView.systemUiVisibility = View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
-            View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
-            View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
-            View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
-            View.SYSTEM_UI_FLAG_FULLSCREEN or
-            View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-
         mView.setOnTouchListener { _, event ->
-            if (event.action == MotionEvent.ACTION_DOWN) {
-                val touchY = event.rawY
-                val popupTop = mView.top
-                if (touchY < popupTop) {
-                    close()
-                    true
-                } else {
-                    false
+            when (event.actionMasked) {
+                MotionEvent.ACTION_OUTSIDE -> { close(); true }
+                MotionEvent.ACTION_DOWN -> { downY = event.rawY; downScroll = mView.scrollY; false }
+                MotionEvent.ACTION_UP -> {
+                    if (downScroll == 0 && event.rawY - downY > dp(72)) { close(); true } else false
                 }
-            } else {
-                false
+                else -> false
             }
         }
-        mWindowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
     }
 
-    @SuppressLint("InlinedApi", "SetTextI18s")
-    fun open(name: String = "AirPods Pro", batteryNotification: AirPodsNotifications.BatteryNotification? = null) {
+    fun openPairing(name: String, modelId: Int) {
+        if (attached || closing || notified) return
+        if (!Settings.canDrawOverlays(context)) {
+            handler.post { forceClose() }
+            return
+        }
+        mView.findViewById<TextView>(R.id.name).text = name
+        mView.findViewById<ImageView>(R.id.popup_artwork).setImageResource(OverlayArtwork.pairing(modelId))
+        val metrics = windowManager.currentWindowMetrics
+        val insets = metrics.windowInsets.getInsetsIgnoringVisibility(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
+        val bounds = metrics.bounds
+        val width = min(dp(400), bounds.width() - insets.left - insets.right - dp(32)).coerceAtLeast(1)
+        val maxHeight = (bounds.height() - insets.top - insets.bottom - dp(32)).coerceAtLeast(1)
+        mView.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(maxHeight, View.MeasureSpec.AT_MOST))
+        val params = WindowManager.LayoutParams(width, min(mView.measuredHeight, maxHeight),
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
+            PixelFormat.TRANSLUCENT).apply {
+                gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+                y = dp(16)
+            }
+        this.params = params
         try {
-            if (mView.windowToken == null && mView.parent == null && !isClosing) {
-                mView.findViewById<TextView>(R.id.name).text = name
-
-                if (batteryNotification != null) updateBatteryStatus(batteryNotification)
-
-                val vid = mView.findViewById<VideoView>(R.id.video)
-                vid.setAudioFocusRequest(AudioManager.AUDIOFOCUS_NONE)
-                vid.setVideoPath("android.resource://me.kavishdevar.librepods/" + R.raw.connected)
-                vid.resolveAdjustedSize(vid.width, vid.height)
-                vid.start()
-                vid.setOnCompletionListener {
-                    vid.start()
-                }
-
-                try {
-                    mWindowManager.addView(mView, mParams)
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                }
-
-                val displayMetrics = mView.context.resources.displayMetrics
-                val screenHeight = displayMetrics.heightPixels
-
-                mView.translationY = screenHeight.toFloat()
-                mView.alpha = 1f
-
-                val translationY = PropertyValuesHolder.ofFloat(View.TRANSLATION_Y, screenHeight.toFloat(), 0f)
-
-                ObjectAnimator.ofPropertyValuesHolder(mView, translationY).apply {
-                    duration = 500
-                    interpolator = DecelerateInterpolator()
-                    start()
-                }
-
-                if (batteryNotification != null) registerBatteryUpdateReceiver()
-
-                autoCloseRunnable = Runnable { close() }
-                autoCloseHandler.postDelayed(autoCloseRunnable!!, 12000)
-            }
-        } catch (e: Exception) {
-            Log.e("PopupWindow", "Error opening popup: ${e.message}")
-            onCloseCallback()
+            windowManager.addView(mView, params)
+            attached = true
+            animate(opening = true)
+            handler.postDelayed(expire, 12_000)
+        } catch (e: RuntimeException) {
+            Log.w("PopupWindow", "Cannot show pairing invitation", e)
+            // Post so the controller has stored this card before its dismissal callback.
+            handler.post { forceClose() }
         }
     }
 
-    fun showPairingActions(message: String, actions: List<Pair<String, () -> Unit>>) {
-        autoCloseRunnable?.let { autoCloseHandler.removeCallbacks(it) }
-        mView.findViewById<TextView>(R.id.pairing_message).apply {
-            text = message
-            visibility = View.VISIBLE
-        }
-        mView.findViewById<LinearLayout>(R.id.pairing_actions).apply {
-            visibility = View.VISIBLE
-            removeAllViews()
-            actions.forEach { (label, action) ->
-                addView(Button(context).apply {
-                    text = label
-                    isAllCaps = false
-                    setOnClickListener { action() }
-                })
+    fun showPairingActions(message: String, actions: List<Pair<String, () -> Unit>>, busy: Boolean = actions.isEmpty()) {
+        if (closing || notified) return
+        mView.findViewById<TextView>(R.id.pairing_message).text = message
+        val action = actions.singleOrNull()
+        button.text = action?.first ?: context.getString(R.string.pairing_connect)
+        button.isEnabled = action != null && !busy
+        button.importantForAccessibility = if (busy) View.IMPORTANT_FOR_ACCESSIBILITY_NO else View.IMPORTANT_FOR_ACCESSIBILITY_AUTO
+        button.visibility = if (!busy && action == null) View.INVISIBLE else View.VISIBLE
+        button.setTextColor(if (busy) android.graphics.Color.TRANSPARENT else android.graphics.Color.WHITE)
+        progress.visibility = if (busy) View.VISIBLE else View.GONE
+        button.setOnClickListener {
+            if (!closing && action != null) {
+                interacted = true
+                handler.removeCallbacks(expire)
+                action.second()
             }
         }
+        if (interacted || busy) handler.removeCallbacks(expire)
+        resize()
     }
 
-    @SuppressLint("UnspecifiedRegisterReceiverFlag")
-    private fun registerBatteryUpdateReceiver() {
-        batteryUpdateReceiver = object : BroadcastReceiver() {
-            override fun onReceive(context: Context?, intent: Intent?) {
-                if (intent?.action == AirPodsNotifications.BATTERY_DATA) {
-                    val batteryList = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                        intent.getParcelableArrayListExtra("data", Battery::class.java)
-                    } else {
-                        @Suppress("DEPRECATION")
-                        intent.getParcelableArrayListExtra("data")
-                    }
-                    if (batteryList != null) {
-                        updateBatteryStatusFromList(batteryList)
-                    }
-                }
-            }
-        }
-
-        val filter = IntentFilter(AirPodsNotifications.BATTERY_DATA)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            context.registerReceiver(batteryUpdateReceiver, filter, Context.RECEIVER_EXPORTED)
-        } else {
-            context.registerReceiver(batteryUpdateReceiver, filter)
-        }
-    }
-
-    private fun unregisterBatteryUpdateReceiver() {
-        batteryUpdateReceiver?.let {
-            try {
-                context.unregisterReceiver(it)
-                batteryUpdateReceiver = null
-            } catch (e: Exception) {
-                Log.e("PopupWindow", "Error unregistering battery receiver: ${e.message}")
-            }
-        }
-    }
-
-    private fun updateBatteryStatusFromList(batteryList: List<Battery>) {
-        val batteryLeftText = mView.findViewById<TextView>(R.id.left_battery)
-        val batteryRightText = mView.findViewById<TextView>(R.id.right_battery)
-        val batteryCaseText = mView.findViewById<TextView>(R.id.case_battery)
-
-        batteryLeftText.text = batteryList.find { it.component == BatteryComponent.LEFT }?.let {
-            if (it.status != BatteryStatus.DISCONNECTED) {
-                "\uDBC3\uDC8E    ${it.level}%"
-            } else {
-                ""
-            }
-        } ?: ""
-
-        batteryRightText.text = batteryList.find { it.component == BatteryComponent.RIGHT }?.let {
-            if (it.status != BatteryStatus.DISCONNECTED) {
-                "\uDBC3\uDC8D    ${it.level}%"
-            } else {
-                ""
-            }
-        } ?: ""
-
-        batteryCaseText.text = batteryList.find { it.component == BatteryComponent.CASE }?.let {
-            if (it.status != BatteryStatus.DISCONNECTED) {
-                "\uDBC3\uDE6C    ${it.level}%"
-            } else {
-                ""
-            }
-        } ?: ""
-    }
-
-    @SuppressLint("SetTextI18s")
-    fun updateBatteryStatus(batteryNotification: AirPodsNotifications.BatteryNotification) {
-        val batteryStatus = batteryNotification.getBattery()
-        updateBatteryStatusFromList(batteryStatus)
+    private fun resize() {
+        val layout = params ?: return
+        if (!attached) return
+        val metrics = windowManager.currentWindowMetrics
+        val insets = metrics.windowInsets.getInsetsIgnoringVisibility(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
+        val maxHeight = (metrics.bounds.height() - insets.top - insets.bottom - dp(32)).coerceAtLeast(1)
+        mView.measure(View.MeasureSpec.makeMeasureSpec(layout.width, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(maxHeight, View.MeasureSpec.AT_MOST))
+        layout.height = min(mView.measuredHeight, maxHeight)
+        runCatching { windowManager.updateViewLayout(mView, layout) }.onFailure { forceClose() }
     }
 
     fun close() {
-        try {
-            if (isClosing) return
-            isClosing = true
+        if (closing || notified) return
+        closing = true
+        handler.removeCallbacks(expire)
+        notifyDismissed()
+        if (attached) animate(opening = false) else remove()
+    }
 
-            autoCloseRunnable?.let { autoCloseHandler.removeCallbacks(it) }
-            unregisterBatteryUpdateReceiver()
+    fun forceClose() {
+        closing = true
+        handler.removeCallbacks(expire)
+        cancelAnimation()
+        notifyDismissed()
+        remove()
+    }
 
-            val vid = mView.findViewById<VideoView>(R.id.video)
-            vid.stopPlayback()
+    private fun notifyDismissed() {
+        if (!notified) { notified = true; onCloseCallback() }
+    }
 
-            ObjectAnimator.ofFloat(mView, "translationY", mView.height.toFloat()).apply {
-                duration = 500
-                interpolator = AccelerateInterpolator()
-                addListener(object : AnimatorListenerAdapter() {
-                    override fun onAnimationEnd(animation: Animator) {
-                        try {
-                            mView.visibility = View.GONE
-                            if (mView.parent != null) {
-                                mWindowManager.removeView(mView)
-                            }
-                        } catch (e: Exception) {
-                            Log.e("PopupWindow", "Error removing view: ${e.message}")
-                        } finally {
-                            isClosing = false
-                            onCloseCallback()
-                        }
-                    }
-                })
-                start()
-            }
-        } catch (e: Exception) {
-            Log.e("PopupWindow", "Error closing popup: ${e.message}")
-            isClosing = false
-            onCloseCallback()
+    private fun animate(opening: Boolean) {
+        cancelAnimation()
+        if (!ValueAnimator.areAnimatorsEnabled()) {
+            render(if (opening) 1f else 0f)
+            if (!opening) remove()
+            return
+        }
+        val token = generation
+        val from = expansion
+        val to = if (opening) 1f else 0f
+        render(from)
+        animation = ValueAnimator.ofFloat(from, to).apply {
+            duration = ((if (opening) 420 else 220) * kotlin.math.abs(to - from)).toLong().coerceAtLeast(1)
+            interpolator = DecelerateInterpolator()
+            addUpdateListener { render(it.animatedValue as Float) }
+            addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator) {
+                    if (token == generation && !opening) remove()
+                }
+            })
+            start()
         }
     }
+
+    private fun render(amount: Float) {
+        expansion = amount
+        mView.translationY = dp(48) * (1 - amount)
+        mView.alpha = amount
+        mView.scaleX = .96f + .04f * amount
+        mView.scaleY = .96f + .04f * amount
+        mView.findViewById<View>(R.id.popup_artwork).alpha = islandStageOpacity(amount, .12f)
+        mView.findViewById<View>(R.id.pairing_actions).alpha = islandStageOpacity(amount, .3f)
+    }
+
+    private fun cancelAnimation() {
+        generation++
+        animation?.cancel()
+        animation = null
+    }
+
+    private fun remove() {
+        cancelAnimation()
+        if (attached) runCatching { windowManager.removeViewImmediate(mView) }
+        attached = false
+    }
+
+    private fun dp(value: Int) = (value * context.resources.displayMetrics.density).toInt()
 }

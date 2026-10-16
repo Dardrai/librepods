@@ -43,9 +43,21 @@ object NearbyAirPods {
         val trimmed = name?.trim() ?: return false
         if (!Regex("\\bAirPods\\b", RegexOption.IGNORE_CASE).containsMatchIn(trimmed)) return false
         val pro = modelNames[modelId]?.contains("Pro") ?: return false
-        return Regex("\\bPro\\b", RegexOption.IGNORE_CASE).containsMatchIn(trimmed) == pro &&
-            !Regex("\\bMax\\b", RegexOption.IGNORE_CASE).containsMatchIn(trimmed)
+        if (Regex("\\bPro\\b", RegexOption.IGNORE_CASE).containsMatchIn(trimmed) != pro ||
+            Regex("\\bMax\\b", RegexOption.IGNORE_CASE).containsMatchIn(trimmed)) return false
+        val generation = Regex("\\bAirPods\\s+(?:Pro\\s+)?([1-5])\\b", RegexOption.IGNORE_CASE)
+            .find(trimmed)?.groupValues?.get(1)?.toInt() ?: return true
+        return generation == when (modelId) {
+            0x0220, 0x0e20 -> 1
+            0x0f20, 0x1420, 0x2420 -> 2
+            0x1320, 0x2720 -> 3
+            0x1920, 0x1b20 -> 4
+            0x3020, 0x3620 -> 5
+            else -> return false
+        }
     }
+
+    fun usesDoubleTap(modelId: Int): Boolean = modelId in setOf(0x1920, 0x1b20, 0x2720, 0x3020, 0x3620)
 
     class Discovery(private val modelId: Int) {
         private val addresses = linkedSetOf<String>()
@@ -61,6 +73,8 @@ object NearbyAirPods {
         fun finish() { complete = true }
 
         fun automatic(now: Long): String? = addresses.singleOrNull()?.takeIf { complete && now - soleSince >= STABLE_MS }
+
+        val ambiguous: Boolean get() = addresses.size > 1
 
         companion object { const val STABLE_MS = 2_000L }
     }
@@ -93,8 +107,8 @@ object NearbyAirPods {
             return event
         }
 
-        fun expire(now: Long): List<Event> = visits.mapNotNull { (model, visit) ->
-            if (visit.open && now - visit.at >= ABSENCE_MS) {
+        fun expire(now: Long, protectedModel: Int? = null): List<Event> = visits.mapNotNull { (model, visit) ->
+            if (model != protectedModel && visit.open && now - visit.at >= ABSENCE_MS) {
                 visit.open = false
                 visit.offered = false
                 Event(model, false)
@@ -115,8 +129,12 @@ object NearbyAirPods {
         var modelId: Int? = null
             private set
         private var attempt = 0L
+        private var requestedAt = 0L
+        var isBlocked = false
+            private set
 
-        fun open(model: Int): Long {
+        fun open(model: Int): Long? {
+            if (isBlocked || modelId != null || model !in modelNames) return null
             generation++
             modelId = model
             return generation
@@ -124,9 +142,21 @@ object NearbyAirPods {
 
         fun isCurrent(token: Long): Boolean = modelId != null && generation == token
 
-        fun beginAttempt(token: Long): Long? = if (isCurrent(token)) ++attempt else null
+        fun beginAttempt(token: Long, now: Long = 0): Long? {
+            if (!isCurrent(token) || isBlocked) return null
+            requestedAt = now
+            return ++attempt
+        }
 
-        fun isCurrentAttempt(token: Long, operation: Long): Boolean = isCurrent(token) && attempt == operation
+        fun isCurrentAttempt(token: Long, operation: Long): Boolean = !isBlocked && isCurrent(token) && attempt == operation
+
+        fun remainingMillis(token: Long, operation: Long, now: Long): Long =
+            if (isCurrentAttempt(token, operation)) (REQUEST_MS - (now - requestedAt).coerceAtLeast(0)).coerceAtLeast(0) else 0
+
+        fun setBlocked(blocked: Boolean) {
+            isBlocked = blocked
+            if (blocked && modelId != null) close()
+        }
 
         fun close(model: Int? = null): Boolean {
             if (model != null && modelId != model) return false
@@ -134,6 +164,8 @@ object NearbyAirPods {
             modelId = null
             return true
         }
+
+        companion object { const val REQUEST_MS = 60_000L }
     }
 
     private const val ABSENCE_MS = 30_000L
