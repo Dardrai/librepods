@@ -92,6 +92,7 @@ import me.kavishdevar.librepods.core.utils.redactMac
 import me.kavishdevar.librepods.database.app.AppSettingsEntity
 import me.kavishdevar.librepods.presentation.activities.MainActivity
 import me.kavishdevar.librepods.presentation.overlays.IslandType
+import me.kavishdevar.librepods.presentation.overlays.IslandListeningMode
 import me.kavishdevar.librepods.presentation.overlays.IslandWindow
 import me.kavishdevar.librepods.presentation.widgets.BatteryWidget
 import me.kavishdevar.librepods.utils.MediaController
@@ -738,10 +739,13 @@ class LibrePodsService: Service() {
     fun observeAppleState(device: AppleDevice): Job = serviceScope.launch(Dispatchers.IO) {
         var previousState = device.state.value
         var lastSavedKeys: Map<MagicKeyType, ByteArray>? = null
+        val listeningMode = IslandListeningMode()
         var conversationOwner: Any? = null
 
         try {
         device.state.collect { state ->
+            // Capture before any repository suspension; an old emission cannot belong to a later socket.
+            val modeTransport = device.aacp.captureAudioSocket()
             val deviceSettings = device.settings.value
 
             if (state.magicKeys.isNotEmpty() && state.magicKeys != lastSavedKeys) {
@@ -769,6 +773,30 @@ class LibrePodsService: Service() {
                 }
             }
 
+
+            // Independent of battery/component updates: StateFlow can coalesce them with a mode report.
+            saveChangedControlCache(previousState, state) {
+                appleRepository.saveCacheFromState(device.macAddress, it)
+            }
+            listeningMode.observeReport(modeTransport?.takeIf(device.aacp::ownsAudioSocket),
+                previousState.controlStates[ControlCommandIdentifier.LISTENING_MODE],
+                state.controlStates[ControlCommandIdentifier.LISTENING_MODE],
+                currentReport = device.state.value.controlStates[ControlCommandIdentifier.LISTENING_MODE])?.let { mode ->
+                val owner = modeTransport ?: return@let
+                withContext(Dispatchers.Main.immediate) {
+                    if (!destroying && devices.value[device.macAddress] === device &&
+                        device.aacp.ownsAudioSocket(owner) &&
+                        device.state.value.controlStates[ControlCommandIdentifier.LISTENING_MODE]
+                            ?.singleOrNull()?.toInt()?.and(255) == mode) {
+                        showIsland(device, statusText = getString(when (mode) {
+                            1 -> R.string.off
+                            2 -> R.string.noise_cancellation
+                            3 -> R.string.transparency
+                            else -> R.string.adaptive
+                        }))
+                    }
+                }
+            }
 
             if (state.aacpPackets != previousState.aacpPackets) {
                 if (!appDataRepository.state.value.hasConnectedToAACP) {
@@ -902,10 +930,6 @@ class LibrePodsService: Service() {
                     )
                     Log.d(TAG, "control states: ${state.controlStates}")
 
-                    if (state.controlStates.isNotEmpty()) {
-                        appleRepository.saveCacheFromState(device.macAddress, state)
-                    }
-
                     Log.d(TAG, "updating notification")
                     updateDeviceNotification(device = device)
                 }
@@ -977,7 +1001,8 @@ class LibrePodsService: Service() {
         device: Device<*, *, *>,
         type: IslandType = IslandType.CONNECTED,
         reversed: Boolean = false,
-        otherDeviceName: String? = null
+        otherDeviceName: String? = null,
+        statusText: String? = null
     ) {
         Log.d(TAG, "Showing island window")
 
@@ -1015,6 +1040,7 @@ class LibrePodsService: Service() {
                         type = type,
                         reversed = reversed,
                         otherDeviceName = otherDeviceName,
+                        statusText = statusText,
 
                         openApp = {
                             Log.d(TAG, "Opening app")
@@ -1517,4 +1543,10 @@ private fun earPresenceOf(components: Set<DeviceComponentState>): EarPresence {
         components.size -> EarPresence.FULL
         else -> EarPresence.PARTIAL
     }
+}
+
+/** Save each confirmed control update even when the same emission also changes battery or wear state. */
+internal suspend fun saveChangedControlCache(previous: AppleState, current: AppleState,
+                                            save: suspend (AppleState) -> Unit) {
+    if (current.controlStates.isNotEmpty() && current.controlStates != previous.controlStates) save(current)
 }

@@ -1,7 +1,7 @@
 import java.util.Properties
 
-val appVersionName = (rootProject.extra["appVersionName"] as String) + "-pixel13"
-val appVersionCode = 200000098
+val appVersionName = (rootProject.extra["appVersionName"] as String) + "-pixel15"
+val appVersionCode = 200000100
 
 plugins {
     alias(libs.plugins.android.application)
@@ -162,6 +162,7 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.robolectric:robolectric:4.17")
     testImplementation("org.mockito:mockito-core:5.21.0")
+    testImplementation("androidx.compose.ui:ui-test-junit4")
     implementation(project(":core"))
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.accompanist.permissions)
@@ -183,6 +184,7 @@ dependencies {
     implementation(libs.androidx.compose.material.icons.core)
     implementation(libs.billing)
     debugImplementation(libs.androidx.compose.ui.tooling)
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
     implementation(libs.androidx.compose.foundation.layout)
     implementation(libs.aboutlibraries.compose)
     implementation(libs.aboutlibraries.compose.m3)

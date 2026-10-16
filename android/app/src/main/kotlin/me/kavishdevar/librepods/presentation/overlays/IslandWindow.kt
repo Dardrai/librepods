@@ -27,6 +27,7 @@ import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
 import android.view.Gravity
+import android.view.ContextThemeWrapper
 import android.view.View
 import android.view.WindowManager
 import android.view.WindowInsets
@@ -34,6 +35,7 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.ComposeView
@@ -50,6 +52,7 @@ import androidx.savedstate.SavedStateRegistryController
 import androidx.savedstate.SavedStateRegistryOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import me.kavishdevar.librepods.database.app.AppSettingsEntity
+import me.kavishdevar.librepods.R
 import me.kavishdevar.librepods.presentation.activities.MainActivity
 import me.kavishdevar.librepods.core.devices.AirPodsModel
 import me.kavishdevar.librepods.core.devices.AppleDevice
@@ -81,6 +84,8 @@ class IslandWindow(
     private var windowManager: WindowManager = context.getSystemService(WindowManager::class.java)
     private var composeView: ComposeView? = null
     private var lifecycleOwner: OverlayLifecycleOwner? = null
+    private var transitionGeneration by mutableLongStateOf(0L)
+    private var retainedWindowWidth = 0
 
     private var autoCloseHandler: Handler? = null
     private var autoCloseRunnable: Runnable? = null
@@ -92,6 +97,7 @@ class IslandWindow(
     private var batteryLevel by mutableIntStateOf(70)
     private var reversed by mutableStateOf(false)
     private var otherDeviceName by mutableStateOf(null as String?)
+    private var statusText by mutableStateOf(null as String?)
     private var ownerAddress: String? = null
     private var model by mutableStateOf(AirPodsModel.UNKNOWN)
     private var batteries by mutableStateOf(emptySet<Battery>())
@@ -143,6 +149,8 @@ class IslandWindow(
         lifecycleOwner?.stop()
         composeView = null
         lifecycleOwner = null
+        retainedWindowWidth = 0
+        transitionGeneration++
         this.context = context
         this.usingAccessibilityService = context is LibrePodsAccessibilityService
         this.windowManager = context.getSystemService(WindowManager::class.java)
@@ -171,7 +179,7 @@ class IslandWindow(
         this.appSettings = appSettings
         this.currentAppSettings = appSettings
 
-        updateWindowParams(islandState)
+        beginTransition(islandState, force = true)
     }
 
     fun updateBattery(batteryPercentage: Int) {
@@ -217,8 +225,25 @@ class IslandWindow(
             return
         }
 
+        beginTransition(state)
+    }
+
+    private fun beginTransition(state: IslandState, force: Boolean = false) {
+        if (state == islandState && !force) return
+        retainedWindowWidth = maxOf(retainedWindowWidth,
+            (composeView?.layoutParams as? WindowManager.LayoutParams)?.width?.coerceAtLeast(0) ?: 0)
+        transitionGeneration++
         islandState = state
         updateWindowParams(state)
+    }
+
+    private fun finishTransition(expected: ComposeView, generation: Long, state: IslandState) {
+        if (composeView !== expected || transitionGeneration != generation || islandState != state) return
+        if (state == IslandState.CLOSE) cleanupAndRemoveView(expected)
+        else {
+            retainedWindowWidth = 0
+            updateWindowParams(state)
+        }
     }
 
     fun show(
@@ -241,13 +266,14 @@ class IslandWindow(
         keepOpen: Boolean = false,
         owner: AppleDevice? = null,
         ownerModel: AirPodsModel = owner?.metadata?.value?.model ?: AirPodsModel.UNKNOWN,
-        observedAtNanos: Long = SystemClock.elapsedRealtimeNanos()
+        observedAtNanos: Long = SystemClock.elapsedRealtimeNanos(),
+        statusText: String? = null
     ) {
         if (Looper.myLooper() != Looper.getMainLooper()) {
             Handler(Looper.getMainLooper()).post {
                 show(name, batteryLevel, type, reversed, otherDeviceName, onReverseAction,
                     openApp, showOffListeningMode, noiseControlModeValue, onNoiseControlModeChanged,
-                    adaptiveStrength, onAdaptiveStrengthChanged, forcedState, keepOpen, owner, ownerModel, observedAtNanos)
+                    adaptiveStrength, onAdaptiveStrengthChanged, forcedState, keepOpen, owner, ownerModel, observedAtNanos, statusText)
             }
             return
         }
@@ -265,6 +291,7 @@ class IslandWindow(
         this.type = type
         this.reversed = reversed
         this.otherDeviceName = otherDeviceName
+        this.statusText = statusText
 
         this.openApp = openApp
 
@@ -282,7 +309,7 @@ class IslandWindow(
             onAdaptiveStrengthChanged(it)
         }
 
-        islandState = forcedState ?: if (appSettings.islandSettings.enableExpanded) IslandState.EXPANDED else IslandState.COMPACT
+        beginTransition(forcedState ?: if (appSettings.islandSettings.enableExpanded) IslandState.EXPANDED else IslandState.COMPACT)
         createLayoutParams(islandState)
         if (composeView == null) {
             setupComposeView()
@@ -332,8 +359,14 @@ class IslandWindow(
         } else {
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
         }
+        val targetWidth = when (state) {
+            IslandState.EXPANDED -> placement.expandedWidth
+            IslandState.COMPACT -> placement.compactWidth
+            IslandState.CLOSE -> minOf(placement.compactWidth,
+                maxOf(placement.compactHeight, cameraCapsuleWidth.toInt()))
+        }
         return WindowManager.LayoutParams(
-            if (state == IslandState.EXPANDED) placement.expandedWidth else placement.compactWidth,
+            maxOf(targetWidth, retainedWindowWidth),
             WindowManager.LayoutParams.WRAP_CONTENT,
             windowType,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
@@ -353,7 +386,7 @@ class IslandWindow(
     private fun setupComposeView() {
         lifecycleOwner = OverlayLifecycleOwner()
 
-        composeView = ComposeView(context).apply {
+        composeView = ComposeView(ContextThemeWrapper(context, R.style.Theme_LibrePods_Overlay)).apply {
             val overlayView = this
             isForceDarkAllowed = false
             setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
@@ -382,18 +415,15 @@ class IslandWindow(
                         batteryLevel = batteryLevel,
                         reversed = reversed,
                         otherDeviceName = otherDeviceName,
+                        statusText = statusText,
 
                         islandSettings = effectiveSettings,
                         islandState = islandState,
 
                         openApp = { openApp() },
-                        changeState = { state, updateBefore ->
-                            if (updateBefore) updateWindowParams(state)
-                            Log.d("Island", "Changing state: $islandState -> $state")
-                            islandState = state
-                            if (!updateBefore) updateWindowParams(state)
-                        },
-                        onClosed = { cleanupAndRemoveView(overlayView) },
+                        changeState = { state, _ -> changeState(state) },
+                        transitionGeneration = transitionGeneration,
+                        onTransitionFinished = { generation, state -> finishTransition(overlayView, generation, state) },
                         resetTimer = { resetTimer() },
 
                         showOffListeningMode = showOffListeningMode,
@@ -431,7 +461,7 @@ class IslandWindow(
 
         autoCloseRunnable?.let { autoCloseHandler?.removeCallbacks(it) }
         ageHandler.removeCallbacks(updateAge)
-        islandState = IslandState.CLOSE
+        beginTransition(IslandState.CLOSE)
     }
 
     private fun cleanupAndRemoveView(expected: ComposeView) {
@@ -450,6 +480,7 @@ class IslandWindow(
             ownerAddress = null
             composeView = null
             lifecycleOwner = null
+            retainedWindowWidth = 0
             islandState = IslandState.CLOSE
         }
     }

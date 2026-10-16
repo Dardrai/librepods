@@ -3,8 +3,11 @@ package me.kavishdevar.librepods.presentation.overlays
 
 import android.app.Application
 import android.graphics.Insets
+import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.graphics.RectF
+import android.view.ContextThemeWrapper
+import android.view.WindowManager
 import androidx.compose.ui.platform.ComposeView
 import me.kavishdevar.librepods.core.devices.AirPodsModel
 import me.kavishdevar.librepods.core.devices.Battery
@@ -18,10 +21,89 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import org.robolectric.RuntimeEnvironment
+import java.util.concurrent.TimeUnit
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [37], application = Application::class)
 class IslandStateTest {
+    @Test fun islandKeepsItsFrameworkDarkOptOutEvenWhenTheCallingAppThemeIsLight() {
+        val caller = ContextThemeWrapper(RuntimeEnvironment.getApplication(), android.R.style.Theme_Material_Light_NoActionBar)
+        val lightTheme = caller.resources.getIdentifier("isLightTheme", "attr", "android")
+        caller.obtainStyledAttributes(intArrayOf(lightTheme)).let {
+            try { assertTrue(it.getBoolean(0, false)) } finally { it.recycle() }
+        }
+        val window = IslandWindow(caller, AppSettingsEntity())
+        IslandWindow::class.java.getDeclaredMethod("setupComposeView").apply { isAccessible = true }.invoke(window)
+        val view = IslandWindow::class.java.getDeclaredField("composeView").apply { isAccessible = true }.get(window) as ComposeView
+        try {
+            assertFalse(view.isForceDarkAllowed)
+            view.context.obtainStyledAttributes(intArrayOf(lightTheme, android.R.attr.forceDarkAllowed)).let {
+                try {
+                    assertFalse(it.getBoolean(0, true))
+                    assertFalse(it.getBoolean(1, true))
+                } finally { it.recycle() }
+            }
+            caller.obtainStyledAttributes(intArrayOf(lightTheme)).let {
+                try { assertTrue(it.getBoolean(0, false)) } finally { it.recycle() }
+            }
+        } finally { view.disposeComposition() }
+    }
+
+    @Test fun nativeWindowRetainsOutgoingWidthUntilTheMatchingTransitionCompletes() {
+        val context = RuntimeEnvironment.getApplication()
+        val window = IslandWindow(context, AppSettingsEntity())
+        val view = ComposeView(context).apply {
+            layoutParams = WindowManager.LayoutParams(1600, 600,
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, 0, PixelFormat.TRANSPARENT)
+        }
+        assertEquals(1600, view.layoutParams.width)
+        IslandWindow::class.java.getDeclaredField("composeView").apply { isAccessible = true }.set(window, view)
+        val params = IslandWindow::class.java.getDeclaredMethod("createLayoutParams", IslandState::class.java)
+            .apply { isAccessible = true }
+        val generation = IslandWindow::class.java.getDeclaredMethod("getTransitionGeneration").apply { isAccessible = true }
+        val finish = IslandWindow::class.java.getDeclaredMethod("finishTransition", ComposeView::class.java,
+            Long::class.javaPrimitiveType, IslandState::class.java).apply { isAccessible = true }
+        window.changeState(IslandState.EXPANDED)
+        val outgoingGeneration = generation.invoke(window) as Long
+        window.changeState(IslandState.COMPACT)
+        val compactGeneration = generation.invoke(window) as Long
+        assertEquals(1600, (params.invoke(window, IslandState.COMPACT) as WindowManager.LayoutParams).width)
+        finish.invoke(window, view, outgoingGeneration, IslandState.EXPANDED)
+        assertEquals(1600, (params.invoke(window, IslandState.COMPACT) as WindowManager.LayoutParams).width)
+        finish.invoke(window, ComposeView(context), compactGeneration, IslandState.COMPACT)
+        assertEquals(1600, (params.invoke(window, IslandState.COMPACT) as WindowManager.LayoutParams).width)
+        finish.invoke(window, view, compactGeneration, IslandState.COMPACT)
+        assertTrue((params.invoke(window, IslandState.COMPACT) as WindowManager.LayoutParams).width < 1600)
+    }
+
+    @Test fun sameSizeStatusAndBatteryUpdatesDoNotRestartTheOpeningTransition() {
+        val window = IslandWindow(RuntimeEnvironment.getApplication(), AppSettingsEntity())
+        val generation = IslandWindow::class.java.getDeclaredMethod("getTransitionGeneration").apply { isAccessible = true }
+        window.changeState(IslandState.EXPANDED)
+        val firstGeneration = generation.invoke(window) as Long
+        assertTrue(firstGeneration > 0L)
+        window.changeState(IslandState.EXPANDED)
+        window.updateBattery(42)
+        window.updateNoiseControl(3, 40)
+        assertEquals(firstGeneration, generation.invoke(window))
+    }
+
+    @Test fun cachedAgesUseStableCoarseUnitsAndShareOnlyWhenEveryComponentMatches() {
+        assertEquals(0L to TimeUnit.SECONDS, islandAgeBucket(59))
+        assertEquals(1L to TimeUnit.MINUTES, islandAgeBucket(60))
+        assertEquals(59L to TimeUnit.MINUTES, islandAgeBucket(3599))
+        assertEquals(1L to TimeUnit.HOURS, islandAgeBucket(3600))
+        assertEquals(1L to TimeUnit.DAYS, islandAgeBucket(86400))
+        val cells = listOf(BatteryComponent.LEFT, BatteryComponent.RIGHT, BatteryComponent.CASE).map {
+            IslandBatteryCell(it, 80, live = false, charging = false, ageSeconds = 120)
+        }
+        assertEquals(2L to TimeUnit.MINUTES, islandCommonAge(cells))
+        assertEquals(2L to TimeUnit.MINUTES, islandCommonAge(cells.dropLast(1) + cells.last().copy(ageSeconds = 179)))
+        assertNull(islandCommonAge(cells.dropLast(1) + cells.last().copy(ageSeconds = 180)))
+        assertNull(islandCommonAge(cells.dropLast(1) + cells.last().copy(live = true)))
+        assertNull(islandCommonAge(cells.dropLast(1) + cells.last().copy(level = null, ageSeconds = null)))
+    }
+
     @Test fun openingStartsWithAnAlreadyVisibleCameraCapsuleForBothDisplayModes() {
         val settings = IslandSettings(compactWidth = 300f, compactHeight = 132f,
             expandedWidth = 1248f, expandedHeight = 630f)
@@ -43,7 +125,7 @@ class IslandStateTest {
             islandInitialSize(settings, IslandState.EXPANDED, motionEnabled = false))
         assertEquals(settings.compactWidth to settings.compactHeight,
             islandInitialSize(settings, IslandState.COMPACT, motionEnabled = false))
-        assertEquals(0f to settings.compactHeight,
+        assertEquals(settings.compactHeight to settings.compactHeight,
             islandInitialSize(settings, IslandState.CLOSE, motionEnabled = true))
     }
 

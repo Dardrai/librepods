@@ -20,7 +20,7 @@ pair, local behavior choices and correctly owner-bound BLE keys once. Existing
 rewrite database rows are preserved. Unconfirmed device control values are not
 migrated as device reports. The Android Bluetooth bond stays with Android.
 
-The current fork version is `2.0.0-alpha.1-pixel13`, code `200000098`.
+The current fork version is `2.0.0-alpha.1-pixel15`, code `200000100`.
 
 ## Pairing and island latency
 
@@ -42,11 +42,21 @@ The current fork version is `2.0.0-alpha.1-pixel13`, code `200000098`.
 - Incomplete key responses retain the previous complete IRK/encryption pair;
   a valid replacement changes both together. Cache, metadata and settings
   updates are transactional so concurrent saves cannot overwrite each other.
-- The island attaches immediately as a visible camera-sized capsule and uses
-  the existing spring to open. Remove Animations starts at the requested size.
+- The island attaches immediately as a visible camera-sized capsule. Its shell
+  expands around a payload measured at its final size, so text and artwork do
+  not reflow while opening or closing. Remove Animations snaps to the requested size.
   It wraps the actual camera path and limits expanded width to 420 dp with
   screen margins. Passive battery updates retain the owner and dismissal time;
   a canceled exit cannot remove a reopened or replacement overlay.
+- Content scales together to fit inside the shell below the camera, with camera
+  clearance kept outside that movement. Compact artwork and battery occupy
+  separate spaces beside the camera. Closing returns to the capsule before removal.
+  The native window retains enough width for the outgoing content until the
+  matching transition finishes. Cached battery ages use coarse units and share
+  one last-seen label when all components match; their stored ages stay separate.
+- Confirmed listening-mode changes display their localized mode name. Cached
+  values, pending requests, first reports and duplicate reports stay silent;
+  each connection establishes a fresh notification baseline.
 - Debug timing logs measure Android's radio timestamp to the overlay request
   and the first drawing pass.
   They do not measure when the physical case opened or prove Windows parity.
@@ -92,15 +102,27 @@ requests are retained only for the current connection, not presented as reports.
 
 ## Validation on 2026-10-16
 
-`verifyPixel` passed with 135 tests in 31 suites, no failures, errors or skips,
+`verifyPixel` passed with 149 tests in 33 suites, no failures, errors or skips,
 Android lint with no errors, and successful debug/minified release builds.
 Native pairing-card captures cover light mode and dark mode with narrow width
-and larger text. The release was signed with the existing fork certificate and
-installed in place on the Pixel as Pixel13. Android's scan state confirms
+and larger text. Pixel15 was signed with the existing fork certificate and is
+ready for an in-place update; Pixel14 remains installed while the user is away.
+Android's scan state confirms
 unbatched passive low-latency monitoring. The user confirmed the island now
-appears promptly on Pixel12. Pixel13 restores its camera-origin opening
-animation, with regressions for visible initial geometry, reduced motion and
-interrupted exits. Physical animation confirmation is pending.
+appears promptly on Pixel12 and confirmed Pixel13's camera-origin expansion.
+Pixel14 added cached-age cleanup and confirmed listening-mode notices, but the
+user reported a white flash on dismissal and rejected the content fading.
+Pixel15 replaces that motion with fixed-layout payloads and a coordinated
+camera-capsule transition, and applies a dark framework context to the overlay
+to opt out of Android's color inversion. Pixel15 passes native rendering checks
+for fixed layout and complete content fitting during folds, including compact
+camera clearance and the shortest accepted expanded layout. Rendering uses
+API 33 because Espresso's legacy input bridge is unavailable on API 37; theme,
+native window width and callback lifetime checks run on API 37.
+The physical motion/listening-mode check is pending. The Pixel was left untouched.
+Regression coverage includes visible initial geometry, reduced motion,
+interrupted exits, age grouping, per-transport mode baselines and concurrent
+control/battery/wear cache updates.
 
 The first physical Pixel11 check still took roughly ten seconds after opening
 the case, despite 32 ms from Android's scan timestamp to the overlay request and
