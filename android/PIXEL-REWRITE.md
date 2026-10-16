@@ -105,8 +105,8 @@ requests are retained only for the current connection, not presented as reports.
 `verifyPixel` passed with 149 tests in 33 suites, no failures, errors or skips,
 Android lint with no errors, and successful debug/minified release builds.
 Native pairing-card captures cover light mode and dark mode with narrow width
-and larger text. Pixel15 was signed with the existing fork certificate and is
-ready for an in-place update; Pixel14 remains installed while the user is away.
+and larger text. Pixel15 was signed with the existing fork certificate and
+installed in place, retaining the app's data. Android confirmed its version.
 Android's scan state confirms
 unbatched passive low-latency monitoring. The user confirmed the island now
 appears promptly on Pixel12 and confirmed Pixel13's camera-origin expansion.
@@ -119,7 +119,8 @@ for fixed layout and complete content fitting during folds, including compact
 camera clearance and the shortest accepted expanded layout. Rendering uses
 API 33 because Espresso's legacy input bridge is unavailable on API 37; theme,
 native window width and callback lifetime checks run on API 37.
-The physical motion/listening-mode check is pending. The Pixel was left untouched.
+The user confirmed Pixel15 opens and closes smoothly, with no overlapping text
+or white flash, and that listening-mode changes display the new mode in the island.
 Regression coverage includes visible initial geometry, reduced motion,
 interrupted exits, age grouping, per-transport mode baselines and concurrent
 control/battery/wear cache updates.
