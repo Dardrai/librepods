@@ -35,12 +35,9 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
@@ -48,7 +45,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.kyant.backdrop.backdrops.rememberLayerBackdrop
-import kotlinx.coroutines.flow.debounce
 import me.kavishdevar.librepods.R
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommandIdentifier
 import me.kavishdevar.librepods.core.bluetooth.att.ATTHandle
@@ -57,6 +53,7 @@ import me.kavishdevar.librepods.core.devices.AirPodsSpecs
 import me.kavishdevar.librepods.core.devices.AppleSettings
 import me.kavishdevar.librepods.core.devices.BaseCapability
 import me.kavishdevar.librepods.presentation.components.apple.AboutCard
+import me.kavishdevar.librepods.presentation.components.apple.AdaptiveAudioStrengthSlider
 import me.kavishdevar.librepods.presentation.components.apple.AudioSettings
 import me.kavishdevar.librepods.presentation.components.apple.BatteryView
 import me.kavishdevar.librepods.presentation.components.apple.CallControlSettings
@@ -68,16 +65,13 @@ import me.kavishdevar.librepods.presentation.components.primitives.StyledButton
 import me.kavishdevar.librepods.presentation.components.primitives.StyledListItem
 import me.kavishdevar.librepods.presentation.components.primitives.StyledListItemOrientation
 import me.kavishdevar.librepods.presentation.components.primitives.StyledScaffold
-import me.kavishdevar.librepods.presentation.components.primitives.StyledSlider
 import me.kavishdevar.librepods.presentation.components.primitives.StyledToggle
 import me.kavishdevar.librepods.presentation.design.DesignSystem
 import me.kavishdevar.librepods.presentation.design.LibrePodsTheme
 import me.kavishdevar.librepods.presentation.design.LocalDesignSystem
-import me.kavishdevar.librepods.presentation.icons.LocalIcons
 import me.kavishdevar.librepods.presentation.utils.LocalDebugMode
 import me.kavishdevar.librepods.presentation.viewmodel.AppleUiState
 import me.kavishdevar.librepods.presentation.viewmodel.AppleViewModel
-import kotlin.time.Duration.Companion.milliseconds
 
 @Composable
 fun AppleSettingsRoute(
@@ -244,6 +238,7 @@ fun AppleSettingsScreen(
                             )
                         },
                         adaptiveStrength = state.controlStates[ControlCommandIdentifier.AUTO_ANC_STRENGTH]?.getOrNull(0)?.toInt() ?: 50,
+                        requestedAdaptiveStrength = state.requestedControls[ControlCommandIdentifier.AUTO_ANC_STRENGTH]?.firstOrNull()?.toInt(),
                         onAdaptiveStrengthChanged = {
                             setControlCommandInt(
                                 ControlCommandIdentifier.AUTO_ANC_STRENGTH, it
@@ -263,34 +258,12 @@ fun AppleSettingsScreen(
                                 fadeOut() + slideOutVertically()
                             }
                         ) {
-                            val sliderValue = remember {
-                                mutableFloatStateOf(
-                                    100f - (state.controlStates[ControlCommandIdentifier.AUTO_ANC_STRENGTH]?.getOrNull(
-                                        0
-                                    )?.toFloat() ?: 50f)
-                                )
-                            }
-
-                            LaunchedEffect(sliderValue) {
-                                snapshotFlow { sliderValue.floatValue }
-                                    .debounce(100.milliseconds)
-                                    .collect { value ->
-                                        setControlCommandInt(
-                                            ControlCommandIdentifier.AUTO_ANC_STRENGTH,
-                                            (100 - value).toInt()
-                                        )
-                                    }
-                            }
-
-                            StyledSlider(
-                                value = sliderValue.floatValue,
-                                onValueChange = { sliderValue.floatValue = it },
-                                valueRange = 0f..100f,
-                                snapPoints = listOf(0f, 50f, 100f),
-                                startImageVector = LocalIcons.current.SpeakerMin,
-                                endImageVector = LocalIcons.current.SpeakerMax,
-                                independent = true,
-                                description = stringResource(R.string.adaptive_audio_description),
+                            AdaptiveAudioStrengthSlider(
+                                adaptiveStrength = state.controlStates[ControlCommandIdentifier.AUTO_ANC_STRENGTH]?.firstOrNull()?.toInt() ?: 50,
+                                requestedAdaptiveStrength = state.requestedControls[ControlCommandIdentifier.AUTO_ANC_STRENGTH]?.firstOrNull()?.toInt(),
+                                onAdaptiveStrengthChanged = {
+                                    setControlCommandInt(ControlCommandIdentifier.AUTO_ANC_STRENGTH, it)
+                                },
                                 enabled = uiState.isPremium
                             )
 

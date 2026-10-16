@@ -20,7 +20,7 @@ pair, local behavior choices and correctly owner-bound BLE keys once. Existing
 rewrite database rows are preserved. Unconfirmed device control values are not
 migrated as device reports. The Android Bluetooth bond stays with Android.
 
-The current fork version is `2.0.0-alpha.1-pixel18`, code `200000103`.
+The current fork version is `2.0.0-alpha.1-pixel19`, code `200000104`.
 
 ## Pairing and island latency
 
@@ -55,6 +55,11 @@ The current fork version is `2.0.0-alpha.1-pixel18`, code `200000103`.
   a matching first-frame poster until the current decoded texture is available.
   Unsupported models, reduced motion and playback errors retain model-specific
   static artwork. The video stays visible through the short exit, then releases.
+- The success card stays open for Continue or a real lid close, and updates its
+  AirPods/case battery row from the exact newly bonded device. Readings from
+  before that bond, unknown statuses and unavailable or stale components do not
+  become live percentages. Different bud levels remain separate. Recognizing
+  the new owned BLE identity does not synthesize a close for the active card.
 - Owned battery/lid reports require a current bond and valid per-device keys.
   Public advertisements cannot establish a Classic identity or overwrite an
   owned device's batteries.
@@ -82,6 +87,10 @@ The current fork version is `2.0.0-alpha.1-pixel18`, code `200000103`.
 - Confirmed listening-mode changes display their localized mode name. Cached
   values, pending requests, first reports and duplicate reports stay silent;
   each connection establishes a fresh notification baseline.
+- Adaptive strength keeps the requested slider position separate from reported
+  controls because Pro 3 can accept the write without echoing it. A subsequent
+  valid strength report remains authoritative, including rounded values. Merely
+  opening the Material slider does not send its initial/default value.
 - Debug timing logs measure Android's radio timestamp to the overlay request
   and the first drawing pass.
   They do not measure when the physical case opened or prove Windows parity.
@@ -126,6 +135,21 @@ access. No fixed ATT handle has been reintroduced. Silent Allow Off/adaptive
 requests are retained only for the current connection, not presented as reports.
 
 ## Validation on 2026-10-16
+
+Pixel19's `verifyPixel` passed with 183 tests in 36 suites, no failures, errors
+or skips, lint with 0 errors, 289 warnings and 1 hint, and successful debug and
+minified release builds. New regressions cover exact post-bond battery ownership,
+retaining the success card, independent reading expiry, unpair cleanup, rounded
+Adaptive reports, actual drag/release and reopening, and Material's input-only
+writes. Battery layouts were checked with native API 37 rendering in light,
+narrow/large-text dark and short landscape layouts, with both balanced and split
+bud levels. The Apple drag test uses API 33's legacy renderer because Robolectric's
+native AGSL compiler rejects the existing backdrop shader; Material uses native
+rendering. The expiry test ages its readings before real scheduled callbacks
+because this runner's virtual Handler clock does not advance the wall clock.
+Pixel19 was signed with the existing certificate and installed in place; Android
+confirmed version `2.0.0-alpha.1-pixel19` and the retained Shizuku grant. Physical
+battery-card and slider acceptance are pending. No audio checks were repeated.
 
 Pixel18's `verifyPixel` passed with 173 tests in 35 suites, no failures, errors
 or skips, lint with no errors, and successful debug/minified release builds.

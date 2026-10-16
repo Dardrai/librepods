@@ -155,6 +155,7 @@ fun IslandContent(
     onNoiseControlModeChanged: (Int) -> Unit,
     adaptiveStrength: Int = 0,
     onAdaptiveStrengthChanged: (Int) -> Unit,
+    requestedAdaptiveStrength: Int? = null,
     model: AirPodsModel = AirPodsModel.UNKNOWN,
     batteries: Set<Battery> = emptySet(),
     batteryNow: Long = System.currentTimeMillis(),
@@ -551,6 +552,7 @@ fun IslandContent(
                                 noiseControlModeValue = noiseControlModeValue,
                                 onNoiseControlModeChanged = onNoiseControlModeChanged,
                                 adaptiveStrength = adaptiveStrength,
+                                requestedAdaptiveStrength = requestedAdaptiveStrength,
                                 onAdaptiveStrengthChanged = onAdaptiveStrengthChanged,
                                 showLabels = false
                             )

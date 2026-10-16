@@ -24,6 +24,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import me.kavishdevar.librepods.R
 import me.kavishdevar.librepods.core.bluetooth.ble.NearbyAirPods
+import me.kavishdevar.librepods.core.devices.Battery
 import me.kavishdevar.librepods.presentation.overlays.PopupWindow
 import me.kavishdevar.librepods.shizuku.ShizukuAudioClient
 
@@ -51,6 +52,8 @@ class NearbyPairingController(
     private var selection: Runnable? = null
     private var requestedAt = 0L
     private var firstCandidateAt: Long? = null
+    private var pairedAddress: String? = null
+    private var pairedAt = 0L
     @Volatile private var closed = false
     @Volatile private var blocked = false
 
@@ -80,6 +83,7 @@ class NearbyPairingController(
         if (closed || blocked) return
         val now = SystemClock.elapsedRealtime()
         val attempt = session.beginAttempt(token, now) ?: return
+        pairedAddress = null
         stopDiscovery()
         requestedAt = now
         firstCandidateAt = null
@@ -274,14 +278,14 @@ class NearbyPairingController(
                                 Log.d(TAG, "Connect to BONDED: ${SystemClock.elapsedRealtime() - requestedAt}ms")
                                 finishConsent(accepted = true)
                                 stopDiscovery()
+                                pairedAddress = device.address
+                                pairedAt = System.currentTimeMillis()
                                 popup?.showPairingActions(context.getString(R.string.pairing_complete), listOf(
                                     context.getString(R.string.pairing_continue) to {
                                         if (session.isCurrentAttempt(token, attempt)) dismiss()
                                     }
                                 ), busy = false, stage = PopupWindow.Stage.COMPLETE)
                                 onPaired(device)
-                                timeout = Runnable { if (session.isCurrentAttempt(token, attempt)) dismiss() }
-                                    .also { handler.postDelayed(it, 3_000) }
                             }
                             BluetoothDevice.BOND_NONE -> {
                                 if (!bondingObserved || device.bondState != BluetoothDevice.BOND_NONE) return
@@ -394,7 +398,17 @@ class NearbyPairingController(
         expected.finish()
     }
 
+    @androidx.annotation.MainThread
+    fun updatePairingBattery(device: BluetoothDevice, batteries: Set<Battery>) {
+        if (closed || blocked || pairedAddress != device.address) return
+        if (runCatching { device.bondState == BluetoothDevice.BOND_BONDED }.getOrDefault(false)) {
+            // A newly created bond must not inherit readings from an earlier pairing.
+            popup?.updatePairingBattery(batteries.filter { (it.observedAt ?: Long.MIN_VALUE) >= pairedAt }.toSet())
+        } else dismiss()
+    }
+
     private fun dismiss() {
+        pairedAddress = null
         session.close()
         stopDiscovery()
         onInteractionChanged(null)

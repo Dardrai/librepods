@@ -502,6 +502,7 @@ fun DeviceListScreen(
                                                             }
                                                         },
                                                         adaptiveStrength = deviceState.controlStates[ControlCommandIdentifier.AUTO_ANC_STRENGTH]?.get(0)?.toInt() ?: 50,
+                                                        requestedAdaptiveStrength = deviceState.requestedControls[ControlCommandIdentifier.AUTO_ANC_STRENGTH]?.firstOrNull()?.toInt(),
                                                         onAdaptiveStrengthChanged = {
                                                             CoroutineScope(Dispatchers.IO).launch {
                                                                 (device as AppleDevice).setControlCommand(

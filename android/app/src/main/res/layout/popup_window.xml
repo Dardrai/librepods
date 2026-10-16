@@ -25,6 +25,32 @@
             <ImageView android:id="@+id/popup_artwork" android:layout_width="match_parent" android:layout_height="match_parent"
                 android:scaleType="fitCenter" android:importantForAccessibility="no" />
         </FrameLayout>
+        <LinearLayout android:id="@+id/pairing_battery_row" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:minHeight="64dp" android:orientation="horizontal"
+            android:baselineAligned="false" android:gravity="center_vertical" android:visibility="gone"
+            android:accessibilityLiveRegion="polite">
+            <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="0.45"
+                android:orientation="vertical" android:gravity="center" android:paddingHorizontal="4dp">
+                <TextView android:id="@+id/pairing_buds_battery_label" android:layout_width="match_parent" android:layout_height="wrap_content" android:gravity="center"
+                    android:fontFamily="@font/inter" android:textSize="12sp" android:textColor="#636366"
+                    android:includeFontPadding="false" android:importantForAccessibility="no" android:text="@string/pairing_battery_buds" />
+                <TextView android:id="@+id/pairing_buds_battery_text" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                    android:gravity="center" android:layout_marginTop="4dp" android:fontFamily="@font/inter"
+                    android:textSize="18sp" android:textColor="#1C1C1E" android:includeFontPadding="false" android:text="@string/pairing_battery_unknown" />
+                <TextView android:id="@+id/pairing_right_battery_text" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                    android:gravity="center" android:layout_marginTop="4dp" android:fontFamily="@font/inter"
+                    android:textSize="14sp" android:textColor="#1C1C1E" android:includeFontPadding="false" android:visibility="gone" />
+            </LinearLayout>
+            <LinearLayout android:id="@+id/pairing_case_battery_column" android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="0.55"
+                android:orientation="vertical" android:gravity="center" android:paddingHorizontal="4dp">
+                <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:gravity="center"
+                    android:fontFamily="@font/inter" android:textSize="12sp" android:textColor="#636366"
+                    android:includeFontPadding="false" android:importantForAccessibility="no" android:text="@string/island_battery_case" />
+                <TextView android:id="@+id/pairing_case_battery_text" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                    android:gravity="center" android:layout_marginTop="4dp" android:fontFamily="@font/inter"
+                    android:textSize="18sp" android:textColor="#1C1C1E" android:includeFontPadding="false" android:text="@string/pairing_battery_unknown" />
+            </LinearLayout>
+        </LinearLayout>
         <TextView android:id="@+id/pairing_message" android:layout_width="match_parent" android:layout_height="wrap_content"
             android:minHeight="48dp" android:gravity="center" android:fontFamily="@font/inter"
             android:includeFontPadding="false" android:lineSpacingExtra="3dp"

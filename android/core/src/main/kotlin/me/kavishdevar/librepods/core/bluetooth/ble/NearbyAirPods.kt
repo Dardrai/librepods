@@ -96,7 +96,7 @@ object NearbyAirPods {
         private data class Visit(var at: Long, var open: Boolean, var offered: Boolean)
         private val visits = mutableMapOf<Int, Visit>()
 
-        fun observe(event: Event, now: Long, alreadyPaired: Boolean): Event? {
+        fun observe(event: Event, now: Long, alreadyPaired: Boolean, protectedModel: Int? = null): Event? {
             val visit = visits.getOrPut(event.modelId) { Visit(now, false, false) }
             if (now < visit.at) return null
             if (now - visit.at >= ABSENCE_MS) visit.offered = false
@@ -107,7 +107,7 @@ object NearbyAirPods {
                 visit.offered = false
                 return event.takeIf { wasOpen }
             }
-            if (alreadyPaired) {
+            if (alreadyPaired && event.modelId != protectedModel) {
                 val wasOpen = visit.open
                 visit.open = false
                 visit.offered = true

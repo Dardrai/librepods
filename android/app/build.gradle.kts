@@ -1,7 +1,7 @@
 import java.util.Properties
 
-val appVersionName = (rootProject.extra["appVersionName"] as String) + "-pixel18"
-val appVersionCode = 200000103
+val appVersionName = (rootProject.extra["appVersionName"] as String) + "-pixel19"
+val appVersionCode = 200000104
 
 plugins {
     alias(libs.plugins.android.application)

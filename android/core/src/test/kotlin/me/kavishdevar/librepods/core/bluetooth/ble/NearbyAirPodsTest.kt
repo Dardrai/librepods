@@ -255,6 +255,19 @@ class NearbyAirPodsTest {
         assertTrue(visits.expire(30_002).isEmpty())
     }
 
+    @Test fun activePairingKeepsRealLidEventsAfterOwnershipBecomesKnown() {
+        val visits = NearbyAirPods.Visits()
+        val open = NearbyAirPods.Event(0x2720, true)
+        val closed = open.copy(lidOpen = false)
+        assertEquals(open, visits.observe(open, 0, false))
+        assertNull(visits.observe(open, 1, true, protectedModel = open.modelId))
+        assertNull(visits.observe(open, 2, true, protectedModel = open.modelId))
+        assertTrue(visits.expire(30_002, protectedModel = open.modelId).isEmpty())
+        assertEquals(closed, visits.observe(closed, 30_003, true, protectedModel = open.modelId))
+        assertNull(visits.observe(closed, 30_004, true, protectedModel = open.modelId))
+        assertNull(visits.observe(open, 30_005, true))
+    }
+
     @Test fun scannerShutdownClosesOnlyActiveInvitationsAndClearsTheirDeduplication() {
         val visits = NearbyAirPods.Visits()
         val open = NearbyAirPods.Event(0x2720, true)

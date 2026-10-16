@@ -15,6 +15,7 @@ import android.os.SystemClock
 import android.provider.Settings
 import android.view.View
 import android.widget.Button
+import android.widget.TextView
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
@@ -22,6 +23,9 @@ import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.withContext
 import me.kavishdevar.librepods.R
 import me.kavishdevar.librepods.core.bluetooth.ble.NearbyAirPods
+import me.kavishdevar.librepods.core.devices.Battery
+import me.kavishdevar.librepods.core.devices.BatteryComponent
+import me.kavishdevar.librepods.core.devices.BatteryStatus
 import me.kavishdevar.librepods.presentation.overlays.PopupWindow
 import org.junit.After
 import org.junit.Assert.*
@@ -211,7 +215,7 @@ class NearbyPairingControllerTest {
         assertEquals("Continue must not repeat the paired callback", listOf(selected), paired)
     }
 
-    @Test fun aConfirmedBondStillDismissesAfterThreeSecondsWithoutContinue() {
+    @Test fun aConfirmedBondWaitsForContinueOrThePhysicalLidClose() {
         controller.close()
         var pairedAt = 0L
         controller = NearbyPairingController(context, confirmConsent = { _, _ -> false }, onPaired = {
@@ -225,9 +229,53 @@ class NearbyPairingControllerTest {
         bondChanged(selected, BluetoothDevice.BOND_BONDING)
         pairing(selected).setBondState(BluetoothDevice.BOND_BONDED)
         bondChanged(selected, BluetoothDevice.BOND_BONDED)
-        advanceTo(pairedAt + 2_999)
+        advanceTo(pairedAt + 90_000)
         assertEquals(PopupWindow.Stage.COMPLETE, stage())
-        advanceTo(pairedAt + 3_000)
+        controller.onNearbyDevice(NearbyAirPods.Event(0x2720, false))
+        idle()
+        assertNull(field("popup"))
+    }
+
+    @Test fun successBatteryReadingsBelongToTheExactNewBondAndCannotReopenAClosedCard() {
+        val selected = bondingCandidate()
+        val oldReading = System.currentTimeMillis() - 1
+        val old = setOf(Battery(BatteryComponent.CASE, 25, BatteryStatus.NOT_CHARGING, oldReading))
+        controller.updatePairingBattery(selected, old)
+        pairing(selected).setBondState(BluetoothDevice.BOND_BONDED)
+        bondChanged(selected, BluetoothDevice.BOND_BONDED)
+        controller.updatePairingBattery(selected, old)
+        assertEquals("—", popupView().findViewById<TextView>(R.id.pairing_case_battery_text).text.toString())
+
+        val foreign = device(2)
+        pairing(foreign).setBondState(BluetoothDevice.BOND_BONDED)
+        val live = setOf(
+            Battery(BatteryComponent.LEFT, 80, BatteryStatus.NOT_CHARGING),
+            Battery(BatteryComponent.RIGHT, 80, BatteryStatus.NOT_CHARGING),
+            Battery(BatteryComponent.CASE, 70, BatteryStatus.CHARGING))
+        controller.updatePairingBattery(foreign, live)
+        assertEquals("—", popupView().findViewById<TextView>(R.id.pairing_case_battery_text).text.toString())
+        controller.updatePairingBattery(selected, live)
+        assertEquals("80%", popupView().findViewById<TextView>(R.id.pairing_buds_battery_text).text.toString())
+        assertEquals("70%", popupView().findViewById<TextView>(R.id.pairing_case_battery_text).text.toString())
+
+        controller.cancelPending()
+        idle()
+        controller.updatePairingBattery(selected, live)
+        assertNull(field("popup"))
+        connect()
+        controller.updatePairingBattery(selected, live)
+        assertEquals(PopupWindow.Stage.SETUP, stage())
+        assertEquals(View.GONE, popupView().findViewById<View>(R.id.pairing_battery_row).visibility)
+    }
+
+    @Test fun removingTheCompletedBondClosesOnlyItsOwnSuccessCard() {
+        val selected = bondingCandidate()
+        pairing(selected).setBondState(BluetoothDevice.BOND_BONDED)
+        bondChanged(selected, BluetoothDevice.BOND_BONDED)
+        controller.updatePairingBattery(device(2), emptySet())
+        assertEquals(PopupWindow.Stage.COMPLETE, stage())
+        pairing(selected).setBondState(BluetoothDevice.BOND_NONE)
+        controller.updatePairingBattery(selected, emptySet())
         assertNull(field("popup"))
     }
 
@@ -469,9 +517,12 @@ class NearbyPairingControllerTest {
         .apply { isAccessible = true }.get(controller)
 
     private fun button(): Button {
+        return popupView().findViewById(R.id.pairing_primary)
+    }
+
+    private fun popupView(): View {
         val popup = field("popup") as PopupWindow
-        val view = PopupWindow::class.java.getDeclaredField("mView").apply { isAccessible = true }.get(popup) as View
-        return view.findViewById(R.id.pairing_primary)
+        return PopupWindow::class.java.getDeclaredField("mView").apply { isAccessible = true }.get(popup) as View
     }
 
     private fun stage(): PopupWindow.Stage = PopupWindow::class.java.getDeclaredField("stage")

@@ -118,9 +118,10 @@ class IslandWindow(
     private var showOffListeningMode by mutableStateOf(false)
     private var noiseControlModeValue by mutableIntStateOf(4)
     private var adaptiveStrength by mutableIntStateOf(30)
+    private var requestedAdaptiveStrength by mutableStateOf<Int?>(null)
 
     private var onNoiseControlModeChanged: (Int) -> Unit = { noiseControlModeValue = it }
-    private var onAdaptiveStrengthChanged: (Int) -> Unit = { adaptiveStrength = it }
+    private var onAdaptiveStrengthChanged: (Int) -> Unit = { requestedAdaptiveStrength = it }
 
     private var openApp: () -> Unit = {}
 
@@ -210,7 +211,19 @@ class IslandWindow(
             noiseControlModeValue = state.controlStates[ControlCommandIdentifier.LISTENING_MODE]?.firstOrNull()?.toInt() ?: 3,
             onNoiseControlModeChanged = { device.setControlCommand(ControlCommandIdentifier.LISTENING_MODE, it) },
             adaptiveStrength = state.controlStates[ControlCommandIdentifier.AUTO_ANC_STRENGTH]?.firstOrNull()?.toInt() ?: 50,
+            requestedAdaptiveStrength = state.requestedControls[ControlCommandIdentifier.AUTO_ANC_STRENGTH]?.firstOrNull()?.toInt(),
             onAdaptiveStrengthChanged = { device.setControlCommand(ControlCommandIdentifier.AUTO_ANC_STRENGTH, it) })
+    }
+
+    fun updateAdaptiveStrength(device: AppleDevice) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            Handler(Looper.getMainLooper()).post { updateAdaptiveStrength(device) }
+            return
+        }
+        if (!isVisible || ownerAddress != device.macAddress.value) return
+        val state = device.state.value
+        adaptiveStrength = state.controlStates[ControlCommandIdentifier.AUTO_ANC_STRENGTH]?.firstOrNull()?.toInt() ?: 50
+        requestedAdaptiveStrength = state.requestedControls[ControlCommandIdentifier.AUTO_ANC_STRENGTH]?.firstOrNull()?.toInt()
     }
 
     fun updateNoiseControl(mode: Int, strength: Int, showOff: Boolean = showOffListeningMode) {
@@ -267,13 +280,14 @@ class IslandWindow(
         owner: AppleDevice? = null,
         ownerModel: AirPodsModel = owner?.metadata?.value?.model ?: AirPodsModel.UNKNOWN,
         observedAtNanos: Long = SystemClock.elapsedRealtimeNanos(),
-        statusText: String? = null
+        statusText: String? = null,
+        requestedAdaptiveStrength: Int? = null
     ) {
         if (Looper.myLooper() != Looper.getMainLooper()) {
             Handler(Looper.getMainLooper()).post {
                 show(name, batteryLevel, type, reversed, otherDeviceName, onReverseAction,
                     openApp, showOffListeningMode, noiseControlModeValue, onNoiseControlModeChanged,
-                    adaptiveStrength, onAdaptiveStrengthChanged, forcedState, keepOpen, owner, ownerModel, observedAtNanos, statusText)
+                    adaptiveStrength, onAdaptiveStrengthChanged, forcedState, keepOpen, owner, ownerModel, observedAtNanos, statusText, requestedAdaptiveStrength)
             }
             return
         }
@@ -298,6 +312,7 @@ class IslandWindow(
         this.showOffListeningMode = showOffListeningMode
         this.noiseControlModeValue = noiseControlModeValue
         this.adaptiveStrength = adaptiveStrength
+        this.requestedAdaptiveStrength = requestedAdaptiveStrength
 
         this.onNoiseControlModeChanged = {
             this.noiseControlModeValue = it
@@ -305,7 +320,6 @@ class IslandWindow(
         }
 
         this.onAdaptiveStrengthChanged = {
-            this.adaptiveStrength = it
             onAdaptiveStrengthChanged(it)
         }
 
@@ -430,6 +444,7 @@ class IslandWindow(
                         noiseControlModeValue = noiseControlModeValue,
                         onNoiseControlModeChanged = this@IslandWindow.onNoiseControlModeChanged,
                         adaptiveStrength = this@IslandWindow.adaptiveStrength,
+                        requestedAdaptiveStrength = this@IslandWindow.requestedAdaptiveStrength,
                         onAdaptiveStrengthChanged = this@IslandWindow.onAdaptiveStrengthChanged,
                         model = model, batteries = batteries, batteryNow = batteryNow,
                         paired = ownerAddress != null, nearby = nearby, cameraPaddingPx = cameraPadding,

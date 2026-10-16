@@ -4,6 +4,9 @@
     <string name="pairing_nearby_hint">Connect AirPods to this device.</string>
     <string name="pairing_connect">Connect</string>
     <string name="pairing_continue">Continue</string>
+    <string name="pairing_battery_buds">AirPods</string>
+    <string name="pairing_battery_unknown">—</string>
+    <string name="pairing_battery_component_value">%1$s %2$s</string>
     <string name="pairing_double_tap_title">Double-Tap the Case</string>
     <string name="pairing_hold_button_title">Hold the Setup Button</string>
     <string name="pairing_connecting_title">Connecting…</string>

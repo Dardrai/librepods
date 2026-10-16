@@ -7,8 +7,12 @@ internal fun normalizedControl(value: ByteArray): ByteArray =
 
 internal fun AppleState.withControlReport(id: ControlCommandIdentifier, rawValue: ByteArray): AppleState {
     val value = normalizedControl(rawValue)
+    // Adaptive strength can apply silently and later report a rounded value.
+    val confirmsRequest = if (id == ControlCommandIdentifier.AUTO_ANC_STRENGTH)
+        rawValue.isNotEmpty() && value.size == 1 && (value[0].toInt() and 255) in 0..100
+    else requestedControls[id]?.contentEquals(value) == true
     return copy(controlStates = controlStates + (id to value), requestedControls =
-        if (requestedControls[id]?.contentEquals(value) == true) requestedControls - id else requestedControls)
+        if (confirmsRequest) requestedControls - id else requestedControls)
 }
 
 internal fun AppleState.withControlRequest(id: ControlCommandIdentifier, value: ByteArray,

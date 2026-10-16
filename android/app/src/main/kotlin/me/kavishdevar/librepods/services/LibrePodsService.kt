@@ -82,6 +82,7 @@ import me.kavishdevar.librepods.core.data.recording.Recording
 import me.kavishdevar.librepods.core.devices.AppleDevice
 import me.kavishdevar.librepods.core.devices.AppleSettings
 import me.kavishdevar.librepods.core.devices.AppleState
+import me.kavishdevar.librepods.core.devices.Battery
 import me.kavishdevar.librepods.core.devices.BatteryComponent
 import me.kavishdevar.librepods.core.devices.BatteryStatus
 import me.kavishdevar.librepods.core.devices.ComponentStatus
@@ -479,6 +480,7 @@ class LibrePodsService: Service() {
                 BluetoothDevice.ACTION_BOND_STATE_CHANGED -> {
                     val changed = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
                     if (changed != null && changed.bondState == BluetoothDevice.BOND_NONE) {
+                        nearbyPairing?.updatePairingBattery(changed, emptySet())
                         val address = MacAddress(changed.address)
                         onDeviceDisconnected(address)
                         deviceJobs.remove(address)?.forEach { it.cancel() }
@@ -558,7 +560,7 @@ class LibrePodsService: Service() {
                 "encryptedBatteryKey=${owned?.state?.value?.magicKeys?.containsKey(MagicKeyType.ENC_KEY) == true}")
         }
         lidEvent?.let { event ->
-            nearbyVisits.observe(event, observed / 1_000_000, owned != null)?.let {
+            nearbyVisits.observe(event, observed / 1_000_000, owned != null, protectedModel = pairingModel)?.let {
                 nearbyPairing?.onNearbyDevice(it, observed)
             }
         }
@@ -738,6 +740,7 @@ class LibrePodsService: Service() {
 
     fun observeAppleState(device: AppleDevice): Job = serviceScope.launch(Dispatchers.IO) {
         var previousState = device.state.value
+        var pairingBattery: Set<Battery>? = null
         var lastSavedKeys: Map<MagicKeyType, ByteArray>? = null
         val listeningMode = IslandListeningMode()
         var conversationOwner: Any? = null
@@ -747,6 +750,23 @@ class LibrePodsService: Service() {
             // Capture before any repository suspension; an old emission cannot belong to a later socket.
             val modeTransport = device.aacp.captureAudioSocket()
             val deviceSettings = device.settings.value
+
+            if (state.battery != pairingBattery) {
+                pairingBattery = state.battery
+                withContext(Dispatchers.Main.immediate) {
+                    if (!destroying && devices.value[device.macAddress] === device &&
+                        device.state.value.battery == state.battery) {
+                        nearbyPairing?.updatePairingBattery(device.bluetoothDevice, state.battery)
+                    }
+                }
+            }
+            if (state.controlStates != previousState.controlStates || state.requestedControls != previousState.requestedControls) {
+                withContext(Dispatchers.Main.immediate) {
+                    if (!destroying && devices.value[device.macAddress] === device) {
+                        islandWindow.updateAdaptiveStrength(device)
+                    }
+                }
+            }
 
             if (state.magicKeys.isNotEmpty() && state.magicKeys != lastSavedKeys) {
                 appleRepository.saveCacheFromState(device.macAddress, state)
@@ -1061,6 +1081,7 @@ class LibrePodsService: Service() {
                             )
                         },
                         adaptiveStrength = state.controlStates[ControlCommandIdentifier.AUTO_ANC_STRENGTH]?.getOrNull(0)?.toInt() ?: 50,
+                        requestedAdaptiveStrength = state.requestedControls[ControlCommandIdentifier.AUTO_ANC_STRENGTH]?.firstOrNull()?.toInt(),
                         onAdaptiveStrengthChanged = {
                             device.setControlCommand(
                                 ControlCommandIdentifier.AUTO_ANC_STRENGTH, it
