@@ -19,6 +19,7 @@ import android.provider.Settings
 import android.view.ContextThemeWrapper
 import android.view.DisplayCutout
 import android.view.View
+import android.view.ViewGroup
 import android.view.WindowInsets
 import android.view.WindowManager
 import android.view.WindowMetrics
@@ -59,6 +60,14 @@ class OverlayRenderingTest {
     @Test fun pairingBindsActionsAndKeepsItsWhiteCardInBothThemes() {
         for ((night, width, fontScale) in listOf(Triple(false, 412, 1f), Triple(true, 320, 1.28f))) {
             val context = renderContext(night, width, fontScale)
+            val lightTheme = context.resources.getIdentifier("isLightTheme", "attr", "android")
+            assertNotEquals("Framework light-theme attribute is missing", 0, lightTheme)
+            val themeFlags = intArrayOf(android.R.attr.forceDarkAllowed, lightTheme)
+            fun flags(target: Context): List<Boolean> {
+                val values = target.obtainStyledAttributes(themeFlags)
+                return try { themeFlags.indices.map { values.getBoolean(it, true) } } finally { values.recycle() }
+            }
+            val originalFlags = flags(context)
             var connected = 0
             var dismissed = 0
             val popup = PopupWindow(context) { dismissed++ }
@@ -70,11 +79,15 @@ class OverlayRenderingTest {
                 val view = root(popup, "mView")
                 val name = view.findViewById<TextView>(R.id.name)
                 val button = view.findViewById<Button>(R.id.pairing_primary)
+                assertFalse("Pairing card permits hardware color inversion", view.isForceDarkAllowed)
+                assertEquals(listOf(false, false), flags(view.context))
+                assertEquals("Pairing theme changed the app's theme", originalFlags, flags(context))
                 assertEquals("AirPods Pro 3", name.text.toString())
                 assertTrue(Color.luminance(name.currentTextColor) < 0.2)
                 assertNotNull(view.findViewById<ImageView>(R.id.popup_artwork).drawable)
                 assertTrue(button.isEnabled)
                 render(view, "pairing-${if (night) "dark-narrow-large" else "light"}", width)
+                assertPairingControlsFit(view)
                 button.performClick()
                 assertEquals(1, connected)
 
@@ -83,6 +96,7 @@ class OverlayRenderingTest {
                 assertEquals(gesture, view.findViewById<TextView>(R.id.pairing_message).text.toString())
                 assertFalse(button.isEnabled)
                 render(view, "pairing-searching-${if (night) "dark-narrow-large" else "light"}", width)
+                assertPairingControlsFit(view)
                 popup.close()
                 popup.close()
                 assertEquals(1, dismissed)
@@ -309,6 +323,17 @@ class OverlayRenderingTest {
         .apply { isAccessible = true }.get(instance)!!
 
     private fun root(instance: Any, name: String) = field(instance, name) as View
+
+    private fun assertPairingControlsFit(view: View) {
+        for (id in listOf(R.id.name, R.id.pairing_message, R.id.pairing_primary, R.id.close_button)) {
+            val control = view.findViewById<View>(id)
+            val bounds = Rect()
+            control.getDrawingRect(bounds)
+            (view as ViewGroup).offsetDescendantRectToMyCoords(control, bounds)
+            assertTrue("Pairing control $id is clipped", bounds.left >= 0 && bounds.top >= 0 &&
+                bounds.right <= view.width && bounds.bottom <= view.height)
+        }
+    }
 
     private fun islandWithMetrics(context: Context, bounds: Rect, cutout: DisplayCutout?, safeInsets: Insets): IslandWindow {
         val insets = WindowInsets.Builder()

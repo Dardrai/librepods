@@ -48,6 +48,17 @@ after the card closes. Microphone capture and playback recovery block new
 invitations. Active pairing is protected from synthetic BLE absence expiry;
 physical lid closure still cancels it.
 
+The card owns its colors through a separate framework theme so Android 17's
+expanded dark mode cannot invert it around the opaque video. Its background
+matches the original clip, with a shorter artwork area. Preview pairing popup
+in the popup-animation settings opens this same card without Bluetooth discovery
+or bonding; Done, expiry or leaving Settings closes it and releases playback.
+
+BLE lid reports use immediate delivery. The previous 500 ms batching request
+was clamped to a five-second batch interval on the Pixel, delaying both the
+nearby invitation and the paired battery island. Timestamp validation, device
+trust and duplicate suppression still apply to each report.
+
 The Dynamic Island follows the Windows black capsule, with staged motion,
 model artwork and separate left, right and case battery rings (one for Max).
 Unknown readings show an em dash. Cached readings retain their age, dim, and

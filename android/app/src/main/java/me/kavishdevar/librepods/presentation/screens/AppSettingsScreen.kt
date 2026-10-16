@@ -18,10 +18,12 @@
 
 package me.kavishdevar.librepods.presentation.screens
 
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import android.provider.Settings
 import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -53,11 +55,13 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -81,6 +85,9 @@ import com.kyant.backdrop.backdrops.layerBackdrop
 import com.kyant.backdrop.backdrops.rememberLayerBackdrop
 import me.kavishdevar.librepods.BuildConfig
 import me.kavishdevar.librepods.R
+import me.kavishdevar.librepods.bluetooth.NearbyAirPods
+import me.kavishdevar.librepods.data.AirPodsModels
+import me.kavishdevar.librepods.presentation.overlays.PopupWindow
 import me.kavishdevar.librepods.presentation.components.AppInfoCard
 import me.kavishdevar.librepods.presentation.components.DeviceInfoCard
 import me.kavishdevar.librepods.presentation.components.StyledBottomSheet
@@ -110,6 +117,12 @@ fun AppSettingsScreen(
     val context = LocalContext.current
     val scrollState = rememberScrollState()
     val state by viewModel.uiState.collectAsState()
+    var pairingPreview by remember { mutableStateOf<PopupWindow?>(null) }
+    val pairingPreviewHint = stringResource(R.string.pairing_preview_hint)
+    val pairingPreviewDone = stringResource(R.string.pairing_preview_done)
+    DisposableEffect(context) {
+        onDispose { pairingPreview?.forceClose() }
+    }
 
     val backdrop = rememberLayerBackdrop()
 
@@ -216,6 +229,27 @@ fun AppSettingsScreen(
                     description = stringResource(R.string.show_island_popup_description),
                     checked = state.showIslandPopup,
                     onCheckedChange = viewModel::setShowIslandPopup,
+                )
+
+                StyledListItem(
+                    name = stringResource(R.string.pairing_preview),
+                    onClick = {
+                        if (!Settings.canDrawOverlays(context)) {
+                            Toast.makeText(context, R.string.pairing_preview_permission, Toast.LENGTH_LONG).show()
+                        } else {
+                            pairingPreview?.forceClose()
+                            val modelNumber = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+                                .getString("airpods_model_number", "") ?: ""
+                            val model = AirPodsModels.getModelByModelNumber(modelNumber)
+                            val modelId = NearbyAirPods.modelNames.entries.firstOrNull { it.value == model?.name }?.key ?: 0x2720
+                            pairingPreview = PopupWindow(context).apply {
+                                openPairing(NearbyAirPods.modelNames.getValue(modelId), modelId)
+                                showPairingActions(pairingPreviewHint, listOf(
+                                    pairingPreviewDone to { close() }
+                                ))
+                            }
+                        }
+                    }
                 )
             }
 

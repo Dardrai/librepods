@@ -31,6 +31,7 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
 import android.util.Log
+import android.view.ContextThemeWrapper
 import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.MotionEvent
@@ -47,7 +48,8 @@ import kotlin.math.min
 /** A single invitation; Bluetooth work belongs to NearbyPairingController. */
 @SuppressLint("InflateParams", "ClickableViewAccessibility")
 class PopupWindow(private val context: Context, private val onCloseCallback: () -> Unit = {}) {
-    private val mView: View = LayoutInflater.from(context).inflate(R.layout.popup_window, null)
+    private val mView: View = LayoutInflater.from(ContextThemeWrapper(context, R.style.Theme_LibrePods_Pairing))
+        .inflate(R.layout.popup_window, null)
     private val windowManager = context.getSystemService(WindowManager::class.java)
     private val handler = Handler(Looper.getMainLooper())
     private val button = mView.findViewById<Button>(R.id.pairing_primary)

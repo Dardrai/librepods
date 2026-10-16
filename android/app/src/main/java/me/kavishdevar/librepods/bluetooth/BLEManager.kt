@@ -228,7 +228,8 @@ class BLEManager(private val context: Context) {
                 .setMatchMode(ScanSettings.MATCH_MODE_AGGRESSIVE)
                 .setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
                 .setNumOfMatches(ScanSettings.MATCH_NUM_MAX_ADVERTISEMENT)
-                .setReportDelay(500L)
+                // Any nonzero delay enables batching; Android clamps it to at least five seconds.
+                .setReportDelay(0L)
                 .build()
 
             val manufacturerData = ByteArray(27)

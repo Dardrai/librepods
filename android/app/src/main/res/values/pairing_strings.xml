@@ -3,6 +3,10 @@
     <string name="battery_cached_age">Last received %1$d min ago</string>
     <string name="pairing_nearby_hint">AirPods are nearby. Connect to start Android pairing.</string>
     <string name="pairing_connect">Connect</string>
+    <string name="pairing_preview">Preview pairing popup</string>
+    <string name="pairing_preview_hint">Pairing preview</string>
+    <string name="pairing_preview_done">Done</string>
+    <string name="pairing_preview_permission">Allow display over other apps to preview this popup.</string>
     <string name="pairing_double_tap">Keep both AirPods in the open case. Double-tap the front until the light flashes white.</string>
     <string name="pairing_hold_button">Keep both AirPods in the open case. Hold the setup button until the light flashes white.</string>
     <string name="pairing_find">Find my AirPods</string>
