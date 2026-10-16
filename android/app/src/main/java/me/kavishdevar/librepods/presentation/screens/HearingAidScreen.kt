@@ -58,6 +58,7 @@ import me.kavishdevar.librepods.bluetooth.AACPManager
 import me.kavishdevar.librepods.bluetooth.ATTHandles
 import me.kavishdevar.librepods.data.parseTransparencySettingsResponse
 import me.kavishdevar.librepods.data.disableCustomizedTransparency
+import me.kavishdevar.librepods.data.hearingAidSettingsWritable
 import me.kavishdevar.librepods.presentation.components.ConfirmationDialog
 import me.kavishdevar.librepods.presentation.components.StyledList
 import me.kavishdevar.librepods.presentation.components.StyledListItem
@@ -83,6 +84,8 @@ fun HearingAidScreen(viewModel: AirPodsViewModel, onNavigateHearingAidAdjustment
     val assistStatus = state.controlStates[AACPManager.Companion.ControlCommandIdentifiers.HEARING_ASSIST_CONFIG]
     val hearingAidEnabled = aidStatus?.getOrNull(1) == 0x01.toByte() &&
         assistStatus?.getOrNull(0) == 0x01.toByte()
+    val canEnableHearingAid = hearingAidSettingsWritable(state.hearingAidData) &&
+        parseTransparencySettingsResponse(transparencyData) != null
 
     val m3eEnabled = LocalDesignSystem.current == DesignSystem.Material
     val topPadding = if (m3eEnabled) 0.dp else WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + 84.dp
@@ -115,7 +118,7 @@ fun HearingAidScreen(viewModel: AirPodsViewModel, onNavigateHearingAidAdjustment
             StyledToggle(
                 label = stringResource(R.string.hearing_aid),
                 checked = hearingAidEnabled,
-                enabled = hearingAidEnabled || parseTransparencySettingsResponse(transparencyData) != null,
+                enabled = hearingAidEnabled || canEnableHearingAid,
                 onCheckedChange = { enabled ->
                     if (enabled) {
                         showDialog.value = true
@@ -129,6 +132,10 @@ fun HearingAidScreen(viewModel: AirPodsViewModel, onNavigateHearingAidAdjustment
                 name = stringResource(R.string.adjustments),
                 onClick = onNavigateHearingAidAdjustments,
             )
+        }
+
+        if (state.hearingAidData.isNotEmpty() && !hearingAidSettingsWritable(state.hearingAidData)) {
+            Text(stringResource(R.string.hearing_settings_read_only), style = MaterialTheme.typography.bodySmall)
         }
 
         Text(
@@ -196,7 +203,7 @@ fun HearingAidScreen(viewModel: AirPodsViewModel, onNavigateHearingAidAdjustment
         dismissText = "Cancel",
         onConfirm = {
             showDialog.value = false
-            if (parseTransparencySettingsResponse(transparencyData) != null) {
+            if (canEnableHearingAid) {
                 disableCustomizedTransparency(transparencyData) { handle, value ->
                     viewModel.setATTCharacteristicValue(handle, value, deviceAddress)
                 }

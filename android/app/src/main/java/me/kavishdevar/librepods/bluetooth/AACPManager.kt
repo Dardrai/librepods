@@ -242,7 +242,6 @@ class AACPManager {
         fun onConversationAwarenessReceived(conversationAwareness: ByteArray)
         fun onControlCommandReceived(controlCommand: ByteArray)
         fun onDeviceInformationReceived(deviceInformation: AirPodsInformation)
-        fun onHeadTrackingReceived(headTracking: ByteArray)
         fun onUnknownPacketReceived(packet: ByteArray)
         fun onProximityKeysReceived(proximityKeys: ByteArray)
         fun onStemPressReceived(stemPress: ByteArray)
@@ -407,6 +406,11 @@ class AACPManager {
             return
         }
 
+        if (packet[5] != 0.toByte()) {
+            Log.w(TAG, "Ignoring unsupported AACP opcode namespace")
+            return
+        }
+
         when (val opcode = packet[4]) {
             Opcodes.BATTERY_INFO -> {
                 callback?.onBatteryInfoReceived(packet)
@@ -465,16 +469,6 @@ class AACPManager {
 
             Opcodes.HEADTRACKING -> {
                 rtBuddyPacketCallback?.invoke(packet)
-                if (packet.size < 70) {
-                    Log.w(
-                        TAG, "Received HEADTRACKING packet too short: ${
-                        packet.joinToString(" ") {
-                            "%02X".format(it)
-                        }
-                    }")
-                    return
-                }
-                callback?.onHeadTrackingReceived(packet)
             }
 
             Opcodes.PROXIMITY_KEYS_RSP -> {
@@ -665,129 +659,6 @@ class AACPManager {
             0x00,
             0x00
         )
-    }
-
-    fun sendStartHeadTracking(): Boolean {
-        return sendDataPacket(createStartHeadTrackingPacket())
-    }
-
-    fun createStartHeadTrackingPacket(): ByteArray {
-        val opcode = byteArrayOf(Opcodes.HEADTRACKING, 0x00)
-        val data = byteArrayOf(
-            0x00,
-            0x00,
-            0x10,
-            0x00,
-            0x10,
-            0x00,
-            0x08,
-            0xA1.toByte(),
-            0x02,
-            0x42,
-            0x0B,
-            0x08,
-            0x0E,
-            0x10,
-            0x02,
-            0x1A,
-            0x05,
-            0x01,
-            0x40,
-            0x9C.toByte(),
-            0x00,
-            0x00,
-        )
-        return opcode + data
-    }
-
-    fun createAlternateStartHeadTrackingPacket(): ByteArray {
-        val opcode = byteArrayOf(Opcodes.HEADTRACKING, 0x00)
-        val data = byteArrayOf(
-            0x00,
-            0x00,
-            0x10,
-            0x00,
-            0x0F,
-            0x00,
-            0x08,
-            0x73,
-            0x42,
-            0x0B,
-            0x08,
-            0x10,
-            0x10,
-            0x02,
-            0x1A,
-            0x05,
-            0x01,
-            0x40,
-            0x9C.toByte(),
-            0x00,
-            0x00
-        )
-        return opcode + data
-    }
-
-    fun sendStopHeadTracking(): Boolean {
-        return sendDataPacket(createStopHeadTrackingPacket())
-    }
-
-    fun createStopHeadTrackingPacket(): ByteArray {
-        val opcode = byteArrayOf(Opcodes.HEADTRACKING, 0x00)
-        val data = byteArrayOf(
-            0x00,
-            0x00,
-            0x10,
-            0x00,
-            0x11,
-            0x00,
-            0x08,
-            0x7E,
-            0x10,
-            0x02,
-            0x42,
-            0x0B,
-            0x08,
-            0x4E,
-            0x10,
-            0x02,
-            0x1A,
-            0x05,
-            0x01,
-            0x00,
-            0x00,
-            0x00,
-            0x00
-        )
-        return opcode + data
-    }
-
-    fun createAlternateStopHeadTrackingPacket(): ByteArray {
-        val opcode = byteArrayOf(Opcodes.HEADTRACKING, 0x00)
-        val data = byteArrayOf(
-            0x00,
-            0x00,
-            0x10,
-            0x00,
-            0x0F,
-            0x00,
-            0x08,
-            0x75,
-            0x42,
-            0x0B,
-            0x08,
-            0x10,
-            0x10,
-            0x02,
-            0x1A,
-            0x05,
-            0x01,
-            0x00,
-            0x00,
-            0x00,
-            0x00
-        )
-        return opcode + data
     }
 
     fun sendRename(name: String): Boolean {
@@ -1283,39 +1154,33 @@ class AACPManager {
     }
 
     fun parseInformationPacket(packet: ByteArray): AirPodsInformation {
-        require(packet.size >= 6) { "Information response is truncated" }
-        val data = packet.sliceArray(6 until packet.size)
-
-        var index = 0
-        while (index < data.size && data[index] != 0x00.toByte()) index++
-
-        val strings = mutableListOf<String>()
-        while (index < data.size) {
-            // skip 0x00 bytes
-            while (index < data.size && data[index] == 0x00.toByte()) index++
-            if (index >= data.size) break
+        require(packet.size >= 11 && HEADER_BYTES.indices.all { packet[it] == HEADER_BYTES[it] } &&
+            packet[4] == Opcodes.INFORMATION && packet[5] == 0.toByte()) { "Invalid information response" }
+        var index = 11
+        val strings = List(11) {
             val start = index
-            // find next 0x00 byte
-            while (index < data.size && data[index] != 0x00.toByte()) index++
-            val str = data.sliceArray(start until index).decodeToString()
-            strings.add(str)
+            while (index < packet.size && packet[index] != 0.toByte()) index++
+            require(index < packet.size) { "Unterminated information field" }
+            val raw = packet.copyOfRange(start, index++)
+            val value = raw.decodeToString()
+            require(value.toByteArray().contentEquals(raw) && value.none { Character.isISOControl(it) }) {
+                "Invalid UTF-8 information field"
+            }
+            value
         }
 
-        require(strings.size >= 3) { "Information response lacks a name or model" }
-        strings.removeAt(0)
-
         return AirPodsInformation(
-            name = strings.getOrNull(0) ?: "",
-            modelNumber = strings.getOrNull(1) ?: "",
-            manufacturer = strings.getOrNull(2) ?: "",
-            serialNumber = strings.getOrNull(3) ?: "",
-            version1 = strings.getOrNull(4) ?: "",
-            version2 = strings.getOrNull(5) ?: "",
-            hardwareRevision = strings.getOrNull(6) ?: "",
-            updaterIdentifier = strings.getOrNull(7) ?: "",
-            leftSerialNumber = strings.getOrNull(8) ?: "",
-            rightSerialNumber = strings.getOrNull(9) ?: "",
-            version3 = strings.getOrNull(10) ?: "",
+            name = strings[0],
+            modelNumber = strings[1],
+            manufacturer = strings[2],
+            serialNumber = strings[3],
+            version1 = strings[4],
+            version2 = strings[5],
+            hardwareRevision = strings[6],
+            updaterIdentifier = strings[7],
+            leftSerialNumber = strings[8],
+            rightSerialNumber = strings[9],
+            version3 = strings[10],
         )
     }
 

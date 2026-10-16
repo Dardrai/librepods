@@ -8,10 +8,10 @@ import java.nio.ByteOrder
 
 class HearingSettingsTest {
     private fun report(hearingAid: Boolean, ownVoice: Boolean = true): ByteArray {
-        val data = ByteArray(if (ownVoice) 108 else 100)
+        val data = ByteArray(if (!ownVoice) 100 else if (hearingAid) 104 else 108)
         val buffer = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN)
         if (hearingAid) {
-            buffer.put(byteArrayOf(2, 2, 0x60, 0))
+            buffer.put(byteArrayOf(2, 2, 0x64, 0))
         } else {
             buffer.putFloat(1f)
         }
@@ -19,7 +19,10 @@ class HearingSettingsTest {
         buffer.putFloat(-0.25f).putFloat(-0.3f).putFloat(0f).putFloat(0.2f)
         repeat(8) { buffer.putFloat(it + 11f) }
         buffer.putFloat(0.75f).putFloat(0.8f).putFloat(1f).putFloat(0.9f)
-        if (ownVoice) buffer.putFloat(0.45f).putInt(0x12345678)
+        if (ownVoice) {
+            buffer.putFloat(0.45f)
+            if (!hearingAid) buffer.putInt(0x12345678)
+        }
         return data
     }
 
@@ -82,7 +85,7 @@ class HearingSettingsTest {
             assertEquals(ATTHandles.HEARING_AID, handle)
             sent = value
         }
-        val expected = saved.copyOf().also { it[2] = 0x64 }
+        val expected = saved.copyOf()
         ByteBuffer.wrap(expected).order(ByteOrder.LITTLE_ENDIAN).putFloat(16, 8.5f)
         assertArrayEquals(expected, sent)
         assertArrayEquals(saved, data)
@@ -113,7 +116,7 @@ class HearingSettingsTest {
                 val parsed = parseTransparencySettingsResponse(data)!!
                 sendTransparencySettings(data, parsed.copy(leftTone = -0.8f)) { _, value -> sent = value }
             }
-            val expected = data.copyOf().also { if (hearingAid) it[2] = 0x64 }
+            val expected = data.copyOf()
             ByteBuffer.wrap(expected).order(ByteOrder.LITTLE_ENDIAN).putFloat(40, -0.8f)
             assertArrayEquals(expected, sent)
         }
@@ -189,5 +192,34 @@ class HearingSettingsTest {
         sendHearingAidSettings(hearing, parsedHearing.copy(ownVoiceAmplification = Float.POSITIVE_INFINITY), writer)
         sendHearingAidSettings(hearing, parsedHearing.copy(rightEQ = FloatArray(9)), writer)
         assertEquals(0, writes)
+    }
+
+    @Test fun capturedHearingHeaderIsReadableButCannotBeChangedIntoAnEditableFormat() {
+        val data = report(true).also {
+            byteArrayOf(2, 0, 0x60, 0).copyInto(it)
+        }
+        val original = data.copyOf()
+        val settings = parseHearingAidSettingsResponse(data)!!
+        assertFalse(hearingAidSettingsWritable(data))
+        var writes = 0
+        sendHearingAidSettings(data, settings.copy(leftTone = 0.2f)) { _, _ -> writes++ }
+        assertEquals(0, writes)
+        assertArrayEquals(original, data)
+    }
+
+    @Test fun supportedHearingHeadersArePreservedAndUnknownFormatsNeverWrite() {
+        for (format in listOf(0, 0x64)) {
+            val data = report(true).also { it[2] = format.toByte() }
+            assertTrue(hearingAidSettingsWritable(data))
+            var sent: ByteArray? = null
+            sendHearingAidSettings(data, parseHearingAidSettingsResponse(data)!!.copy(leftTone = 0.2f)) { _, value -> sent = value }
+            assertArrayEquals(data.copyOfRange(0, 4), sent!!.copyOfRange(0, 4))
+        }
+        for (data in listOf(report(true).copyOf(108), report(true).also { it[2] = 0x61 })) {
+            assertFalse(hearingAidSettingsWritable(data))
+            var writes = 0
+            sendHearingAidSettings(data, parseHearingAidSettingsResponse(report(true))!!) { _, _ -> writes++ }
+            assertEquals(0, writes)
+        }
     }
 }

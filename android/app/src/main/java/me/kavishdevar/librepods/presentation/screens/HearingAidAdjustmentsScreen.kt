@@ -34,6 +34,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -49,6 +50,7 @@ import me.kavishdevar.librepods.bluetooth.ATTHandles
 import me.kavishdevar.librepods.data.HearingAidSettings
 import me.kavishdevar.librepods.data.parseHearingAidSettingsResponse
 import me.kavishdevar.librepods.data.sendHearingAidSettings
+import me.kavishdevar.librepods.data.hearingAidSettingsWritable
 import me.kavishdevar.librepods.presentation.components.StyledSlider
 import me.kavishdevar.librepods.presentation.components.StyledToggle
 import me.kavishdevar.librepods.presentation.theme.DesignSystem
@@ -66,10 +68,12 @@ fun HearingAidAdjustmentsScreen(viewModel: AirPodsViewModel) {
 
     val deviceAddress = state.deviceAddress
     val data = state.requestedATT[ATTHandles.HEARING_AID] ?: state.hearingAidData
+    val writable = hearingAidSettingsWritable(data)
     val settings = remember(deviceAddress, data) {
         mutableStateOf(parseHearingAidSettingsResponse(data))
     }
     fun updateSettings(edit: (HearingAidSettings) -> HearingAidSettings) {
+        if (!writable) return
         val current = settings.value ?: return
         val updated = edit(current)
         if (updated == current) return
@@ -94,8 +98,13 @@ fun HearingAidAdjustmentsScreen(viewModel: AirPodsViewModel) {
     ) {
         Spacer(modifier = Modifier.height(topPadding))
 
+        if (!writable) {
+            Text(stringResource(R.string.hearing_settings_read_only), style = MaterialTheme.typography.bodySmall)
+        }
+
         StyledSlider(
             label = stringResource(R.string.amplification),
+            enabled = writable,
             valueRange = -1f..1f,
             value = (current?.netAmplification ?: 0f).coerceIn(-1f, 1f),
             onValueChange = {
@@ -108,6 +117,7 @@ fun HearingAidAdjustmentsScreen(viewModel: AirPodsViewModel) {
 
         StyledToggle(
             label = stringResource(R.string.swipe_to_control_amplification),
+            enabled = writable,
             checked = state.controlStates[AACPManager.Companion.ControlCommandIdentifiers.HPS_GAIN_SWIPE]?.getOrNull(0) == 0x01.toByte(),
             onCheckedChange = { viewModel.setControlCommandBoolean(AACPManager.Companion.ControlCommandIdentifiers.HPS_GAIN_SWIPE, it) },
             description = stringResource(R.string.swipe_amplification_description)
@@ -115,6 +125,7 @@ fun HearingAidAdjustmentsScreen(viewModel: AirPodsViewModel) {
 
         StyledSlider(
             label = stringResource(R.string.balance),
+            enabled = writable,
             valueRange = -1f..1f,
             value = (current?.balance ?: 0f).coerceIn(-1f, 1f),
             onValueChange = {
@@ -128,6 +139,7 @@ fun HearingAidAdjustmentsScreen(viewModel: AirPodsViewModel) {
 
         StyledSlider(
             label = stringResource(R.string.tone),
+            enabled = writable,
             valueRange = -1f..1f,
             value = (current?.leftTone ?: 0f).coerceIn(-1f, 1f),
             onValueChange = {
@@ -140,6 +152,7 @@ fun HearingAidAdjustmentsScreen(viewModel: AirPodsViewModel) {
 
         StyledSlider(
             label = stringResource(R.string.ambient_noise_reduction),
+            enabled = writable,
             valueRange = 0f..1f,
             value = (current?.leftAmbientNoiseReduction ?: 0f).coerceIn(0f, 1f),
             onValueChange = {
@@ -152,6 +165,7 @@ fun HearingAidAdjustmentsScreen(viewModel: AirPodsViewModel) {
 
         StyledToggle(
             label = stringResource(R.string.conversation_boost),
+            enabled = writable,
             checked = current?.leftConversationBoost ?: false,
             onCheckedChange = { value -> updateSettings { it.copy(leftConversationBoost = value, rightConversationBoost = value) } },
             description = stringResource(R.string.conversation_boost_description)

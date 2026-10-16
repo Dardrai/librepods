@@ -14,8 +14,9 @@ class ConversationVolume {
 
     fun owns(owner: Any): Boolean = this.owner === owner
 
-    fun begin(current: Int, maximum: Int, percent: Int, relative: Boolean, stage: Int, owner: Any): Boolean {
-        if (stage !in 1..3 || (stage != 1 && (!owns(owner) || !speaking))) return false
+    fun begin(current: Int, maximum: Int, percent: Int, relative: Boolean, stage: Int, owner: Any,
+        captureActive: Boolean = false): Boolean {
+        if (captureActive || stage !in 1..3 || (stage != 1 && (!owns(owner) || !speaking))) return false
         if (!owns(owner)) { clear(); this.owner = owner }
         if (!speaking) {
             if (original == null || expected != current) original = current

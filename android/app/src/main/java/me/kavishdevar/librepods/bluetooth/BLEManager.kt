@@ -60,11 +60,14 @@ class BLEManager(private val context: Context) {
         val isLeftCharging: Boolean = false,
         val isRightCharging: Boolean = false,
         val isCaseCharging: Boolean = false,
-        val lidOpen: Boolean = false,
+        val lidOpen: Boolean? = null,
+        val bothInCase: Boolean = false,
         val color: String = "Unknown",
         val connectionState: String = "Unknown",
         val batterySnapshot: BleBatteryCache.Snapshot? = null
-    )
+    ) {
+        val mayReconnect: Boolean get() = model in NearbyAirPods.modelNames.values && !bothInCase && lidOpen != false
+    }
 
     @Synchronized
     fun getMostRecentStatus(): AirPodsStatus? {
@@ -232,17 +235,9 @@ class BLEManager(private val context: Context) {
                 .setReportDelay(0L)
                 .build()
 
-            val manufacturerData = ByteArray(27)
-            val manufacturerDataMask = ByteArray(27)
-
-            manufacturerData[0] = 7
-            manufacturerData[1] = 25
-
-            manufacturerDataMask[0] = -1
-            manufacturerDataMask[1] = -1
-
+            // The proximity record can follow another Apple record in the same advertisement.
             val scanFilter = ScanFilter.Builder()
-                .setManufacturerData(76, manufacturerData, manufacturerDataMask)
+                .setManufacturerData(76, byteArrayOf())
                 .build()
 
             mScanCallback = object : ScanCallback() {
@@ -415,7 +410,7 @@ class BLEManager(private val context: Context) {
                     listener.onBatteryChanged(parsedStatus)
                     Log.d(TAG, "New AirPods device detected: $address")
 
-                    if (currentGlobalLidState == null || currentGlobalLidState != parsedStatus.lidOpen) {
+                    if (parsedStatus.lidOpen != null && currentGlobalLidState != parsedStatus.lidOpen) {
                         currentGlobalLidState = parsedStatus.lidOpen
                         listener.onLidStateChanged(parsedStatus.lidOpen)
                         Log.d(TAG, "Lid state ${if (parsedStatus.lidOpen) "opened" else "closed"} (detected from new device)")
@@ -425,7 +420,7 @@ class BLEManager(private val context: Context) {
                         listener.onDeviceStatusChanged(parsedStatus, previousStatus)
                     }
 
-                    if (parsedStatus.lidOpen != previousStatus.lidOpen) {
+                    if (parsedStatus.lidOpen != null && parsedStatus.lidOpen != previousStatus.lidOpen) {
                         val previousGlobalState = currentGlobalLidState
                         currentGlobalLidState = parsedStatus.lidOpen
 
@@ -486,7 +481,7 @@ class BLEManager(private val context: Context) {
 
         val (isCaseCharging, caseBattery) = formatBattery(decrypted[3].toInt() and 0xFF)
 
-        val lidOpen = ((lid shr 3) and 0x01) == 0
+        val lidOpen = if (status and 0x44 != 0 && modelId !in setOf(0x0a20, 0x1f20)) lid and 8 == 0 else null
 
         return AirPodsStatus(
             address = address,
@@ -502,6 +497,7 @@ class BLEManager(private val context: Context) {
             isRightCharging = isRightCharging,
             isCaseCharging = isCaseCharging,
             lidOpen = lidOpen,
+            bothInCase = status and 4 != 0,
             color = color,
             connectionState = conn
         )
@@ -597,7 +593,7 @@ class BLEManager(private val context: Context) {
         val isRightCharging = if (isFlipped) (flags and 0x01) != 0 else (flags and 0x02) != 0
         val isCaseCharging = (flags and 0x04) != 0
 
-        val lidOpen = ((lid shr 3) and 0x01) == 0
+        val lidOpen = if (status and 0x44 != 0 && modelId !in setOf(0x0a20, 0x1f20)) lid and 8 == 0 else null
 
         fun decodeBattery(n: Int): Int? = when (n) {
             in 0x0..0x9 -> n * 10
@@ -620,6 +616,7 @@ class BLEManager(private val context: Context) {
             isRightCharging = isRightCharging,
             isCaseCharging = isCaseCharging,
             lidOpen = lidOpen,
+            bothInCase = status and 4 != 0,
             color = color,
             connectionState = conn
         )

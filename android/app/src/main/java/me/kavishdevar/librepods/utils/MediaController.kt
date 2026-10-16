@@ -39,6 +39,7 @@ object MediaController {
     private var volumeTransition: Runnable? = null
     private var conversationAddress: String? = null
     private var conversationPausedMedia = false
+    private var microphoneCaptureActive = false
     private val mediaAttributes = AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).build()
     private lateinit var audioManager: AudioManager
     var iPausedTheMedia = false
@@ -318,6 +319,12 @@ object MediaController {
     }
 
     @Synchronized
+    fun setMicrophoneCaptureActive(active: Boolean) {
+        microphoneCaptureActive = active
+        if (active) conversationVolume.owner?.let { cancelConversation(it) }
+    }
+
+    @Synchronized
     fun startSpeaking(stage: Int, owner: Any, address: String) {
         if (stage !in 1..3 || (stage != 1 && (!conversationVolume.owns(owner) || !conversationVolume.speaking))) return
         if (!conversationVolume.owns(owner)) {
@@ -329,9 +336,9 @@ object MediaController {
         }
         conversationAddress = address
         val first = !conversationVolume.speaking
-        conversationVolume.begin(audioManager.getStreamVolume(AudioManager.STREAM_MUSIC),
+        if (!conversationVolume.begin(audioManager.getStreamVolume(AudioManager.STREAM_MUSIC),
             audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC),
-            conversationalAwarenessVolume, relativeVolume, stage, owner)
+            conversationalAwarenessVolume, relativeVolume, stage, owner, microphoneCaptureActive)) return
         runVolumeTransition(owner)
         if (first && conversationalAwarenessPauseMusic) {
             conversationPausedMedia = audioManager.isMusicActive

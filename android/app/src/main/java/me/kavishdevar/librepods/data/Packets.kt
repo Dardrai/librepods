@@ -176,17 +176,19 @@ class AirPodsNotifications {
         }
 
         fun isBatteryData(data: ByteArray): Boolean {
-            if (data.joinToString("") { "%02x".format(it) }.startsWith("040004000400")) {
-                Log.d("BatteryNotification", "Battery data starts with 040004000400. Most likely is a battery packet.")
-            } else {
-                return false
+            val prefix = byteArrayOf(4, 0, 4, 0, 4, 0)
+            if (data.size < 7 || !prefix.indices.all { data[it] == prefix[it] }) return false
+            val count = data[6].toInt() and 0xff
+            if (count == 0 || data.size != 7 + count * 5) return false
+            val components = mutableSetOf<Int>()
+            for (offset in 7 until data.size step 5) {
+                val level = data[offset + 2].toInt() and 0xff
+                if (level > 100 && level != 255) return false
+                val component = data[offset].toInt() and 0xff
+                if (component in setOf(BatteryComponent.LEFT, BatteryComponent.RIGHT, BatteryComponent.CASE) &&
+                    !components.add(component)) return false
             }
-            if (data.size != 22) {
-                Log.d("BatteryNotification", "Battery data size is not 22, probably being used with Airpods with fewer or more battery count.")
-                return false
-            }
-            Log.d("BatteryNotification", data.joinToString("") { "%02x".format(it) }.startsWith("040004000400").toString())
-            return data.joinToString("") { "%02x".format(it) }.startsWith("040004000400")
+            return true
         }
 
         fun setBatteryDirect(
@@ -219,25 +221,29 @@ class AirPodsNotifications {
         }
 
         fun setBattery(data: ByteArray) {
-            if (data.size != 22 || data[7].toInt() !in setOf(BatteryComponent.LEFT, BatteryComponent.RIGHT) ||
-                data[12].toInt() !in setOf(BatteryComponent.LEFT, BatteryComponent.RIGHT) ||
-                data[7] == data[12] || data[17].toInt() != BatteryComponent.CASE) {
-                return
-            }
-            val previous = listOf(first, second, case)
-            fun read(offset: Int): Battery {
-                val component = data[offset].toInt()
+            if (!isBatteryData(data)) return
+            for (offset in 7 until data.size step 5) {
+                val component = data[offset].toInt() and 0xff
+                val previous = when (component) {
+                    BatteryComponent.LEFT -> if (first.component == component) first else second
+                    BatteryComponent.RIGHT -> if (second.component == component) second else first
+                    BatteryComponent.CASE -> case
+                    else -> continue
+                }
                 val level = data[offset + 2].toInt() and 0xff
                 val status = data[offset + 3].toInt() and 0xff
-                if (level !in 0..100 || status !in setOf(BatteryStatus.CHARGING, BatteryStatus.NOT_CHARGING,
-                        BatteryStatus.OPTIMIZED_CHARGING)) {
-                    return previous.first { it.component == component }.copy(live = false, status = BatteryStatus.DISCONNECTED)
+                val next = if (level == 255 || status == BatteryStatus.DISCONNECTED) {
+                    previous.copy(live = false, status = BatteryStatus.DISCONNECTED)
+                } else {
+                    Battery(component, level, if (status == BatteryStatus.CHARGING ||
+                        status == BatteryStatus.OPTIMIZED_CHARGING) status else BatteryStatus.NOT_CHARGING)
                 }
-                return Battery(component, level, status)
+                when (component) {
+                    BatteryComponent.LEFT -> first = next
+                    BatteryComponent.RIGHT -> second = next
+                    BatteryComponent.CASE -> case = next
+                }
             }
-            first = read(7)
-            second = read(12)
-            case = read(17)
         }
 
         fun getBattery(): List<Battery> {

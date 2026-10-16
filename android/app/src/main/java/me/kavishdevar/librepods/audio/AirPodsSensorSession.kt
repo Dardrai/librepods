@@ -3,6 +3,7 @@ package me.kavishdevar.librepods.audio
 
 import android.bluetooth.BluetoothSocket
 import android.os.SystemClock
+import android.util.Log
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -32,6 +33,8 @@ class AirPodsSensorSession(private val aacp: AACPManager) : AutoCloseable {
         val running = AtomicBoolean(true)
         val heart = AtomicBoolean(false)
         val motion = AtomicBoolean(false)
+        val headTracking = AtomicBoolean(false)
+        val heartSample = AtomicBoolean(false)
         val suspended = AtomicBoolean(suspended)
         val mapping = AtomicReference(RtBuddySensors.Batch(false, 0, null, null, null, null))
         @Volatile var lastHeartMs = 0L
@@ -44,6 +47,8 @@ class AirPodsSensorSession(private val aacp: AACPManager) : AutoCloseable {
     @Volatile private var session: Session? = null
     private var closed = false
     private var suspended = false
+    @Volatile var onHeadTrackingMotion: ((RtBuddySensors.Motion) -> Unit)? = null
+    val isHeadTrackingEnabled: Boolean get() = session?.headTracking?.get() == true
     private val callback: (ByteArray) -> Unit = ::receive
 
     init { aacp.rtBuddyPacketCallback = callback }
@@ -60,7 +65,7 @@ class AirPodsSensorSession(private val aacp: AACPManager) : AutoCloseable {
             current.parser.setLegacyMotionService(legacy)
             current.legacyMotionService = legacy
             if (!supportsHeartRate) current.heart.set(false)
-            if (!supportsMotion) current.motion.set(false)
+            if (!supportsMotion) { current.motion.set(false); current.headTracking.set(false) }
             mutableState.update { it.copy(supportsHeartRate = supportsHeartRate, supportsMotion = supportsMotion,
                 heartRateEnabled = it.heartRateEnabled && supportsHeartRate, motionEnabled = it.motionEnabled && supportsMotion,
                 heartRate = it.heartRate.takeIf { supportsHeartRate },
@@ -98,6 +103,14 @@ class AirPodsSensorSession(private val aacp: AACPManager) : AutoCloseable {
     }
 
     @Synchronized
+    fun setHeadTrackingEnabled(enabled: Boolean): Boolean {
+        val active = session?.takeIf { !closed && it.running.get() && it.socket === BluetoothConnectionManager.aacpSocket } ?: return false
+        if (enabled && !state.value.supportsMotion) return false
+        active.headTracking.set(enabled)
+        return true
+    }
+
+    @Synchronized
     fun setSuspended(suspended: Boolean) {
         this.suspended = suspended
         session?.suspended?.set(suspended)
@@ -127,15 +140,20 @@ class AirPodsSensorSession(private val aacp: AACPManager) : AutoCloseable {
         val now = SystemClock.elapsedRealtime()
         if (active.heart.get() && batch.heartRate != null) {
             active.lastHeartMs = now
+            active.heartSample.set(true)
             mutableState.update { current ->
                 if (session !== active || !active.heart.get() || active.suspended.get()) current else current.copy(heartRate = batch.heartRate.bpm,
                     heartRateConfidence = batch.heartRate.confidence, heartRateTimestampMs = System.currentTimeMillis(),
                     heartRateError = null)
             }
         }
-        if (active.motion.get() && batch.motion != null) {
+        if ((active.motion.get() || active.headTracking.get()) && batch.motion != null) {
             active.lastMotionMs = now
-            mutableState.update { current -> if (session !== active || !active.motion.get() || active.suspended.get()) current else current.copy(motion = batch.motion, motionError = null) }
+            if (active.motion.get()) mutableState.update { current ->
+                if (session !== active || !active.motion.get() || active.suspended.get()) current else current.copy(motion = batch.motion, motionError = null)
+            }
+            if (active.headTracking.get()) try { onHeadTrackingMotion?.invoke(batch.motion) }
+            catch (error: Exception) { Log.w("AirPodsSensors", "Head movement consumer failed", error) }
         }
     }
 
@@ -149,7 +167,7 @@ class AirPodsSensorSession(private val aacp: AACPManager) : AutoCloseable {
         fun current() = active.running.get() && session === active && active.socket === BluetoothConnectionManager.aacpSocket
         fun mapped(expected: RtBuddySensors.Batch?) = expected?.sameMapping(active.mapping.get()) == true
         fun heartWanted() = current() && active.heart.get() && !active.suspended.get()
-        fun motionWanted() = current() && active.motion.get() && !active.suspended.get()
+        fun motionWanted() = current() && (active.motion.get() || active.headTracking.get()) && !active.suspended.get()
         fun send(packet: ByteArray, expected: RtBuddySensors.Batch? = null,
             allowed: () -> Boolean = { true }): Boolean = synchronized(this@AirPodsSensorSession) {
             if (session !== active || active.socket !== BluetoothConnectionManager.aacpSocket ||
@@ -162,19 +180,17 @@ class AirPodsSensorSession(private val aacp: AACPManager) : AutoCloseable {
             return send(RtBuddySensors.streamCommand(sequence, service, period, report, heart), expected, allowed)
         }
         fun heartStop() {
-            val owner = heartMapping ?: return
-            if (!mapped(owner)) return
-            val a = command(84, 0, heart = true, expected = owner)
-            val b = command(19, 0, heart = true, expected = owner)
-            val c = send(byteArrayOf(4, 0, 4, 0, 9, 0, 0x30, 2, 0, 0, 0), owner)
-            if (!(a && b && c) && mapped(owner)) mutableState.update { current ->
+            val a = command(84, 0, heart = true)
+            val b = command(19, 0, heart = true)
+            val c = send(byteArrayOf(4, 0, 4, 0, 9, 0, 0x30, 2, 0, 0, 0))
+            if (!(a && b && c) && current()) mutableState.update { current ->
                 if (session !== active) current else current.copy(heartRateError = "Could not stop the heart-rate sensor. Reconnect your AirPods.")
             }
         }
-        fun pause(ms: Long, owner: RtBuddySensors.Batch): Boolean {
+        fun pause(ms: Long): Boolean {
             val end = SystemClock.elapsedRealtime() + ms
-            while (heartWanted() && mapped(owner) && SystemClock.elapsedRealtime() < end) Thread.sleep(20)
-            return heartWanted() && mapped(owner)
+            while (heartWanted() && SystemClock.elapsedRealtime() < end) Thread.sleep(20)
+            return heartWanted()
         }
         var heartLive = false
         var heartAttempt = 0
@@ -196,14 +212,17 @@ class AirPodsSensorSession(private val aacp: AACPManager) : AutoCloseable {
             motionLive = null
         }
         try {
+            send(RtBuddySensors.descriptorRequest(++sequence))
             while (current()) {
                 val now = SystemClock.elapsedRealtime()
                 val mapping = active.mapping.get()
                 if (heartMapping != null && !mapped(heartMapping)) {
-                    heartLive = false
-                    heartMapping = null
-                    heartAttempt = 0
-                    active.lastHeartMs = 0
+                    heartMapping = mapping
+                    // HR setup announces its own descriptors; only refresh an already live stream.
+                    if (active.heartSample.getAndSet(false)) {
+                        heartLive = false
+                        heartAttempt = 0
+                    }
                 }
                 if (motionMapping != null && !mapped(motionMapping)) {
                     // The old address can now belong to a different sensor; never write its Stop.
@@ -231,18 +250,20 @@ class AirPodsSensorSession(private val aacp: AACPManager) : AutoCloseable {
                     heartMapping = mapping
                     heartLive = true
                     heartAttempt++
+                    active.heartSample.set(false)
                     active.lastHeartMs = 0
                     var ok = true
                     for ((packet, delay) in HEART_INIT) {
-                        if (!send(packet, mapping, ::heartWanted) || !pause(delay, mapping)) { ok = false; break }
+                        if (!send(packet, allowed = ::heartWanted) || !pause(delay)) { ok = false; break }
                     }
-                    if (ok) ok = send(byteArrayOf(4, 0, 4, 0, 9, 0, 0x30, 1, 0, 0, 0), mapping, ::heartWanted) && pause(120, mapping)
-                    if (ok) ok = command(84, 1_000_000, heart = true, expected = mapping, allowed = ::heartWanted) &&
-                        pause(120, mapping) && command(19, 1_000_000, heart = true, expected = mapping, allowed = ::heartWanted)
-                    if (!ok && heartWanted() && mapped(mapping)) {
+                    if (ok) ok = send(byteArrayOf(4, 0, 4, 0, 9, 0, 0x30, 1, 0, 0, 0), allowed = ::heartWanted) && pause(120)
+                    if (ok) ok = command(84, 1_000_000, heart = true, allowed = ::heartWanted) &&
+                        pause(120) && command(19, 1_000_000, heart = true, allowed = ::heartWanted)
+                    if (!ok && heartWanted()) {
                         active.heart.set(false)
                         update { it.copy(heartRateEnabled = false, heartRateError = "Could not start the heart-rate sensor.") }
                     }
+                    heartMapping = active.mapping.get()
                     heartDeadline = SystemClock.elapsedRealtime() + 12_000
                 }
                 if (wantHeart && heartLive && now >= heartDeadline &&
@@ -272,6 +293,7 @@ class AirPodsSensorSession(private val aacp: AACPManager) : AutoCloseable {
                 }
                 if (motionTimeout.expired(wantMotion, now, active.lastMotionMs)) {
                     active.motion.set(false)
+                    active.headTracking.set(false)
                     update { it.copy(motionEnabled = false, motion = null,
                         motionError = "No movement reports. Please try again.") }
                 }
@@ -280,6 +302,7 @@ class AirPodsSensorSession(private val aacp: AACPManager) : AutoCloseable {
         } catch (_: Exception) {
             active.heart.set(false)
             active.motion.set(false)
+            active.headTracking.set(false)
             mutableState.update { current -> if (session !== active) current else current.copy(
                 heartRateEnabled = false, motionEnabled = false, heartRate = null, heartRateConfidence = null,
                 heartRateTimestampMs = null, motion = null, heartRateError = "Sensor session stopped.", motionError = "Sensor session stopped.") }

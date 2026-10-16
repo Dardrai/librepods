@@ -129,6 +129,8 @@ class RtBuddySensorsTest {
     }
 
     @Test fun streamCommandsMatchCapturedHeartAndMotionWireLayouts() {
+        assertArrayEquals(byteArrayOf(4, 0, 4, 0, 0x17, 0, 0, 0, 0x10, 0, 5, 0, 8, 0x98.toByte(), 1, 0x22, 0),
+            RtBuddySensors.descriptorRequest(152))
         val heart = RtBuddySensors.streamCommand(1, 84, 1_000_000, heartRate = true)
         assertArrayEquals(byteArrayOf(4, 0, 4, 0, 0x17, 0, 0, 0, 0x10, 0, 17, 0, 8, 1, 16, 2,
             0x42, 11, 8, 84, 16, 2, 0x1a, 5, 1, 0x40, 0x42, 0x0f, 0), heart)

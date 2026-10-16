@@ -6,6 +6,22 @@ import org.junit.Test
 class ConversationVolumeTest {
     private val owner = Any()
 
+    @Test fun microphoneCaptureRejectsSpeechDuckingUntilCaptureEnds() {
+        val volume = ConversationVolume()
+        for (stage in 1..3) {
+            assertFalse(volume.begin(12, 20, 25, false, stage, owner, captureActive = true))
+            assertNull(volume.owner)
+            assertNull(volume.step(12, owner))
+        }
+        assertTrue(volume.begin(12, 20, 25, false, 1, owner))
+        assertEquals(11, volume.step(12, owner))
+        // Starting capture restores an existing duck only while it still owns the last write.
+        assertEquals(12, volume.cancel(11, owner))
+        assertFalse(volume.begin(12, 20, 25, false, 1, owner, captureActive = true))
+        assertFalse(volume.end(12, owner))
+        assertTrue(volume.begin(12, 20, 25, false, 1, owner, captureActive = false))
+    }
+
     @Test fun quietAudioIsNeverRaisedWhileSpeaking() {
         val volume = ConversationVolume()
         volume.begin(1, 20, 25, false, 1, owner)

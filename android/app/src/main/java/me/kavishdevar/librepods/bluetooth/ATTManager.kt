@@ -20,6 +20,8 @@ package me.kavishdevar.librepods.bluetooth
 
 import android.bluetooth.BluetoothSocket
 import android.util.Log
+import me.kavishdevar.librepods.data.hearingAidSettingsWritable
+import me.kavishdevar.librepods.data.parseTransparencySettingsResponse
 import java.util.concurrent.ConcurrentHashMap
 
 private const val TAG = "ATTManager"
@@ -124,7 +126,12 @@ class ATTManagerv2 {
     fun writeCharacteristic(handle: ATTHandles, data: ByteArray, timeoutMillis: Long = 2000,
         expectedSession: Session? = currentSession(), canSend: () -> Boolean = { true }): Boolean {
         val active = expectedSession?.takeIf { currentSession() === it } ?: return false
-        if (!writeCharacteristic(handle.value.toByte(), data, timeoutMillis, active, canSend)) return false
+        if (when (handle) {
+            ATTHandles.HEARING_AID -> !hearingAidSettingsWritable(data)
+            ATTHandles.TRANSPARENCY -> parseTransparencySettingsResponse(data) == null
+            ATTHandles.LOUD_SOUND_REDUCTION -> data.size != 1 || data[0].toInt() !in 0..1
+        }) return false
+        if (!active.bearer.writeVerifiedSetting(handle, data, timeoutMillis, canSend)) return false
         if (currentSession() !== active) return false
         active.characteristics[handle] = data.copyOf()
         return true

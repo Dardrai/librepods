@@ -22,6 +22,17 @@ internal class ATTBearer(
     private var pending: Pending? = null
     val isCurrent: Boolean get() = !retired.get() && isTransportCurrent()
 
+    fun command(pdu: ByteArray, canSend: () -> Boolean = { true }): Boolean = transaction.withLock {
+        if (!isCurrent || !canSend()) return false
+        try {
+            send(pdu)
+            isCurrent
+        } catch (_: Exception) {
+            retire()
+            false
+        }
+    }
+
     fun request(pdu: ByteArray, responseOpcode: Byte, timeoutMillis: Long,
         canSend: () -> Boolean = { true }): ByteArray? = transaction.withLock {
         if (!isCurrent || !canSend()) return null

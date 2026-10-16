@@ -291,7 +291,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
             device: BLEManager.AirPodsStatus, previousStatus: BLEManager.AirPodsStatus?
         ) {
             val now = SystemClock.elapsedRealtime()
-            if (device.paired && device.connectionState == "Disconnected" &&
+            if (device.paired && device.mayReconnect && device.connectionState == "Disconnected" &&
                 !(device.isLeftCharging && device.isRightCharging) && config.takeoverWhenDisconnected &&
                 sharedPreferences.getBoolean("automatic_connection_ctrl_cmd", true) &&
                 BluetoothConnectionManager.aacpSocket?.isConnected != true &&
@@ -389,6 +389,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         aacpManager = AACPManager()
         initializeAACPManagerCallback()
         experimentalAudio = ExperimentalAudioController(this, aacpManager, ::recoverNativePlayback) { active ->
+            MediaController.setMicrophoneCaptureActive(active)
             nearbyPairing?.setBlocked(active || destroying)
             if (!destroying && microphoneForeground != active) {
                 microphoneForeground = active
@@ -1052,14 +1053,6 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                         packageName
                     )
                 )
-            }
-
-            @SuppressLint("NewApi")
-            override fun onHeadTrackingReceived(headTracking: ByteArray) {
-                if (isHeadTrackingActive) {
-                    HeadTracking.processPacket(headTracking)
-                    processHeadTrackingData(headTracking)
-                }
             }
 
             override fun onProximityKeysReceived(proximityKeys: ByteArray) {
@@ -2265,17 +2258,6 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         }
     }
 
-    @RequiresApi(Build.VERSION_CODES.R)
-    fun processHeadTrackingData(data: ByteArray) {
-        val horizontal = ByteBuffer.wrap(data, 51, 2).order(ByteOrder.LITTLE_ENDIAN).short.toInt()
-        val vertical = ByteBuffer.wrap(data, 53, 2).order(ByteOrder.LITTLE_ENDIAN).short.toInt()
-        try {
-            gestureDetector?.processHeadOrientation(horizontal, vertical)
-        } catch (e: Exception) {
-            Log.w(TAG, "gesture detector on ${data.toHexString()}: ${e.message}")
-        }
-    }
-
     private lateinit var connectionReceiver: BroadcastReceiver
 
     private fun resToUri(resId: Int): Uri? {
@@ -3353,12 +3335,16 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         super.onDestroy()
     }
 
-    var isHeadTrackingActive = false
+    val isHeadTrackingActive: Boolean
+        get() = ::experimentalAudio.isInitialized && experimentalAudio.sensors.isHeadTrackingEnabled
 
     fun startHeadTracking() {
-        isHeadTrackingActive = true
-        val useAlternatePackets =
-            sharedPreferences.getBoolean("use_alternate_head_tracking_packets", true)
+        updateSensorCapabilities()
+        if (!experimentalAudio.sensors.setHeadTrackingEnabled(true)) return
+        experimentalAudio.sensors.onHeadTrackingMotion = { motion ->
+            HeadTracking.processMotion(motion)
+            gestureDetector?.processHeadOrientation(motion.horizontal, motion.vertical)
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && aacpManager.getControlCommandStatus(
                 AACPManager.Companion.ControlCommandIdentifiers.OWNS_CONNECTION
             )?.value?.get(0)?.toInt() != 1
@@ -3368,23 +3354,11 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         } else {
             Log.w(TAG, "Will not be taking over for head tracking, might not work.")
         }
-        if (useAlternatePackets) {
-            aacpManager.sendDataPacket(aacpManager.createAlternateStartHeadTrackingPacket())
-        } else {
-            aacpManager.sendStartHeadTracking()
-        }
         HeadTracking.reset()
     }
 
     fun stopHeadTracking() {
-        val useAlternatePackets =
-            sharedPreferences.getBoolean("use_alternate_head_tracking_packets", true)
-        if (useAlternatePackets) {
-            aacpManager.sendDataPacket(aacpManager.createAlternateStopHeadTrackingPacket())
-        } else {
-            aacpManager.sendStopHeadTracking()
-        }
-        isHeadTrackingActive = false
+        experimentalAudio.sensors.setHeadTrackingEnabled(false)
         gestureDetector?.stopDetection()
     }
 

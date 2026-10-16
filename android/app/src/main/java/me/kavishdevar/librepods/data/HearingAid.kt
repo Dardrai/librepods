@@ -83,6 +83,8 @@ data class HearingAidSettings(
 
 fun parseHearingAidSettingsResponse(data: ByteArray): HearingAidSettings? {
     if (data.size < 104) return null
+    if (data[2].toInt() !in setOf(0, 0x64) &&
+        !data.copyOfRange(0, 4).contentEquals(byteArrayOf(2, 0, 0x60, 0))) return null
     val buffer = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN)
     if ((4 until 104 step 4).any { !buffer.getFloat(it).isFinite() }) return null
 
@@ -133,18 +135,19 @@ fun parseHearingAidSettingsResponse(data: ByteArray): HearingAidSettings? {
     )
 }
 
+fun hearingAidSettingsWritable(data: ByteArray): Boolean =
+    data.size == 104 && data[2].toInt() in setOf(0, 0x64) && parseHearingAidSettingsResponse(data) != null
+
 fun sendHearingAidSettings(
     currentData: ByteArray,
     hearingAidSettings: HearingAidSettings,
     sender: (ATTHandles, ByteArray) -> Unit
 ) {
+    if (!hearingAidSettingsWritable(currentData)) return
     val original = parseHearingAidSettingsResponse(currentData) ?: return
     if (hearingAidSettings.leftEQ.size != 8 || hearingAidSettings.rightEQ.size != 8
     ) return
     val buffer = ByteBuffer.wrap(currentData.copyOf()).order(ByteOrder.LITTLE_ENDIAN)
-
-    // Writes use the 0x64 header while reports use 0x60.
-    buffer.put(2, 0x64)
 
     // Left EQ
     for (i in 0..7) {

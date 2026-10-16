@@ -8,6 +8,10 @@ import java.lang.reflect.Proxy
 
 class AACPReceptionTest {
     private fun header(opcode: Byte) = byteArrayOf(4, 0, 4, 0, opcode, 0)
+    private fun information(fields: List<String> = listOf("My AirPods", "A3063", "Apple", "EXAMPLE",
+        "90.3431.6807", "", "1", "updater", "LEFT", "RIGHT", "9A348")): ByteArray =
+        header(Opcodes.INFORMATION) + byteArrayOf(2, 0, 0, 4, 0) +
+            fields.fold(byteArrayOf()) { bytes, field -> bytes + field.toByteArray() + byteArrayOf(0) }
     private fun devices(count: Int = 1) = header(Opcodes.CONNECTED_DEVICES) +
         byteArrayOf(0, 0, count.toByte()) + byteArrayOf(1, 2, 3, 4, 5, 6, 1, 2)
 
@@ -63,14 +67,59 @@ class AACPReceptionTest {
 
     @Test fun validMetadataStillParsesAfterBoundaryValidation() {
         val manager = AACPManager()
-        val information = header(Opcodes.INFORMATION) + byteArrayOf(1, 0) +
-            "reserved\u0000My AirPods\u0000A3063\u0000Apple\u0000".toByteArray()
-        assertEquals("My AirPods", manager.parseInformationPacket(information).name)
-        assertEquals("A3063", manager.parseInformationPacket(information).modelNumber)
+        assertEquals("My AirPods", manager.parseInformationPacket(information()).name)
+        assertEquals("A3063", manager.parseInformationPacket(information()).modelNumber)
         val source = manager.parseAudioSourceResponse(header(Opcodes.AUDIO_SOURCE) +
             byteArrayOf(1, 2, 3, 4, 5, 6, 2))
         assertEquals("06:05:04:03:02:01", source.first)
         assertEquals(AACPManager.Companion.AudioSourceType.MEDIA, source.second)
+    }
+
+    @Test fun metadataKeepsEmptyPositionalFieldsAndRejectsIncompleteOrInvalidUtf8() {
+        val manager = AACPManager()
+        val fields = listOf("Écouteurs", "A3063", "Apple", "EXAMPLE", "90.3431.6807", "",
+            "1", "updater", "LEFT", "RIGHT", "9A348")
+        val packet = information(fields)
+        val parsed = manager.parseInformationPacket(packet + byteArrayOf(0x12, 0x34))
+        assertEquals("Écouteurs", parsed.name)
+        assertEquals("", parsed.version2)
+        assertEquals("1", parsed.hardwareRevision)
+        assertEquals("LEFT", parsed.leftSerialNumber)
+        assertEquals("RIGHT", parsed.rightSerialNumber)
+        assertEquals("9A348", parsed.version3)
+        for (length in 0 until packet.size) assertThrows(IllegalArgumentException::class.java) {
+            manager.parseInformationPacket(packet.copyOf(length))
+        }
+        for (offset in listOf(0, 5)) assertThrows(IllegalArgumentException::class.java) {
+            manager.parseInformationPacket(packet.copyOf().also { it[offset] = 1 })
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            manager.parseInformationPacket(packet.copyOf().also { it[11] = 0xff.toByte() })
+        }
+        val empties = manager.parseInformationPacket(information(fields.mapIndexed { index, value ->
+            if (index in setOf(0, 5, 8, 10)) "" else value
+        }))
+        assertEquals("", empties.name)
+        assertEquals("A3063", empties.modelNumber)
+        assertEquals("RIGHT", empties.rightSerialNumber)
+        assertEquals("", empties.version3)
+    }
+
+    @Test fun unsupportedOpcodeHighBytesDoNotReachOrdinaryConsumers() {
+        val manager = AACPManager()
+        val callbacks = mutableListOf<String>()
+        manager.setPacketCallback(Proxy.newProxyInstance(
+            AACPManager.PacketCallback::class.java.classLoader,
+            arrayOf(AACPManager.PacketCallback::class.java)
+        ) { _, method, _ -> callbacks.add(method.name); null } as AACPManager.PacketCallback)
+        for (packet in listOf(devices(), information(), header(Opcodes.BATTERY_INFO) + byteArrayOf(0),
+            header(Opcodes.EAR_DETECTION) + byteArrayOf(0, 1))) {
+            manager.receivePacket(packet.copyOf().also { it[5] = 1 })
+        }
+        assertTrue(callbacks.isEmpty())
+        assertTrue(manager.connectedDevices.isEmpty())
+        manager.receivePacket(information())
+        assertEquals(listOf("onDeviceInformationReceived"), callbacks)
     }
 
     @Test fun truncatedEarAndConversationReportsNeverReachFixedOffsetConsumers() {

@@ -61,6 +61,7 @@ import me.kavishdevar.librepods.R
 import me.kavishdevar.librepods.bluetooth.ATTHandles
 import me.kavishdevar.librepods.data.parseHearingAidSettingsResponse
 import me.kavishdevar.librepods.data.sendHearingAidSettings
+import me.kavishdevar.librepods.data.hearingAidSettingsWritable
 import me.kavishdevar.librepods.presentation.theme.DesignSystem
 import me.kavishdevar.librepods.presentation.theme.LibrePodsTheme
 import me.kavishdevar.librepods.presentation.theme.LocalDesignSystem
@@ -116,10 +117,15 @@ fun UpdateHearingTestScreen(
             textAlign = TextAlign.Center,
         )
         val data = state.requestedATT[ATTHandles.HEARING_AID] ?: state.hearingAidData
+        val writable = hearingAidSettingsWritable(data)
+        if (!writable) {
+            Text(stringResource(R.string.hearing_settings_read_only), style = MaterialTheme.typography.bodySmall)
+        }
         val settings = remember(state.deviceAddress, data) {
             mutableStateOf(parseHearingAidSettingsResponse(data))
         }
         fun updateBand(index: Int, value: String, left: Boolean) {
+            if (!writable) return
             val parsed = value.toFloatOrNull()?.takeIf { it.isFinite() } ?: return
             val current = settings.value ?: return
             val updated = if (left) {
@@ -169,6 +175,7 @@ fun UpdateHearingTestScreen(
                 )
                 OutlinedTextField(
                     value = settings.value?.leftEQ?.get(index)?.toString().orEmpty(),
+                    readOnly = !writable,
                     onValueChange = { updateBand(index, it, left = true) },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                     textStyle = TextStyle(
@@ -179,6 +186,7 @@ fun UpdateHearingTestScreen(
                 )
                 OutlinedTextField(
                     value = settings.value?.rightEQ?.get(index)?.toString().orEmpty(),
+                    readOnly = !writable,
                     onValueChange = { updateBand(index, it, left = false) },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                     textStyle = TextStyle(

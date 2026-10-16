@@ -276,8 +276,8 @@ class RtBuddySensors(private var legacyMotionService: Int? = null) {
             }
         } catch (_: IllegalArgumentException) { null } catch (_: IllegalStateException) { null }
 
-        fun streamCommand(sequence: Int, service: Int, periodUs: Int, report: Int = 1, heartRate: Boolean = false): ByteArray {
-            require(sequence in 0..16383 && service in 1..127 && periodUs >= 0 && report in 1..4)
+        private fun sequenceField(sequence: Int): MutableList<Byte> {
+            require(sequence in 0..16383)
             var seq = sequence
             val payload = mutableListOf<Byte>(8)
             do {
@@ -285,6 +285,17 @@ class RtBuddySensors(private var legacyMotionService: Int? = null) {
                 seq = seq ushr 7
                 payload += (byte or if (seq != 0) 0x80 else 0).toByte()
             } while (seq != 0)
+            return payload
+        }
+
+        fun descriptorRequest(sequence: Int): ByteArray {
+            val payload = sequenceField(sequence).apply { add(0x22); add(0) }
+            return PREFIX + byteArrayOf(payload.size.toByte(), 0) + payload.toByteArray()
+        }
+
+        fun streamCommand(sequence: Int, service: Int, periodUs: Int, report: Int = 1, heartRate: Boolean = false): ByteArray {
+            require(service in 1..127 && periodUs >= 0 && report in 1..4)
+            val payload = sequenceField(sequence)
             if (heartRate) payload += listOf(0x10, 2).map(Int::toByte)
             payload += listOf(0x42, 11, 8, service, 0x10, 2, 0x1a, 5, report).map(Int::toByte)
             repeat(4) { payload += (periodUs ushr (8 * it)).toByte() }

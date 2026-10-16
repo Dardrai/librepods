@@ -62,6 +62,7 @@ import me.kavishdevar.librepods.data.BatteryStatus
 import me.kavishdevar.librepods.data.Capability
 import me.kavishdevar.librepods.data.ControlCommandRepository
 import me.kavishdevar.librepods.data.CustomEq
+import me.kavishdevar.librepods.data.hearingAidSettingsWritable
 import me.kavishdevar.librepods.data.StemAction
 import me.kavishdevar.librepods.data.XposedRemotePrefProvider
 import me.kavishdevar.librepods.services.AirPodsService
@@ -502,6 +503,12 @@ class AirPodsViewModel(
         identifier: ControlCommandIdentifiers, value: ByteArray
     ): Boolean {
         if (value.isEmpty() || value.size > 4) return false
+        if (!isDemoMode && ((identifier == ControlCommandIdentifiers.HEARING_AID && value.getOrNull(1) == 1.toByte()) ||
+                (identifier == ControlCommandIdentifiers.HEARING_ASSIST_CONFIG && value[0] == 1.toByte())) &&
+            !hearingAidSettingsWritable(_uiState.value.hearingAidData)) {
+            showControlError(R.string.hearing_settings_read_only)
+            return false
+        }
         if (identifier == ControlCommandIdentifiers.AUTO_ANC_STRENGTH &&
             (value.size != 1 || (value[0].toInt() and 255) !in 0..100)) return false
         if (identifier == ControlCommandIdentifiers.ALLOW_OFF_OPTION &&
@@ -885,9 +892,12 @@ class AirPodsViewModel(
             try {
                 delay(100)
                 if (!ownsRequest()) return@launch
-                if (manager.writeCharacteristic(handle, request, expectedSession = active,
-                        canSend = { isActive && ownsRequest() }) && isActive && ownsRequest())
-                    updateATTValue(handle, request, active, address)
+                val confirmed = manager.writeCharacteristic(handle, request, expectedSession = active,
+                    canSend = { isActive && ownsRequest() })
+                if (isActive && currentControlSocket() === control && _uiState.value.deviceAddress == address) {
+                    if (confirmed && ownsRequest()) updateATTValue(handle, request, active, address)
+                    else showControlError(R.string.att_setting_not_confirmed)
+                }
             } finally {
                 _uiState.update { state ->
                     if (state.requestedATT[handle] !== request) state else state.copy(requestedATT = state.requestedATT - handle)
