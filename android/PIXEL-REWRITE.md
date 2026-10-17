@@ -20,7 +20,7 @@ pair, local behavior choices and correctly owner-bound BLE keys once. Existing
 rewrite database rows are preserved. Unconfirmed device control values are not
 migrated as device reports. The Android Bluetooth bond stays with Android.
 
-The current fork version is `2.0.0-alpha.1-pixel27`, code `200000112`.
+The current fork version is `2.0.0-alpha.1-pixel28`, code `200000113`.
 
 ## Pairing and island latency
 
@@ -28,8 +28,10 @@ The current fork version is `2.0.0-alpha.1-pixel27`, code `200000112`.
   While the screen is on, the service temporarily uses low-latency scanning;
   screen-off scanning uses the configured mode. The preference is not changed.
 - Public lid reports display a model invitation without waiting for Classic
-  discovery, an audio connection or AACP initialization. Discovery starts only
-  after Connect. A sole matching Classic candidate can proceed after two stable
+  discovery, an audio connection or AACP initialization. The first card explains
+  the model's double-tap or setup-button gesture until the light flashes white,
+  then says to tap Connect. Discovery starts only after Connect. A sole matching
+  Classic candidate can proceed after two stable
   seconds, without waiting for the full inquiry and another fixed delay. Name
   updates are accepted only for Classic addresses found in that scan; multiple
   matching addresses prevent automatic selection.
@@ -40,8 +42,9 @@ The current fork version is `2.0.0-alpha.1-pixel27`, code `200000112`.
   already bonding, and adopts only the sole stable selected address instead of
   starting another bond. A protected consent request received during discovery
   can be revisited once that address is selected, for at most fifteen seconds from
-  receipt, provided the exact bond remains active. Before selection it neither
-  confirms nor holds the request. Removing the bond, changing the variant,
+  receipt, provided the exact bond remains active. Before selection it never
+  confirms; the separate consent worker can defer the native prompt for at most
+  seven seconds while discovery continues. Removing the bond, changing the variant,
   retrying or closing retires
   the hint. PIN/passkey prompts retain Android's normal confirmation flow.
 - With already-authorized Shizuku, Connect warms the shell bridge without
@@ -173,6 +176,22 @@ connection-owned. Pro 3's saved Allow Off choice is a separate presentation
 fallback, and is not presented as a device report.
 
 ## Validation
+
+Pixel28 moves the existing model-specific pairing-mode instructions onto the
+initial card, followed by “Then tap Connect.” Pairing, discovery, consent guards,
+layout and animation behavior are unchanged. Existing rendering fixtures use the
+longer real message for normal, narrow large-text and landscape checks.
+On 2026-10-17, `verifyPixel` passed all 233 tests in 43 suites with no failures,
+errors or skips; lint reported 0 errors, 289 warnings and 1 hint; debug and
+minified FOSS release builds passed. Native rendering checks and batched visual
+inspection confirmed the longer instructions fit, with Connect reachable at
+normal size, narrow large text and scrolled landscape large text. Review caught
+and repaired a missing local context in a rendering fixture; the obsolete first
+snapshot was stopped and the corrected full build passed. Pixel28 was signed
+with the existing fork certificate and installed in place. Android confirmed
+version `2.0.0-alpha.1-pixel28`, code `200000113`, with Shizuku permission retained.
+Fresh pairing was not repeated for this copy change; no bond, audio route or
+call setting was changed.
 
 Pixel27 defers compatible incoming consent in a separate, non-exported app
 process during an explicit pairing attempt. Android serializes broadcasts per

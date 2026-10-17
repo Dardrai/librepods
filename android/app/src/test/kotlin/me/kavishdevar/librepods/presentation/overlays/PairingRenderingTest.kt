@@ -59,7 +59,8 @@ class PairingRenderingTest {
                 for (stage in PopupWindow.Stage.entries) {
                     val busy = stage == PopupWindow.Stage.SETUP || stage == PopupWindow.Stage.CONNECTING
                     val message = when (stage) {
-                        PopupWindow.Stage.NEARBY -> context.getString(R.string.pairing_nearby_hint)
+                        PopupWindow.Stage.NEARBY -> context.getString(R.string.pairing_double_tap) + "\n\n" +
+                            context.getString(R.string.pairing_nearby_hint)
                         PopupWindow.Stage.SETUP -> context.getString(R.string.pairing_double_tap)
                         PopupWindow.Stage.CONNECTING -> context.getString(R.string.pairing_confirm_system)
                         PopupWindow.Stage.COMPLETE -> context.getString(R.string.pairing_complete)
@@ -297,12 +298,14 @@ class PairingRenderingTest {
 
     @Test fun theWholeCardMovesWithoutPayloadFadesOrReflow() {
         val profile = Profile("motion", 412, 900, 1f)
-        val popup = PopupWindow(context(profile))
+        val context = context(profile)
+        val popup = PopupWindow(context)
         try {
             popup.openPairing("AirPods Pro 3", 0x2720)
             assertEquals(420L, (field(popup, "animation") as ValueAnimator).duration)
             invoke(popup, "cancelAnimation")
-            popup.showPairingActions("AirPods are nearby.", listOf("Connect" to {}), stage = PopupWindow.Stage.NEARBY)
+            popup.showPairingActions(context.getString(R.string.pairing_double_tap) + "\n\n" +
+                context.getString(R.string.pairing_nearby_hint), listOf("Connect" to {}), stage = PopupWindow.Stage.NEARBY)
             layout(popup)
             val view = view(popup)
             val payloads = listOf(R.id.name, R.id.popup_artwork_container, R.id.pairing_message, R.id.pairing_actions)

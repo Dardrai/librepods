@@ -96,7 +96,7 @@ class NearbyPairingController(
             }.also {
                 it.openPairing(name, event.modelId, observedAtNanos)
                 Log.d(TAG, "Lid advertisement to pairing overlay: ${(SystemClock.elapsedRealtimeNanos() - observedAtNanos) / 1_000_000}ms")
-                it.showPairingActions(context.getString(R.string.pairing_nearby_hint), listOf(
+                it.showPairingActions(instructions(R.string.pairing_nearby_hint), listOf(
                     context.getString(R.string.pairing_connect) to { discover(token) }
                 ), stage = PopupWindow.Stage.NEARBY)
             }
