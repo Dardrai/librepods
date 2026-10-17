@@ -10,6 +10,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.provider.Settings
@@ -94,6 +95,55 @@ class NearbyPairingControllerTest {
         assertEquals(PopupWindow.Stage.CONNECTING, stage())
         advance(15_000)
         assertEquals("The old full-scan callback must not request another bond", 1, pairing(device).requests)
+    }
+
+    @Test fun anEarlySelectionTickRearmsForTheOriginalDeadlineInsteadOfWaitingForInquiryEnd() {
+        connect()
+        val candidate = device(1)
+        found(candidate)
+        val observedAt = field("firstCandidateAt") as Long
+        advanceTo(observedAt + 1_999)
+        val earlyTick = field("selection") as Runnable
+        (field("handler") as Handler).removeCallbacks(earlyTick)
+        earlyTick.run()
+        assertEquals(0, pairing(candidate).requests)
+        assertNotNull("An early tick must keep the sole candidate scheduled", field("selection"))
+        advanceTo(observedAt + 2_000)
+        assertEquals(1, pairing(candidate).requests)
+        assertEquals(observedAt + 2_000, pairing(candidate).bondAt)
+        assertEquals(BluetoothDevice.TRANSPORT_BREDR, pairing(candidate).transport)
+        assertFalse(pairing(candidate).discoveringAtBond)
+        advance(15_000)
+        assertEquals("Inquiry completion must not repeat a successful selection", 1, pairing(candidate).requests)
+    }
+
+    @Test fun ambiguityOrCancellationRetiresTheRearmedSelection() {
+        for (cancel in listOf(false, true)) {
+            controller.close()
+            controller = newController()
+            connect()
+            val candidate = device(1)
+            found(candidate)
+            val observedAt = field("firstCandidateAt") as Long
+            advanceTo(observedAt + 1_999)
+            val earlyTick = field("selection") as Runnable
+            (field("handler") as Handler).removeCallbacks(earlyTick)
+            earlyTick.run()
+            assertNotNull(field("selection"))
+            val other = device(2)
+            if (cancel) {
+                controller.cancelPending()
+                idle()
+            } else {
+                // Deliver the competing result before the one remaining millisecond elapses.
+                (field("receiver") as BroadcastReceiver).onReceive(context,
+                    discovery(other, BluetoothDevice.DEVICE_TYPE_CLASSIC))
+            }
+            assertNull("Retirement must remove the replacement timer", field("selection"))
+            advance(2_000)
+            assertEquals(0, pairing(candidate).requests)
+            assertEquals(0, pairing(other).requests)
+        }
     }
 
     @Test fun anotherCandidateBeforeTheSelectionDeadlinePreventsAutomaticPairing() {

@@ -20,7 +20,7 @@ pair, local behavior choices and correctly owner-bound BLE keys once. Existing
 rewrite database rows are preserved. Unconfirmed device control values are not
 migrated as device reports. The Android Bluetooth bond stays with Android.
 
-The current fork version is `2.0.0-alpha.1-pixel25`, code `200000110`.
+The current fork version is `2.0.0-alpha.1-pixel26`, code `200000111`.
 
 ## Pairing and island latency
 
@@ -33,6 +33,8 @@ The current fork version is `2.0.0-alpha.1-pixel25`, code `200000110`.
   seconds, without waiting for the full inquiry and another fixed delay. Name
   updates are accepted only for Classic addresses found in that scan; multiple
   matching addresses prevent automatic selection.
+  A selection timer that fires before its eligibility deadline re-arms for the
+  remaining interval; it cannot strand a valid candidate until inquiry finishes.
 - Incoming native pairing can begin before discovery selects the device.
   The same attempt receiver tracks that progress, admits fresh Classic results
   already bonding, and adopts only the sole stable selected address instead of
@@ -171,6 +173,24 @@ connection-owned. Pro 3's saved Allow Off choice is a separate presentation
 fallback, and is not presented as a device report.
 
 ## Validation
+
+Pixel26 repairs a one-shot selection callback that could drop a still-valid
+candidate when it ran just before the elapsed-time eligibility deadline.
+It rechecks and re-arms only for a positive remaining interval; ambiguity,
+cancellation, current-attempt lifetime and the two-second sole-candidate window
+remain enforced. Candidate-check timestamps distinguish timer delivery from
+later bond/discovery IPC. The earlier Pixel25 trace is consistent with a
+stranded selection, but did not record timer delivery and does not prove that
+specific attempt's cause.
+On 2026-10-17, `verifyPixel` passed with 222 tests in 42 suites, no failures,
+errors or skips, lint with 0 errors, 289 warnings and 1 hint, and successful
+debug and minified release builds. Two new regressions simulate a timer at
+1999 ms and verify one BR/EDR bond at 2000 ms without inquiry completion, plus
+ambiguity or cancellation retiring the replacement timer. Independent review
+found no remaining blockers. Pixel26 was signed with the existing certificate
+and installed in place; Android confirmed version `2.0.0-alpha.1-pixel26`,
+code `200000111`, and the retained Shizuku grant. Physical timing checks are
+pending. Layout and motion are unchanged; no microphone route or call started.
 
 Pixel25 suppresses automatic island announcements for the exact newly paired
 device's current case opening. Suppression is armed before asynchronous device

@@ -277,7 +277,15 @@ class NearbyPairingController(
         selection = Runnable {
             selection = null
             if (canContinue(token, attempt)) {
-                candidates.automatic(SystemClock.elapsedRealtime())?.let(devices::get)?.let(onSelect)
+                val now = SystemClock.elapsedRealtime()
+                val remaining = candidates.readyInMillis(now)
+                Log.i(TAG, "Connect to candidate check: ${now - requestedAt}ms remaining=$remaining")
+                if (remaining != null && remaining > 0) {
+                    Log.i(TAG, "Classic selection rearmed with ${remaining}ms remaining")
+                    scheduleSelection(token, attempt, devices, candidates, onSelect)
+                } else if (remaining == 0L) {
+                    candidates.automatic(now)?.let(devices::get)?.let(onSelect)
+                }
             }
         }.also { handler.postDelayed(it, remaining) }
     }
