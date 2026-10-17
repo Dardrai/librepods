@@ -201,8 +201,17 @@ The full third run passed after fixture repair, with production unchanged.
 Independent review found no remaining blockers. Pixel27 was signed with the
 existing certificate and installed in place; Android confirmed version
 `2.0.0-alpha.1-pixel27`, code `200000112`, and the retained Shizuku grant.
-Fresh-pairing prompt-flash validation is pending. No microphone or call route
-was started; normal Android audio mode was verified before installation.
+The user repeated fresh pairing twice and confirmed automatic completion
+without the Android prompt flashing in either attempt. Both traces captured
+the worker-held request before guarded confirmation; helper responses took
+41 ms and 30 ms after capture, with native bonding complete at 11270 ms and
+10616 ms after Connect. Discovery and physical pairing-mode entry vary, so
+these totals do not measure a fixed speedup. Both requests arrived after fresh
+selection; incoming-before-discovery is covered by the delayed-selection
+regression and still needs another physical sample. The bounded capture is
+stopped, the worker service is unbound, and the original empty logging property
+is retained. No microphone or call route was started; normal Android audio mode
+was verified before installation.
 
 Pixel26 repairs a one-shot selection callback that could drop a still-valid
 candidate when it ran just before the elapsed-time eligibility deadline.
