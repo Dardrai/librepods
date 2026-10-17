@@ -101,7 +101,7 @@ class NearbyPairingController(
         stopDiscovery()
         requestedAt = now
         firstCandidateAt = null
-        Log.d(TAG, "Connect requested")
+        Log.i(TAG, "Connect requested")
         if (confirmConsent == null) runCatching {
             (client ?: ShizukuAudioClient(context).also { client = it }).connect()
         }
@@ -132,7 +132,7 @@ class NearbyPairingController(
             val now = SystemClock.elapsedRealtime()
             if (candidates.observe(device.address, name, now) && firstCandidateAt == null) {
                 firstCandidateAt = now
-                Log.d(TAG, "Connect to first Classic candidate: ${now - requestedAt}ms")
+                Log.i(TAG, "Connect to first Classic candidate: ${now - requestedAt}ms")
             }
             showInstructions(token, if (candidates.ambiguous) R.string.pairing_multiple_cases else null)
             scheduleSelection(token, attempt, devices, candidates, ::select)
@@ -170,7 +170,10 @@ class NearbyPairingController(
                                     }
                                 }
                             } else if (intent.action == BluetoothDevice.ACTION_PAIRING_REQUEST) {
-                                val consent = intent.getIntExtra(BluetoothDevice.EXTRA_PAIRING_VARIANT, BluetoothDevice.ERROR) == 3
+                                val variant = intent.getIntExtra(BluetoothDevice.EXTRA_PAIRING_VARIANT, BluetoothDevice.ERROR)
+                                val consent = variant == 3
+                                val nativeState = if (consent) changed.bondState else null
+                                Log.i(TAG, "Pairing request: variant=$variant state=$nativeState selected=${selected?.device?.address == address} after=${SystemClock.elapsedRealtime() - requestedAt}ms")
                                 if (!consent) {
                                     hints[address]?.active = false
                                     if (hints.size < 16) hints.putIfAbsent(address, ConsentHint(SystemClock.elapsedRealtime(), false))
@@ -181,12 +184,12 @@ class NearbyPairingController(
                                         consentFallback = null
                                         finishConsent()
                                     }
-                                } else if (changed.bondState == BluetoothDevice.BOND_BONDING &&
+                                } else if (nativeState == BluetoothDevice.BOND_BONDING &&
                                     (hints.size < 16 || address in hints) &&
                                     (bondingSeen.size < 16 || address in bondingSeen)) {
                                     bondingSeen.add(address)
                                     if (hints.putIfAbsent(address, ConsentHint(SystemClock.elapsedRealtime())) == null) {
-                                        Log.d(TAG, "Captured incoming consent: ${SystemClock.elapsedRealtime() - requestedAt}ms")
+                                        Log.i(TAG, "Captured incoming consent: ${SystemClock.elapsedRealtime() - requestedAt}ms")
                                     }
                                 }
                             }
@@ -258,7 +261,7 @@ class NearbyPairingController(
         if (!canContinue(token, attempt)) return
         stopScan(keepReceiver = receiver)
         candidates.finish()
-        Log.d(TAG, "Classic discovery finished with ${devices.size} fresh Classic devices")
+        Log.i(TAG, "Classic discovery finished with ${devices.size} fresh Classic devices")
         if (candidates.readyInMillis(SystemClock.elapsedRealtime()) != null) {
             scheduleSelection(token, attempt, devices, candidates, onSelect)
         } else {
@@ -307,15 +310,16 @@ class NearbyPairingController(
             val hint = hints[device.address]?.takeIf {
                 bondState == BluetoothDevice.BOND_BONDING && currentState == BluetoothDevice.BOND_BONDING
             }
+            Log.i(TAG, "Selected bond: initial=$bondState current=$currentState consentAge=${hint?.let { SystemClock.elapsedRealtime() - it.receivedAt }} consentActive=${hint?.active}")
             if (currentState == BluetoothDevice.BOND_NONE) {
-                Log.d(TAG, "Connect to createBond: ${SystemClock.elapsedRealtime() - requestedAt}ms")
+                Log.i(TAG, "Connect to createBond: ${SystemClock.elapsedRealtime() - requestedAt}ms")
                 val started = if (Build.VERSION.SDK_INT >= 37) device.createBond(BluetoothDevice.TRANSPORT_BREDR)
                     else device.createBond()
                 if (!started && device.bondState != BluetoothDevice.BOND_BONDING) {
                     scheduleScan(token, attempt, R.string.pairing_bond_failed)
                     return
                 }
-            } else Log.d(TAG, "Adopted incoming bond: ${SystemClock.elapsedRealtime() - requestedAt}ms")
+            } else Log.i(TAG, "Adopted incoming bond: ${SystemClock.elapsedRealtime() - requestedAt}ms")
             showInstructions(token, R.string.pairing_confirm_system)
             when (device.bondState) {
                 BluetoothDevice.BOND_BONDED -> if (selected.bondingObserved) completeBond(token, attempt, device)
@@ -348,7 +352,7 @@ class NearbyPairingController(
         when (intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.ERROR)) {
             BluetoothDevice.BOND_BONDING -> {
                 selected.bondingObserved = true
-                Log.d(TAG, "Connect to BONDING: ${SystemClock.elapsedRealtime() - requestedAt}ms")
+                Log.i(TAG, "Connect to BONDING: ${SystemClock.elapsedRealtime() - requestedAt}ms")
             }
             BluetoothDevice.BOND_BONDED -> if (selected.bondingObserved && device.bondState == BluetoothDevice.BOND_BONDED) {
                 completeBond(token, attempt, device)
@@ -382,7 +386,7 @@ class NearbyPairingController(
                 if (stillCurrent()) {
                     confirmed = confirmConsent?.invoke(device.address, stillCurrent)
                         ?: client?.confirmPairing(device.address, stillCurrent) ?: false
-                    Log.d(TAG, "Consent confirmation available: $confirmed after ${SystemClock.elapsedRealtime() - requestedAt}ms")
+                    Log.i(TAG, "Consent confirmation available: $confirmed after ${SystemClock.elapsedRealtime() - requestedAt}ms")
                 }
             } catch (error: Exception) {
                 if (error is CancellationException) throw error
@@ -414,7 +418,7 @@ class NearbyPairingController(
     }
 
     private fun completeBond(token: Long, attempt: Long, device: BluetoothDevice) {
-        Log.d(TAG, "Connect to BONDED: ${SystemClock.elapsedRealtime() - requestedAt}ms")
+        Log.i(TAG, "Connect to BONDED: ${SystemClock.elapsedRealtime() - requestedAt}ms")
         finishConsent(accepted = true)
         stopDiscovery()
         pairedAddress = device.address

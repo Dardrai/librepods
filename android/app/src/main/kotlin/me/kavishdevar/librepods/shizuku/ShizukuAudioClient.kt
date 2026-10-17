@@ -351,8 +351,17 @@ class ShizukuAudioClient(context: Context) : Closeable {
 
     /** Optional consent assistance: never waits for binding, asks permission or starts an audio route. */
     suspend fun confirmPairing(address: String, stillCurrent: () -> Boolean): Boolean {
-        val remote = bridge ?: return false
-        if (!pairingAllowed(remote) || !runCatching(stillCurrent).getOrDefault(false)) return false
+        val remote = bridge
+        if (remote == null) {
+            android.util.Log.i("NearbyPairing", "Consent bridge unavailable: connected=false")
+            return false
+        }
+        val allowed = pairingAllowed(remote)
+        val ownerCurrent = if (allowed) runCatching(stillCurrent).getOrDefault(false) else null
+        if (ownerCurrent != true) {
+            android.util.Log.i("NearbyPairing", "Consent bridge declined: allowed=$allowed owner=$ownerCurrent")
+            return false
+        }
         val selected = runCatching { A2dpRecoveryGuard(address).address }.getOrNull() ?: return false
         return try {
             withTimeoutOrNull(1_200) {
@@ -371,7 +380,10 @@ class ShizukuAudioClient(context: Context) : Closeable {
                         val result = try {
                             if (!request.active.get() || !pairingAllowed(remote)) false
                             else request.remote.confirmPairing(request.address, request.owner)
-                        } catch (_: Exception) { false }
+                        } catch (error: Exception) {
+                            android.util.Log.i("NearbyPairing", "Consent bridge failed: ${error.javaClass.simpleName}")
+                            false
+                        }
                         finally {
                             request.active.set(false)
                             synchronized(lock) { if (pairingRequest === request) pairingRequest = null }

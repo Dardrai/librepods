@@ -731,6 +731,55 @@ class NearbyPairingControllerTest {
         awaitMainCondition { calls.get() == 1 }
     }
 
+    @Test fun twoPreselectionNativeCyclesKeepTheLatestConsentThroughoutOneContinuousInquiry() {
+        val native = nativeFallback()
+        for (bondingBroadcastFirst in listOf(true, false)) {
+            controller.close()
+            val entered = CountDownLatch(1)
+            val calls = AtomicInteger()
+            controller = NearbyPairingController(context, confirmConsent = { _, current ->
+                assertTrue(current())
+                calls.incrementAndGet()
+                entered.countDown()
+                true
+            })
+            connect()
+            val selected = device(1)
+            advance(3_624)
+            pairing(selected).setBondState(BluetoothDevice.BOND_BONDING)
+            bondChanged(selected, BluetoothDevice.BOND_BONDING)
+            advance(106)
+            pairing(selected).setBondState(BluetoothDevice.BOND_NONE)
+            bondChanged(selected, BluetoothDevice.BOND_NONE)
+            assertTrue("An unselected failed native cycle must not stop inquiry", adapter.isDiscovering)
+            advance(1_808)
+            pairing(selected).setBondState(BluetoothDevice.BOND_BONDING)
+            if (bondingBroadcastFirst) bondChanged(selected, BluetoothDevice.BOND_BONDING)
+            val beforeNative = native.get()
+            orderedPairingRequest(selected, 3)
+            if (!bondingBroadcastFirst) bondChanged(selected, BluetoothDevice.BOND_BONDING)
+            assertEquals("Unselected consent remains available to Android", beforeNative + 1, native.get())
+            assertNull(field("pendingConsent"))
+            assertNull(field("consentJob"))
+            advance(14)
+            found(selected)
+            val foundAt = field("firstCandidateAt") as Long
+            advanceTo(foundAt + 1_900)
+            assertTrue(adapter.isDiscovering)
+            assertEquals(0, calls.get())
+            assertEquals(0, pairing(selected).requests)
+            advanceTo(foundAt + 2_000)
+            assertTrue("The second cycle's consent must survive either broadcast ordering", entered.await(2, TimeUnit.SECONDS))
+            assertEquals(1, calls.get())
+            assertEquals("The native bond must be adopted without createBond", 0, pairing(selected).requests)
+            assertFalse(adapter.isDiscovering)
+            assertEquals(PopupWindow.Stage.CONNECTING, stage())
+            pairing(selected).setBondState(BluetoothDevice.BOND_BONDED)
+            bondChanged(selected, BluetoothDevice.BOND_BONDED)
+            assertEquals(PopupWindow.Stage.COMPLETE, stage())
+        }
+    }
+
     private fun connect() {
         controller.onNearbyDevice(NearbyAirPods.Event(0x2720, true))
         idle()

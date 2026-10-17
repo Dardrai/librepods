@@ -20,7 +20,7 @@ pair, local behavior choices and correctly owner-bound BLE keys once. Existing
 rewrite database rows are preserved. Unconfirmed device control values are not
 migrated as device reports. The Android Bluetooth bond stays with Android.
 
-The current fork version is `2.0.0-alpha.1-pixel22`, code `200000107`.
+The current fork version is `2.0.0-alpha.1-pixel23`, code `200000108`.
 
 ## Pairing and island latency
 
@@ -166,6 +166,20 @@ fallback, and is not presented as a device report.
 
 ## Validation
 
+Pixel23 adds release-visible, identity-free pairing diagnostics for request
+variant and native state, selected consent age, helper availability and guard
+rejection. No names, addresses, keys or pairing codes are recorded. Pairing
+consent policy and timing bounds are unchanged. A new regression models the
+observed two incoming native cycles during one uninterrupted Classic inquiry,
+with both orderings of the second bonding broadcast and protected consent.
+On 2026-10-17, `verifyPixel` passed with 216 tests in 42 suites, no failures,
+errors or skips, lint with 0 errors, 289 warnings and 1 hint, and successful
+debug and minified release builds. Pixel23 was signed with the existing
+certificate and installed in place. Android confirmed version
+`2.0.0-alpha.1-pixel23`, code `200000108`, and the retained Shizuku grant.
+The physical diagnostic repeat is pending; intermittent automatic pairing is
+still unresolved. No experimental microphone route or call was started.
+
 On 2026-10-17, Pixel22's `verifyPixel` passed with 215 tests in 42 suites,
 no failures, errors or skips, lint with 0 errors, 289 warnings and 1 hint,
 and successful debug and minified release builds. Six new controller regressions
@@ -177,7 +191,11 @@ animations are unchanged; existing rendering and input tests still pass.
 
 Pixel22 was signed with the existing certificate and installed in place.
 Android confirmed version `2.0.0-alpha.1-pixel22`, code `200000107`, and the
-retained Shizuku grant. The physical repeat is pending. Android's earlier
+retained Shizuku grant. In the physical repeat, the user reported that the first
+pair completed automatically, but the second required Android's Pair button.
+Native history showed the second request arriving during uninterrupted inquiry,
+about two seconds before candidate selection, so the scan-retry listener gap
+does not explain that attempt. Android's earlier
 history showed one local bond completing in 895 ms, while an incoming pairing
 request waited 3423 ms for the user's manual confirmation. These are native bond
 timings, not measurements from tapping Connect. No experimental microphone
