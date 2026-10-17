@@ -188,7 +188,11 @@ window supplies lifecycle, saved-state and view-model owners for real queued
 main-thread traversal. Independent review found no remaining blockers.
 Pixel25 was signed with the existing certificate and installed in place;
 Android confirmed version `2.0.0-alpha.1-pixel25`, code `200000110`, and the
-retained Shizuku grant. Physical pairing and island checks are pending.
+retained Shizuku grant. On 2026-10-17, the user confirmed two fresh pairings
+complete automatically without Android's Pair button. They also confirmed
+the success card appears alone, and after Continue plus a case close/open the
+island returns on that next opening. The bounded timing capture was stopped;
+the system logging preference remains at its original setting.
 No experimental microphone route or call was started.
 
 Pixel24 retains an exact active incoming consent for fifteen seconds from its
@@ -203,8 +207,9 @@ errors or skips, lint with 0 errors, 289 warnings and 1 hint, and successful
 debug and minified release builds. Independent review found no remaining
 blockers. Pixel24 was signed with the existing certificate and installed in
 place; Android confirmed version `2.0.0-alpha.1-pixel24`, code `200000109`,
-and the retained Shizuku grant. The physical repeat is pending. Layout and
-motion are unchanged; no experimental microphone route or call was started.
+and the retained Shizuku grant. Subsequent physical checks are recorded under
+Pixel25. Layout and motion are unchanged; no experimental microphone route or
+call was started.
 
 Pixel23 adds release-visible, identity-free pairing diagnostics for request
 variant and native state, selected consent age, helper availability and guard
