@@ -266,6 +266,7 @@ class LibrePodsService: Service() {
         registerBluetoothReceivers()
 
         nearbyPairing = NearbyPairingController(this, onInteractionChanged = { pairingModel = it }) { paired ->
+            islandWindow.suppressPairingOpening(paired.address, SystemClock.elapsedRealtimeNanos())
             serviceScope.launch(Dispatchers.IO) {
                 val device = createDevice(paired) as? AppleDevice
                 if (device != null) withContext(Dispatchers.Main.immediate) {
@@ -360,6 +361,7 @@ class LibrePodsService: Service() {
         devices.value.values.forEach { it.disconnect() }
         nearbyPairing?.close()
         islandWindow.close()
+        islandWindow.clearPairingOpening()
         runCatching { getSystemService(TelephonyManager::class.java).unregisterTelephonyCallback(telephonyCallback) }
         serviceScope.cancel()
         bleHandler.removeCallbacksAndMessages(null)
@@ -607,6 +609,7 @@ class LibrePodsService: Service() {
                         nearbyVisits.clear()
                         recentProximityReports.clear()
                         pairedLids.clear()
+                        islandWindow.clearPairingOpening()
                     }
                     return
                 }
@@ -621,6 +624,7 @@ class LibrePodsService: Service() {
                         pairedObservations.remove(address)
                         recentProximityReports.clear()
                         pairedLids.remove(address)
+                        islandWindow.clearPairingOpening(address.value)
                     }
                 }
             }
@@ -717,6 +721,7 @@ class LibrePodsService: Service() {
         device.receiveNearbyBattery(report.batteries)
         islandWindow.updatePairedBattery(device, report.model)
         report.lidOpen?.let { open ->
+            islandWindow.observePairedCaseLid(device.macAddress.value, open, observed)
             val previous = pairedLids.put(device.macAddress, open)
             if (open && previous != true && device.settings.value.showIslandPopup) {
                 islandWindow.showPairedLid(device, report.model, observed)

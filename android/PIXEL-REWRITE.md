@@ -20,7 +20,7 @@ pair, local behavior choices and correctly owner-bound BLE keys once. Existing
 rewrite database rows are preserved. Unconfirmed device control values are not
 migrated as device reports. The Android Bluetooth bond stays with Android.
 
-The current fork version is `2.0.0-alpha.1-pixel24`, code `200000109`.
+The current fork version is `2.0.0-alpha.1-pixel25`, code `200000110`.
 
 ## Pairing and island latency
 
@@ -70,6 +70,12 @@ The current fork version is `2.0.0-alpha.1-pixel24`, code `200000109`.
   stale components do not become live percentages. Different bud levels remain
   separate. Recognizing the new owned BLE identity does not synthesize a close
   for the active card.
+- Successful pairing suppresses that pair's automatic island announcements for
+  the current case opening, including queued connection updates. Continuing or
+  dismissing the success card keeps that suppression. A newer verified lid-close
+  report re-enables the next opening. Listening-mode notices and other pairs
+  remain available; replayed batteries and model-only invitations cannot reset
+  the suppression.
 - Owned battery/lid reports require a current bond and valid per-device keys.
   Public advertisements cannot establish a Classic identity or overwrite an
   owned device's batteries.
@@ -165,6 +171,25 @@ connection-owned. Pro 3's saved Allow Off choice is a separate presentation
 fallback, and is not presented as a device report.
 
 ## Validation
+
+Pixel25 suppresses automatic island announcements for the exact newly paired
+device's current case opening. Suppression is armed before asynchronous device
+setup and checked on the main thread after queued shows arrive. A newer owned,
+decoded close releases it; battery replay, stale or foreign close reports and
+ordinary UI dismissal do not. Explicit listening-mode notices remain available.
+Unpairing, Bluetooth-off and service teardown retire the matching suppression.
+No layout or animation geometry changes are included.
+On 2026-10-17, `verifyPixel` passed with 220 tests in 42 suites, no failures,
+errors or skips, lint with 0 errors, 289 warnings and 1 hint, and successful
+debug and minified release builds. Two new window regressions cover queued
+announcements, exact-owner dismissal, stale/equal/foreign closes, the next
+opening, ordinary dismissal, explicit notices and cleanup. Their synthetic
+window supplies lifecycle, saved-state and view-model owners for real queued
+main-thread traversal. Independent review found no remaining blockers.
+Pixel25 was signed with the existing certificate and installed in place;
+Android confirmed version `2.0.0-alpha.1-pixel25`, code `200000110`, and the
+retained Shizuku grant. Physical pairing and island checks are pending.
+No experimental microphone route or call was started.
 
 Pixel24 retains an exact active incoming consent for fifteen seconds from its
 original receipt, allowing the observed 5667 ms discovery/selection path to

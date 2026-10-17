@@ -9,9 +9,21 @@ import android.graphics.Insets
 import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.graphics.RectF
+import android.os.Looper
 import android.view.ContextThemeWrapper
 import android.view.WindowManager
 import androidx.compose.ui.platform.ComposeView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.LifecycleRegistry
+import androidx.lifecycle.ViewModelStore
+import androidx.lifecycle.ViewModelStoreOwner
+import androidx.lifecycle.setViewTreeLifecycleOwner
+import androidx.lifecycle.setViewTreeViewModelStoreOwner
+import androidx.savedstate.SavedStateRegistry
+import androidx.savedstate.SavedStateRegistryController
+import androidx.savedstate.SavedStateRegistryOwner
+import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import me.kavishdevar.librepods.core.devices.AirPodsModel
 import me.kavishdevar.librepods.core.devices.AppleDevice
 import me.kavishdevar.librepods.core.devices.AppleMetadata
@@ -211,6 +223,101 @@ class IslandStateTest {
         } finally {
             window.close()
             finish.invoke(window, view, generation.invoke(window) as Long, IslandState.CLOSE)
+        }
+    }
+
+    @Test fun pairingOpeningSuppressesQueuedAnnouncementsUntilANewerOwnedCaseClose() = withPairedWindow { window, paired, other ->
+        val address = paired.macAddress.value
+        val queued = Thread { window.show(owner = paired, keepOpen = true) }
+        queued.start()
+        queued.join()
+        assertEquals(IslandState.CLOSE, window.islandState)
+        window.suppressPairingOpening(address, 1_000L)
+        shadowOf(Looper.getMainLooper()).idle()
+        assertFalse("An announcement queued before pairing completion must also be suppressed", window.isVisible)
+
+        window.close() // Closing a card/island must not end the physical case opening.
+        for ((owner, open, observed) in listOf(
+            Triple(address, true, 1_001L),
+            Triple(address, false, 999L),
+            Triple(address, false, 1_000L),
+            Triple(other.macAddress.value, false, 1_001L)
+        )) {
+            window.observePairedCaseLid(owner, open, observed)
+            window.showPairedLid(paired)
+            window.updatePairedBattery(paired)
+            assertEquals(IslandState.CLOSE, window.islandState)
+        }
+        window.observePairedCaseLid(address, false, 1_001L)
+        window.observePairedCaseLid(address, true, 1_002L)
+        window.showPairedLid(paired)
+        assertTrue("The next actual case opening is eligible again", window.isVisible)
+
+        window.suppressPairingOpening(address, 2_000L)
+        window.clearPairingOpening(other.macAddress.value)
+        window.show(owner = paired, keepOpen = true)
+        assertFalse(window.isVisible)
+        window.clearPairingOpening(address)
+        window.show(owner = paired, keepOpen = true)
+        assertTrue("Unpairing retires only that pair's suppression", window.isVisible)
+        window.suppressPairingOpening(address, 3_000L)
+        window.clearPairingOpening()
+        window.show(owner = paired, keepOpen = true)
+        assertTrue("Adapter/service retirement clears the in-memory policy", window.isVisible)
+    }
+
+    @Test fun pairingOpeningClosesOnlyItsAutomaticIslandAndKeepsModeForeignAndPreviewNotices() = withPairedWindow { window, paired, other ->
+        window.show(owner = paired, keepOpen = true)
+        assertTrue(window.isVisible)
+        window.suppressPairingOpening(paired.macAddress.value, 1_000L)
+        assertEquals("The pairing card replaces an already-visible automatic island", IslandState.CLOSE, window.islandState)
+
+        window.show(owner = paired, statusText = "Transparency", keepOpen = true)
+        assertTrue(window.isVisible)
+        window.suppressPairingOpening(paired.macAddress.value, 1_001L)
+        assertTrue("An explicit listening-mode notice stays visible", window.isVisible)
+        window.show(owner = other, keepOpen = true)
+        window.suppressPairingOpening(paired.macAddress.value, 1_002L)
+        assertTrue("Another pair remains eligible", window.isVisible)
+        window.show(owner = paired, type = IslandType.TAKING_OVER, keepOpen = true)
+        assertTrue("An intentional takeover notice is not a battery announcement", window.isVisible)
+        window.show(keepOpen = true)
+        assertTrue("Customization previews have no paired owner", window.isVisible)
+    }
+
+    private fun withPairedWindow(block: (IslandWindow, AppleDevice, AppleDevice) -> Unit) {
+        val context = RuntimeEnvironment.getApplication()
+        shadowOf(context).grantPermissions(Manifest.permission.BLUETOOTH_CONNECT)
+        val adapter = context.getSystemService(BluetoothManager::class.java).adapter
+        shadowOf(adapter).setState(BluetoothAdapter.STATE_ON)
+        val paired = AppleDevice(context, adapter, adapter.getRemoteDevice("00:11:22:33:44:55"), ConnectionState.DISCONNECTED)
+        val other = AppleDevice(context, adapter, adapter.getRemoteDevice("00:11:22:33:44:66"), ConnectionState.DISCONNECTED)
+        val window = IslandWindow(context, AppSettingsEntity())
+        val owner = object : LifecycleOwner, SavedStateRegistryOwner, ViewModelStoreOwner {
+            val registry = LifecycleRegistry(this)
+            val savedState = SavedStateRegistryController.create(this)
+            override val lifecycle: Lifecycle get() = registry
+            override val savedStateRegistry: SavedStateRegistry get() = savedState.savedStateRegistry
+            override val viewModelStore = ViewModelStore()
+        }
+        owner.savedState.performRestore(null)
+        owner.registry.currentState = Lifecycle.State.RESUMED
+        val view = ComposeView(context).apply {
+            setViewTreeLifecycleOwner(owner)
+            setViewTreeSavedStateRegistryOwner(owner)
+            setViewTreeViewModelStoreOwner(owner)
+        }
+        context.getSystemService(WindowManager::class.java).addView(view, WindowManager.LayoutParams(800, 600,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            PixelFormat.TRANSPARENT))
+        IslandWindow::class.java.getDeclaredField("composeView").apply { isAccessible = true }.set(window, view)
+        try { block(window, paired, other) } finally {
+            window.close()
+            IslandWindow::class.java.getDeclaredMethod("cleanupAndRemoveView", ComposeView::class.java)
+                .apply { isAccessible = true }.invoke(window, view)
+            view.disposeComposition()
+            owner.registry.currentState = Lifecycle.State.DESTROYED
+            owner.viewModelStore.clear()
         }
     }
 

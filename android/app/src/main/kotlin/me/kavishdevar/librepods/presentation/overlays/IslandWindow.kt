@@ -100,6 +100,7 @@ class IslandWindow(
     private var otherDeviceName by mutableStateOf(null as String?)
     private var statusText by mutableStateOf(null as String?)
     private var ownerAddress: String? = null
+    private val pairingOpenings = mutableMapOf<String, Long>()
     private var model by mutableStateOf(AirPodsModel.UNKNOWN)
     private var batteries by mutableStateOf(emptySet<Battery>())
     private var nearby by mutableStateOf(false)
@@ -202,6 +203,32 @@ class IslandWindow(
         batteryNow = System.currentTimeMillis()
     }
 
+    fun suppressPairingOpening(address: String, observedAtNanos: Long) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            Handler(Looper.getMainLooper()).post { suppressPairingOpening(address, observedAtNanos) }
+            return
+        }
+        pairingOpenings[address] = maxOf(pairingOpenings[address] ?: Long.MIN_VALUE, observedAtNanos)
+        if (ownerAddress == address && type == IslandType.CONNECTED && statusText == null) close()
+    }
+
+    fun observePairedCaseLid(address: String, open: Boolean, observedAtNanos: Long) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            Handler(Looper.getMainLooper()).post { observePairedCaseLid(address, open, observedAtNanos) }
+            return
+        }
+        // Only a newer authenticated case close ends the opening covered by the pairing card.
+        if (!open && observedAtNanos > (pairingOpenings[address] ?: return)) pairingOpenings.remove(address)
+    }
+
+    fun clearPairingOpening(address: String? = null) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            Handler(Looper.getMainLooper()).post { clearPairingOpening(address) }
+            return
+        }
+        if (address == null) pairingOpenings.clear() else pairingOpenings.remove(address)
+    }
+
     fun showPairedLid(device: AppleDevice, model: AirPodsModel = device.metadata.value.model,
                       observedAtNanos: Long = SystemClock.elapsedRealtimeNanos()) {
         val state = device.state.value
@@ -293,6 +320,9 @@ class IslandWindow(
             }
             return
         }
+
+        if (owner != null && type == IslandType.CONNECTED && statusText == null &&
+            pairingOpenings.containsKey(owner.macAddress.value)) return
 
         Log.d("IslandWindow", "Showing island window: accessibility = $usingAccessibilityService")
 
