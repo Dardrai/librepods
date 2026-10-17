@@ -189,8 +189,16 @@ debug and minified release builds. Two new regressions simulate a timer at
 ambiguity or cancellation retiring the replacement timer. Independent review
 found no remaining blockers. Pixel26 was signed with the existing certificate
 and installed in place; Android confirmed version `2.0.0-alpha.1-pixel26`,
-code `200000111`, and the retained Shizuku grant. Physical timing checks are
-pending. Layout and motion are unchanged; no microphone route or call started.
+code `200000111`, and the retained Shizuku grant. The user reported fast pairing;
+Android's prompt appeared but required no tap and dismissed automatically.
+The captured attempt selected exactly 2000 ms after its first fresh Classic
+candidate, adopted the incoming bond in 5 ms, and completed at 10153 ms after
+Connect. Its first candidate arrived at 6817 ms; this includes time before the
+phone found the case and does not isolate entry into physical pairing mode.
+No early re-arm or full-scan stall occurred in that attempt, so it does not prove
+the old trace's cause or a fixed speedup across radio conditions. Bounded captures
+are stopped and the original system logging setting is retained. Layout and
+motion are unchanged; no microphone route or call started.
 
 Pixel25 suppresses automatic island announcements for the exact newly paired
 device's current case opening. Suppression is armed before asynchronous device
