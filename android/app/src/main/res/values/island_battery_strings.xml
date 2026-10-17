@@ -12,4 +12,11 @@
     <string name="island_battery_last_seen">Last seen %1$s</string>
     <string name="island_battery_current">Current</string>
     <string name="island_battery_cached">Cached</string>
+    <string name="island_connect">Connect</string>
+    <string name="island_connect_retry">Retry</string>
+    <string name="island_connecting">Connecting…</string>
+    <string name="island_connect_failed">Couldn’t connect</string>
+    <string name="island_connect_device">Connect to %1$s</string>
+    <string name="island_connecting_device">Connecting to %1$s</string>
+    <string name="island_show_connection_controls">Show connection controls for %1$s</string>
 </resources>

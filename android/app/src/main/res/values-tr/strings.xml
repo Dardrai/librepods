@@ -34,7 +34,6 @@
     <string name="airpods_not_connected">AirPods bağlı değil</string>
     <string name="airpods_not_connected_description">Ayarlara erişmek için lütfen AirPods\'unuzu bağlayın.</string>
     <string name="back">Geri</string>
-    <string name="customizations">Özelleştirmeler</string>
     <string name="relative_conversation_awareness_volume">Göreceli ses</string>
     <string name="relative_conversation_awareness_volume_description">Maksimum ses yerine mevcut sesin yüzdesine göre azaltır.</string>
     <string name="conversation_awareness_pause_music">Müziği Duraklat</string>

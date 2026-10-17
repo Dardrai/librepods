@@ -25,7 +25,7 @@ data class ConnectedDevicesPacket(
             val payload = packet.copyOfRange(6, packet.size)
 
             val deviceCount = payload[2].toInt() and 255
-            require(payload.size >= 3 + deviceCount * 8) { "Truncated connected-host report" }
+            require(payload.size == 3 + deviceCount * 8) { "Invalid connected-host report length" }
             val devices = mutableListOf<ConnectedDevice>()
 
             var offset = 3

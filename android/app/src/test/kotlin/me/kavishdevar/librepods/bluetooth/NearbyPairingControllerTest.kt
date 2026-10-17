@@ -226,6 +226,34 @@ class NearbyPairingControllerTest {
         assertEquals(1, pairing(current).requests)
     }
 
+    @Test fun rejectedDifferentModelCanBeOfferedAfterTheCurrentCardClosesWithoutAnotherLidCycle() {
+        controller.close()
+        val visits = NearbyAirPods.Visits()
+        controller = NearbyPairingController(context, confirmConsent = { _, _ -> false },
+            onInvitationRejected = visits::retry)
+        fun observe(model: Int) {
+            val observed = SystemClock.elapsedRealtimeNanos()
+            visits.observe(NearbyAirPods.Event(model, true), observed / 1_000_000, false)?.let {
+                controller.onNearbyDevice(it, observed)
+            }
+            idle()
+        }
+        observe(0x2720)
+        val first = field("popup")
+        advance(1_000)
+        observe(0x1920)
+        assertSame("A second invitation must not replace the active card", first, field("popup"))
+        advance(1_000)
+        observe(0x1920)
+        controller.cancelPending()
+        idle()
+        observe(0x1920)
+        assertNotNull(field("popup"))
+        assertNotSame(first, field("popup"))
+        assertEquals("AirPods 4", popupView().findViewById<TextView>(R.id.name).text.toString())
+        assertEquals(PopupWindow.Stage.NEARBY, stage())
+    }
+
     @Test fun globalDeadlineAndForeignDiscoveryOwnershipSurviveTheFastPath() {
         adapter.startDiscovery()
         connect()

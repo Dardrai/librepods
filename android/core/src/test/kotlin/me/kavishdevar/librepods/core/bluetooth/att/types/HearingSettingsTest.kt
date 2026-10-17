@@ -195,16 +195,16 @@ class HearingSettingsTest {
     }
 
     @Test fun capturedHearingHeaderIsReadableButCannotBeChangedIntoAnEditableFormat() {
-        val data = report(true).also {
-            byteArrayOf(2, 0, 0x60, 0).copyInto(it)
+        for (enrollment in byteArrayOf(0, 2)) {
+            val data = report(true).also { byteArrayOf(2, enrollment, 0x60, 0).copyInto(it) }
+            val original = data.copyOf()
+            val settings = parseHearingAidSettingsResponse(data)!!
+            assertFalse(hearingAidSettingsWritable(data))
+            var writes = 0
+            sendHearingAidSettings(data, settings.copy(leftTone = 0.2f)) { _, _ -> writes++ }
+            assertEquals(0, writes)
+            assertArrayEquals(original, data)
         }
-        val original = data.copyOf()
-        val settings = parseHearingAidSettingsResponse(data)!!
-        assertFalse(hearingAidSettingsWritable(data))
-        var writes = 0
-        sendHearingAidSettings(data, settings.copy(leftTone = 0.2f)) { _, _ -> writes++ }
-        assertEquals(0, writes)
-        assertArrayEquals(original, data)
     }
 
     @Test fun supportedHearingHeadersArePreservedAndUnknownFormatsNeverWrite() {

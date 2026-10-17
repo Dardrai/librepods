@@ -1,5 +1,7 @@
 package me.kavishdevar.librepods.presentation.screens.apple
 
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import android.content.Intent
 import android.text.format.DateFormat
 import androidx.compose.animation.AnimatedContent
@@ -20,8 +22,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.toMutableStateList
@@ -37,12 +40,15 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import me.kavishdevar.librepods.BuildConfig
 import me.kavishdevar.librepods.R
+import me.kavishdevar.librepods.audio.ExperimentalAudioController
+import me.kavishdevar.librepods.audio.MicrophonePhase
 import me.kavishdevar.librepods.core.data.recording.Recording
 import me.kavishdevar.librepods.presentation.components.primitives.StyledButton
 import me.kavishdevar.librepods.presentation.components.primitives.StyledList
 import me.kavishdevar.librepods.presentation.components.primitives.styledListItem
 import me.kavishdevar.librepods.presentation.components.primitives.StyledListItemOrientation
 import me.kavishdevar.librepods.presentation.components.primitives.StyledScaffold
+import me.kavishdevar.librepods.presentation.components.apple.rememberMicrophonePermission
 import me.kavishdevar.librepods.presentation.viewmodel.AppleUiState
 import me.kavishdevar.librepods.presentation.viewmodel.AppleViewModel
 import java.time.Instant
@@ -62,6 +68,7 @@ fun RecordingScreenRoute(
         recordings = viewModel.recordings(),
         startRecording = viewModel::startRecording,
         stopRecording = viewModel::stopRecording,
+        audioController = viewModel.audioController,
     )
 }
 
@@ -72,6 +79,7 @@ fun RecordingScreen(
     recordings: List<Recording>,
     startRecording: () -> Unit,
     stopRecording: () -> Unit,
+    audioController: ExperimentalAudioController? = null,
 ) {
     val state = uiState.state
 
@@ -244,22 +252,57 @@ fun RecordingScreen(
                 }
             }
 
-            StyledButton(
-                modifier = Modifier.fillMaxWidth(),
-                onClick = if (state.recordingState.isRecording) {
-                    stopRecording
-                } else {
-                    startRecording
-                }
-            ) {
-                Text(
-                    text = if (state.recordingState.isRecording) {
-                        "Stop Recording"
-                    } else "Start Recording",
-                    style = MaterialTheme.typography.labelMedium
-                )
-            }
+            RecorderControls(audioController, state.recordingState.isRecording, startRecording, stopRecording)
             Spacer(modifier = Modifier.height(bottomPadding))
         }
+    }
+}
+
+@Composable
+private fun RecorderControls(
+    controller: ExperimentalAudioController?,
+    recording: Boolean,
+    startRecording: () -> Unit,
+    stopRecording: () -> Unit,
+) {
+    if (controller == null) {
+        Text(stringResource(R.string.recorder_connect_airpods), style = MaterialTheme.typography.bodySmall)
+        return
+    }
+    val bridge by controller.bridge.state.collectAsState()
+    val microphone by controller.microphone.state.collectAsState()
+    val message by controller.message.collectAsState()
+    var permissionError by remember(controller) { mutableStateOf("") }
+    val permissionMessage = stringResource(R.string.experimental_audio_permission)
+    val permission = rememberMicrophonePermission(controller) { permissionError = permissionMessage }
+    val busy = controller.isOpening || microphone.phase !in listOf(MicrophonePhase.IDLE, MicrophonePhase.ERROR) ||
+        bridge.session !in listOf("stopped", "failed")
+    if (!bridge.connected) {
+        StyledList {
+            styledListItem(contentText = stringResource(R.string.experimental_shizuku_connect),
+                enabled = !busy, onClick = { permissionError = ""; controller.bridge.requestPermission() })
+        }
+        Spacer(Modifier.height(8.dp))
+    }
+    val status = when {
+        !controller.isConnected -> stringResource(R.string.recorder_connect_airpods)
+        !controller.supportsMicrophone -> stringResource(R.string.recorder_microphone_unsupported)
+        !bridge.connected -> bridge.detail.ifBlank { bridge.availability }
+        else -> permissionError.ifBlank { message.ifBlank { microphone.message.ifBlank { bridge.detail.ifBlank { bridge.availability } } } }
+    }
+    if (status.isNotBlank()) {
+        Text(status, style = MaterialTheme.typography.bodySmall)
+        Spacer(Modifier.height(8.dp))
+    }
+    StyledButton(
+        modifier = Modifier.fillMaxWidth(),
+        enabled = recording || controller.isConnected && controller.supportsMicrophone && bridge.connected && !bridge.probing && !busy,
+        onClick = {
+            if (recording) stopRecording()
+            else { permissionError = ""; permission(startRecording) }
+        },
+    ) {
+        Text(stringResource(if (recording) R.string.recorder_stop else R.string.recorder_start),
+            style = MaterialTheme.typography.labelMedium)
     }
 }

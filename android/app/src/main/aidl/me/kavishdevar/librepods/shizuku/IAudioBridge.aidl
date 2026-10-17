@@ -14,5 +14,6 @@ interface IAudioBridge {
     boolean restoreNativePlayback(String address, IPlaybackRecoveryOwner owner) = 3;
     boolean isMicrophonePrivacyBlocked() = 4;
     boolean confirmPairing(String address, IPlaybackRecoveryOwner owner) = 5;
+    boolean connectNativePlayback(String address, IPlaybackRecoveryOwner owner) = 6;
     void destroy() = 16777114;
 }

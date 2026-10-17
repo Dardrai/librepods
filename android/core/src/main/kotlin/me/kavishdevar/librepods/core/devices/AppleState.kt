@@ -50,9 +50,7 @@ data class AppleState(
 
     val leftIsPrimary: Boolean = true,
 
-    val headphoneAccommodation: FloatArray = FloatArray(8),
-    val headphoneAccommodationEnabledForMedia: Boolean = false,
-    val headphoneAccommodationEnabledForPhone: Boolean = false,
+    val hearingModes: HearingModes = HearingModes(),
 
     val currentHeartRate: HeartRateSample? = null,
     val hrmState: BuddyState = BuddyState.INACTIVE,

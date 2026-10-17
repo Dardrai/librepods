@@ -42,11 +42,6 @@ fun AppInfoCard(
         )
 
         styledListItem(
-            contentText = stringResource(R.string.flavor),
-            supportingText = BuildConfig.FLAVOR,
-        )
-
-        styledListItem(
             contentText = stringResource(R.string.build_type),
             supportingText = BuildConfig.BUILD_TYPE,
         )

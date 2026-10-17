@@ -22,6 +22,7 @@ import android.bluetooth.BluetoothSocket
 import android.os.ParcelUuid
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
@@ -40,6 +41,7 @@ import me.kavishdevar.librepods.core.bluetooth.aacp.packet.InformationPacket
 import me.kavishdevar.librepods.core.bluetooth.aacp.packet.MagicKeyResponsePacket
 import me.kavishdevar.librepods.core.bluetooth.aacp.packet.RenamePacket
 import me.kavishdevar.librepods.core.bluetooth.aacp.packet.StemPressPacket
+import me.kavishdevar.librepods.core.bluetooth.aacp.packet.hostClockPacket
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.AppleEvent
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.Capability
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.CapabilityEntry
@@ -53,7 +55,11 @@ import me.kavishdevar.librepods.core.data.apple.BuddyState
 import me.kavishdevar.librepods.core.data.audio.MicrophoneFrame
 import me.kavishdevar.librepods.core.data.heartrate.HeartRateSample
 import me.kavishdevar.librepods.core.devices.AppleDevice
+import me.kavishdevar.librepods.core.devices.AirPodsModel
+import me.kavishdevar.librepods.core.devices.AirPodsSpecs
+import me.kavishdevar.librepods.core.devices.BaseCapability
 import me.kavishdevar.librepods.core.devices.BatteryStatus
+import me.kavishdevar.librepods.core.devices.HearingModes
 import me.kavishdevar.librepods.core.devices.cachedControlStates
 import me.kavishdevar.librepods.core.devices.withControlReport
 import me.kavishdevar.librepods.core.devices.withControlRequest
@@ -75,15 +81,21 @@ class AACPManager(private val device: AppleDevice,
     private val TAG = "AACPManager"
 
     @Volatile private var socket: BluetoothSocket? = null
+    private class PendingConnect(val socket: BluetoothSocket, val preserveNearbyBattery: Boolean) { var cancelled = false }
+    @Volatile private var pendingConnect: PendingConnect? = null
     private var connectionScope: CoroutineScope? = null
     private val connectLock = java.util.concurrent.locks.ReentrantLock()
     private val connectionEpoch = AtomicLong()
+    private var hostClockEpoch: Long? = null
     private val controlTimeouts = ConcurrentHashMap<ControlCommandIdentifier, Job>()
     private var eqTimeout: Job? = null
     @Volatile var microphonePacketCallback: ((BluetoothSocket, ByteArray) -> Unit)? = null
+    private var microphoneRequested: BluetoothSocket? = null
+    fun isMicrophoneRequested(): Boolean = synchronized(this) { microphoneRequested != null }
 
-    fun captureAudioSocket(): BluetoothSocket? = socket?.takeIf { it.isConnected }
-    fun ownsAudioSocket(expected: BluetoothSocket): Boolean = socket === expected && expected.isConnected
+    fun captureAudioSocket(): BluetoothSocket? = socket?.takeIf { pendingConnect?.socket !== it && it.isConnected }
+    fun ownsAudioSocket(expected: BluetoothSocket): Boolean =
+        socket === expected && pendingConnect?.socket !== expected && expected.isConnected
 
     /** Captured-transport writes never enter packet history or raw logs. */
     fun sendAudioPacket(expected: BluetoothSocket, packet: ByteArray): Boolean = synchronized(expected) {
@@ -135,6 +147,7 @@ class AACPManager(private val device: AppleDevice,
             if (!sendSourceFeatureCapabilities(expected)) return
             delay(200.milliseconds)
             if (!sendNotificationRequest(expected)) return
+            if (!sendCapabilitiesRequest(expected)) return
             delay(200.milliseconds)
             if (!sendCountryCode(expected)) return
             delay(200.milliseconds)
@@ -143,11 +156,32 @@ class AACPManager(private val device: AppleDevice,
         }
     }
 
-    fun connect(): Boolean {
+    fun connect(): Boolean = connectRequest({ true }, {}, preserveNearbyBattery = false)
+
+    fun connect(stillCurrent: () -> Boolean, onPendingSocket: (BluetoothSocket) -> Unit): Boolean =
+        connectRequest(stillCurrent, onPendingSocket, preserveNearbyBattery = true)
+
+    private fun connectRequest(stillCurrent: () -> Boolean, onPendingSocket: (BluetoothSocket) -> Unit,
+        preserveNearbyBattery: Boolean): Boolean {
+        val current = { runCatching(stillCurrent).getOrDefault(false) }
         val requestEpoch = connectionEpoch.get()
         connectLock.lock()
-        return try { if (requestEpoch != connectionEpoch.get()) false else connect(requestEpoch) }
+        return try {
+            if (requestEpoch != connectionEpoch.get() || !current()) false
+            else connect(requestEpoch, preserveControlState = preserveNearbyBattery,
+                stillCurrent = current, onPendingSocket = onPendingSocket, preserveNearbyBattery = preserveNearbyBattery)
+        }
         finally { connectLock.unlock() }
+    }
+
+    /** Cancels only an unpublished control connection, never a live or replacement transport. */
+    fun cancelPendingConnect(expected: BluetoothSocket): Boolean {
+        synchronized(this) {
+            val pending = pendingConnect ?: return false
+            if (pending.socket !== expected || socket !== expected) return false
+            pending.cancelled = true
+        }
+        return disconnect(expected, notifyDevice = true, preserveControlState = true)
     }
 
     class ControlSessionRefresh internal constructor(internal val original: BluetoothSocket) {
@@ -155,7 +189,9 @@ class AACPManager(private val device: AppleDevice,
         internal var epoch: Long? = null
     }
 
-    fun prepareControlSessionRefresh(): ControlSessionRefresh? = captureAudioSocket()?.let(::ControlSessionRefresh)
+    fun prepareControlSessionRefresh(): ControlSessionRefresh? = synchronized(this) {
+        if (device.state.value.hearingModes.pending != null) null else captureAudioSocket()?.let(::ControlSessionRefresh)
+    }
 
     /** Reopen only AACP; native media/call profiles and the last confirmed settings are retained. */
     fun refreshControlSession(request: ControlSessionRefresh, stillCurrent: () -> Boolean): Boolean {
@@ -165,7 +201,8 @@ class AACPManager(private val device: AppleDevice,
             val motionWanted = sensorState.headTrackingState != BuddyState.INACTIVE
             val heartWanted = sensorState.hrmState != BuddyState.INACTIVE
             synchronized(this) {
-                if (request.cancelled || !stillCurrent() || !ownsAudioSocket(request.original)) return false
+                if (request.cancelled || !stillCurrent() || !ownsAudioSocket(request.original) ||
+                    device.state.value.hearingModes.pending != null) return false
                 request.epoch = connectionEpoch.get() + 1
             }
             if (!disconnect(request.original, preserveControlState = true)) return false
@@ -207,9 +244,11 @@ class AACPManager(private val device: AppleDevice,
         disconnect(owned, notifyDevice = true, preserveControlState = true)
     }
 
-    private fun connect(requestEpoch: Long, preserveControlState: Boolean = false): Boolean {
-        if (requestEpoch != connectionEpoch.get()) return false
-        if (socket != null && socket!!.isConnected) {
+    private fun connect(requestEpoch: Long, preserveControlState: Boolean = false,
+        stillCurrent: () -> Boolean = { true }, onPendingSocket: (BluetoothSocket) -> Unit = {},
+        preserveNearbyBattery: Boolean = false): Boolean {
+        if (requestEpoch != connectionEpoch.get() || !stillCurrent()) return false
+        if (captureAudioSocket() != null) {
             Log.i(TAG, "Already connected")
             return true
         }
@@ -220,18 +259,33 @@ class AACPManager(private val device: AppleDevice,
             return false
         }
 
+        val pending = PendingConnect(connectingSocket, preserveNearbyBattery)
         val previous = synchronized(this) {
-            if (requestEpoch != connectionEpoch.get()) { connectingSocket.close(); return false }
-            val retired = socket to rtBuddyManager
-            socket = connectingSocket
-            rtBuddyManager = null
-            retired
+            if (requestEpoch != connectionEpoch.get() || !stillCurrent()) null else {
+                val retired = socket to rtBuddyManager
+                socket = connectingSocket
+                pendingConnect = pending
+                rtBuddyManager = null
+                retired
+            }
+        } ?: run {
+            runCatching { connectingSocket.close() }
+            return false
         }
         // Closing the transport first releases any sensor writer waiting on the old socket.
         runCatching { previous.first?.close() }
         previous.second?.close()
         connectingSocket.let { socket ->
             try {
+                onPendingSocket(socket)
+                val current = synchronized(this) {
+                    this.socket === socket && pendingConnect === pending && !pending.cancelled &&
+                        requestEpoch == connectionEpoch.get() && stillCurrent()
+                }
+                if (!current) {
+                    cancelPendingConnect(socket)
+                    return false
+                }
                 Log.i(TAG, "connecting...")
                 socket.connect()
             } catch (e: Exception) {
@@ -250,11 +304,23 @@ class AACPManager(private val device: AppleDevice,
             }
 
             val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-            synchronized(this) {
-                if (this.socket !== socket || requestEpoch != connectionEpoch.get()) { scope.cancel(); socket.close(); return false }
-                connectionScope?.cancel()
-                connectionScope = scope
-                rtBuddyManager = createSensorSession(socket)
+            val published = synchronized(this) {
+                if (this.socket !== socket || pendingConnect !== pending || pending.cancelled ||
+                    requestEpoch != connectionEpoch.get() || !stillCurrent()) false else {
+                    connectionScope?.cancel()
+                    connectionScope = scope
+                    pendingConnect = null
+                    hostClockEpoch = null
+                    device.updateState { it.copy(capabilities = emptySet(), hearingModes = HearingModes(),
+                        hearingAidData = byteArrayOf(), transparencyData = byteArrayOf()) }
+                    rtBuddyManager = createSensorSession(socket)
+                    true
+                }
+            }
+            if (!published) {
+                scope.cancel()
+                cancelPendingConnect(socket)
+                return false
             }
             scope.launch {
                 sendDelayedInitPackets(socket)
@@ -334,10 +400,10 @@ class AACPManager(private val device: AppleDevice,
 
     @OptIn(ExperimentalStdlibApi::class)
     fun processPacket(packet: ByteArray, sourceSocket: BluetoothSocket? = captureAudioSocket()) {
-        if (sourceSocket != null && !ownsAudioSocket(sourceSocket)) return
+        if (sourceSocket == null || !ownsAudioSocket(sourceSocket)) return
         // A protobuf record can span reads; feed continuation bytes before the AACP header guard.
         val sensors = synchronized(this) {
-            if (sourceSocket != null && ownsAudioSocket(sourceSocket)) rtBuddyManager else null
+            if (ownsAudioSocket(sourceSocket)) rtBuddyManager else null
         }
         sensors?.feed(packet)
         if (!validAacpMessage(packet)) {
@@ -354,34 +420,42 @@ class AACPManager(private val device: AppleDevice,
                     payload = payload
                 )
 
-                device.updateState {
-                    it.copy(
-                        leftIsPrimary = payload[0] == 0x01.toByte(),
-                        aacpPackets = it.aacpPackets + packet
-                    )
+                publishForTransport(this, sourceSocket, ::captureAudioSocket) {
+                    device.updateState {
+                        it.copy(
+                            leftIsPrimary = payload[0] == 0x01.toByte(),
+                            aacpPackets = it.aacpPackets + packet
+                        )
+                    }
                 }
             }
             MessageOpcode.CAPABILITIES -> {
+                val capabilities = try { parseCapabilitiesResponse(packet) }
+                    catch (_: IllegalArgumentException) { Log.w(TAG, "Ignoring malformed capabilities report"); return }
                 val payload = packet.copyOfRange(6, packet.size)
                 val packet = AACPPacket.createUnknownPacket(
                     opcode = MessageOpcode.CAPABILITIES,
                     payload = payload
                 )
 
-                device.updateState {
-                    it.copy(
-                        capabilities = parseCapabilitiesResponse(packet.rawPacket),
-                        aacpPackets = it.aacpPackets + packet
-                    )
+                publishForTransport(this, sourceSocket, ::captureAudioSocket) {
+                    device.updateState {
+                        it.copy(
+                            capabilities = capabilities,
+                            aacpPackets = it.aacpPackets + packet
+                        )
+                    }
                 }
             }
             MessageOpcode.BATTERY_INFO -> {
                 val batteryPacket = BatteryInfoPacket.parse(packet)
-                device.updateState { state -> state.copy(
-                    battery = mergeBatteryReports(state.battery, batteryPacket.batteries,
-                        device.settings.value.cacheDisconnectedComponentBattery),
-                    aacpPackets = state.aacpPackets + batteryPacket
-                ) }
+                publishForTransport(this, sourceSocket, ::captureAudioSocket) {
+                    device.updateState { state -> state.copy(
+                        battery = mergeBatteryReports(state.battery, batteryPacket.batteries,
+                            device.settings.value.cacheDisconnectedComponentBattery),
+                        aacpPackets = state.aacpPackets + batteryPacket
+                    ) }
+                }
             }
 
             MessageOpcode.CONTROL_COMMAND -> {
@@ -396,9 +470,10 @@ class AACPManager(private val device: AppleDevice,
                         it.withControlReport(controlCommand.identifier, controlCommand.value).let { state ->
                             if (controlCommand.identifier == ControlCommandIdentifier.OWNS_CONNECTION)
                                 state.copy(owns = controlCommand.value[0] == 0x01.toByte()) else state
-                        }.let { it.copy(aacpPackets = it.aacpPackets + controlCommandPacket) }
+                        }.let { it.copy(aacpPackets = it.aacpPackets + controlCommandPacket,
+                            hearingModes = it.hearingModes.withReport(packet)) }
                     }
-                    if (sourceSocket != null && controlCommand.identifier == ControlCommandIdentifier.ALLOW_OFF_OPTION)
+                    if (controlCommand.identifier == ControlCommandIdentifier.ALLOW_OFF_OPTION)
                         device.rememberAllowOffReport(controlCommand.value)
                     if (controlCommand.identifier !in device.state.value.requestedControls)
                         controlTimeouts.remove(controlCommand.identifier)?.cancel()
@@ -407,13 +482,14 @@ class AACPManager(private val device: AppleDevice,
 
             MessageOpcode.EAR_DETECTION -> {
                 if (packet.size < 8) return
-                val earDetectionResponsePacket = EarDetectionResponsePacket.parse(packet, device.state.value.leftIsPrimary)
-
-                device.updateState {
-                    it.copy(
-                        componentState = earDetectionResponsePacket.componentStates,
-                        aacpPackets = it.aacpPackets + earDetectionResponsePacket
-                    )
+                publishForTransport(this, sourceSocket, ::captureAudioSocket) {
+                    val earDetectionResponsePacket = EarDetectionResponsePacket.parse(packet, device.state.value.leftIsPrimary)
+                    device.updateState {
+                        it.copy(
+                            componentState = earDetectionResponsePacket.componentStates,
+                            aacpPackets = it.aacpPackets + earDetectionResponsePacket
+                        )
+                    }
                 }
             }
 
@@ -424,11 +500,13 @@ class AACPManager(private val device: AppleDevice,
                     opcode = MessageOpcode.CONVERSATION_AWARENESS,
                     payload = packet.copyOfRange(6, packet.size)
                 )
-                device.updateState {
-                    it.copy(
-                        conversationAwarenessState = payload.getOrElse(3, {0}).toInt(),
-                        aacpPackets = it.aacpPackets + packet
-                    )
+                publishForTransport(this, sourceSocket, ::captureAudioSocket) {
+                    device.updateState {
+                        it.copy(
+                            conversationAwarenessState = payload.getOrElse(3, {0}).toInt(),
+                            aacpPackets = it.aacpPackets + packet
+                        )
+                    }
                 }
             }
 
@@ -444,19 +522,22 @@ class AACPManager(private val device: AppleDevice,
             MessageOpcode.STEM_PRESS -> {
                 val packet = StemPressPacket.parse(packet)
 
-                CoroutineScope(Dispatchers.IO).launch {
-                    device.emitEvent(
-                        AppleEvent.StemPress(
-                            pressType = packet.stemPressType,
-                            bud = packet.stemPressBud
+                publishForTransport(this, sourceSocket, ::captureAudioSocket) {
+                    // Retirement cancels an emission if a subscriber makes it suspend.
+                    connectionScope?.launch(start = CoroutineStart.UNDISPATCHED) {
+                        device.emitEvent(
+                            AppleEvent.StemPress(
+                                pressType = packet.stemPressType,
+                                bud = packet.stemPressBud
+                            )
                         )
-                    )
-                }
+                    }
 
-                device.updateState {
-                    it.copy(
-                        aacpPackets = it.aacpPackets + packet
-                    )
+                    device.updateState {
+                        it.copy(
+                            aacpPackets = it.aacpPackets + packet
+                        )
+                    }
                 }
             }
 
@@ -464,11 +545,13 @@ class AACPManager(private val device: AppleDevice,
                 try {
                     val packet = AudioSourcePacket.parse(packet)
 
-                    device.updateState {
-                        it.copy(
-                            audioSource = packet.audioSource,
-                            aacpPackets = it.aacpPackets + packet
-                        )
+                    publishForTransport(this, sourceSocket, ::captureAudioSocket) {
+                        device.updateState {
+                            it.copy(
+                                audioSource = packet.audioSource,
+                                aacpPackets = it.aacpPackets + packet
+                            )
+                        }
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "Error parsing audio source response: ${e.javaClass.simpleName}")
@@ -479,11 +562,13 @@ class AACPManager(private val device: AppleDevice,
                 try {
                     val packet = ConnectedDevicesPacket.parse(packet)
 
-                    device.updateState {
-                        it.copy (
-                            connectedDevices = packet.connectedDevices,
-                            aacpPackets = it.aacpPackets + packet
-                        )
+                    publishForTransport(this, sourceSocket, ::captureAudioSocket) {
+                        device.updateState {
+                            it.copy (
+                                connectedDevices = packet.connectedDevices,
+                                aacpPackets = it.aacpPackets + packet
+                            )
+                        }
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "Error parsing connected devices response: ${e.javaClass.simpleName}")
@@ -496,107 +581,81 @@ class AACPManager(private val device: AppleDevice,
                 val sender =
                     packet.sliceArray(6..11).reversedArray().joinToString(":") { "%02X".format(it) }
 
-                if ("iPad" in packetString) {
-                    device.state.value.connectedDevices.find { it.macAddress.value == sender }?.type = "iPad"
-                } else if ("Mac" in packetString) {
-                    device.state.value.connectedDevices.find { it.macAddress.value == sender }?.type = "Mac"
-                } else if ("iPhone" in packetString) { // not sure if this is it - don't have an iphone
-                    device.state.value.connectedDevices.find { it.macAddress.value == sender }?.type = "iPhone"
-                } else if ("Linux" in packetString) {
-                    device.state.value.connectedDevices.find { it.macAddress.value == sender }?.type = "Linux"
-                } else if ("Android" in packetString) {
-                    device.state.value.connectedDevices.find { it.macAddress.value == sender }?.type = "Android"
-                }
-                Log.i(TAG, "Received smart routing response")
-                if (packetString.contains("SetOwnershipToFalse")) {
-                    CoroutineScope(Dispatchers.IO).launch {
-                        device.emitEvent(
-                            AppleEvent.OwnershipToFalseRequest(
-                                sender = sender,
-                                reverseTapped = packetString.contains("ReverseBannerTapped")
-                            )
-                        )
+                publishForTransport(this, sourceSocket, ::captureAudioSocket) {
+                    if ("iPad" in packetString) {
+                        device.state.value.connectedDevices.find { it.macAddress.value == sender }?.type = "iPad"
+                    } else if ("Mac" in packetString) {
+                        device.state.value.connectedDevices.find { it.macAddress.value == sender }?.type = "Mac"
+                    } else if ("iPhone" in packetString) { // not sure if this is it - don't have an iphone
+                        device.state.value.connectedDevices.find { it.macAddress.value == sender }?.type = "iPhone"
+                    } else if ("Linux" in packetString) {
+                        device.state.value.connectedDevices.find { it.macAddress.value == sender }?.type = "Linux"
+                    } else if ("Android" in packetString) {
+                        device.state.value.connectedDevices.find { it.macAddress.value == sender }?.type = "Android"
                     }
-                }
-                if (packetString.contains("ShowNearbyUI")) {
-                    CoroutineScope(Dispatchers.IO).launch {
-                        device.emitEvent(
-                            AppleEvent.ShowNearbyUi(
-                                sender = sender
+                    Log.i(TAG, "Received smart routing response")
+                    if (packetString.contains("SetOwnershipToFalse")) {
+                        connectionScope?.launch(start = CoroutineStart.UNDISPATCHED) {
+                            device.emitEvent(
+                                AppleEvent.OwnershipToFalseRequest(
+                                    sender = sender,
+                                    reverseTapped = packetString.contains("ReverseBannerTapped")
+                                )
                             )
-                        )
+                        }
                     }
-                }
+                    if (packetString.contains("ShowNearbyUI")) {
+                        connectionScope?.launch(start = CoroutineStart.UNDISPATCHED) {
+                            device.emitEvent(
+                                AppleEvent.ShowNearbyUi(
+                                    sender = sender
+                                )
+                            )
+                        }
+                    }
 
-                val packet = AACPPacket.createUnknownPacket(
-                    opcode = MessageOpcode.SMART_ROUTING_RESPONSE,
-                    payload = packet.copyOfRange(6, packet.size)
-                )
-
-                device.updateState {
-                    it.copy(
-                        aacpPackets = it.aacpPackets + packet
+                    val packet = AACPPacket.createUnknownPacket(
+                        opcode = MessageOpcode.SMART_ROUTING_RESPONSE,
+                        payload = packet.copyOfRange(6, packet.size)
                     )
+
+                    device.updateState {
+                        it.copy(
+                            aacpPackets = it.aacpPackets + packet
+                        )
+                    }
                 }
             }
 
             MessageOpcode.HEADPHONE_ACCOMMODATION -> {
-                if (packet.size != 140) {
-                    Log.w(
-                        TAG,
-                        "Received HEADPHONE_ACCOMMODATION packet of unexpected size: ${packet.size}, expected 140"
-                    )
-                    return
-                }
-                if (packet[6] != 0x84.toByte()) {
-                    Log.w(
-                        TAG,
-                        "Received HEADPHONE_ACCOMMODATION packet with unexpected identifier: ${packet[6].toHexString()}, expected 0x84"
-                    )
-                    return
-                }
-
-                val eqOnMedia = (packet[10] == 0x01.toByte())
-                val eqOnPhone = (packet[11] == 0x01.toByte())
-                // there are 4 eqs. i am not sure what those are for, maybe all 4 listening modes, or maybe phone+media left+right, but then there shouldn't be another flag for phone/media visible. just directly the EQ... weird.
-                // the EQs are little endian floats
-                val eq1 = ByteBuffer.wrap(packet, 12, 32).order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer()
-                ByteBuffer.wrap(packet, 44, 32).order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer()
-                ByteBuffer.wrap(packet, 76, 32).order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer()
-                ByteBuffer.wrap(packet, 108, 32).order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer()
-
-                // for now, taking just the first EQ
-                val eqData = FloatArray(8) { i -> eq1.get(i) }
-
-                Log.d(
-                    TAG,
-                    "Received headphone accommodation settings"
-                )
-
-                val packet = AACPPacket.createUnknownPacket(
-                    opcode = MessageOpcode.HEADPHONE_ACCOMMODATION,
-                    payload = packet.copyOfRange(6, packet.size)
-                )
-
-                device.updateState {
-                    it.copy(
-                        headphoneAccommodation = eqData,
-                        headphoneAccommodationEnabledForMedia = eqOnMedia,
-                        headphoneAccommodationEnabledForPhone = eqOnPhone,
-                        aacpPackets = it.aacpPackets + packet
-                    )
+                publishForTransport(this, sourceSocket, ::captureAudioSocket) {
+                    device.updateState {
+                        it.copy(hearingModes = it.hearingModes.withReport(packet))
+                    }
                 }
             }
 
             MessageOpcode.INFORMATION -> {
                 val informationPacket = InformationPacket.parse(packet)
+                var clockPacket: AACPPacket? = null
 
-                device.updateState {
-                    it.copy(
-                        aacpPackets = it.aacpPackets + informationPacket
-                    )
+                publishForTransport(this, sourceSocket, ::captureAudioSocket) {
+                    device.updateState {
+                        it.copy(
+                            aacpPackets = it.aacpPackets + informationPacket
+                        )
+                    }
+                    device.updateMetadata { informationPacket.metadata }
+                    val model = informationPacket.metadata.model
+                    val epoch = connectionEpoch.get()
+                    if (model != AirPodsModel.UNKNOWN &&
+                        BaseCapability.HEARING_AID in AirPodsSpecs.getSpec(model).baseCapabilities &&
+                        hostClockEpoch != epoch) {
+                        clockPacket = hostClockPacket()
+                        if (clockPacket != null) hostClockEpoch = epoch
+                    }
                 }
-                device.updateMetadata { informationPacket.metadata }
+                clockPacket?.let { sendPacket(it, sourceSocket) }
             }
 
             MessageOpcode.CUSTOM_EQ -> {
@@ -618,14 +677,17 @@ class AACPManager(private val device: AppleDevice,
 
             MessageOpcode.MICROPHONE_STREAM -> {
                 val audio = microphonePacketCallback
-                if (audio != null && sourceSocket != null) {
-                    audio(sourceSocket, packet)
+                if (audio != null) {
+                    publishForTransport(this, sourceSocket, ::captureAudioSocket) { audio(sourceSocket, packet) }
                     return
                 }
                 try {
-                    MicrophoneFrame.parsePacket(packet).forEach{ frame ->
-                        CoroutineScope(Dispatchers.IO).launch {
-                            device.emitMicrophoneFrame(frame)
+                    val frames = MicrophoneFrame.parsePacket(packet)
+                    publishForTransport(this, sourceSocket, ::captureAudioSocket) {
+                        frames.forEach { frame ->
+                            connectionScope?.launch(start = CoroutineStart.UNDISPATCHED) {
+                                device.emitMicrophoneFrame(frame)
+                            }
                         }
                     }
                 } catch (e: Exception) {
@@ -640,10 +702,12 @@ class AACPManager(private val device: AppleDevice,
                     opcode = MessageOpcode.fromByte(opcode),
                     payload = packet.copyOfRange(6, packet.size)
                 )
-                device.updateState {
-                    it.copy(
-                        aacpPackets = it.aacpPackets + packet
-                    )
+                publishForTransport(this, sourceSocket, ::captureAudioSocket) {
+                    device.updateState {
+                        it.copy(
+                            aacpPackets = it.aacpPackets + packet
+                        )
+                    }
                 }
                 Log.w(TAG, "Unhandled messageOpcode received: ${opcode.toHexString()}")
             }
@@ -653,6 +717,9 @@ class AACPManager(private val device: AppleDevice,
     fun sendControlCommand(identifier: Byte, value: ByteArray): Boolean {
         if (value.isEmpty() || value.size > 4) return false
         val controlCommand = ControlCommand(ControlCommandIdentifier.fromByte(identifier) ?: return false, value)
+        // Hearing modes share a gate and need a current report/fitting transaction.
+        if (controlCommand.identifier in setOf(ControlCommandIdentifier.HEARING_AID,
+                ControlCommandIdentifier.HEARING_ASSIST_CONFIG)) return false
 
         val packet = ControlCommandPacket.create(controlCommand)
 
@@ -709,6 +776,9 @@ class AACPManager(private val device: AppleDevice,
 
         return sendPacket(packet, expected)
     }
+
+    fun sendCapabilitiesRequest(expected: BluetoothSocket? = captureAudioSocket()): Boolean = sendPacket(
+        AACPPacket.createUnknownPacket(MessageOpcode.CAPABILITIES_REQUEST, byteArrayOf(0x08)), expected)
 
     // todo: implement adaptive volume
     fun sendSourceFeatureCapabilities(expected: BluetoothSocket? = captureAudioSocket()): Boolean {
@@ -1032,41 +1102,6 @@ class AACPManager(private val device: AppleDevice,
         )
     }
 
-    fun sendPhoneMediaEQ(eq: FloatArray, phone: Byte = 0x02.toByte(), media: Byte = 0x02.toByte()) {
-        if (eq.size != 8) throw IllegalArgumentException("EQ must be 8 floats")
-        val header = byteArrayOf(
-            0x84.toByte(),
-            0x00.toByte(),
-            0x02.toByte(),
-            0x02.toByte(),
-            phone,
-            media
-        )
-        val buffer = ByteBuffer.allocate(128).order(ByteOrder.LITTLE_ENDIAN)
-        for (block in 0..3) {
-            for (i in 0..7) {
-                buffer.putFloat(eq[i])
-            }
-        }
-
-        val payload = header + buffer.array()
-
-        val packet = AACPPacket.createUnknownPacket(
-            opcode = MessageOpcode.HEADPHONE_ACCOMMODATION,
-            payload = payload
-        )
-
-        sendPacket(packet)
-
-        device.updateState {
-            it.copy(
-                headphoneAccommodation = eq.copyOf(),
-                headphoneAccommodationEnabledForMedia = media == 0x01.toByte(),
-                headphoneAccommodationEnabledForPhone = phone == 0x01.toByte()
-            )
-        }
-    }
-
     fun sendCountryCode(expected: BluetoothSocket? = captureAudioSocket()): Boolean {
         val payload = byteArrayOf(
             0x00, 0xFF.toByte(),
@@ -1087,9 +1122,12 @@ class AACPManager(private val device: AppleDevice,
         preserveControlState: Boolean = false): Boolean {
         var retiredSensors: RTBuddyManager? = null
         val retired = retireForTransport(this, expected, { socket }) {
+            val preserveNearbyBattery = pendingConnect?.takeIf { it.socket === expected }?.preserveNearbyBattery == true
             retiredSensors = rtBuddyManager
             socket = null
+            pendingConnect = null
             rtBuddyManager = null
+            microphoneRequested = null
             connectionEpoch.incrementAndGet()
             connectionScope?.cancel()
             connectionScope = null
@@ -1103,16 +1141,18 @@ class AACPManager(private val device: AppleDevice,
                         battery.status != BatteryStatus.UNKNOWN
                 }
                 val retainedBatteries = when {
+                    preserveNearbyBattery -> knownBatteries.toSet()
                     preserveControlState && !notifyDevice -> knownBatteries.toSet()
                     device.settings.value.cacheDisconnectedComponentBattery -> knownBatteries.map { battery ->
                         battery.copy(status = BatteryStatus.DISCONNECTED, present = false)
                     }.toSet()
                     else -> emptySet()
                 }
-                it.copy(battery = retainedBatteries, connectedDevices = emptyList(),
+                it.copy(battery = retainedBatteries, connectedDevices = emptyList(), capabilities = emptySet(),
                     controlStates = if (preserveControlState)
                         it.cachedControlStates(device.settings.value, device.metadata.value.modelNumber) else emptyMap(),
                     requestedControls = emptyMap(), requestedCustomEq = null, aacpPackets = emptyList(),
+                    hearingModes = HearingModes(), hearingAidData = byteArrayOf(), transparencyData = byteArrayOf(),
                     headTrackingState = BuddyState.INACTIVE, hrmState = BuddyState.INACTIVE, currentHeartRate = null)
             }
             // The notification belongs to this retirement, before a replacement can be published.
@@ -1158,6 +1198,12 @@ class AACPManager(private val device: AppleDevice,
     }
 
     fun requestMicrophoneStream(expected: BluetoothSocket? = captureAudioSocket()): Boolean {
+        if (expected == null) return false
+        val reserved = synchronized(this) {
+            if (!ownsAudioSocket(expected) || device.state.value.hearingModes.pending != null) false
+            else { microphoneRequested = expected; true }
+        }
+        if (!reserved) return false
         val payload = byteArrayOf(
             0x00, 0x00,
             0x09, 0x00, // length
@@ -1173,7 +1219,9 @@ class AACPManager(private val device: AppleDevice,
             payload = payload
         )
 
-        return expected != null && sendAudioPacket(expected, packet.rawPacket)
+        val success = sendAudioPacket(expected, packet.rawPacket)
+        if (!success) synchronized(this) { if (microphoneRequested === expected) microphoneRequested = null }
+        return success
     }
 
     fun endMicrophoneStream(expected: BluetoothSocket? = captureAudioSocket()): Boolean {
@@ -1188,12 +1236,13 @@ class AACPManager(private val device: AppleDevice,
             payload = payload
         )
 
-        return expected != null && sendAudioPacket(expected, packet.rawPacket)
+        val success = expected != null && sendAudioPacket(expected, packet.rawPacket)
+        if (success) synchronized(this) { if (microphoneRequested === expected) microphoneRequested = null }
+        return success
     }
 
     fun parseCapabilitiesResponse(packet: ByteArray): Set<CapabilityEntry> {
-        require(packet.size >= 7) { "Packet too short" }
-        require(packet[4] == MessageOpcode.CAPABILITIES.value) {
+        require(packet.size >= 7 && validAacpMessage(packet) && packet[4] == MessageOpcode.CAPABILITIES.value) {
             "Not a capabilities packet"
         }
 
@@ -1213,6 +1262,8 @@ class AACPManager(private val device: AppleDevice,
                     "Unknown capability 0x%02X".format(capabilityId.toInt() and 0xFF)
                 )
 
+            require(capabilities.none { it.capability == capability }) { "Duplicate capability" }
+
             if (offset + capability.valueSize > packet.size) {
                 throw IllegalArgumentException("Truncated packet")
             }
@@ -1224,6 +1275,8 @@ class AACPManager(private val device: AppleDevice,
 
             offset += capability.valueSize
         }
+
+        require(offset == packet.size) { "Trailing capabilities data" }
 
         for (capability in capabilities) {
             Log.d(

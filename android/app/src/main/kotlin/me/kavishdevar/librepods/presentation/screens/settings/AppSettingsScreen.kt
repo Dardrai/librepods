@@ -1,5 +1,5 @@
 /*
-    LibrePods - AirPods liberated from Apple’s ecosystem
+    LibrePods - AirPods liberated from Appleâ€™s ecosystem
     Copyright (C) 2025 LibrePods contributors
 
     This program is free software: you can redistribute it and/or modify
@@ -18,14 +18,13 @@
 
 package me.kavishdevar.librepods.presentation.screens.settings
 
+import androidx.compose.runtime.getValue
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.widget.Toast
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -34,7 +33,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.foundation.text.input.clearText
 import androidx.compose.foundation.verticalScroll
@@ -43,12 +41,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
@@ -65,7 +61,6 @@ import me.kavishdevar.librepods.R
 import me.kavishdevar.librepods.presentation.components.common.AppInfoCard
 import me.kavishdevar.librepods.presentation.components.common.DeviceInfoCard
 import me.kavishdevar.librepods.presentation.components.primitives.StyledBottomSheet
-import me.kavishdevar.librepods.presentation.components.primitives.StyledButton
 import me.kavishdevar.librepods.presentation.components.primitives.StyledConfirmationDialog
 import me.kavishdevar.librepods.presentation.components.primitives.StyledIconButton
 import me.kavishdevar.librepods.presentation.components.primitives.StyledInputField
@@ -78,13 +73,11 @@ import me.kavishdevar.librepods.presentation.components.primitives.styledToggle
 import me.kavishdevar.librepods.presentation.icons.LocalIcons
 import me.kavishdevar.librepods.presentation.viewmodel.AppSettingsViewModel
 import me.kavishdevar.librepods.utils.XposedState
-import java.util.concurrent.TimeUnit
 
 @Composable
 fun AppSettingsScreen(
     viewModel: AppSettingsViewModel = viewModel(),
     navigateBack: (() -> Unit)?,
-    navigateToPurchase: () -> Unit,
     navigateToOpenSourceLicenses: () -> Unit,
     navigateToReleaseNotesScreen: () -> Unit,
     navigateToBleSettingsScreen: () -> Unit,
@@ -120,52 +113,7 @@ fun AppSettingsScreen(
 
             Spacer(modifier = Modifier.height(20.dp))
 
-            if (!state.isPremium && state.state.hasConnectedToAACP) {
-                StyledButton(
-                    onClick = navigateToPurchase,
-                    backdrop = rememberLayerBackdrop(),
-                    modifier = Modifier.fillMaxWidth(),
-                    maxScale = 0.05f,
-                    surfaceColor = MaterialTheme.colorScheme.primary
-                ) {
-                    Text(
-                        stringResource(R.string.unlock_advanced_features),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onPrimary
-                    )
-                }
-                Spacer(modifier = Modifier.height(16.dp))
-            }
 
-            if (state.state.timeUntilFOSSPremiumExpiry > 0L) {
-                Box(
-                    modifier = Modifier
-                        .background(Color(0xFF32829B), RoundedCornerShape(28.dp))
-                        .clip(RoundedCornerShape(28.dp))
-                        .clickable {
-                            val emailIntent = Intent(Intent.ACTION_SENDTO).apply {
-                                data = "mailto:".toUri()
-                                putExtra(Intent.EXTRA_EMAIL, arrayOf("billing@kavish.xyz"))
-                                putExtra(Intent.EXTRA_SUBJECT, "LibrePods Play billing error")
-                                putExtra(
-                                    Intent.EXTRA_TEXT,
-                                    "Please enter your GitHub username to restore your premium access:\n\nGitHub username: "
-                                )
-                            }
-                            context.startActivity(emailIntent)
-                        }
-                ) {
-                    Text(
-                        text = stringResource(
-                            R.string.play_foss_premium_banner, maxOf(1, TimeUnit.MILLISECONDS.toDays(state.state.timeUntilFOSSPremiumExpiry).toInt())
-                        ),
-                        modifier = Modifier
-                            .padding(16.dp),
-                        style = MaterialTheme.typography.bodyMediumEmphasized,
-                        color = Color.White
-                    )
-                }
-            }
 
             if (state.state.hasConnectedToAACP) {
                 StyledListItem(
@@ -300,13 +248,8 @@ fun AppSettingsScreen(
                                 Uri.encode("v${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
                             val device = Uri.encode("${Build.MANUFACTURER} ${Build.MODEL}")
                             val androidVersion = Uri.encode("${Build.ID} (${Build.DISPLAY})")
-                            val appSource = Uri.encode(
-                                when {
-                                    BuildConfig.PLAY_BUILD -> "Play"
-                                    else -> "GitHub"
-                                }
-                            )
-                            val url = "https://github.com/kavishdevar/librepods/issues/new" +
+                            val appSource = Uri.encode("GitHub")
+                            val url = "https://github.com/Ripthulhu/librepods/issues/new" +
                                 "?template=01-bug-report-android.yml" +
                                 "&app-source=$appSource" +
                                 "&app-version=$appVersion" +
@@ -491,7 +434,7 @@ fun AppSettingsScreen(
                                    "\n\nApp details:" +
                                    "\nVERSION: ${BuildConfig.VERSION_NAME}" +
                                    "\nVERSION_CODE: ${BuildConfig.VERSION_CODE}" +
-                                   "\nFLAVOR: ${BuildConfig.FLAVOR}" +
+                                   "\nSOURCE: GitHub" +
                                    "\nBUILD_TYPE: ${BuildConfig.BUILD_TYPE}"
                            )
                        }

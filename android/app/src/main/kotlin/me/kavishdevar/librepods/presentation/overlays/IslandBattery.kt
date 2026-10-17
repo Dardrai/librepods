@@ -25,10 +25,10 @@ internal fun islandBatteryCells(model: AirPodsModel, batteries: Set<Battery>, no
     val components = if (model in setOf(AirPodsModel.AIRPODS_MAX_LIGHTNING, AirPodsModel.AIRPODS_MAX_USBC, AirPodsModel.AIRPODS_MAX_2))
         listOf(BatteryComponent.HEADSET) else listOf(BatteryComponent.LEFT, BatteryComponent.RIGHT, BatteryComponent.CASE)
     return components.map { component ->
-        val battery = batteries.singleOrNull { it.component == component }
+        val battery = batteries.singleOrNull { it.component == component }?.takeIf { it.status != BatteryStatus.UNKNOWN }
         val live = battery?.isLive(now) == true
         IslandBatteryCell(component, battery?.level?.takeIf { it in 0..100 && battery.observedAt != null }, live,
-            live && battery?.status in setOf(BatteryStatus.CHARGING, BatteryStatus.OPTIMIZED_CHARGING),
+            live && battery.status in setOf(BatteryStatus.CHARGING, BatteryStatus.OPTIMIZED_CHARGING),
             battery?.observedAt?.takeIf { now >= it }?.let { (now - it) / 1000 })
     }
 }

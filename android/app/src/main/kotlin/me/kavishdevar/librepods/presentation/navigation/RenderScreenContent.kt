@@ -1,6 +1,7 @@
 package me.kavishdevar.librepods.presentation.navigation
 
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.lifecycle.ViewModelProvider
@@ -20,7 +21,6 @@ import me.kavishdevar.librepods.core.devices.AppleDevice
 import me.kavishdevar.librepods.core.devices.Device
 import me.kavishdevar.librepods.presentation.screens.DeviceListScreen
 import me.kavishdevar.librepods.presentation.screens.OpenSourceLicensesScreen
-import me.kavishdevar.librepods.presentation.screens.PurchaseScreen
 import me.kavishdevar.librepods.presentation.screens.ReleaseNotesScreen
 import me.kavishdevar.librepods.presentation.screens.apple.AccessibilitySettingsScreen
 import me.kavishdevar.librepods.presentation.screens.apple.AppleSettingsRoute
@@ -51,7 +51,6 @@ import me.kavishdevar.librepods.presentation.screens.settings.island.IslandExpan
 import me.kavishdevar.librepods.presentation.screens.settings.island.IslandExpandedSizeAndPositionRoute
 import me.kavishdevar.librepods.presentation.viewmodel.AppSettingsViewModel
 import me.kavishdevar.librepods.presentation.viewmodel.AppleViewModel
-import me.kavishdevar.librepods.presentation.viewmodel.PurchaseViewModel
 import me.kavishdevar.librepods.repository.AppDataRepository
 import me.kavishdevar.librepods.repository.HeartRateRepository
 import me.kavishdevar.librepods.repository.RecordingRepository
@@ -93,7 +92,6 @@ fun RenderScreenContent(
     refreshDeviceSettings: suspend (AppleDevice) -> DeviceSettingsRefreshResult
 ) {
     val navigate: (Screen) -> Unit = { target -> if (target !in backStack) backStack.add(target) } // prevents multiple clicks while transitioning
-    fun navigateToPurchase() = navigate(Screen.Purchase)
 
     val navigateBack: (() -> Unit)? = if (backStack.size > 1) {
         {
@@ -151,7 +149,6 @@ fun RenderScreenContent(
                 navigateToHearingAid = { navigate(Screen.HearingAid(screen.macAddress)) },
                 navigateToLeftLongPress = { navigate(Screen.LongPress(screen.macAddress, left)) },
                 navigateToRightLongPress = { navigate(Screen.LongPress(screen.macAddress, right)) },
-                navigateToPurchase = ::navigateToPurchase,
                 navigateToEqualizer = { navigate(Screen.Equalizer(screen.macAddress)) },
                 navigateToHeadTracking = { navigate(Screen.HeadTracking(screen.macAddress)) },
                 navigateToAccessibility = { navigate(Screen.Accessibility(screen.macAddress)) },
@@ -186,7 +183,6 @@ fun RenderScreenContent(
             AppSettingsScreen(
                 viewModel = appSettingsViewModel,
                 navigateBack = navigateBack,
-                navigateToPurchase = ::navigateToPurchase,
                 navigateToOpenSourceLicenses = { navigate(Screen.OpenSourceLicenses) },
                 navigateToReleaseNotesScreen = { navigate(Screen.ReleaseNotes) },
                 navigateToBleSettingsScreen = { navigate(Screen.BLESettings) },
@@ -206,7 +202,6 @@ fun RenderScreenContent(
             HeadTrackingScreen(
                 viewModel = appleViewModel,
                 navigateBack = navigateBack,
-                navigateToPurchase = ::navigateToPurchase
             )
         }
 
@@ -221,7 +216,6 @@ fun RenderScreenContent(
             AccessibilitySettingsScreen(
                 viewModel = appleViewModel,
                 navigateBack = navigateBack,
-                navigateToPurchase = ::navigateToPurchase,
                 navigateToTransparencyCustomization = {
                     navigate(Screen.TransparencyCustomization(screen.macAddress))
                 }
@@ -308,16 +302,14 @@ fun RenderScreenContent(
             HearingProtectionScreen(
                 viewModel = appleViewModel,
                 navigateBack = navigateBack,
-                navigateToPurchase = ::navigateToPurchase
             )
         }
 
         is Screen.Purchase -> {
-            val viewModel: PurchaseViewModel = viewModel()
-            PurchaseScreen(
-                viewModel = viewModel,
-                navigateBack = navigateBack
-            )
+            LaunchedEffect(Unit) {
+                backStack.remove(Screen.Purchase)
+                navigate(Screen.AppSettings)
+            }
         }
 
         is Screen.Equalizer -> {
@@ -344,7 +336,6 @@ fun RenderScreenContent(
                 viewModel = appleViewModel,
                 name = screen.bud,
                 navigateBack = navigateBack,
-                navigateToPurchase = ::navigateToPurchase
             )
         }
 

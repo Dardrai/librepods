@@ -309,8 +309,15 @@ class ShizukuAudioClient(context: Context) : Closeable {
     }
 
     /** Restarts only the selected pair's native A2DP profile after the AirPods uplink has stopped. */
-    suspend fun restoreNativePlayback(address: String, stillCurrent: () -> Boolean = { true }): Boolean = try {
-        withTimeoutOrNull(6500) {
+    suspend fun restoreNativePlayback(address: String, stillCurrent: () -> Boolean = { true }): Boolean =
+        nativePlayback(address, stillCurrent, connectOnly = false)
+
+    /** Explicit takeover joins Android's pending connection and never cycles an already connected profile. */
+    suspend fun connectNativePlayback(address: String, stillCurrent: () -> Boolean): Boolean =
+        nativePlayback(address, stillCurrent, connectOnly = true)
+
+    private suspend fun nativePlayback(address: String, stillCurrent: () -> Boolean, connectOnly: Boolean): Boolean = try {
+        withTimeoutOrNull(if (connectOnly) 19_000L else 6500L) {
             val callerJob = currentCoroutineContext()[Job]
             suspendCancellableCoroutine { continuation ->
                 val request = synchronized(lock) {
@@ -328,6 +335,7 @@ class ShizukuAudioClient(context: Context) : Closeable {
                         ipc.withLock {
                             drainStops()
                             if (!request.active.get()) false
+                            else if (connectOnly) request.remote.connectNativePlayback(request.address, request.owner)
                             else request.remote.restoreNativePlayback(request.address, request.owner)
                         }
                     } catch (error: Exception) {

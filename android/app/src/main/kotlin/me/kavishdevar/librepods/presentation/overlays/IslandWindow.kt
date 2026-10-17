@@ -1,5 +1,5 @@
 /*
-    LibrePods - AirPods liberated from Apple’s ecosystem
+    LibrePods - AirPods liberated from Appleâ€™s ecosystem
     Copyright (C) 2025 LibrePods contributors
 
     This program is free software: you can redistribute it and/or modify
@@ -18,6 +18,8 @@
 
 package me.kavishdevar.librepods.presentation.overlays
 
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import android.content.Context
 import android.content.Intent
 import android.graphics.PixelFormat
@@ -32,17 +34,16 @@ import android.view.View
 import android.view.WindowManager
 import android.view.WindowInsets
 import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.ViewCompositionStrategy
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
+import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.ViewModelStore
 import androidx.lifecycle.ViewModelStoreOwner
 import androidx.lifecycle.setViewTreeLifecycleOwner
@@ -63,6 +64,12 @@ import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommandIdentifi
 import me.kavishdevar.librepods.presentation.design.LibrePodsTheme
 import me.kavishdevar.librepods.presentation.design.NightTheme
 import me.kavishdevar.librepods.services.LibrePodsAccessibilityService
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 
 enum class IslandType {
     CONNECTED,
@@ -77,6 +84,8 @@ enum class IslandState {
     CLOSE
 }
 
+enum class IslandConnectState { IDLE, CONNECTING, FAILED }
+
 @Suppress("unused")
 class IslandWindow(
     private var context: Context,
@@ -90,6 +99,7 @@ class IslandWindow(
 
     private var autoCloseHandler: Handler? = null
     private var autoCloseRunnable: Runnable? = null
+    private var keepOpenRequested = false
 
     private var currentAppSettings by mutableStateOf(appSettings)
 
@@ -100,6 +110,14 @@ class IslandWindow(
     private var otherDeviceName by mutableStateOf(null as String?)
     private var statusText by mutableStateOf(null as String?)
     private var ownerAddress: String? = null
+    private var ownerAnnouncementAtNanos = Long.MIN_VALUE
+    private var onConnect: (suspend () -> Boolean)? = null
+    private var isAudioConnected: (() -> Boolean)? = null
+    private var deferConnectAction: (() -> Boolean)? = null
+    private var connectActionDeferred by mutableStateOf(false)
+    private var connectState by mutableStateOf(IslandConnectState.IDLE)
+    private var connectJob: Job? = null
+    private var connectGeneration = 0L
     private val pairingOpenings = mutableMapOf<String, Long>()
     private var model by mutableStateOf(AirPodsModel.UNKNOWN)
     private var batteries by mutableStateOf(emptySet<Battery>())
@@ -112,6 +130,7 @@ class IslandWindow(
     private val updateAge = object : Runnable {
         override fun run() {
             if (!isVisible || ownerAddress == null) return
+            refreshConnectionState()
             batteryNow = System.currentTimeMillis()
             ageHandler.postDelayed(this, 1000)
         }
@@ -148,6 +167,7 @@ class IslandWindow(
 
         val restore = isVisible
         val state = islandState
+        cancelConnect()
         composeView?.let { if (it.parent != null) windowManager.removeView(it) }
         lifecycleOwner?.stop()
         composeView = null
@@ -169,6 +189,8 @@ class IslandWindow(
                 composeView?.visibility = View.VISIBLE
             } catch (e: Exception) {
                 Log.e("IslandWindow", "Error adding overlay view: $e")
+                close()
+                composeView?.let(::cleanupAndRemoveView)
             }
         }
     }
@@ -199,9 +221,23 @@ class IslandWindow(
         this.batteries = device.state.value.battery
         this.name = device.metadata.value.name
         if (model != AirPodsModel.UNKNOWN) this.model = model
-        this.nearby = device.connectionState.value != ConnectionState.CONNECTED
+        refreshConnectionState(device.connectionState.value != ConnectionState.CONNECTED)
         batteryNow = System.currentTimeMillis()
     }
+
+    private fun refreshConnectionState(fallbackNearby: Boolean = nearby, restartDismissal: Boolean = true) {
+        val deferred = shouldDeferConnectAction()
+        // The hint can query the audio inventory too; read actual ownership last as outputs appear.
+        nearby = ownerAddress != null && (isAudioConnected?.let { !it() } ?: fallbackNearby)
+        if (!nearby && connectState == IslandConnectState.FAILED) connectState = IslandConnectState.IDLE
+        val wasDeferred = connectActionDeferred
+        connectActionDeferred = nearby && deferred
+        if (restartDismissal && wasDeferred && !connectActionDeferred && !keepOpenRequested && isVisible &&
+            connectState == IslandConnectState.IDLE) resetTimer()
+    }
+
+    private fun shouldDeferConnectAction(): Boolean = ownerAddress != null && onConnect != null &&
+        type == IslandType.CONNECTED && statusText == null && deferConnectAction?.invoke() == true
 
     fun suppressPairingOpening(address: String, observedAtNanos: Long) {
         if (Looper.myLooper() != Looper.getMainLooper()) {
@@ -217,8 +253,15 @@ class IslandWindow(
             Handler(Looper.getMainLooper()).post { observePairedCaseLid(address, open, observedAtNanos) }
             return
         }
-        // Only a newer authenticated case close ends the opening covered by the pairing card.
-        if (!open && observedAtNanos > (pairingOpenings[address] ?: return)) pairingOpenings.remove(address)
+        if (!open) {
+            // Only a newer authenticated case close ends the opening covered by the pairing card.
+            pairingOpenings[address]?.let { if (observedAtNanos > it) pairingOpenings.remove(address) }
+            if (ownerAddress == address && type == IslandType.CONNECTED && statusText == null &&
+                onConnect != null && observedAtNanos > ownerAnnouncementAtNanos) {
+                Log.d("IslandWindow", "Closing island for matching case lid")
+                close()
+            }
+        }
     }
 
     fun clearPairingOpening(address: String? = null) {
@@ -230,7 +273,10 @@ class IslandWindow(
     }
 
     fun showPairedLid(device: AppleDevice, model: AirPodsModel = device.metadata.value.model,
-                      observedAtNanos: Long = SystemClock.elapsedRealtimeNanos()) {
+                      observedAtNanos: Long = SystemClock.elapsedRealtimeNanos(),
+                      onConnect: (suspend () -> Boolean)? = null,
+                      isAudioConnected: (() -> Boolean)? = null,
+                      deferConnectAction: (() -> Boolean)? = null) {
         val state = device.state.value
         show(name = device.metadata.value.name, owner = device, ownerModel = model, observedAtNanos = observedAtNanos,
             openApp = { context.startActivity(Intent(context, MainActivity::class.java)
@@ -240,7 +286,8 @@ class IslandWindow(
             onNoiseControlModeChanged = { device.setControlCommand(ControlCommandIdentifier.LISTENING_MODE, it) },
             adaptiveStrength = state.controlStates[ControlCommandIdentifier.AUTO_ANC_STRENGTH]?.firstOrNull()?.toInt() ?: 50,
             requestedAdaptiveStrength = state.requestedControls[ControlCommandIdentifier.AUTO_ANC_STRENGTH]?.firstOrNull()?.toInt(),
-            onAdaptiveStrengthChanged = { device.setControlCommand(ControlCommandIdentifier.AUTO_ANC_STRENGTH, it) })
+            onAdaptiveStrengthChanged = { device.setControlCommand(ControlCommandIdentifier.AUTO_ANC_STRENGTH, it) },
+            onConnect = onConnect, isAudioConnected = isAudioConnected, deferConnectAction = deferConnectAction)
     }
 
     fun updateAdaptiveStrength(device: AppleDevice) {
@@ -310,13 +357,17 @@ class IslandWindow(
         ownerModel: AirPodsModel = owner?.metadata?.value?.model ?: AirPodsModel.UNKNOWN,
         observedAtNanos: Long = SystemClock.elapsedRealtimeNanos(),
         statusText: String? = null,
-        requestedAdaptiveStrength: Int? = null
+        requestedAdaptiveStrength: Int? = null,
+        onConnect: (suspend () -> Boolean)? = null,
+        isAudioConnected: (() -> Boolean)? = null,
+        deferConnectAction: (() -> Boolean)? = null
     ) {
         if (Looper.myLooper() != Looper.getMainLooper()) {
             Handler(Looper.getMainLooper()).post {
                 show(name, batteryLevel, type, reversed, otherDeviceName, onReverseAction,
                     openApp, showOffListeningMode, noiseControlModeValue, onNoiseControlModeChanged,
-                    adaptiveStrength, onAdaptiveStrengthChanged, forcedState, keepOpen, owner, ownerModel, observedAtNanos, statusText, requestedAdaptiveStrength)
+                    adaptiveStrength, onAdaptiveStrengthChanged, forcedState, keepOpen, owner, ownerModel, observedAtNanos, statusText, requestedAdaptiveStrength,
+                    onConnect, isAudioConnected, deferConnectAction)
             }
             return
         }
@@ -326,11 +377,17 @@ class IslandWindow(
 
         Log.d("IslandWindow", "Showing island window: accessibility = $usingAccessibilityService")
 
+        if (ownerAddress != owner?.macAddress?.value || islandState == IslandState.CLOSE ||
+            type != IslandType.CONNECTED || statusText != null || onConnect == null) cancelConnect()
+        this.onConnect = onConnect
+        this.isAudioConnected = isAudioConnected
+        this.deferConnectAction = deferConnectAction
+        this.keepOpenRequested = keepOpen
         this.batteryLevel = batteryLevel
         this.ownerAddress = owner?.macAddress?.value
+        this.ownerAnnouncementAtNanos = observedAtNanos
         this.model = ownerModel
         this.batteries = owner?.state?.value?.battery.orEmpty()
-        this.nearby = owner != null && owner.connectionState.value != ConnectionState.CONNECTED
         this.batteryNow = System.currentTimeMillis()
 
         this.name = name
@@ -338,6 +395,8 @@ class IslandWindow(
         this.reversed = reversed
         this.otherDeviceName = otherDeviceName
         this.statusText = statusText
+        refreshConnectionState(owner != null && owner.connectionState.value != ConnectionState.CONNECTED,
+            restartDismissal = false)
 
         this.openApp = openApp
 
@@ -370,13 +429,16 @@ class IslandWindow(
                 composeView?.visibility = View.VISIBLE
             } catch (e: Exception) {
                 Log.e("IslandWindow", "Error adding overlay view: $e")
+                close()
+                composeView?.let(::cleanupAndRemoveView)
+                return
             }
         }
 
         updateWindowParams(islandState)
         ageHandler.removeCallbacks(updateAge)
         if (owner != null) ageHandler.post(updateAge)
-        if (!keepOpen) resetTimer()
+        if (keepOpen) autoCloseRunnable?.let { autoCloseHandler?.removeCallbacks(it) } else resetTimer()
     }
 
     private fun updateWindowParams(state: IslandState) {
@@ -480,7 +542,11 @@ class IslandWindow(
                         onAdaptiveStrengthChanged = this@IslandWindow.onAdaptiveStrengthChanged,
                         model = model, batteries = batteries, batteryNow = batteryNow,
                         paired = ownerAddress != null, nearby = nearby, cameraPaddingPx = cameraPadding,
-                        cameraCapsuleWidthPx = cameraCapsuleWidth
+                        cameraCapsuleWidthPx = cameraCapsuleWidth,
+                        onConnect = this@IslandWindow.onConnect
+                            ?.takeUnless { connectState == IslandConnectState.IDLE && connectActionDeferred }
+                            ?.let { { requestConnect() } },
+                        connectState = connectState
                     )
                 }
             }
@@ -489,6 +555,8 @@ class IslandWindow(
 
     private fun resetTimer() {
         autoCloseRunnable?.let { autoCloseHandler?.removeCallbacks(it) }
+        if (connectState == IslandConnectState.CONNECTING ||
+            (connectState == IslandConnectState.IDLE && connectActionDeferred)) return
         autoCloseHandler = Handler(Looper.getMainLooper())
         autoCloseRunnable = Runnable {
             if (appSettings.islandSettings.keepCompactVisible) {
@@ -506,9 +574,57 @@ class IslandWindow(
             return
         }
 
+        cancelConnect(resetState = false)
         autoCloseRunnable?.let { autoCloseHandler?.removeCallbacks(it) }
         ageHandler.removeCallbacks(updateAge)
         beginTransition(IslandState.CLOSE)
+    }
+
+    fun closePaired(address: String) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            Handler(Looper.getMainLooper()).post { closePaired(address) }
+            return
+        }
+        if (ownerAddress == address) close()
+    }
+
+    private fun requestConnect() {
+        val address = ownerAddress ?: return
+        val action = onConnect ?: return
+        val owner = lifecycleOwner ?: return
+        if (!isVisible) return
+        refreshConnectionState()
+        if (!isVisible || !nearby || connectState == IslandConnectState.CONNECTING ||
+            (connectState == IslandConnectState.IDLE && connectActionDeferred) ||
+            type != IslandType.CONNECTED || statusText != null) return
+        val generation = ++connectGeneration
+        connectState = IslandConnectState.CONNECTING
+        autoCloseRunnable?.let { autoCloseHandler?.removeCallbacks(it) }
+        connectJob = owner.lifecycleScope.launch {
+            val success = try {
+                withTimeout(25_000) { action() }
+            } catch (_: TimeoutCancellationException) {
+                false
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                Log.w("IslandWindow", "Could not connect nearby AirPods", failure)
+                false
+            }
+            // Completion belongs to this opening, even if the same pair was closed and reopened.
+            if (!isActive || generation != connectGeneration || ownerAddress != address || islandState == IslandState.CLOSE) return@launch
+            val connected = success || isAudioConnected?.invoke() == true
+            connectState = if (connected) IslandConnectState.IDLE else IslandConnectState.FAILED
+            if (connected) nearby = false
+            resetTimer()
+        }
+    }
+
+    private fun cancelConnect(resetState: Boolean = true) {
+        connectGeneration++
+        connectJob?.cancel()
+        connectJob = null
+        if (resetState) connectState = IslandConnectState.IDLE
     }
 
     private fun cleanupAndRemoveView(expected: ComposeView) {
@@ -525,6 +641,13 @@ class IslandWindow(
         } finally {
             ageHandler.removeCallbacks(updateAge)
             ownerAddress = null
+            ownerAnnouncementAtNanos = Long.MIN_VALUE
+            onConnect = null
+            isAudioConnected = null
+            deferConnectAction = null
+            connectActionDeferred = false
+            connectState = IslandConnectState.IDLE
+            keepOpenRequested = false
             composeView = null
             lifecycleOwner = null
             retainedWindowWidth = 0

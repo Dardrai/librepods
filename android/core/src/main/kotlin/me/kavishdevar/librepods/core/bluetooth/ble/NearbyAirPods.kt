@@ -93,7 +93,7 @@ object NearbyAirPods {
 
     class Visits {
         // shortcut: public reports coalesce same-model pairs; split visits when authenticated identity is available.
-        private data class Visit(var at: Long, var open: Boolean, var offered: Boolean)
+        private data class Visit(var at: Long, var open: Boolean, var offered: Boolean, var offeredAt: Long = at)
         private val visits = mutableMapOf<Int, Visit>()
 
         fun observe(event: Event, now: Long, alreadyPaired: Boolean, protectedModel: Int? = null): Event? {
@@ -116,7 +116,12 @@ object NearbyAirPods {
             visit.open = true
             if (visit.offered) return null
             visit.offered = true
+            visit.offeredAt = now
             return event
+        }
+
+        fun retry(modelId: Int, offeredAt: Long) {
+            visits[modelId]?.takeIf { it.open && it.offeredAt == offeredAt }?.offered = false
         }
 
         fun expire(now: Long, protectedModel: Int? = null): List<Event> = visits.mapNotNull { (model, visit) ->

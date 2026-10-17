@@ -37,6 +37,7 @@ class NearbyPairingController(
     private val confirmConsent: (suspend (String, () -> Boolean) -> Boolean)? = null,
     private val consentGateFactory: (Int, (BluetoothDevice, Long, PairingConsentGate.Consent) -> Unit) -> PairingConsentWatch =
         { model, onConsent -> PairingConsentGate(context, model, onConsent) },
+    private val onInvitationRejected: (Int, Long) -> Unit = { _, _ -> },
     private val onPaired: (BluetoothDevice) -> Unit = {}
 ) {
     private class ConsentHint(val receivedAt: Long, @Volatile var active: Boolean = true) {
@@ -85,7 +86,10 @@ class NearbyPairingController(
                 return@post
             }
             if (!Settings.canDrawOverlays(context)) return@post
-            val token = session.open(event.modelId) ?: return@post
+            val token = session.open(event.modelId) ?: run {
+                if (session.modelId != event.modelId) onInvitationRejected(event.modelId, observedAtNanos / 1_000_000)
+                return@post
+            }
             val name = NearbyAirPods.modelNames[event.modelId] ?: return@post
             val radioAge = (SystemClock.elapsedRealtimeNanos() - observedAtNanos).coerceAtLeast(0L)
             // Round up the age so decoding the same invitation cannot miss this floor by 1 ms.

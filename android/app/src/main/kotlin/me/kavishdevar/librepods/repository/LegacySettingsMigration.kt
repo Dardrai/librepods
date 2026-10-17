@@ -27,7 +27,7 @@ internal object LegacySettingsMigration {
             hasCompletedOnboarding = old["onboarding_complete"] == true,
             hasConnectedToAACP = old["connection_successful"] == true,
             firstSuccessfulConnectionTime = (old["first_connection_successful_time"] as? Long)?.takeIf { it > 0 },
-            isPremium = !me.kavishdevar.librepods.BuildConfig.PLAY_BUILD && old["foss_upgraded"] == true,
+            isPremium = old["foss_upgraded"] == true,
         ))
         device(old)?.let { entity ->
             if (database.appleDao().get(entity.macAddress) == null) database.appleDao().upsert(entity)

@@ -1,5 +1,5 @@
 /*
-    LibrePods - AirPods liberated from Apple’s ecosystem
+    LibrePods - AirPods liberated from Appleâ€™s ecosystem
     Copyright (C) 2025 LibrePods contributors
 
     This program is free software: you can redistribute it and/or modify
@@ -18,12 +18,12 @@
 
 package me.kavishdevar.librepods.presentation.screens.apple
 
+import androidx.compose.runtime.getValue
 import android.util.Log
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.wrapContentWidth
@@ -31,20 +31,16 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
-import com.kyant.backdrop.backdrops.rememberLayerBackdrop
 import me.kavishdevar.librepods.R
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommandIdentifier
 import me.kavishdevar.librepods.core.devices.effectiveAllowOff
 import me.kavishdevar.librepods.core.data.StemAction
-import me.kavishdevar.librepods.presentation.components.primitives.StyledButton
 import me.kavishdevar.librepods.presentation.components.primitives.StyledList
 import me.kavishdevar.librepods.presentation.components.primitives.StyledListItemOrientation
 import me.kavishdevar.librepods.presentation.components.primitives.StyledScaffold
@@ -57,7 +53,6 @@ fun LongPress(
     viewModel: AppleViewModel,
     name: String,
     navigateBack: (() -> Unit)?,
-    navigateToPurchase: () -> Unit
 ) {
     val uiState by viewModel.uiState.collectAsState()
 
@@ -114,27 +109,9 @@ fun LongPress(
                             StemAction.DIGITAL_ASSISTANT
                         )
                     },
-                    enabled = uiState.isPremium
                 )
             }
 
-            if (!uiState.isPremium) {
-                Spacer(modifier = Modifier.height(24.dp))
-                StyledButton(
-                    onClick = navigateToPurchase,
-                    backdrop = rememberLayerBackdrop(),
-                    modifier = Modifier.fillMaxWidth(),
-                    maxScale = 0.05f,
-                    surfaceColor = MaterialTheme.colorScheme.primary
-                ) {
-                    Text(
-                        stringResource(R.string.unlock_advanced_features),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onPrimary
-                    )
-                }
-                Spacer(modifier = Modifier.height(16.dp))
-            }
 
             if (longPressAction == StemAction.CYCLE_NOISE_CONTROL_MODES) {
                 Spacer(modifier = Modifier.height(32.dp))

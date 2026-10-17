@@ -1,21 +1,28 @@
 package me.kavishdevar.librepods.presentation.overlays
 
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import android.util.Log
 import android.animation.ValueAnimator
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedContentTransitionScope
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -28,6 +35,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.requiredHeightIn
 import androidx.compose.foundation.layout.requiredSize
@@ -36,21 +44,23 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.contentColorFor
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.ClipOp
 import androidx.compose.ui.graphics.Color
@@ -76,6 +86,8 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.Role
 import kotlinx.coroutines.launch
 import me.kavishdevar.librepods.R
 import me.kavishdevar.librepods.data.app.IslandBatteryStyle
@@ -166,6 +178,8 @@ fun IslandContent(
     statusText: String? = null,
     transitionGeneration: Long = 0L,
     onTransitionFinished: (Long, IslandState) -> Unit = { _, _ -> },
+    onConnect: (() -> Unit)? = null,
+    connectState: IslandConnectState = IslandConnectState.IDLE,
 ) {
     val density = LocalDensity.current
     val cells = islandBatteryCells(model, batteries, batteryNow)
@@ -270,7 +284,17 @@ fun IslandContent(
     val textColor = if (!expandedContent || backgroundColor.luminance() < 0.5f) Color.White else contentColorFor(backgroundColor)
     val shape = RoundedCornerShape(with(density) { animRadius.value.toDp() } )
 
-    val typeText = statusText ?: when (type) {
+    val showConnectAction = paired && type == IslandType.CONNECTED && statusText == null &&
+        onConnect != null && (nearby || connectState != IslandConnectState.IDLE)
+    val reserveConnectAction = paired && type == IslandType.CONNECTED && statusText == null
+    val actionIconOnly = with(density) { islandSettings.expandedWidth.toDp() } < 340.dp
+    val motionEnabled = ValueAnimator.areAnimatorsEnabled()
+    val expandConnectLabel = stringResource(R.string.island_show_connection_controls, name)
+    val typeText = if (showConnectAction && connectState == IslandConnectState.CONNECTING)
+        stringResource(R.string.island_connecting)
+    else if (showConnectAction && connectState == IslandConnectState.FAILED)
+        stringResource(R.string.island_connect_failed)
+    else statusText ?: when (type) {
         IslandType.CONNECTED -> stringResource(if (nearby) R.string.island_nearby else R.string.island_connected_text)
         IslandType.TAKING_OVER -> stringResource(R.string.island_taking_over_text)
         IslandType.MOVED_TO_REMOTE -> stringResource(R.string.island_moved_to_remote_text)
@@ -341,7 +365,16 @@ fun IslandContent(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .weight(1f)
-                                .pointerInput(islandState) {
+                                .testTag("island-header")
+                                .then(if (!expandedContent && showConnectAction)
+                                    Modifier.combinedClickable(role = Role.Button, onClickLabel = expandConnectLabel,
+                                        onLongClick = {
+                                            if (!islandSettings.compactOpenAppOnTap) openApp()
+                                            else changeState(IslandState.EXPANDED, true)
+                                        },
+                                        onClick = { changeState(IslandState.EXPANDED, true) }
+                                    ).semantics { contentDescription = expandConnectLabel }
+                                else Modifier.pointerInput(islandState, showConnectAction, islandSettings) {
                                     detectTapGestures(
                                         onPress = {
                                             scale.animateTo(1f, springSpec)
@@ -386,7 +419,7 @@ fun IslandContent(
                                             }
                                         }
                                     )
-                                },
+                                }),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
@@ -397,7 +430,7 @@ fun IslandContent(
                             }
                             AnimatedContent(
                                 targetState = useMonochrome,
-                                modifier = if (expandedContent) Modifier else Modifier.width(compactWingWidth)
+                                modifier = if (expandedContent) Modifier.testTag("island-artwork") else Modifier.width(compactWingWidth)
                                     .fillMaxHeight().testTag("island-compact-artwork"),
                                 contentAlignment = if (expandedContent) Alignment.TopStart else Alignment.Center,
                             ) {
@@ -424,14 +457,30 @@ fun IslandContent(
                                     .weight(1f)
                                     .padding(horizontal = 12.dp)
                             ) {
-                                    AnimatedVisibility(visible = islandSettings.fontSize > 15) {
-                                        Text(
-                                            text = typeText,
-                                            style = MaterialTheme.typography.bodyMedium,
-                                            fontSize = islandSettings.fontSize.sp * 0.65f,
-                                            fontWeight = FontWeight.SemiBold,
-                                            color = textColor.copy(0.6f),
-                                        )
+                                    if (islandSettings.fontSize > 15) {
+                                        val captionLineHeight = maxOf(MaterialTheme.typography.bodyMedium.lineHeight.value,
+                                            islandSettings.fontSize * 0.65f * 1.4f).sp
+                                        val captionModifier = Modifier.fillMaxWidth().height(with(density) { captionLineHeight.toDp() })
+                                            .clipToBounds().testTag("island-status")
+                                        val captionContent: @Composable (String) -> Unit = { caption ->
+                                            Text(text = caption,
+                                                modifier = if (caption == typeText) Modifier else Modifier.clearAndSetSemantics { },
+                                                style = MaterialTheme.typography.bodyMedium.copy(lineHeight = captionLineHeight),
+                                                fontSize = islandSettings.fontSize.sp * 0.65f,
+                                                fontWeight = FontWeight.SemiBold,
+                                                color = textColor.copy(0.6f), maxLines = 1, softWrap = false,
+                                                overflow = TextOverflow.Ellipsis)
+                                        }
+                                        if (motionEnabled) AnimatedContent(targetState = typeText,
+                                            modifier = captionModifier,
+                                            transitionSpec = {
+                                                (slideIntoContainer(AnimatedContentTransitionScope.SlideDirection.Up,
+                                                        tween(200, easing = CubicBezierEasing(0.2f, 0f, 0f, 1f))) togetherWith
+                                                        slideOutOfContainer(AnimatedContentTransitionScope.SlideDirection.Up,
+                                                            tween(200, easing = CubicBezierEasing(0.2f, 0f, 0f, 1f))))
+                                                    .using(SizeTransform(clip = true, sizeAnimationSpec = { _, _ -> snap() }))
+                                            }, label = "island-status") { captionContent(it) }
+                                        else Box(captionModifier) { captionContent(typeText) }
                                     }
 
                                     Text(
@@ -509,7 +558,7 @@ fun IslandContent(
                                         (maxHeight / 2.5f).toSp()
                                     }
                                     Text(
-                                        text = displayBatteryLevel?.toString() ?: "—",
+                                        text = displayBatteryLevel?.toString() ?: "â€”",
                                         style = MaterialTheme.typography.bodyLarge.copy(
                                             fontSize = fontSize,
                                             fontWeight = FontWeight.SemiBold
@@ -519,6 +568,25 @@ fun IslandContent(
                                         softWrap = false,
                                         textAlign = TextAlign.Center,
                                     )
+                                }
+                            }
+                            if (expandedContent && reserveConnectAction) {
+                                // Connection changes keep the name and artwork in their established positions.
+                                Box(Modifier.width(if (actionIconOnly) 48.dp else 108.dp).heightIn(min = 48.dp)
+                                    .testTag("island-action-slot"), contentAlignment = Alignment.Center) {
+                                    val actionContent: @Composable () -> Unit = {
+                                        IslandConnectButton(name, connectState, textColor, actionIconOnly,
+                                            visible = showConnectAction, motionEnabled = motionEnabled) {
+                                            if (showConnectAction && connectState != IslandConnectState.CONNECTING)
+                                                onConnect?.invoke()
+                                        }
+                                    }
+                                    if (motionEnabled) androidx.compose.animation.AnimatedVisibility(visible = showConnectAction,
+                                        enter = fadeIn(tween(140)), exit = fadeOut(tween(100)),
+                                        modifier = if (showConnectAction) Modifier else Modifier.clearAndSetSemantics { }) {
+                                        actionContent()
+                                    }
+                                    else if (showConnectAction) actionContent()
                                 }
                             }
                         }
@@ -565,6 +633,51 @@ fun IslandContent(
 }
 
 @Composable
+private fun IslandConnectButton(name: String, state: IslandConnectState, textColor: Color, iconOnly: Boolean,
+    visible: Boolean, motionEnabled: Boolean, onClick: () -> Unit) {
+    val connecting = state == IslandConnectState.CONNECTING
+    val description = stringResource(if (connecting) R.string.island_connecting_device else R.string.island_connect_device, name)
+    val label = if (connecting) null else if (iconOnly) "" else
+        stringResource(if (state == IslandConnectState.FAILED) R.string.island_connect_retry else R.string.island_connect)
+    Button(
+        onClick = onClick,
+        enabled = visible && !connecting,
+        modifier = Modifier.width(if (iconOnly) 48.dp else 108.dp).heightIn(min = 48.dp).testTag("island-connect")
+            .semantics { contentDescription = description },
+        shape = RoundedCornerShape(50),
+        colors = ButtonDefaults.buttonColors(
+            containerColor = textColor.copy(alpha = 0.12f), contentColor = textColor,
+            disabledContainerColor = textColor.copy(alpha = 0.12f), disabledContentColor = textColor,
+        ),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+    ) {
+        val density = LocalDensity.current
+        val labelModifier = Modifier.fillMaxWidth()
+            .height(with(density) { MaterialTheme.typography.labelLarge.lineHeight.toDp() }.coerceAtLeast(20.dp))
+            .testTag("island-connect-content")
+        val labelContent: @Composable (String?) -> Unit = { content ->
+            Box(modifier = if (content == label) Modifier else Modifier.clearAndSetSemantics { },
+                contentAlignment = Alignment.Center) {
+                when (content) {
+                    null -> CircularProgressIndicator(modifier = Modifier.size(18.dp), color = textColor, strokeWidth = 2.dp)
+                    "" -> Icon(LocalIcons.current.Bluetooth, null, modifier = Modifier.size(20.dp))
+                    else -> Text(content, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
+        }
+        if (motionEnabled) AnimatedContent(targetState = label,
+            modifier = labelModifier,
+            contentAlignment = Alignment.Center,
+            transitionSpec = {
+                (fadeIn(tween(120, delayMillis = 80)) togetherWith fadeOut(tween(80)))
+                    .using(SizeTransform(clip = true, sizeAnimationSpec = { _, _ -> snap() }))
+            }, label = "island-connect-label") { labelContent(it) }
+        else Box(labelModifier, contentAlignment = Alignment.Center) { labelContent(label) }
+    }
+}
+
+@Composable
 private fun islandAgeText(age: Pair<Long, TimeUnit>): String = when (age.second) {
     TimeUnit.MINUTES -> stringResource(R.string.island_battery_age_minutes, age.first)
     TimeUnit.HOURS -> stringResource(R.string.island_battery_age_hours, age.first)
@@ -581,7 +694,7 @@ private fun IslandBatteryIndicator(cell: IslandBatteryCell, style: IslandBattery
         BatteryComponent.CASE -> R.string.island_battery_case
         BatteryComponent.HEADSET -> R.string.island_battery_headset
     })
-    val percentage = cell.level?.let { "$it%" } ?: "—"
+    val percentage = cell.level?.let { "$it%" } ?: "â€”"
     val age = if (!cell.live && cell.ageSeconds != null)
         islandAgeText(islandAgeBucket(cell.ageSeconds)) else null
     val freshness = stringResource(when {

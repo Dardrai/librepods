@@ -21,7 +21,7 @@ on:
         required: true
         default: pixel-shizuku-rewrite
       publish_release:
-        description: Publish a signed FOSS prerelease (requires fork signing secrets)
+        description: Publish a signed GitHub prerelease (requires fork signing secrets)
         type: boolean
         default: false
       release_tag:
@@ -68,7 +68,11 @@ jobs:
           packages: platform-tools
       - name: Install Android toolchain
         run: sdkmanager "platforms;android-37.0" "build-tools;36.0.0" "ndk;30.0.14904198"
-      - name: Test, lint and build FOSS debug APK
+      - name: Check native VendorID hook
+        run: |
+          g++ -std=c++23 -Wall -Wextra -pedantic android/app/src/test/cpp/vendor_hook_test.cpp -o "$RUNNER_TEMP/vendor-hook-test"
+          "$RUNNER_TEMP/vendor-hook-test"
+      - name: Test, lint and build Android APKs
         working-directory: android
         run: ./gradlew --no-daemon :app:verifyPixel
       - uses: actions/upload-artifact@v4
@@ -81,12 +85,12 @@ jobs:
             android/app/build/reports/tests/
             android/app/build/test-results/
             android/app/build/overlay-previews/
-            android/app/build/reports/lint-results-fossDebug.*
+            android/app/build/reports/lint-results-debug.*
           if-no-files-found: ignore
       - uses: actions/upload-artifact@v4
         with:
           name: apk-debug
-          path: android/app/build/outputs/apk/foss/debug/app-foss-debug.apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
       - name: Prepare fork release signing
         if: steps.metadata.outputs.publish_release == 'true'
@@ -114,18 +118,18 @@ jobs:
           pathlib.Path('android/local.properties').write_text(''.join(f'{name}={escape(value)}\n' for name, value in values.items()))
           PY
           keytool -list -keystore android/release.keystore -storepass:env RELEASE_STORE_PASSWORD -alias "$RELEASE_KEY_ALIAS" >/dev/null
-      - name: Build signed FOSS release APK
+      - name: Build signed GitHub release APK
         if: steps.metadata.outputs.publish_release == 'true'
         working-directory: android
-        run: ./gradlew --no-daemon assembleFossRelease
+        run: ./gradlew --no-daemon assembleRelease
       - name: Verify and checksum release APK
         if: steps.metadata.outputs.publish_release == 'true'
         env:
           APP_VERSION: ${{ steps.metadata.outputs.app_version }}
         run: |
           mkdir -p artifacts
-          apk="artifacts/LibrePods-FOSS-v${APP_VERSION}-release.apk"
-          cp android/app/build/outputs/apk/foss/release/app-foss-release.apk "$apk"
+          apk="artifacts/LibrePods-v${APP_VERSION}-release.apk"
+          cp android/app/build/outputs/apk/release/app-release.apk "$apk"
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs "$apk"
           (cd artifacts && sha256sum ./*.apk > SHA256SUMS)
       - uses: actions/upload-artifact@v4
@@ -154,7 +158,7 @@ jobs:
         with:
           name: apk-release
           path: artifacts
-      - name: Publish signed FOSS prerelease
+      - name: Publish signed GitHub prerelease
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.build.outputs.release_tag }}

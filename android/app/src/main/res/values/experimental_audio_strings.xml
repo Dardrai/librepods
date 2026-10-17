@@ -19,6 +19,10 @@
     <string name="experimental_audio_call">Use AirPods for this call</string>
     <string name="experimental_audio_calls_hint">Experimental cellular calls: turn off Phone calls for these AirPods, keep Media audio on, choose the phone speaker and leave mute off. Stop restores the previous route.</string>
     <string name="experimental_audio_permission">Allow microphone access, reconnect the AirPods and tap the action again.</string>
+    <string name="recorder_connect_airpods">Connect your AirPods before recording.</string>
+    <string name="recorder_microphone_unsupported">The high-quality microphone has not been verified for this AirPods model.</string>
+    <string name="recorder_start">Start Recording</string>
+    <string name="recorder_stop">Stop Recording</string>
     <string name="experimental_audio_duration">Recording: %1$.1f seconds; elapsed: %2$.1f seconds</string>
     <string name="experimental_audio_eld_gate">Stereo AAC-ELD playback remains blocked until the Android encoder and Bluetooth transport checks pass.</string>
 </resources>

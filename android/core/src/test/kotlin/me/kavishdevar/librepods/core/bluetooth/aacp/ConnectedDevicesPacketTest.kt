@@ -15,9 +15,11 @@ class ConnectedDevicesPacketTest {
         assertTrue(ConnectedDevicesPacket.parse(header + byteArrayOf(0)).connectedDevices.isEmpty())
     }
 
-    @Test fun rejectsPartialDuplicateAndUnsignedOversizedCountsInsteadOfPublishingMissingHosts() {
+    @Test fun rejectsPartialDuplicateTrailingAndUnsignedOversizedCountsInsteadOfPublishingMissingHosts() {
         for (packet in listOf(header, header + byteArrayOf(2) + host,
-            header + byteArrayOf(2) + host + host, header + byteArrayOf(0x80.toByte()))) {
+            header + byteArrayOf(2) + host + host, header + byteArrayOf(0x80.toByte()),
+            header + byteArrayOf(1) + host + byteArrayOf(0), header + byteArrayOf(0, 0),
+            (header + byteArrayOf(1) + host).also { it[5] = 1 })) {
             assertThrows(IllegalArgumentException::class.java) { ConnectedDevicesPacket.parse(packet) }
         }
     }

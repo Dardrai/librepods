@@ -35,7 +35,6 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.transformLatest
 import kotlinx.coroutines.launch
-import me.kavishdevar.librepods.billing.BillingManager
 import me.kavishdevar.librepods.bluetooth.DeviceSettingsRefreshResult
 import me.kavishdevar.librepods.audio.ExperimentalAudioController
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommandIdentifier
@@ -47,6 +46,7 @@ import me.kavishdevar.librepods.core.devices.AppleDevice
 import me.kavishdevar.librepods.core.devices.AppleMetadata
 import me.kavishdevar.librepods.core.devices.AppleSettings
 import me.kavishdevar.librepods.core.devices.AppleState
+import me.kavishdevar.librepods.core.devices.HearingMode
 import me.kavishdevar.librepods.data.xposed.XposedRemotePrefProvider
 import me.kavishdevar.librepods.database.app.AppSettingsEntity
 import me.kavishdevar.librepods.database.app.AppStateEntity
@@ -64,7 +64,6 @@ data class AppleUiState(
     val appState: AppStateEntity = AppStateEntity(),
     val appSettings: AppSettingsEntity = AppSettingsEntity(),
 
-    val isPremium: Boolean = false,
     val vendorIdHook: Boolean = false,
     val recordings: List<Recording> = emptyList(),
 
@@ -81,14 +80,15 @@ class AppleViewModel(
     private val audioControllerProvider: () -> ExperimentalAudioController? = { null },
 ) : ViewModel(), DeviceViewModel {
     val audioController: ExperimentalAudioController? get() = audioControllerProvider()
-    val billingManager = BillingManager
 
     val events = device.events
     val connectionState = device.connectionState
     private val _refreshingSettings = MutableStateFlow(false)
     val refreshingSettings = _refreshingSettings.asStateFlow()
+    private var hearingModeJob: Job? = null
 
     fun refreshDeviceSettings(refresh: suspend (AppleDevice) -> DeviceSettingsRefreshResult) {
+        if (device.state.value.hearingModes.pending != null) return
         if (!_refreshingSettings.compareAndSet(false, true)) return
         viewModelScope.launch {
             try {
@@ -147,16 +147,14 @@ class AppleViewModel(
     val uiState = combine(
         deviceDetails,
         appData,
-        billingManager.provider.isPremium,
         _heartRateRange,
         heartRateSamples
-    ) { (state, settings, metadata), (appState, appSettings), isPremium, heartRateRange, heartRateSamples ->
+    ) { (state, settings, metadata), (appState, appSettings), heartRateRange, heartRateSamples ->
         AppleUiState(
             state = state.copy(controlStates = state.controlStates + state.requestedControls,
                 customEq = state.requestedCustomEq ?: state.customEq),
             settings = settings,
             metadata = metadata,
-            isPremium = isPremium,
             vendorIdHook = XposedRemotePrefProvider.create().getBoolean(
                 "vendor_id_hook",
                 false
@@ -173,7 +171,6 @@ class AppleViewModel(
             state = device.state.value,
             settings = device.settings.value,
             metadata = device.metadata.value,
-            isPremium = billingManager.provider.isPremium.value,
             vendorIdHook = XposedRemotePrefProvider.create()
                 .getBoolean("vendor_id_hook", false)
         )
@@ -181,6 +178,23 @@ class AppleViewModel(
 
     fun disconnect() = device.disconnect()
     fun recordings(): List<Recording> = recordingRepository.recordings()
+
+    fun setHearingMode(mode: HearingMode, enabled: Boolean) {
+        hearingModeJob?.cancel()
+        hearingModeJob = viewModelScope.launch {
+            val confirmed = try {
+                withContext(Dispatchers.IO) {
+                    when (mode) {
+                        HearingMode.HEARING_AID -> device.setHearingAidEnabled(enabled)
+                        HearingMode.MEDIA_ASSIST -> device.setMediaAssistEnabled(enabled)
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) { false }
+            if (!confirmed) Toast.makeText(device.context, R.string.hearing_mode_unconfirmed, Toast.LENGTH_LONG).show()
+        }
+    }
 
     fun setControlCommand(identifier: ControlCommandIdentifier, value: ByteArray): Boolean =
         device.setControlCommand(identifier, value)

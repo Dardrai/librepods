@@ -8,6 +8,7 @@ data class AppStateEntity(
     @PrimaryKey
     val id: Int = 0,
 
+    // Retain legacy billing columns so existing databases upgrade without a schema change.
     val isPremium: Boolean = false,
 
     val hasCompletedOnboarding: Boolean = false,

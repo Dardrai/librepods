@@ -5,12 +5,16 @@ import android.app.Application
 import android.Manifest
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager
+import android.content.Context
+import android.content.ContextWrapper
 import android.graphics.Insets
 import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.graphics.RectF
 import android.os.Looper
 import android.view.ContextThemeWrapper
+import android.view.View
+import android.view.ViewGroup
 import android.view.WindowManager
 import androidx.compose.ui.platform.ComposeView
 import androidx.lifecycle.Lifecycle
@@ -18,6 +22,7 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
 import androidx.lifecycle.ViewModelStore
 import androidx.lifecycle.ViewModelStoreOwner
+import androidx.lifecycle.findViewTreeLifecycleOwner
 import androidx.lifecycle.setViewTreeLifecycleOwner
 import androidx.lifecycle.setViewTreeViewModelStoreOwner
 import androidx.savedstate.SavedStateRegistry
@@ -39,13 +44,74 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import org.robolectric.annotation.LooperMode
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.Shadows.shadowOf
 import java.util.concurrent.TimeUnit
+import java.time.Duration
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [37], application = Application::class)
 class IslandStateTest {
+    @Test @LooperMode(LooperMode.Mode.PAUSED)
+    fun failedInitialAndReplacementAttachmentsReleaseTheirOwnerAndAllowTheNextShow() {
+        val application = RuntimeEnvironment.getApplication()
+        val realManager = application.getSystemService(WindowManager::class.java)
+        var reject = false
+        val rejectedOwners = mutableListOf<LifecycleOwner>()
+        val manager = object : WindowManager by realManager {
+            override fun getCurrentWindowMetrics() = realManager.currentWindowMetrics
+            override fun addView(view: View, params: ViewGroup.LayoutParams) {
+                if (reject) {
+                    rejectedOwners += requireNotNull(view.findViewTreeLifecycleOwner())
+                    throw WindowManager.BadTokenException("Overlay permission unavailable")
+                }
+                realManager.addView(view, params)
+            }
+        }
+        val context = object : ContextWrapper(application) {
+            override fun getSystemService(name: String): Any? =
+                if (name == Context.WINDOW_SERVICE) manager else super.getSystemService(name)
+        }
+        val viewField = IslandWindow::class.java.getDeclaredField("composeView").apply { isAccessible = true }
+        val ownerField = IslandWindow::class.java.getDeclaredField("lifecycleOwner").apply { isAccessible = true }
+        val cleanup = IslandWindow::class.java.getDeclaredMethod("cleanupAndRemoveView", ComposeView::class.java)
+            .apply { isAccessible = true }
+        for (replacement in listOf(false, true)) {
+            val window = IslandWindow(context, AppSettingsEntity())
+            try {
+                reject = false
+                if (replacement) {
+                    window.show(keepOpen = true)
+                    assertTrue(window.isVisible)
+                }
+                reject = true
+                if (replacement) window.updateContext(context) else window.show(keepOpen = true)
+                assertFalse(window.isVisible)
+                assertEquals(IslandState.CLOSE, window.islandState)
+                assertNull(viewField.get(window))
+                assertNull(ownerField.get(window))
+                assertEquals(Lifecycle.State.DESTROYED, rejectedOwners.last().lifecycle.currentState)
+                reject = false
+                window.show(keepOpen = true)
+                assertTrue("Granting permission must allow a fresh overlay owner", window.isVisible)
+                assertNotSame(rejectedOwners.last(), ownerField.get(window))
+            } finally {
+                window.close()
+                (viewField.get(window) as? ComposeView)?.let { cleanup.invoke(window, it) }
+            }
+        }
+    }
+
+    @Test @LooperMode(LooperMode.Mode.PAUSED)
+    fun keepOpenPreviewCancelsThePreviousAnnouncementsDismissal() = withPairedWindow { window, paired, _ ->
+        window.show(owner = paired)
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(1))
+        window.show(keepOpen = true)
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(5))
+        assertTrue("The announcement's old timer must not close the settings preview", window.isVisible)
+    }
+
     @Test fun islandKeepsItsFrameworkDarkOptOutEvenWhenTheCallingAppThemeIsLight() {
         val caller = ContextThemeWrapper(RuntimeEnvironment.getApplication(), android.R.style.Theme_Material_Light_NoActionBar)
         val lightTheme = caller.resources.getIdentifier("isLightTheme", "attr", "android")
@@ -361,6 +427,21 @@ class IslandStateTest {
         assertNull(cells[2].level)
         assertNull(cells[2].ageSeconds)
         assertFalse(cells[2].charging)
+    }
+
+    @Test fun unknownStatusNeverBecomesACurrentOrCachedPercentage() {
+        for (observedAt in listOf(199_000L, 100_000L)) {
+            val cells = islandBatteryCells(AirPodsModel.AIRPODS_PRO_3, setOf(
+                Battery(BatteryComponent.LEFT, 85, BatteryStatus.CHARGING, 199_000L),
+                Battery(BatteryComponent.RIGHT, 0, BatteryStatus.UNKNOWN, observedAt)
+            ), 200_000L)
+            assertEquals(85, cells[0].level)
+            assertTrue(cells[0].live)
+            assertNull(cells[1].level)
+            assertFalse(cells[1].live)
+            assertFalse(cells[1].charging)
+            assertNull(cells[1].ageSeconds)
+        }
     }
 
     @Test fun explicitMissingComponentKeepsPercentageButCannotClaimCharging() {

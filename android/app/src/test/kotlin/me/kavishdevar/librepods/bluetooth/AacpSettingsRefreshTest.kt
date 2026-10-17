@@ -6,6 +6,12 @@ import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothSocket
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import me.kavishdevar.librepods.core.bluetooth.aacp.AACPManager
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommandIdentifier
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.MagicKeyType
@@ -22,6 +28,7 @@ import me.kavishdevar.librepods.core.devices.effectiveAllowOff
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.mockito.Mockito.mockConstruction
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.Shadows.shadowOf
@@ -36,6 +43,7 @@ import java.io.PipedOutputStream
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
 
@@ -43,6 +51,317 @@ import kotlin.concurrent.thread
 @Config(sdk = [37], application = Application::class,
     shadows = [RefreshSocketShadow::class, RefreshDeviceShadow::class])
 class AacpSettingsRefreshTest {
+    @Test fun sensorWatchdogSeesTheAdoptedTransportAtConstructionForEveryConnectPath() {
+        @Suppress("UNCHECKED_CAST")
+        val sensorType = Class.forName("me.kavishdevar.librepods.core.bluetooth.aacp.RTBuddyManager") as Class<Any>
+        for (path in listOf("ordinary", "guarded", "refresh")) {
+            val device = createDevice()
+            val previous = socket(connected = true)
+            val replacement = socket()
+            val manager = AACPManager(device) { replacement }
+            if (path == "refresh") bind(manager, previous)
+            var checks = 0
+            mockConstruction(sensorType) { _, context ->
+                @Suppress("UNCHECKED_CAST")
+                val isCurrent = context.arguments()[2] as () -> Boolean
+                assertTrue("The $path sensor watchdog must see its transport during construction", isCurrent())
+                assertSame(replacement, manager.captureAudioSocket())
+                checks++
+            }.use {
+                try {
+                    val connected = when (path) {
+                        "ordinary" -> manager.connect()
+                        "guarded" -> manager.connect({ true }) {}
+                        else -> manager.refreshControlSession(requireNotNull(manager.prepareControlSessionRefresh())) { true }
+                    }
+                    assertTrue(path, connected)
+                    assertEquals(path, 1, checks)
+                } finally { manager.disconnect(); previous.close(); replacement.close() }
+            }
+        }
+    }
+
+    @Test fun cancellingAnExplicitPendingConnectClosesOnlyItsCapturedSocketAndAllowsANormalReplacement() {
+        val device = createDevice()
+        val nearbyBattery = setOf(Battery(BatteryComponent.CASE, 62, BatteryStatus.CHARGING, System.currentTimeMillis()))
+        device.loadInitialState(AppleState(battery = nearbyBattery),
+            AppleSettings(cacheDisconnectedComponentBattery = false), fixtureMetadata())
+        val pending = socket()
+        val replacement = socket()
+        socketShadow(pending).blockConnect()
+        val created = AtomicInteger()
+        val manager = AACPManager(device) { if (created.getAndIncrement() == 0) pending else replacement }
+        val captured = AtomicReference<BluetoothSocket?>()
+        val result = AtomicReference<Boolean?>()
+        val worker = thread { result.set(manager.connect({ true }, captured::set)) }
+        try {
+            assertTrue(socketShadow(pending).connectEntered.await(2, TimeUnit.SECONDS))
+            assertSame(pending, captured.get())
+            assertTrue(manager.cancelPendingConnect(pending))
+            worker.join(2_000)
+            assertFalse(worker.isAlive)
+            assertEquals(false, result.get())
+            assertNull(manager.captureAudioSocket())
+            assertEquals("Cancelling pending AACP cannot erase the authenticated nearby reading", nearbyBattery,
+                device.state.value.battery)
+            assertTrue(manager.connect())
+            assertSame(replacement, manager.captureAudioSocket())
+            assertFalse(manager.cancelPendingConnect(pending))
+            assertFalse(manager.cancelPendingConnect(replacement))
+            assertEquals(0, socketShadow(replacement).closes.get())
+            assertEquals(0, deviceShadow(device.bluetoothDevice).disconnects.get())
+        } finally { manager.disconnect(); pending.close(); replacement.close(); worker.join(2_000) }
+    }
+
+    @Test fun aPhysicallyConnectedSocketIsStillCancellableUntilItsControlSessionIsPublished() {
+        val device = createDevice()
+        val pending = socket()
+        val manager = AACPManager(device) { pending }
+        socketShadow(pending).afterConnectedCheck = {
+            assertNull("The physical socket cannot expose audio before adoption", manager.captureAudioSocket())
+            assertFalse(manager.ownsAudioSocket(pending))
+            assertTrue(manager.cancelPendingConnect(pending))
+        }
+        try {
+            assertFalse(manager.connect({ true }) { assertSame(pending, it) })
+            assertNull(manager.captureAudioSocket())
+            assertFalse(pending.isConnected)
+            assertEquals(0, deviceShadow(device.bluetoothDevice).disconnects.get())
+        } finally { manager.disconnect(); pending.close() }
+    }
+
+    @Test fun lateCancellationCannotCloseAnAdoptedLiveConnection() {
+        val device = createDevice()
+        val live = socket()
+        val manager = AACPManager(device) { live }
+        val current = AtomicBoolean(true)
+        var captured: BluetoothSocket? = null
+        try {
+            assertTrue(manager.connect(current::get) { captured = it })
+            current.set(false)
+            assertSame(live, captured)
+            assertFalse(manager.cancelPendingConnect(live))
+            assertSame(live, manager.captureAudioSocket())
+            assertTrue(live.isConnected)
+            assertEquals(0, socketShadow(live).closes.get())
+        } finally { manager.disconnect(); live.close() }
+    }
+
+    @Test fun cancellationDuringSocketCreationClosesTheCreatedSocketBeforePublicationAndPreservesANewerTransport() {
+        val device = createDevice()
+        val created = socket()
+        val replacement = socket(connected = true)
+        val factoryEntered = CountDownLatch(1)
+        val releaseFactory = CountDownLatch(1)
+        val current = AtomicBoolean(true)
+        val captures = AtomicInteger()
+        val manager = AACPManager(device) {
+            factoryEntered.countDown()
+            check(releaseFactory.await(2, TimeUnit.SECONDS))
+            created
+        }
+        val result = AtomicReference<Boolean?>()
+        val worker = thread { result.set(manager.connect(current::get) { captures.incrementAndGet() }) }
+        try {
+            assertTrue(factoryEntered.await(2, TimeUnit.SECONDS))
+            current.set(false)
+            bind(manager, replacement)
+            releaseFactory.countDown()
+            worker.join(2_000)
+            assertFalse(worker.isAlive)
+            assertEquals(false, result.get())
+            assertEquals(0, captures.get())
+            assertEquals(1, socketShadow(created).closes.get())
+            assertEquals("Cancelled creation must never call socket.connect", 1L, socketShadow(created).connectEntered.count)
+            assertSame(replacement, manager.captureAudioSocket())
+            assertEquals(0, socketShadow(replacement).closes.get())
+        } finally { releaseFactory.countDown(); manager.disconnect(); created.close(); replacement.close(); worker.join(2_000) }
+    }
+
+    @Test fun aRetiredGuardCannotCreateASocketAndLosingItAtThePendingCallbackCannotStartConnect() {
+        val device = createDevice()
+        val pending = socket()
+        val created = AtomicInteger()
+        val manager = AACPManager(device) { created.incrementAndGet(); pending }
+        val current = AtomicBoolean(false)
+        try {
+            assertFalse(manager.connect(current::get) { fail("An old request cannot publish a socket") })
+            assertEquals(0, created.get())
+            current.set(true)
+            assertFalse(manager.connect(current::get) { current.set(false) })
+            assertEquals(1L, socketShadow(pending).connectEntered.count)
+            assertNull(manager.captureAudioSocket())
+            assertEquals(0, deviceShadow(device.bluetoothDevice).disconnects.get())
+        } finally { manager.disconnect(); pending.close() }
+    }
+
+    @Test fun aFailingPendingCallbackCleansUpItsSocket() {
+        val device = createDevice()
+        val pending = socket()
+        val manager = AACPManager(device) { pending }
+        try {
+            assertFalse(manager.connect({ true }) { throw IOException("Retired callback") })
+            assertNull(manager.captureAudioSocket())
+            assertFalse(pending.isConnected)
+            assertEquals(1, socketShadow(pending).closes.get())
+        } finally { manager.disconnect(); pending.close() }
+    }
+
+    @Test fun ordinaryAndGuardedDeviceCallsReuseThePublishedTransportWithoutAnotherSocket() {
+        val device = createDevice()
+        val live = socket()
+        val created = AtomicInteger()
+        val manager = AACPManager(device) { created.incrementAndGet(); live }
+        AppleDevice::class.java.getDeclaredField("aacp").apply { isAccessible = true }.set(device, manager)
+        try {
+            assertTrue(device.connect())
+            assertTrue(device.connect({ true }) { fail("Existing live transport must not be captured as pending") })
+            assertEquals(1, created.get())
+            assertEquals(ConnectionState.CONNECTED, device.connectionState.value)
+            assertSame(live, manager.captureAudioSocket())
+            assertFalse(manager.cancelPendingConnect(live))
+            assertEquals(0, deviceShadow(device.bluetoothDevice).disconnects.get())
+        } finally { manager.disconnect(); live.close() }
+    }
+
+    @Test fun reportsBlockedAcrossReconnectCannotPublishStateMetadataOrEvents() {
+        fun packet(opcode: Int, vararg payload: Int) = byteArrayOf(4, 0, 4, 0, opcode.toByte(), 0) +
+            payload.map { it.toByte() }.toByteArray()
+        val information = packet(0x1d, 2, 0, 0, 4, 0) +
+            listOf("Old name", "A3063", "Apple", "OLD", "9A348", "", "1", "updater", "LEFT", "RIGHT", "")
+                .fold(byteArrayOf()) { bytes, field -> bytes + field.toByteArray() + byteArrayOf(0) }
+        val accommodation = packet(0x53).copyOf(140).apply {
+            this[6] = 0x84.toByte(); this[8] = 2; this[9] = 1; this[10] = 1; this[11] = 1
+        }
+        val reports = listOf(
+            packet(8, 2), packet(2, 1, 1, 1), packet(4, 1, 2, 1, 72, 2, 1),
+            packet(9, 0x0d, 4, 0, 0, 0), packet(6, 0, 1), packet(0x4b, 0, 0, 0, 1),
+            packet(0x19, 5, 1), packet(0x0e, 1, 2, 3, 4, 5, 6, 2),
+            packet(0x2e, 0, 0, 1, 1, 2, 3, 4, 5, 6, 0, 0),
+            packet(0x11, 6, 5, 4, 3, 2, 1) + "ShowNearbyUI SetOwnershipToFalse".toByteArray(),
+            accommodation, information, packet(0x63, 5, 0, 1, 2, 80, 30, 65),
+            packet(0x58, 1, 0).copyOf(22) + byteArrayOf(1, 0, 0, 0, 1, 0x55), packet(0x7e, 1)
+        )
+        for (report in reports) {
+            val device = createDevice()
+            val manager = device.aacp
+            val original = socket(connected = true)
+            val replacement = socket(connected = true)
+            val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+            val emissions = AtomicInteger()
+            scope.launch { device.events.collect { emissions.incrementAndGet() } }
+            scope.launch { device.microphoneFrames.collect { emissions.incrementAndGet() } }
+            bind(manager, original)
+            AACPManager::class.java.getDeclaredField("connectionScope").apply { isAccessible = true }.set(manager, scope)
+            val baseline = device.state.value
+            val metadata = device.metadata.value
+            val entered = CountDownLatch(1)
+            val failure = AtomicReference<Throwable?>()
+            var worker: Thread? = null
+            try {
+                synchronized(manager) {
+                    val pending = thread {
+                        try { entered.countDown(); manager.processPacket(report, original) }
+                        catch (error: Throwable) { failure.set(error) }
+                    }
+                    worker = pending
+                    assertTrue(entered.await(2, TimeUnit.SECONDS))
+                    val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+                    while (pending.state != Thread.State.BLOCKED && pending.isAlive && System.nanoTime() < deadline) Thread.yield()
+                    assertEquals(Thread.State.BLOCKED, pending.state)
+                    bind(manager, replacement)
+                }
+                val completed = checkNotNull(worker)
+                completed.join(2_000)
+                assertFalse(completed.isAlive)
+                assertNull(failure.get())
+                val label = "opcode=${report[4]}"
+                assertSame(label, baseline, device.state.value)
+                assertSame(label, metadata, device.metadata.value)
+                assertEquals(label, 0, emissions.get())
+                manager.processPacket(report, null)
+                assertSame(label, baseline, device.state.value)
+                assertSame(label, metadata, device.metadata.value)
+                assertEquals(label, 0, emissions.get())
+                manager.processPacket(report, replacement)
+                assertTrue("The current transport must still publish $label", device.state.value !== baseline ||
+                    device.metadata.value !== metadata || emissions.get() > 0)
+            } finally {
+                manager.disconnect(); scope.cancel(); original.close(); replacement.close(); worker?.join(2_000)
+            }
+        }
+    }
+
+    @Test fun retiringTheTransportCancelsAnEventWaitingForItsSubscriber() {
+        val device = createDevice()
+        val manager = device.aacp
+        val original = socket(connected = true)
+        val replacement = socket(connected = true)
+        val transportScope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        val subscriberScope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        val resume = CompletableDeferred<Unit>()
+        val emissions = AtomicInteger()
+        subscriberScope.launch { device.events.collect { if (emissions.incrementAndGet() == 1) resume.await() } }
+        bind(manager, original)
+        AACPManager::class.java.getDeclaredField("connectionScope").apply { isAccessible = true }.set(manager, transportScope)
+        val report = byteArrayOf(4, 0, 4, 0, 0x19, 0, 5, 1)
+        try {
+            manager.processPacket(report, original)
+            manager.processPacket(report, original)
+            assertEquals(1, emissions.get())
+            assertTrue(manager.disconnect(original))
+            bind(manager, replacement)
+            resume.complete(Unit)
+            assertEquals("A suspended old event must not reach the replacement session", 1, emissions.get())
+        } finally { manager.disconnect(); transportScope.cancel(); subscriberScope.cancel(); original.close(); replacement.close() }
+    }
+
+    @Test fun aConnectResultCannotRestoreConnectedAfterItsSocketWasRetired() {
+        val device = createDevice()
+        val manager = device.aacp
+        val original = socket(connected = true)
+        bind(manager, original)
+        try {
+            assertTrue(device.connect())
+            assertEquals(ConnectionState.CONNECTED, device.connectionState.value)
+            socketShadow(original).afterConnectedCheck = { assertTrue(manager.disconnect(original, notifyDevice = true)) }
+            assertFalse(device.connect())
+            assertNull(manager.captureAudioSocket())
+            assertEquals(ConnectionState.DISCONNECTED, device.connectionState.value)
+        } finally { manager.disconnect(); original.close() }
+    }
+
+    @Test fun anOlderFailedConnectCannotOverwriteTheReplacementConnectionsStateOrReportSuccess() {
+        val device = createDevice()
+        val manager = device.aacp
+        val original = socket(connected = true)
+        val replacement = socket(connected = true)
+        val lock = AACPManager::class.java.getDeclaredField("connectLock").apply { isAccessible = true }
+            .get(manager) as java.util.concurrent.locks.ReentrantLock
+        val result = AtomicReference<Boolean?>()
+        var worker: Thread? = null
+        bind(manager, original)
+        try {
+            lock.lock()
+            try {
+                val pending = thread { result.set(device.connect()) }
+                worker = pending
+                val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+                while (!lock.hasQueuedThread(pending) && pending.isAlive && System.nanoTime() < deadline) Thread.yield()
+                assertTrue(lock.hasQueuedThread(pending))
+                assertTrue(manager.disconnect(original, notifyDevice = true))
+                bind(manager, replacement)
+                assertTrue(device.connect())
+            } finally { lock.unlock() }
+            val completed = checkNotNull(worker)
+            completed.join(2_000)
+            assertFalse(completed.isAlive)
+            assertEquals(false, result.get())
+            assertSame(replacement, manager.captureAudioSocket())
+            assertEquals(ConnectionState.CONNECTED, device.connectionState.value)
+        } finally { manager.disconnect(); original.close(); replacement.close(); worker?.join(2_000) }
+    }
+
     @Test fun retiredTransportCannotPublishKeysAfterItsInitialOwnershipCheck() {
         val device = createDevice()
         val manager = device.aacp
@@ -334,8 +653,14 @@ class RefreshSocketShadow : ShadowBluetoothSocket() {
     val connectEntered = CountDownLatch(1)
     val closes = AtomicInteger()
     val output = RefreshOutput()
+    var afterConnectedCheck: (() -> Unit)? = null
     init { setOutputStream(output) }
     @Implementation public override fun connect() { connectEntered.countDown(); super.connect() }
+    @Implementation public override fun isConnected(): Boolean {
+        val connected = super.isConnected()
+        afterConnectedCheck?.also { afterConnectedCheck = null; it() }
+        return connected
+    }
     @Implementation public override fun close() {
         closes.incrementAndGet()
         super.close()

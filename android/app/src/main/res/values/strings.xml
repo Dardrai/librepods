@@ -34,7 +34,6 @@
     <string name="airpods_not_connected">AirPods not connected</string>
     <string name="airpods_not_connected_description">Please connect your AirPods to access settings.</string>
     <string name="back">Back</string>
-    <string name="customizations">Customizations</string>
     <string name="relative_conversation_awareness_volume">Relative volume</string>
     <string name="relative_conversation_awareness_volume_description">Reduces to a percentage of the current volume instead of the maximum volume.</string>
     <string name="conversation_awareness_pause_music">Pause Music</string>
@@ -215,27 +214,11 @@
     <string name="listening_mode_transparency_description">Lets in external sounds</string>
     <string name="listening_mode_adaptive_description">Dynamically adjust external noise</string>
     <string name="listening_mode_noise_cancellation_description">Blocks out external sounds</string>
-    <string name="unlock_advanced_features">Unlock advanced features</string>
-    <string name="buy_price">Buy %s</string>
-    <string name="restore_purchases">Restore purchases</string>
-    <string name="ear_detection_description">Automatically stop playing audio when you take them off, and resume playback when you put them back on.</string>
-    <string name="battery">Battery</string>
-    <string name="battery_description">View accurate battery status in the app and notification.</string>
-    <string name="noise_control_description">Switch between listening modes directly from the app or Quick Settings.</string>
-    <string name="advanced_device_settings">Advanced device settings</string>
-    <string name="advanced_device_settings_description">Customize settings like Personalized Volume, Adaptive Audio, Pause media when falling asleep, and other Accessibility settings.</string>
-    <string name="automatic_connection">Automatic Connection</string>
-    <string name="automatic_connection_description">Enable and customize automatic connection to AirPods.</string>
-    <string name="customizations_description">Get access to app customizations, including phone battery in widget, conversation awareness volume, and many more upcoming customization features.</string>
-    <string name="support_the_development">Support the development</string>
-    <string name="support_development_description">LibrePods is developed by a single developer. Upgrading helps keep the app alive.</string>
-    <string name="feature_availability_disclaimer">Feature availability depends on your AirPods model and firmware version.</string>
     <string name="contact">Contact</string>
     <string name="email">E-Mail</string>
     <string name="discord">Discord</string>
     <string name="github_issues">GitHub Issues</string>
     <string name="version_code">Version code</string>
-    <string name="flavor" translatable="false">Flavor</string>
     <string name="build_type">Build type</string>
     <string name="no">No</string>
     <string name="yes">Yes</string>
@@ -264,10 +247,6 @@
     <string name="device_info">Device information</string>
     <string name="build_id">Build ID</string>
     <string name="manufacturer">Manufacturer</string>
-    <string name="free_features">Free features</string>
-    <string name="advanced_features">Advanced features</string>
-    <string name="digital_assistant_on_long_press">Digital Assistant on Long Press</string>
-    <string name="digital_assistant_on_long_press_description">Invoke Digital Assistant when long pressing the AirPods Pro stem.</string>
     <string name="customizations_unavailable">Customizations unavailable. Connect your AirPods at least once to access.</string>
     <string name="xposed_available">Xposed available</string>
     <string name="app_enabled_in_xposed">App enabled in Xposed</string>
@@ -276,7 +255,6 @@
     <string name="optimized_charging">Optimized Charge Limit</string>
     <string name="optimized_charging_description">AirPods can learn from your daily usage and determine when to charge to an optmized limit and when to allow or full charge. This limit adapts to your daily usage and preserves your battery lifespan over time.\nThis setting may not affect unsupported AirPods, or AirPods on an older firmware version.</string>
     <string name="enable_app_in_xposed_or_update_device">Update your device or enable LibrePods in Xposed and reopen the app to proceed.</string>
-    <string name="play_foss_premium_banner">Due to an error in billing, premium access will expire in %1$d days. If you already upgraded the app, please click on this message to email billing@kavish.xyz to restore or verify access. Apologies for the inconvenience.</string>
     <string name="custom">Custom</string>
     <string name="recommended">Recommended</string>
     <string name="appearance">Appearance</string>

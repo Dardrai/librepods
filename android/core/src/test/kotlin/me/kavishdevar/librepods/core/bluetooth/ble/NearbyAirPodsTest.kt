@@ -58,6 +58,20 @@ class NearbyAirPodsTest {
         assertEquals(ours, visits.observe(ours, 3, false))
     }
 
+    @Test fun aRejectedOfferCanRetryDespiteFreshReportsButCannotRearmANewerOrOwnedVisit() {
+        val visits = NearbyAirPods.Visits()
+        val open = NearbyAirPods.Event(0x1920, true)
+        assertEquals(open, visits.observe(open, 10, false))
+        assertNull(visits.observe(open, 11, false))
+        visits.retry(open.modelId, 10)
+        assertEquals(open, visits.observe(open, 12, false))
+        visits.retry(open.modelId, 10)
+        assertNull("A late rejection must not rearm the accepted replacement", visits.observe(open, 13, false))
+        assertEquals(open.copy(lidOpen = false), visits.observe(open, 14, true))
+        visits.retry(open.modelId, 12)
+        assertNull("Ownership must keep its invitation suppressed", visits.observe(open, 15, false))
+    }
+
     @Test fun closingOneModelDoesNotCancelANewerInvitation() {
         val state = NearbyAirPods.Session()
         val first = state.open(0x2720)!!

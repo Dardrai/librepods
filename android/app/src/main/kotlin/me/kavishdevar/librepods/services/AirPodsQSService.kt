@@ -16,220 +16,149 @@
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-@file:OptIn(ExperimentalEncodingApi::class)
-
 package me.kavishdevar.librepods.services
 
-import android.annotation.SuppressLint
-import android.content.BroadcastReceiver
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
-import android.content.SharedPreferences
+import android.content.ServiceConnection
 import android.graphics.drawable.Icon
+import android.os.IBinder
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
 import android.util.Log
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.launch
 import me.kavishdevar.librepods.R
-import me.kavishdevar.librepods.data.AirPodsNotifications
+import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommandIdentifier
+import me.kavishdevar.librepods.core.devices.AirPodsSpecs
+import me.kavishdevar.librepods.core.devices.AppleDevice
+import me.kavishdevar.librepods.core.devices.BaseCapability
+import me.kavishdevar.librepods.core.devices.ConnectionState
 import me.kavishdevar.librepods.core.devices.NoiseControlMode
-import kotlin.io.encoding.ExperimentalEncodingApi
+import me.kavishdevar.librepods.core.devices.effectiveAllowOff
 
 class AirPodsQSService : TileService() {
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var connection: ServiceConnection? = null
+    private var bound = false
+    private var observation: Job? = null
+    private var selected: AppleDevice? = null
 
-    private lateinit var sharedPreferences: SharedPreferences
-    private var currentAncMode: Int = NoiseControlMode.OFF.ordinal + 1
-    private var isAirPodsConnected: Boolean = false
-
-    private val ancStatusReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context, intent: Intent) {
-            if (intent.action == AirPodsNotifications.ANC_DATA.action) {
-                val newMode = intent.getIntExtra("data", NoiseControlMode.OFF.ordinal + 1)
-                Log.d("AirPodsQSService", "Received ANC update: $newMode")
-                currentAncMode = newMode
-                updateTile()
-            }
-        }
-    }
-
-    private val availabilityReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context, intent: Intent) {
-            when (intent.action) {
-                AirPodsNotifications.AIRPODS_CONNECTED.action -> {
-                    Log.d("AirPodsQSService", "Received AIRPODS_CONNECTED")
-                    isAirPodsConnected = true
-                    currentAncMode = 3
-//                    currentAncMode = ServiceManager.getService()?.getANC() ?: (NoiseControlMode.OFF.ordinal + 1)
-                    updateTile()
-                }
-                AirPodsNotifications.AIRPODS_DISCONNECTED.action -> {
-                    Log.d("AirPodsQSService", "Received AIRPODS_DISCONNECTED")
-                    isAirPodsConnected = false
-                    updateTile()
-                }
-            }
-        }
-    }
-
-    private val preferenceChangeListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
-        if (key == "off_listening_mode") {
-            Log.d("AirPodsQSService", "Preference changed: $key")
-            if (currentAncMode == NoiseControlMode.OFF.ordinal + 1 && !isOffModeEnabled()) {
-                currentAncMode = NoiseControlMode.TRANSPARENCY.ordinal + 1
-            }
-            updateTile()
-        }
-    }
-
-    override fun onCreate() {
-        super.onCreate()
-        sharedPreferences = getSharedPreferences("settings", MODE_PRIVATE)
-    }
-
-    @SuppressLint("InlinedApi", "UnspecifiedRegisterReceiverFlag")
     override fun onStartListening() {
         super.onStartListening()
-        Log.d("AirPodsQSService", "onStartListening")
+        if (connection != null) return
+        val owner = object : ServiceConnection {
+            override fun onServiceConnected(name: ComponentName, binder: IBinder) {
+                if (connection !== this) return
+                val service = (binder as? LibrePodsService.LocalBinder)?.getService() ?: return
+                observation?.cancel()
+                observation = scope.launch {
+                    service.devices.collectLatest { devices ->
+                        coroutineScope {
+                            val pods = devices.values.filterIsInstance<AppleDevice>()
+                            fun refresh() {
+                                selected = pods.firstOrNull(::canControl)
+                                updateTile()
+                            }
+                            refresh()
+                            pods.forEach { device ->
+                                launch {
+                                    combine(device.connectionState, device.state, device.settings, device.metadata) { _, _, _, _ -> Unit }
+                                        .collect { refresh() }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
 
-//        val service = ServiceManager.getService()
-//        isAirPodsConnected =
-//        currentAncMode = service?.getANC() ?: (NoiseControlMode.OFF.ordinal + 1)
+            override fun onServiceDisconnected(name: ComponentName) {
+                if (connection !== this) return
+                observation?.cancel()
+                observation = null
+                selected = null
+                updateTile()
+            }
 
-        if (currentAncMode == NoiseControlMode.OFF.ordinal + 1 && !isOffModeEnabled()) {
-             currentAncMode = NoiseControlMode.TRANSPARENCY.ordinal + 1
+            override fun onBindingDied(name: ComponentName) { if (connection === this) releaseBinding() }
+            override fun onNullBinding(name: ComponentName) { if (connection === this) releaseBinding() }
         }
-
-        val ancIntentFilter = IntentFilter(AirPodsNotifications.ANC_DATA.action)
-        val availabilityIntentFilter = IntentFilter().apply {
-            addAction(AirPodsNotifications.AIRPODS_CONNECTED.action)
-            addAction(AirPodsNotifications.AIRPODS_DISCONNECTED.action)
-        }
-
-        try {
-            registerReceiver(ancStatusReceiver, ancIntentFilter, RECEIVER_EXPORTED)
-            registerReceiver(availabilityReceiver, availabilityIntentFilter, RECEIVER_EXPORTED)
-            sharedPreferences.registerOnSharedPreferenceChangeListener(preferenceChangeListener)
-            Log.d("AirPodsQSService", "Receivers registered")
-        } catch (e: Exception) {
-            Log.e("AirPodsQSService", "Error registering receivers: $e")
-        }
-
+        connection = owner
         updateTile()
+        bound = runCatching { bindService(Intent(this, LibrePodsService::class.java), owner, Context.BIND_AUTO_CREATE) }
+            .onFailure { Log.w("AirPodsQSService", "Cannot bind device controls", it) }.getOrDefault(false)
+        if (!bound) connection = null
     }
 
     override fun onStopListening() {
+        releaseBinding()
         super.onStopListening()
-        Log.d("AirPodsQSService", "onStopListening")
-        try {
-            unregisterReceiver(ancStatusReceiver)
-            unregisterReceiver(availabilityReceiver)
-            sharedPreferences.unregisterOnSharedPreferenceChangeListener(preferenceChangeListener)
-            Log.d("AirPodsQSService", "Receivers unregistered")
-        } catch (e: IllegalArgumentException) {
-            Log.e("AirPodsQSService", "Receiver not registered or already unregistered: $e")
-        } catch (e: Exception) {
-            Log.e("AirPodsQSService", "Error unregistering receivers: $e")
-        }
     }
+
+    override fun onDestroy() {
+        releaseBinding()
+        scope.cancel()
+        super.onDestroy()
+    }
+
+    private fun releaseBinding() {
+        val old = connection
+        connection = null
+        observation?.cancel()
+        observation = null
+        selected = null
+        if (bound && old != null) runCatching { unbindService(old) }
+        bound = false
+        updateTile()
+    }
+
+    private fun canControl(device: AppleDevice): Boolean = device.connectionState.value == ConnectionState.CONNECTED &&
+        BaseCapability.LISTENING_MODE in AirPodsSpecs.getSpec(device.metadata.value.model).baseCapabilities
 
     override fun onClick() {
         super.onClick()
-        Log.d("AirPodsQSService", "onClick - Current state: $isAirPodsConnected, Current mode: $currentAncMode")
-        if (!isAirPodsConnected) {
-            Log.d("AirPodsQSService", "Tile clicked but AirPods not connected.")
-            return
+        val device = selected?.takeIf(::canControl) ?: return
+        val state = device.state.value
+        val metadata = device.metadata.value
+        val modes = buildList {
+            if (state.effectiveAllowOff(device.settings.value, metadata.modelNumber) == true) add(NoiseControlMode.OFF)
+            add(NoiseControlMode.TRANSPARENCY)
+            if (BaseCapability.ADAPTIVE_AUDIO in AirPodsSpecs.getSpec(metadata.model).baseCapabilities) add(NoiseControlMode.ADAPTIVE)
+            add(NoiseControlMode.NOISE_CANCELLATION)
         }
-
-        cycleAncMode()
-    }
-
-    private fun cycleAncMode() {
-//        val service = ServiceManager.getService()
-//        if (service == null) {
-//            Log.d("AirPodsQSService", "Tile clicked (cycle mode) but service is null.")
-//            return
-//        }
-//        val nextMode = getNextAncMode()
-//        Log.d("AirPodsQSService", "Cycling ANC mode to: $nextMode")
-//        service.aacpManager.sendControlCommand(
-//            ControlCommandIdentifier.LISTENING_MODE.value,
-//            nextMode
-//        )
+        val current = state.controlStates[ControlCommandIdentifier.LISTENING_MODE]?.firstOrNull()?.toInt()
+        val next = modes[(modes.indexOfFirst { it.ordinal + 1 == current } + 1) % modes.size]
+        device.setControlCommand(ControlCommandIdentifier.LISTENING_MODE, next.ordinal + 1)
     }
 
     private fun updateTile() {
         val tile = qsTile ?: return
-        Log.d("AirPodsQSService", "updateTile - Connected: $isAirPodsConnected, Mode: $currentAncMode")
-
-        val deviceName = sharedPreferences.getString("name", "AirPods") ?: "AirPods"
-
-        if (isAirPodsConnected) {
-            tile.state = Tile.STATE_ACTIVE
-            tile.label = getModeLabel(currentAncMode)
-            tile.subtitle = deviceName
-            tile.icon = Icon.createWithResource(this, getModeIcon(currentAncMode))
-        } else {
-            tile.state = Tile.STATE_UNAVAILABLE
-            tile.label = "AirPods"
-            tile.subtitle = "Disconnected"
-            tile.icon = Icon.createWithResource(this, R.drawable.ic_airpods)
-        }
-
-        try {
-            tile.updateTile()
-            Log.d("AirPodsQSService", "Tile updated successfully")
-        } catch (e: Exception) {
-            Log.e("AirPodsQSService", "Error updating tile: $e")
-        }
-    }
-
-    private fun isOffModeEnabled(): Boolean {
-        return sharedPreferences.getBoolean("off_listening_mode", true)
-    }
-
-    private fun getAvailableModes(): List<Int> {
-        val modes = mutableListOf(
-            NoiseControlMode.TRANSPARENCY.ordinal + 1,
-            NoiseControlMode.ADAPTIVE.ordinal + 1,
-            NoiseControlMode.NOISE_CANCELLATION.ordinal + 1
-        )
-        if (isOffModeEnabled()) {
-            modes.add(0, NoiseControlMode.OFF.ordinal + 1)
-        }
-        return modes
-    }
-
-    private fun getNextAncMode(): Int {
-        val availableModes = getAvailableModes()
-        Log.d("AirPodsQSService", "availableModes: $availableModes, currentAncMode: $currentAncMode")
-        val currentIndex = availableModes.indexOf(currentAncMode)
-        val nextIndex = (currentIndex + 1) % availableModes.size
-        Log.d("AirPodsQSService", "nextIndex: $nextIndex")
-        return availableModes[nextIndex]
-    }
-
-    private fun getModeLabel(mode: Int): String {
-        return when (mode) {
-            NoiseControlMode.OFF.ordinal + 1 -> "Off"
-            NoiseControlMode.TRANSPARENCY.ordinal + 1 -> "Transparency"
-            NoiseControlMode.ADAPTIVE.ordinal + 1 -> "Adaptive"
-            NoiseControlMode.NOISE_CANCELLATION.ordinal + 1 -> "Noise Cancellation"
-            else -> "Unknown"
-        }
-    }
-
-     private fun getModeIcon(mode: Int): Int {
-         return when (mode) {
-             NoiseControlMode.OFF.ordinal + 1 -> R.drawable.ic_noise_cancellation
-             NoiseControlMode.TRANSPARENCY.ordinal + 1 -> R.drawable.ic_transparency
-             NoiseControlMode.ADAPTIVE.ordinal + 1 -> R.drawable.ic_adaptive
-             NoiseControlMode.NOISE_CANCELLATION.ordinal + 1 -> R.drawable.ic_noise_cancellation
-             else -> R.drawable.ic_airpods
-         }
-     }
-
-    override fun onTileAdded() {
-        super.onTileAdded()
-        Log.d("AirPodsQSService", "Tile added")
+        val device = selected?.takeIf(::canControl)
+        val mode = device?.state?.value?.controlStates?.get(ControlCommandIdentifier.LISTENING_MODE)?.firstOrNull()?.toInt()
+        tile.state = if (device == null) Tile.STATE_UNAVAILABLE else Tile.STATE_ACTIVE
+        tile.label = getString(when (mode) {
+            NoiseControlMode.OFF.ordinal + 1 -> R.string.off
+            NoiseControlMode.TRANSPARENCY.ordinal + 1 -> R.string.transparency
+            NoiseControlMode.ADAPTIVE.ordinal + 1 -> R.string.adaptive
+            NoiseControlMode.NOISE_CANCELLATION.ordinal + 1 -> R.string.noise_cancellation
+            else -> R.string.noise_control
+        })
+        tile.subtitle = device?.metadata?.value?.name?.ifBlank { "AirPods" } ?: getString(R.string.takeover_disconnected)
+        tile.icon = Icon.createWithResource(this, when (mode) {
+            NoiseControlMode.OFF.ordinal + 1, NoiseControlMode.NOISE_CANCELLATION.ordinal + 1 -> R.drawable.ic_noise_cancellation
+            NoiseControlMode.TRANSPARENCY.ordinal + 1 -> R.drawable.ic_transparency
+            NoiseControlMode.ADAPTIVE.ordinal + 1 -> R.drawable.ic_adaptive
+            else -> R.drawable.ic_airpods
+        })
+        runCatching { tile.updateTile() }.onFailure { Log.w("AirPodsQSService", "Cannot update tile", it) }
     }
 }

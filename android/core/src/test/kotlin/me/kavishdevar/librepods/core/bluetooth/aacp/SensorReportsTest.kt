@@ -102,6 +102,41 @@ class SensorReportsTest {
         assertNull(parser.receive(command(14, ByteArray(23)), 16).motion)
     }
 
+    @Test fun unknownOnlyDescriptorsAdvanceGenerationWithoutRepeatedlyRestartingMappings() {
+        val parser = SensorReports()
+        parser.receive(announcement(1, 27, dictionary()), 16)
+        assertFalse(parser.receive(announcement(2, 31, dictionary(name = "SPL0")), 16).mappingChanged)
+        assertEquals(27, parser.motionService)
+        val restart = announcement(1, 31, dictionary(name = "SPL0"))
+        assertTrue(parser.receive(restart, 16).mappingChanged)
+        assertNull(parser.motionService)
+        assertNull(parser.receive(command(27, movement()), 16).motion)
+        assertNull(parser.receive(command(16, movement()), 16).motion)
+        repeat(3) { assertFalse(parser.receive(restart, 16).mappingChanged) }
+    }
+
+    @Test fun withdrawnHeartMappingBlocksLegacyReportsUntilANewConnection() {
+        fun heart() = ByteArray(18).apply {
+            this[1] = 72; this[2] = 180.toByte(); this[15] = 0x10
+        }
+        val parser = SensorReports()
+        parser.receive(announcement(1, 27, dictionary("HeartRate",
+            descriptor = SensorDescriptorLayout.HEART_DESCRIPTOR, maximum = 601)), 16)
+        assertEquals(72, parser.receive(command(27, heart()), 16).heartRate?.bpm)
+        parser.receive(announcement(2, 31, dictionary(name = "SPL0")), 16)
+        val restart = announcement(1, 31, dictionary(name = "SPL0"))
+        assertTrue(parser.receive(restart, 16).mappingChanged)
+        assertNull(parser.heartRateService)
+        for (service in listOf(19, 20, 84, 27)) {
+            assertNull(parser.receive(command(service, heart()), 16).heartRate)
+        }
+        assertFalse(parser.receive(restart, 16).mappingChanged)
+        parser.receive(announcement(2, 30, dictionary("HeartRate",
+            descriptor = SensorDescriptorLayout.HEART_DESCRIPTOR, maximum = 601)), 16)
+        assertEquals(72, parser.receive(command(30, heart()), 16).heartRate?.bpm)
+        assertEquals(72, SensorReports().receive(command(20, heart()), 16).heartRate?.bpm)
+    }
+
     @Test fun heartRateRequiresTheCurrentServiceConfidenceRangeAndCapturedStatusTail() {
         val parser = SensorReports()
         fun report(confidence: Int = 180, bpm: Int = 72, tail: String = "100080") = ByteArray(18).apply {

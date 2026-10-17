@@ -1,5 +1,5 @@
 /*
-    LibrePods - AirPods liberated from Apple’s ecosystem
+    LibrePods - AirPods liberated from Appleâ€™s ecosystem
     Copyright (C) 2025 LibrePods contributors
 
     This program is free software: you can redistribute it and/or modify
@@ -18,7 +18,6 @@
 
 package me.kavishdevar.librepods.presentation.activities
 
-//import dagger.hilt.android.AndroidEntryPoint
 import android.app.Activity
 import android.content.BroadcastReceiver
 import android.content.ComponentName
@@ -45,7 +44,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
-import com.google.android.play.core.review.ReviewManagerFactory
 import kotlinx.coroutines.flow.MutableStateFlow
 import me.kavishdevar.librepods.BuildConfig
 import me.kavishdevar.librepods.LibrePodsApplication
@@ -57,11 +55,9 @@ import me.kavishdevar.librepods.presentation.utils.LocalDebugMode
 import me.kavishdevar.librepods.repository.AppDataRepository
 import me.kavishdevar.librepods.services.LibrePodsService
 import me.kavishdevar.librepods.utils.XposedState
-import kotlin.time.Duration.Companion.hours
 
 private lateinit var serviceConnection: ServiceConnection
 private lateinit var connectionStatusReceiver: BroadcastReceiver
-//lateinit var testReviewReceiver: BroadcastReceiver
 
 class MainActivity: ComponentActivity() {
     companion object {
@@ -158,32 +154,10 @@ fun Main() {
     val appDataRepository: AppDataRepository = (LocalContext.current.applicationContext as LibrePodsApplication).appDataRepository
     val appState by appDataRepository.state.collectAsState()
 
-    LaunchedEffect(Unit) {
-        if (BuildConfig.PLAY_BUILD) {
-            val now = System.currentTimeMillis()
-            val firstConn = appState.firstSuccessfulConnectionTime?: 0L
-
-            val alreadyPrompted = appState.reviewPrompted
-
-            val oneDay = 24.hours.inWholeMilliseconds
-
-            if (
-                firstConn != 0L &&
-                !alreadyPrompted &&
-                (now - firstConn) > oneDay
-            ) {
-                triggerReviewFlow(context as? Activity ?: return@LaunchedEffect)
-
-                appDataRepository.updateState {
-                    it.copy(reviewPrompted = true)
-                }
-            }
-        }
-    }
 
     val onboardingComplete = appState.hasCompletedOnboarding
 
-    val currentVersion = BuildConfig.VERSION_NAME.removeSuffix("-debug").removeSuffix("-play")
+    val currentVersion = BuildConfig.VERSION_NAME.removeSuffix("-debug")
     val lastVersionShown = appState.lastVersionShown
 
     val releaseNotesShown = lastVersionShown == currentVersion
@@ -265,15 +239,4 @@ fun Main() {
             librepodsService.value?.refreshDeviceSettings(device) ?: DeviceSettingsRefreshResult.UNAVAILABLE
         }
     )
-}
-
-private fun triggerReviewFlow(activity: Activity) {
-    val manager = ReviewManagerFactory.create(activity)
-    val request = manager.requestReviewFlow()
-    request.addOnCompleteListener { task ->
-        if (task.isSuccessful) {
-            val reviewInfo = task.result
-            manager.launchReviewFlow(activity, reviewInfo)
-        }
-    }
 }

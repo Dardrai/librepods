@@ -1,5 +1,7 @@
 package me.kavishdevar.librepods.presentation.screens
 
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import android.util.Log
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
@@ -33,12 +35,10 @@ import androidx.compose.material3.toPath
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
@@ -58,7 +58,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import me.kavishdevar.librepods.R
-import me.kavishdevar.librepods.billing.BillingManager
 import me.kavishdevar.librepods.core.bluetooth.MacAddress
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommandIdentifier
 import me.kavishdevar.librepods.core.devices.AirPodsSpecs
@@ -94,7 +93,6 @@ fun DeviceListScreen(
 ) {
     val scrollState = rememberScrollState()
 
-    val isPremium by BillingManager.provider.isPremium.collectAsState()
 
     StyledScaffold(
         title = stringResource(R.string.app_name),
@@ -535,7 +533,6 @@ fun DeviceListScreen(
                                                         )
                                                     }
                                                 },
-                                                enabled = isPremium
                                             )
                                         }
 

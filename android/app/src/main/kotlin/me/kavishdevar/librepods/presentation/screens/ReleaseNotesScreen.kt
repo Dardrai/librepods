@@ -1,5 +1,7 @@
 package me.kavishdevar.librepods.presentation.screens
 
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
@@ -38,11 +40,9 @@ import androidx.compose.material3.toShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -114,8 +114,8 @@ fun ReleaseNotesScreen(
                 textAlign = TextAlign.Center
             )
 
-            val versionName = BuildConfig.VERSION_NAME.removeSuffix("-debug").removeSuffix("-play")
-            val url = "https://github.com/kavishdevar/librepods/releases/v$versionName"
+            val versionName = BuildConfig.VERSION_NAME.removeSuffix("-debug")
+            val url = "https://github.com/Ripthulhu/librepods/releases/tag/v$versionName"
             val fullText = "${stringResource(R.string.version)} $versionName"
             val textColor = MaterialTheme.colorScheme.primary
 

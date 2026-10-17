@@ -6,7 +6,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
-import me.kavishdevar.librepods.billing.BillingManager
 import me.kavishdevar.librepods.data.xposed.XposedRemotePrefProvider
 import me.kavishdevar.librepods.database.app.AppSettingsEntity
 import me.kavishdevar.librepods.database.app.AppStateEntity
@@ -19,7 +18,6 @@ data class AppUiState(
 
     val accessibilityServiceAvailable: Boolean = false,
     val vendorIdHook: Boolean = false,
-    val isPremium: Boolean = false,
 
     val showResetDialog: Boolean = false,
 )
@@ -52,14 +50,12 @@ class AppSettingsViewModel(
 
     val uiState = combine(
         appData,
-        BillingManager.provider.isPremium,
         extras,
         _showResetDialog
-    ) { (state, settings), isPremium, (vendorIdHook, accessibilityService), _showResetDialog ->
+    ) { (state, settings), (vendorIdHook, accessibilityService), _showResetDialog ->
         AppUiState(
             state = state,
             settings = settings,
-            isPremium = isPremium,
             vendorIdHook = vendorIdHook.value,
             accessibilityServiceAvailable = accessibilityService.value != null,
             showResetDialog = _showResetDialog
@@ -70,7 +66,6 @@ class AppSettingsViewModel(
         AppUiState(
             state = appDataRepository.state.value,
             settings = appDataRepository.settings.value,
-            isPremium = BillingManager.provider.isPremium.value,
             vendorIdHook = vendorIdHook.value,
             accessibilityServiceAvailable = LibrePodsAccessibilityService.instance.value != null,
             showResetDialog = _showResetDialog.value

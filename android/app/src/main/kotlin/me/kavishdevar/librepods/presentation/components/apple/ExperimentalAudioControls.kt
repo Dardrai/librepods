@@ -1,14 +1,12 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 package me.kavishdevar.librepods.presentation.components.apple
 
-import android.Manifest
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.media.MediaPlayer
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -18,12 +16,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
@@ -47,7 +42,6 @@ fun ExperimentalAudioControls(controller: ExperimentalAudioController) {
     val active = microphone.phase !in listOf(MicrophonePhase.IDLE, MicrophonePhase.ERROR)
     val busy = active || controller.isOpening || bridge.session !in listOf("stopped", "failed")
     var targetPackage by remember(controller) { mutableStateOf("") }
-    var pendingAction by remember(controller) { mutableIntStateOf(0) }
     var localError by remember(controller) { mutableStateOf("") }
     var player by remember(controller) { mutableStateOf<MediaPlayer?>(null) }
     val currentController by rememberUpdatedState(controller)
@@ -62,18 +56,10 @@ fun ExperimentalAudioControls(controller: ExperimentalAudioController) {
             3 -> currentController.startInjection("", forCall = true)
         }
     }
-    val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        val action = pendingAction
-        pendingAction = 0
-        if (granted && action != 0 && currentController.isConnected) run(action)
-        else localError = permissionMessage
-    }
-    fun start(action: Int) {
-        if (context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) run(action)
-        else { pendingAction = action; permission.launch(Manifest.permission.RECORD_AUDIO) }
-    }
+    val permission = rememberMicrophonePermission(controller) { localError = permissionMessage }
+    fun start(action: Int) = permission { run(action) }
     DisposableEffect(controller) {
-        onDispose { pendingAction = 0; player?.release(); player = null }
+        onDispose { player?.release(); player = null }
     }
 
     StyledList(title = stringResource(R.string.experimental_audio_title), description = stringResource(R.string.experimental_audio_description)) {
@@ -89,7 +75,7 @@ fun ExperimentalAudioControls(controller: ExperimentalAudioController) {
         Spacer(Modifier.height(16.dp))
         StyledList(title = stringResource(R.string.experimental_audio_microphone), description = stringResource(R.string.experimental_audio_clock)) {
             styledListItem(contentText = stringResource(R.string.experimental_audio_record),
-                enabled = controller.isConnected && bridge.connected && !bridge.probing && !busy && pendingAction == 0,
+                enabled = controller.isConnected && bridge.connected && !bridge.probing && !busy,
                 onClick = { start(1) })
             if (busy) styledListItem(contentText = stringResource(R.string.experimental_audio_stop), onClick = { controller.stop() })
             val file = microphone.file?.takeIf { !busy && it.isFile && it.length() > 44 }

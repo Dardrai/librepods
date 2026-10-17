@@ -84,7 +84,8 @@ data class HearingAidSettings(
 fun parseHearingAidSettingsResponse(data: ByteArray): HearingAidSettings? {
     if (data.size < 104) return null
     if (data[2].toInt() !in setOf(0, 0x64) &&
-        !data.copyOfRange(0, 4).contentEquals(byteArrayOf(2, 0, 0x60, 0))) return null
+        !(data[0] == 2.toByte() && data[1] in byteArrayOf(0, 2) &&
+            data[2] == 0x60.toByte() && data[3] == 0.toByte())) return null
     val buffer = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN)
     if ((4 until 104 step 4).any { !buffer.getFloat(it).isFinite() }) return null
 

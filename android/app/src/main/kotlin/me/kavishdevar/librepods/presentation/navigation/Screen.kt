@@ -76,6 +76,8 @@ sealed interface Screen: NavKey {
         override val macAddress: MacAddress
     ): DeviceScreen
 
+    // Keep the serialized name so an upgrade can restore an old navigation stack.
+    @Deprecated("Legacy saved navigation state only")
     @Serializable
     data object Purchase: Screen
 

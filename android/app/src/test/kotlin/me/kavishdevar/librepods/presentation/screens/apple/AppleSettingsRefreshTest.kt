@@ -22,8 +22,10 @@ import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.unit.Density
 import androidx.test.core.app.ApplicationProvider
 import me.kavishdevar.librepods.R
+import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommandIdentifier
 import me.kavishdevar.librepods.core.devices.AirPodsModel
 import me.kavishdevar.librepods.core.devices.AppleMetadata
+import me.kavishdevar.librepods.database.app.AppStateEntity
 import me.kavishdevar.librepods.presentation.design.DesignSystem
 import me.kavishdevar.librepods.presentation.design.LibrePodsTheme
 import me.kavishdevar.librepods.presentation.viewmodel.AppleUiState
@@ -54,7 +56,7 @@ class AppleSettingsRefreshTest {
         var requests = 0
         compose.setContent {
             LibrePodsTheme(designSystem = DesignSystem.Apple) {
-                SettingsScreen(busy.value, connected.value) { requests++ }
+                SettingsScreen(busy.value, connected.value, refresh = { requests++ })
             }
         }
         scrollToBottom()
@@ -92,6 +94,21 @@ class AppleSettingsRefreshTest {
         renderMaterial(dark = true, fontScale = 1f, name = "dark-material")
     }
 
+    @Test fun legacyUnpaidStateCannotDisableSupportedAudioControls() {
+        var requested: ControlCommandIdentifier? = null
+        compose.setContent {
+            LibrePodsTheme(designSystem = DesignSystem.Material) {
+                SettingsScreen(busy = false, connected = true, refresh = {},
+                    setBoolean = { id, _ -> requested = id })
+            }
+        }
+        val label = text(R.string.conversation_awareness)
+        compose.onNode(hasScrollToIndexAction()).performScrollToNode(hasText(label))
+        compose.onNodeWithText(label).assertIsDisplayed().assertIsEnabled()
+            .performTouchInput { click() }
+        compose.runOnIdle { assertEquals(ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG, requested) }
+    }
+
     private fun renderMaterial(dark: Boolean, fontScale: Float, name: String) {
         compose.setContent {
             CompositionLocalProvider(LocalDensity provides Density(1f, fontScale)) {
@@ -125,13 +142,19 @@ class AppleSettingsRefreshTest {
     private fun text(id: Int) = ApplicationProvider.getApplicationContext<Application>().getString(id)
 
     @Composable
-    private fun SettingsScreen(busy: Boolean, connected: Boolean, refresh: () -> Unit) {
+    private fun SettingsScreen(
+        busy: Boolean,
+        connected: Boolean,
+        refresh: () -> Unit,
+        setBoolean: (ControlCommandIdentifier, Boolean) -> Unit = { _, _ -> }
+    ) {
         AppleSettingsScreen(
             uiState = AppleUiState(metadata = AppleMetadata(name = "AirPods Pro 3",
                 model = AirPodsModel.AIRPODS_PRO_3, modelName = "AirPods Pro 3", modelNumber = "A3063",
-                version1 = "9A348"), isPremium = true),
+                version1 = "9A348"),
+                appState = AppStateEntity(isPremium = false, timeUntilFOSSPremiumExpiry = 1)),
             setControlCommandInt = { _, _ -> },
-            setControlCommandBoolean = { _, _ -> },
+            setControlCommandBoolean = setBoolean,
             writeATTCharacteristic = { _, _ -> },
             updateSettings = {},
             disconnect = {},
@@ -141,7 +164,6 @@ class AppleSettingsRefreshTest {
             navigateToHearingAid = {},
             navigateToLeftLongPress = {},
             navigateToRightLongPress = {},
-            navigateToPurchase = {},
             navigateToEqualizer = {},
             navigateToHeadTracking = {},
             navigateToAccessibility = {},

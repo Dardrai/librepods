@@ -7,6 +7,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import me.kavishdevar.librepods.database.app.AppSettingsDao
 import me.kavishdevar.librepods.database.app.AppSettingsEntity
@@ -33,34 +34,30 @@ class AppDataRepository(
 
     init {
         scope.launch {
-            _settings.value = settingsDao.get() ?: AppSettingsEntity()
-            _state.value = stateDao.get() ?: AppStateEntity()
-            initialized.complete(Unit)
+            try {
+                _settings.value = settingsDao.get() ?: AppSettingsEntity()
+                _state.value = stateDao.get() ?: AppStateEntity()
+                // One writer per row preserves order and coalesces rapid slider changes.
+                scope.launch { _settings.collect { settingsDao.upsert(it) } }
+                scope.launch { _state.collect { stateDao.upsert(it) } }
+                initialized.complete(Unit)
+            } catch (error: Exception) {
+                initialized.completeExceptionally(error)
+                throw error
+            }
         }
     }
 
     fun updateSettings(
         transform: (AppSettingsEntity) -> AppSettingsEntity
     ) {
-        val newSettings = transform(_settings.value)
-
-        _settings.value = newSettings
-
-        scope.launch {
-            settingsDao.upsert(newSettings)
-        }
+        _settings.update(transform)
     }
 
     fun updateState(
         transform: (AppStateEntity) -> AppStateEntity
     ) {
-        val newState = transform(_state.value)
-
-        _state.value = newState
-
-        scope.launch {
-            stateDao.upsert(newState)
-        }
+        _state.update(transform)
     }
 
     fun resetAppSettings() {

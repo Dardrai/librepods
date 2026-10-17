@@ -15,15 +15,12 @@ For this fork's Pixel/Shizuku build, upgrade notes and known limitations, see
 
 ## Installation
 
-### Google Play Store
-
-If you are using a supported device/OS combination, you can install LibrePods from the Google Play Store. You can use the VendorID hook features with root even from the Play Store version.
-
-<a href="https://play.google.com/store/apps/details?id=me.kavishdevar.librepods"><img width="170" alt="GetItOnGooglePlay_Badge_Web_color_English" src="https://github.com/user-attachments/assets/2948308f-af92-443f-94d9-ee381c3a6ccc"/></a>
-
 ### GitHub Releases
 
-If you need Xposed because of the [root requirement](#root-requirement), you will have to use the apk/zip from the [GitHub releases](https://github.com/kavishdevar/librepods/releases/latest).
+This fork is distributed only through [GitHub releases](https://github.com/Ripthulhu/librepods/releases).
+Install the signed release APK. Existing fork installations can be updated in
+place; keep the app installed to preserve its settings and Shizuku authorization.
+An APK signed with a different certificate cannot update an existing installation.
 
 ### As a system app (root module)
 
@@ -34,15 +31,29 @@ If you want LibrePods to have privileged Bluetooth permissions to
 
 you can install the root module. This is optional and only provides extra features, but it is not required for the app to work.
 
-> [!IMPORTANT]
-> When using the root module, do not install the Play Store version. There might be issues because of the signature mismatch between the Play Store version and the root module.
+## Development builds
 
-## Nightly/Development Builds
+The [Android CI workflow](https://github.com/Ripthulhu/librepods/actions/workflows/ci-android.yml)
+checks Android changes on pushes and pull requests. Successful runs provide an
+`apk-debug` artifact; these use a development certificate and are not upgrades
+for the signed release APK.
 
-Want to try the latest features before they're officially released? You can grab nightly builds from the [latest nightly release](https://github.com/kavishdevar/librepods/releases?q=nightly).
+From `android/`, run `./gradlew :app:verifyPixel` with JDK 21 and the SDK/NDK
+versions declared in the project. This runs core and app unit tests, Android
+lint, and debug and minified release APK builds. There is one Android
+distribution, with no Play flavors or app-bundle release flow.
 
-> [!WARNING]
-> These builds are automatically generated from the latest code and may contain new features and bug fixes that haven't been included in a stable release yet. However, please note that they may also be less stable than official releases, so use them at your own risk.
+Run `./gradlew :app:collectReleaseArtifacts` to collect the APKs in `release/`
+at the repository root. Release signing uses the existing `RELEASE_STORE_FILE`,
+`RELEASE_STORE_PASSWORD`, `RELEASE_KEY_ALIAS` and `RELEASE_KEY_PASSWORD` entries
+in an untracked `android/local.properties`. Without those entries, the release
+APK is unsigned. Keep signing material out of the repository.
+
+To publish a signed GitHub prerelease, use the workflow's `publish_release` and
+`release_tag` inputs, or push a `v*` or `pixel-*` tag. Publishing requires the
+fork's `RELEASE_KEYSTORE_FILE` (base64 keystore), `RELEASE_STORE_PASSWORD`,
+`RELEASE_KEY_ALIAS` and `RELEASE_KEY_PASSWORD` secrets. Signing happens only in
+the release path, after tests and builds pass.
 
 ## Screenshots
 

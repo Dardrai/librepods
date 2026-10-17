@@ -11,8 +11,11 @@ the frontend base.
 Use JDK 21 and the Android SDK/NDK versions declared by the project. The existing
 Gradle toolchain configuration selects/downloads JDK 25 for its daemon. Run
 `./gradlew verifyPixel` from `android/`. This checks core and app unit tests,
-Android lint, the debug APK and the minified FOSS release APK. Signing is
-deliberately external; no signing key or password belongs in the repository.
+Android lint, the debug APK and the minified release APK. There is one GitHub
+distribution with standard `debug` and `release` tasks, without Play flavors,
+billing, reviews or AAB publishing. `collectReleaseArtifacts` collects APKs in
+the repository's `release/` directory. Signing is deliberately external; no
+signing key or password belongs in the repository.
 
 Install a release signed with the existing fork certificate using an in-place
 update. Do not uninstall first. The rewrite migrates the old app's selected
@@ -20,7 +23,102 @@ pair, local behavior choices and correctly owner-bound BLE keys once. Existing
 rewrite database rows are preserved. Unconfirmed device control values are not
 migrated as device reports. The Android Bluetooth bond stays with Android.
 
-The current fork version is `2.0.0-alpha.1-pixel28`, code `200000113`.
+The current fork version is `2.0.0-alpha.1-pixel37`, code `200000122`.
+
+Protocol formats, hearing-mode safety and the current profile-reading limitation
+are documented in [PROTOCOL.md](PROTOCOL.md).
+
+## Connect from the nearby island
+
+For an already-paired device, the expanded nearby island offers a Connect button
+beside its name. It uses the existing authorized Shizuku bridge to request that
+pair's Android media connection, including when another host currently owns it.
+Opening the case alone never requests this handover. A control-only AACP
+connection does not hide the action or count as a media connection.
+
+The button stays in the fixed folding payload, shows progress without resizing,
+and offers Retry if the request fails. The island stays open while connecting;
+closing it cancels the request, and stale results cannot update a reopened island.
+Tapping a compact nearby island expands it to reach the action. Unpairing,
+Bluetooth shutdown, calls and microphone work prevent obsolete or conflicting
+requests. The existing recovery guard preserves other connected Android audio
+devices and does not change profile policies. Shizuku must already be authorized.
+
+Pixel30 was installed in place on the Pixel 10 Pro XL. The user confirmed that
+Connect takes the AirPods back from another host, but reported a slow connection
+and a premature Retry state before the connection completed. Pixel31 separates
+this connection request from microphone playback recovery: it joins an existing
+connection attempt and keeps an already-connected media profile intact. It waits
+for the selected profile to finish connecting instead of treating Android's
+Connecting state as failure. Completion also checks the live audio connection
+before publishing a failure. Microphone playback recovery retains its existing
+selected-profile restart behavior.
+
+The user confirmed Pixel31's handover was much better, but Connect briefly
+reappeared. Its timing capture showed profile completion at 6.855 seconds after
+the tap, followed by Android publishing the output roughly 180 ms later. Pixel32
+keeps Connecting until that output is available, bounded by a one-second wait;
+it does not substitute cached connection state for live output readiness.
+
+Pixel33 keeps Connect out of the way during an automatic return to this phone.
+The battery island still opens immediately. An authenticated case close during
+a local media connection permits a four-second presentation hint on the next
+opening; Android's subsequent profile connection progress also defers the action
+until output readiness or a bounded failure. This hint never claims that audio
+is connected and never starts a Bluetooth connection. Unknown or remote case
+closes offer Connect immediately. Failed automatic returns restore the action
+with a fresh dismissal interval; Bluetooth shutdown and unpairing clear hints.
+
+Pixel34 experimentally overlaps the direct secure AACP connection with Android's
+media connection after an explicit Connect tap. Both paths keep the existing
+selected-pair, Shizuku, call and microphone guards. Pending control work has an
+eighteen-second deadline and can cancel only its captured unpublished socket;
+live or replacement connections remain intact. Passive case openings still
+start neither connection. Only the selected live audio output completes takeover.
+
+The Pixel33 baseline exposed a false failure after native media connection:
+Android registered the output, but the app did not observe it within one second.
+Pixel34 allows up to four seconds for output readiness within the existing total
+request budget and records redacted query diagnostics on failure. This is
+tolerance for delayed observation; the baseline does not establish the exact
+cause. Speed comparisons must measure the selected live output, not just the
+control socket or native profile connection.
+
+Pixel35 makes the island read its final audio state after evaluating the
+reconnection hint. A newly published audio output can clear that hint, so
+using an earlier audio reading could otherwise briefly expose Connect.
+Rapid case closes and reopens also retain an existing reconnect hint's original
+deadline instead of briefly clearing or renewing it. A failed native reconnect
+clears both the hint and eligibility to start it again from that failure.
+These presentation fixes add no delay to discovery or takeover.
+
+Pixel36 dismisses the matching case-opening island on a newer authenticated
+case close, before disconnected battery data can replace its outgoing payload.
+It keeps that payload, including any connection progress, stable throughout the
+existing fold animation. Stale closes, another pair, previews and listening-mode
+notices cannot dismiss the current case announcement.
+Status changes use a short clipped vertical transition, while Connect and its
+progress state animate inside a fixed action area. The name and artwork keep
+their positions. Hidden controls stop accepting input immediately; system
+animation settings also apply to these transitions.
+
+## Android audit fixes
+
+Pixel29 rejects reports from retired control connections and prevents an early
+disconnect from being published as connected. App settings use atomic updates
+and one database writer per row. The Head Gestures switch applies both when a
+call rings and when a pending gesture result arrives.
+
+The island recovers after failed window attachment, excludes unknown battery
+reports and cancels old dismissal timers for settings previews. A pairing card
+that is busy with another model no longer consumes the second model's invitation.
+The Quick Settings tile observes current per-device state, and noise-control
+widget actions retain their own widget identity.
+
+Recorder shares the microphone permission flow, offers Shizuku connection and
+shows failures.
+The optional Xposed vendor hook respects its switch and registers each record
+once. The commented-out predecessor service has been removed.
 
 ## Pairing and island latency
 

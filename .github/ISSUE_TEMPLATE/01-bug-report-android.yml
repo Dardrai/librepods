@@ -20,7 +20,6 @@ body:
       label: App source
       options:
         - GitHub
-        - Play
         - Built from source
     validations:
       required: true

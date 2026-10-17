@@ -9,16 +9,19 @@ import android.content.pm.PackageManager
 import android.os.IBinder
 import android.os.Process
 import android.os.SystemClock
+import android.util.Log
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
-/** Cycles only the selected bonded AirPods' media profile, never ACL, other peers or global routing. */
+/** Explicit connects join an existing profile; microphone recovery can cycle only the selected pair. */
 internal class A2dpPlaybackRecovery(
     private val context: Context,
     address: String,
     private val owner: IPlaybackRecoveryOwner,
+    private val connectOnly: Boolean = false,
 ) : IBinder.DeathRecipient {
     private val guard = A2dpRecoveryGuard(address)
+    private var connectIssued = false
     fun cancel() = guard.cancel()
     override fun binderDied() = guard.ownerDied()
 
@@ -37,7 +40,7 @@ internal class A2dpPlaybackRecovery(
                 "Shizuku lacks $permission for selected-device playback recovery"
             }
         }
-        val deadline = SystemClock.elapsedRealtime() + 5500
+        val deadline = SystemClock.elapsedRealtime() + if (connectOnly) 18_000 else 5500
         val adapter = ShellBluetooth.adapter(context)
         check(adapter.isEnabled) { "Bluetooth is off" }
         val device = adapter.bondedDevices.singleOrNull { it.address == guard.address }
@@ -45,15 +48,10 @@ internal class A2dpPlaybackRecovery(
         check(A2dpRecoveryGuard.isAirPodsCandidate(device.bondState == BluetoothDevice.BOND_BONDED,
             device.type == BluetoothDevice.DEVICE_TYPE_CLASSIC || device.type == BluetoothDevice.DEVICE_TYPE_DUAL,
             device.uuids?.map { it.uuid.toString() }.orEmpty())) { "Selected bonded device does not advertise the AirPods AACP service" }
-        val disconnect = BluetoothA2dp::class.java.getDeclaredMethod("disconnect", BluetoothDevice::class.java)
-            .apply { isAccessible = true }
-        val connect = BluetoothA2dp::class.java.getDeclaredMethod("connect", BluetoothDevice::class.java)
-            .apply { isAccessible = true }
         val latch = CountDownLatch(1)
         val proxyLock = Any()
         var closed = false
         var proxy: BluetoothA2dp? = null
-        var connectIssued = false
         val listener = object : BluetoothProfile.ServiceListener {
             override fun onServiceConnected(profile: Int, service: BluetoothProfile) {
                 val closeLate = synchronized(proxyLock) {
@@ -66,15 +64,6 @@ internal class A2dpPlaybackRecovery(
         }
         fun competing(profile: BluetoothA2dp) = profile.connectedDevices.any { it.address != guard.address }
         fun bonded() = device.bondState == BluetoothDevice.BOND_BONDED
-        fun awaitState(profile: BluetoothA2dp, state: Int, until: Long): Boolean {
-            while (SystemClock.elapsedRealtime() < until) {
-                refreshOwner()
-                if (!guard.mayReconnect(competing(profile)) || !bonded()) return false
-                if (profile.getConnectionState(device) == state) return true
-                Thread.sleep(40)
-            }
-            return false
-        }
         owner.asBinder().linkToDeath(this, 0)
         try {
             refreshOwner()
@@ -82,22 +71,7 @@ internal class A2dpPlaybackRecovery(
             check(adapter.getProfileProxy(context, listener, BluetoothProfile.A2DP)) { "A2DP proxy request was rejected" }
             if (!latch.await(minOf(1000L, deadline - SystemClock.elapsedRealtime()).coerceAtLeast(0), TimeUnit.MILLISECONDS)) return false
             val profile = synchronized(proxyLock) { proxy } ?: return false
-            val initial = profile.getConnectionState(device)
-            if (initial != BluetoothProfile.STATE_CONNECTED && initial != BluetoothProfile.STATE_DISCONNECTED) return false
-            guard.begin(initial == BluetoothProfile.STATE_CONNECTED)
-            refreshOwner()
-            if (!guard.liveOwner() || competing(profile) || !bonded()) return false
-            if (initial == BluetoothProfile.STATE_CONNECTED) {
-                if (!guard.mayDisconnect(competing(profile))) return false
-                if (disconnect.invoke(profile, device) != true) return false
-                guard.disconnectedByUs()
-                if (!awaitState(profile, BluetoothProfile.STATE_DISCONNECTED, minOf(deadline, SystemClock.elapsedRealtime() + 1500))) return false
-            }
-            refreshOwner()
-            if (!guard.mayReconnect(competing(profile)) || !bonded() || SystemClock.elapsedRealtime() >= deadline) return false
-            connectIssued = connect.invoke(profile, device) == true
-            if (!connectIssued) return false
-            return awaitState(profile, BluetoothProfile.STATE_CONNECTED, deadline)
+            return connectProfile(profile, device, deadline)
         } finally {
             // An owner that died after our disconnect gets only its exact prior pair's best-effort rollback.
             val profile = synchronized(proxyLock) { closed = true; proxy.also { proxy = null } }
@@ -106,7 +80,7 @@ internal class A2dpPlaybackRecovery(
                     refreshOwner()
                     if (guard.mayRollback(competing(profile)) && bonded() &&
                         profile.getConnectionState(device) == BluetoothProfile.STATE_DISCONNECTED) {
-                        runCatching { connect.invoke(profile, device) }
+                        runCatching { invokeProfile(profile, "connect", device) }
                     }
                 }
             } finally {
@@ -114,5 +88,80 @@ internal class A2dpPlaybackRecovery(
                 runCatching { owner.asBinder().unlinkToDeath(this, 0) }
             }
         }
+    }
+
+    private fun invokeProfile(profile: BluetoothA2dp, method: String, device: BluetoothDevice): Boolean =
+        BluetoothA2dp::class.java.getDeclaredMethod(method, BluetoothDevice::class.java)
+            .apply { isAccessible = true }.invoke(profile, device) == true
+
+    /** Injectable clock keeps the real profile transitions covered without sleeping in tests. */
+    @SuppressLint("MissingPermission")
+    internal fun connectProfile(profile: BluetoothA2dp, device: BluetoothDevice, deadline: Long,
+        now: () -> Long = { SystemClock.elapsedRealtime() }, pause: () -> Unit = { Thread.sleep(40) }): Boolean {
+        val started = now()
+        fun eligible(): Boolean {
+            refreshOwner()
+            return guard.mayReconnect(profile.connectedDevices.any { it.address != guard.address }) &&
+                device.bondState == BluetoothDevice.BOND_BONDED
+        }
+        fun awaitState(state: Int, until: Long): Boolean {
+            while (now() < until) {
+                if (!eligible()) return false
+                if (profile.getConnectionState(device) == state) return true
+                pause()
+            }
+            return false
+        }
+        fun awaitConnection(alreadyConnecting: Boolean): Boolean {
+            var progressing = alreadyConnecting
+            while (now() < deadline) {
+                if (!eligible()) return false
+                when (profile.getConnectionState(device)) {
+                    BluetoothProfile.STATE_CONNECTED -> return true
+                    BluetoothProfile.STATE_CONNECTING -> progressing = true
+                    BluetoothProfile.STATE_DISCONNECTED -> if (progressing) return false
+                    BluetoothProfile.STATE_DISCONNECTING -> return false
+                }
+                pause()
+            }
+            return false
+        }
+        var initial = profile.getConnectionState(device)
+        while (initial == BluetoothProfile.STATE_DISCONNECTING && now() < deadline) {
+            if (!eligible()) return false
+            pause()
+            initial = profile.getConnectionState(device)
+        }
+        guard.begin(initial == BluetoothProfile.STATE_CONNECTED)
+        if (!eligible() || now() >= deadline) return false
+        Log.i("NearbyTakeover", "A2DP start: connectOnly=$connectOnly state=$initial")
+        val result = when (initial) {
+            BluetoothProfile.STATE_CONNECTED -> if (connectOnly) true else {
+                if (!guard.mayDisconnect(profile.connectedDevices.any { it.address != guard.address }) ||
+                    !invokeProfile(profile, "disconnect", device)) false else {
+                    guard.disconnectedByUs()
+                    if (!awaitState(BluetoothProfile.STATE_DISCONNECTED, minOf(deadline, now() + 1500)) || !eligible()) false
+                    else {
+                        connectIssued = invokeProfile(profile, "connect", device)
+                        connectIssued && awaitConnection(false)
+                    }
+                }
+            }
+            BluetoothProfile.STATE_CONNECTING -> awaitConnection(true)
+            BluetoothProfile.STATE_DISCONNECTED -> {
+                if (!eligible() || now() >= deadline) false else {
+                    connectIssued = invokeProfile(profile, "connect", device)
+                    if (connectIssued) awaitConnection(false)
+                    else when (profile.getConnectionState(device)) {
+                        BluetoothProfile.STATE_CONNECTED -> eligible()
+                        BluetoothProfile.STATE_CONNECTING -> awaitConnection(true)
+                        else -> false
+                    }
+                }
+            }
+            else -> false
+        }
+        Log.i("NearbyTakeover", "A2DP complete: connected=$result elapsedMs=${now() - started}")
+        return result
     }
 }

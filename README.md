@@ -1,3 +1,16 @@
+# LibrePods Android rewrite fork
+
+This is [Ripthulhu/librepods](https://github.com/Ripthulhu/librepods), an Android
+rewrite fork with Pixel/Shizuku support, nearby pairing and Dynamic Island
+overlays. Android builds are distributed through GitHub only.
+
+- [Download signed APKs](https://github.com/Ripthulhu/librepods/releases)
+- [Development builds and checks](https://github.com/Ripthulhu/librepods/actions/workflows/ci-android.yml)
+- [Android installation and build instructions](android/README.md)
+- [Fork behavior and known limitations](android/PIXEL-REWRITE.md)
+
+The upstream project information and acknowledgments follow.
+
 > [!WARNING]
 > librepods.org is not an official website of the LibrePods project. It inaccurately claims to be the official website of the project by claiming copyrights and using the LibrePods logo in the footer. And at the same time, they say that the project is not affiliated with the LibrePods project or its developers.
 > 
@@ -10,17 +23,17 @@
 </picture>
 
 <div align="center" style="margin: 20px 0px;">
-<a href="https://github.com/kavishdevar/librepods/releases/latest">
-  <img src="https://img.shields.io/github/downloads/kavishdevar/librepods/total?label=GitHub%20Downloads" />
+<a href="https://github.com/Ripthulhu/librepods/releases">
+  <img src="https://img.shields.io/github/downloads/Ripthulhu/librepods/total?label=GitHub%20Downloads" />
 </a>
-<a href="https://github.com/kavishdevar/librepods/actions/workflows/ci-android.yml">
-  <img src="https://github.com/kavishdevar/librepods/actions/workflows/ci-android.yml/badge.svg" />
+<a href="https://github.com/Ripthulhu/librepods/actions/workflows/ci-android.yml">
+  <img src="https://github.com/Ripthulhu/librepods/actions/workflows/ci-android.yml/badge.svg" />
 </a>
 <a href="https://github.com/kavishdevar/librepods/actions/workflows/ci-linux-rust.yml">
   <img src="https://github.com/kavishdevar/librepods/actions/workflows/ci-linux-rust.yml/badge.svg" />
 </a>
-<a href="https://github.com/kavishdevar/librepods/issues">
-  <img src="https://img.shields.io/github/issues/kavishdevar/librepods" />  
+<a href="https://github.com/Ripthulhu/librepods/issues">
+  <img src="https://img.shields.io/github/issues/Ripthulhu/librepods" />
 </a>
 <a href="https://discord.gg/HhG4ycVum4">
   <img src="https://img.shields.io/discord/1441416992027574375?logoColor=white&color=5865F2&label=Discord" />

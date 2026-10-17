@@ -1,5 +1,5 @@
 /*
-    LibrePods - AirPods liberated from Apple’s ecosystem
+    LibrePods - AirPods liberated from Appleâ€™s ecosystem
     Copyright (C) 2025 LibrePods contributors
 
     This program is free software: you can redistribute it and/or modify
@@ -18,18 +18,16 @@
 
 package me.kavishdevar.librepods.presentation.screens.apple
 
+import androidx.compose.runtime.getValue
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
@@ -38,7 +36,6 @@ import com.kyant.backdrop.backdrops.rememberLayerBackdrop
 import me.kavishdevar.librepods.R
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommandIdentifier
 import me.kavishdevar.librepods.core.bluetooth.att.ATTHandle
-import me.kavishdevar.librepods.presentation.components.primitives.StyledButton
 import me.kavishdevar.librepods.presentation.components.primitives.StyledScaffold
 import me.kavishdevar.librepods.presentation.components.primitives.StyledToggle
 import me.kavishdevar.librepods.presentation.viewmodel.AppleViewModel
@@ -47,7 +44,6 @@ import me.kavishdevar.librepods.presentation.viewmodel.AppleViewModel
 fun HearingProtectionScreen(
     viewModel: AppleViewModel,
     navigateBack: (() -> Unit)?,
-    navigateToPurchase: () -> Unit
 ) {
     val backdrop = rememberLayerBackdrop()
     val uiState by viewModel.uiState.collectAsState()
@@ -66,22 +62,6 @@ fun HearingProtectionScreen(
                 .padding(horizontal = 16.dp)
         ) {
             Spacer(modifier = Modifier.height(topPadding))
-            if (!uiState.isPremium) {
-                StyledButton(
-                    onClick = navigateToPurchase,
-                    backdrop = rememberLayerBackdrop(),
-                    modifier = Modifier.fillMaxWidth(),
-                    maxScale = 0.05f,
-                    surfaceColor = MaterialTheme.colorScheme.primary
-                ) {
-                    Text(
-                        stringResource(R.string.unlock_advanced_features),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onPrimary
-                    )
-                }
-                Spacer(modifier = Modifier.height(16.dp))
-            }
 
             if (uiState.vendorIdHook) {
                 StyledToggle(
@@ -95,7 +75,6 @@ fun HearingProtectionScreen(
                             byteArrayOf(if (it) 1.toByte() else 0.toByte())
                         )
                     },
-                    enabled = uiState.isPremium
                 )
 
                 Spacer(modifier = Modifier.height(12.dp))
@@ -112,7 +91,6 @@ fun HearingProtectionScreen(
                         ControlCommandIdentifier.PPE_TOGGLE_CONFIG, it
                     )
                 },
-                enabled = uiState.isPremium
             )
             Spacer(modifier = Modifier.height(bottomPadding))
         }

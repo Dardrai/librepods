@@ -140,13 +140,19 @@ class ShizukuAudioService(context: Context) : IAudioBridge.Stub() {
         active.close() // A delayed Stop from a retired owner cannot stop its replacement.
     }
 
-    override fun restoreNativePlayback(address: String, owner: IPlaybackRecoveryOwner): Boolean {
+    override fun restoreNativePlayback(address: String, owner: IPlaybackRecoveryOwner): Boolean =
+        nativePlayback(address, owner, connectOnly = false)
+
+    override fun connectNativePlayback(address: String, owner: IPlaybackRecoveryOwner): Boolean =
+        nativePlayback(address, owner, connectOnly = true)
+
+    private fun nativePlayback(address: String, owner: IPlaybackRecoveryOwner, connectOnly: Boolean): Boolean {
         enforceCaller()
         check(originalContext.packageManager.checkPermission("android.permission.BLUETOOTH_CONNECT", BuildConfig.APPLICATION_ID) ==
             PackageManager.PERMISSION_GRANTED) { "LibrePods Bluetooth permission was revoked" }
         val recovery = synchronized(lock) {
             check(!cleanupFailed.get() && !probing && session == null && playbackRecovery == null) { "Another audio operation is active" }
-            A2dpPlaybackRecovery(shellContext, address, owner).also { playbackRecovery = it }
+            A2dpPlaybackRecovery(shellContext, address, owner, connectOnly).also { playbackRecovery = it }
         }
         val identity = Binder.clearCallingIdentity()
         try {

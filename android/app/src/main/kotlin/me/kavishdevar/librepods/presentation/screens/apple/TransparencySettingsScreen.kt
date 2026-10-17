@@ -1,5 +1,5 @@
 /*
-    LibrePods - AirPods liberated from Apple’s ecosystem
+    LibrePods - AirPods liberated from Appleâ€™s ecosystem
     Copyright (C) 2025 LibrePods contributors
 
     This program is free software: you can redistribute it and/or modify
@@ -18,8 +18,12 @@
 
 package me.kavishdevar.librepods.presentation.screens.apple
 
-import android.annotation.SuppressLint
 import android.util.Log
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.rememberSaveable
+import android.annotation.SuppressLint
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -40,14 +44,10 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.Saver
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.shadow
@@ -57,6 +57,9 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import me.kavishdevar.librepods.R
+import me.kavishdevar.librepods.core.devices.AirPodsModel
+import me.kavishdevar.librepods.core.devices.AirPodsSpecs
+import me.kavishdevar.librepods.core.devices.BaseCapability
 import me.kavishdevar.librepods.core.bluetooth.att.types.TransparencySettings
 import me.kavishdevar.librepods.core.bluetooth.att.types.parseTransparencySettingsResponse
 import me.kavishdevar.librepods.core.bluetooth.att.types.sendTransparencySettings
@@ -105,18 +108,22 @@ fun TransparencySettingsScreen(
             val backgroundColor = MaterialTheme.colorScheme.surfaceContainer
 
             val data = state.transparencyData
-            val settings = remember(data) { mutableStateOf(parseTransparencySettingsResponse(data)) }
-            val writable = settings.value != null
+            val hearingAllowsTransparency = uiState.metadata.model != AirPodsModel.UNKNOWN &&
+                (!AirPodsSpecs.getSpec(uiState.metadata.model).baseCapabilities
+                    .contains(BaseCapability.HEARING_AID) ||
+                    state.hearingModes.customTransparencyAllowed)
+            val settings = remember(data, state.hearingModes) { mutableStateOf(parseTransparencySettingsResponse(data)) }
+            val writable = settings.value != null && hearingAllowsTransparency
             fun updateSettings(edit: (TransparencySettings) -> TransparencySettings) {
                 val current = settings.value ?: return
                 val updated = edit(current)
-                if (updated == current) return
+                if ((updated.enabled && !hearingAllowsTransparency) || updated == current) return
                 settings.value = updated
                 sendTransparencySettings(data, updated, viewModel::writeATTCharacteristic)
             }
             if (uiState.vendorIdHook) {
                 StyledToggle(
-                    enabled = writable,
+                    enabled = settings.value != null && (settings.value?.enabled == true || hearingAllowsTransparency),
                     label = stringResource(R.string.transparency_mode),
                     checked = settings.value?.enabled ?: false,
                     description = stringResource(R.string.customize_transparency_mode_description),

@@ -25,6 +25,7 @@ import android.appwidget.AppWidgetManager
 import android.appwidget.AppWidgetProvider
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.widget.RemoteViews
 import me.kavishdevar.librepods.R
 import me.kavishdevar.librepods.services.LibrePodsService
@@ -41,6 +42,7 @@ class NoiseControlWidget : AppWidgetProvider() {
 
             val intent = Intent(context, LibrePodsService::class.java).apply {
                 action = "ACTION_SET_ANC_MODE"
+                data = Uri.parse("librepods://noise-control-widget/$appWidgetId")
                 putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, appWidgetId)
             }
 

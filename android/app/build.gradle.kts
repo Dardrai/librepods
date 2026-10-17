@@ -1,7 +1,7 @@
 import java.util.Properties
 
-val appVersionName = (rootProject.extra["appVersionName"] as String) + "-pixel28"
-val appVersionCode = 200000113
+val appVersionName = (rootProject.extra["appVersionName"] as String) + "-pixel37"
+val appVersionCode = 200000122
 
 plugins {
     alias(libs.plugins.android.application)
@@ -111,18 +111,6 @@ android {
             }
         }
     }
-    productFlavors {
-        create("foss") {
-            dimension = "env"
-            buildConfigField("Boolean", "PLAY_BUILD", "false")
-        }
-        create("play") {
-            dimension = "env"
-            buildConfigField("Boolean", "PLAY_BUILD", "true")
-            versionNameSuffix = "-play"
-            minSdk = 36
-        }
-    }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_21
         targetCompatibility = JavaVersion.VERSION_21
@@ -152,8 +140,6 @@ android {
     }
 
     ndkVersion = "30.0.14904198"
-
-    flavorDimensions += "env"
 }
 
 dependencies {
@@ -182,7 +168,6 @@ dependencies {
     implementation(libs.haze.materials)
     implementation(libs.androidx.dynamicanimation)
     implementation(libs.androidx.compose.material.icons.core)
-    implementation(libs.billing)
     debugImplementation(libs.androidx.compose.ui.tooling)
     debugImplementation("androidx.compose.ui:ui-test-manifest")
     implementation(libs.androidx.compose.foundation.layout)
@@ -193,8 +178,6 @@ dependencies {
 //    implementation(libs.hilt.compiler)
     compileOnly(libs.libxposed.api)
     implementation(libs.libxposed.service)
-    implementation(libs.play.review)
-    implementation(libs.play.review.ktx)
     implementation(libs.androidx.navigation3.ui)
     implementation(libs.androidx.navigation3.runtime)
     implementation(libs.androidx.lifecycle.viewmodel.navigation3)
@@ -208,7 +191,7 @@ dependencies {
 }
 
 tasks.register("verifyPixel") {
-    dependsOn(":core:testDebugUnitTest", "testFossDebugUnitTest", "lintFossDebug", "assembleFossDebug", "assembleFossRelease")
+    dependsOn(":core:testDebugUnitTest", "testDebugUnitTest", "lintDebug", "assembleDebug", "assembleRelease")
 }
 
 tasks.withType<Test>().configureEach {
@@ -236,33 +219,28 @@ aboutLibraries {
 val releaseDir = rootProject.file("../release")
 
 tasks.register<Copy>("collectReleaseArtifacts") {
-    description = "Collects release APKs and AABs into a single directory."
+    description = "Collects GitHub debug and release APKs into a single directory."
 
     dependsOn(
-        "assembleFossDebug",
-        "assembleFossRelease",
-        "bundlePlayRelease"
+        "assembleDebug",
+        "assembleRelease"
     )
 
     into(releaseDir)
 
-    from(layout.buildDirectory.dir("outputs/apk/foss/release")) {
+    from(layout.buildDirectory.dir("outputs/apk/release")) {
         include("*.apk")
         rename(
             ".*\\.apk",
-            "LibrePods-FOSS-v${appVersionName}-${appVersionCode}-release.apk"
+            "LibrePods-v${appVersionName}-${appVersionCode}-release.apk"
         )
     }
 
-    from(layout.buildDirectory.dir("outputs/apk/foss/debug")) {
+    from(layout.buildDirectory.dir("outputs/apk/debug")) {
         include("*.apk")
         rename(
             ".*\\.apk",
-            "LibrePods-FOSS-v${appVersionName}-${appVersionCode}-debug.apk"
+            "LibrePods-v${appVersionName}-${appVersionCode}-debug.apk"
         )
-    }
-
-    from(layout.buildDirectory.dir("outputs/bundle/playRelease")) {
-        include("*.aab")
     }
 }

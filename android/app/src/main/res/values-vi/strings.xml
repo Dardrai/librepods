@@ -34,7 +34,6 @@
     <string name="airpods_not_connected">AirPods chưa được kết nối</string>
     <string name="airpods_not_connected_description">Vui lòng kết nối đến AirPods của bạn để truy cập cài đặt.</string>
     <string name="back">Quay lại</string>
-    <string name="customizations">Tùy chỉnh</string>
     <string name="relative_conversation_awareness_volume">Âm lượng tương đối</string>
     <string name="relative_conversation_awareness_volume_description">Giảm xuống phần trăm của âm lượng hiện tại thay vì âm lượng tối đa.</string>
     <string name="conversation_awareness_pause_music">Tạm dừng nhạc</string>

@@ -50,7 +50,6 @@ fun ConnectionSettings(
     takeoverWhenMediaStart: Boolean,
     onTakeoverWhenMediaStartChanged: (Boolean) -> Unit,
 
-    isPremium: Boolean
 ) {
     StyledList {
         styledToggle(
@@ -80,21 +79,18 @@ fun ConnectionSettings(
 //            description = stringResource(R.string.takeover_disconnected_desc),
 //            checked = takeoverWhenDisconnected,
 //            onCheckedChange = onTakeoverWhenDisconnectedChanged,
-//            enabled = isPremium
 //        )
 //        StyledToggle(
 //            label = stringResource(R.string.takeover_idle),
 //            description = stringResource(R.string.takeover_idle_desc),
 //            checked = takeoverWhenIdle,
 //            onCheckedChange = onTakeoverWhenIdleChanged,
-//            enabled = isPremium
 //        )
 //        StyledToggle(
 //            label = stringResource(R.string.takeover_music),
 //            description = stringResource(R.string.takeover_music_desc),
 //            checked = takeoverWhenMusic,
 //            onCheckedChange = onTakeoverWhenMusicChanged,
-//            enabled = isPremium
 //        )
 //
 //        StyledToggle(
@@ -102,7 +98,6 @@ fun ConnectionSettings(
 //            description = stringResource(R.string.takeover_call_desc),
 //            checked = takeoverWhenCall,
 //            onCheckedChange = onTakeoverWhenCallChanged,
-//            enabled = isPremium
 //        )
 //    }
 //
@@ -112,14 +107,12 @@ fun ConnectionSettings(
 //            description = stringResource(R.string.takeover_ringing_call_desc),
 //            checked = takeoverWhenRingingCall,
 //            onCheckedChange = onTakeoverWhenRingingCallChanged,
-//            enabled = isPremium
 //        )
 //        StyledToggle(
 //            label = stringResource(R.string.takeover_media_start),
 //            description = stringResource(R.string.takeover_media_start_desc),
 //            checked = takeoverWhenMediaStart,
 //            onCheckedChange = onTakeoverWhenMediaStartChanged,
-//            enabled = isPremium
 //        )
 //    }
 }

@@ -34,7 +34,6 @@
     <string name="airpods_not_connected">AirPods não conectados</string>
     <string name="airpods_not_connected_description">Por favor, conecte seus AirPods para acessar as configurações.</string>
     <string name="back">Voltar</string>
-    <string name="customizations">Personalizações</string>
     <string name="relative_conversation_awareness_volume">Volume relativo</string>
     <string name="relative_conversation_awareness_volume_description">Reduz para uma porcentagem do volume atual em vez do volume máximo.</string>
     <string name="conversation_awareness_pause_music">Pausar Música</string>

@@ -17,8 +17,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
-import me.kavishdevar.librepods.billing.BillingManager
-import me.kavishdevar.librepods.billing.BillingProviderFactory
 import me.kavishdevar.librepods.database.LibrePodsDatabase
 import me.kavishdevar.librepods.presentation.overlays.IslandWindow
 import me.kavishdevar.librepods.repository.AppDataRepository
@@ -93,7 +91,6 @@ class LibrePodsApplication: Application(), XposedServiceHelper.OnServiceListener
             }
         }
 
-        BillingManager.provider = BillingProviderFactory.create(this)
         ProcessLifecycleOwner.get().lifecycle.addObserver(this)
 
         GestureFeedback.init(this)
@@ -103,7 +100,6 @@ class LibrePodsApplication: Application(), XposedServiceHelper.OnServiceListener
     }
 
     override fun onResume(owner: LifecycleOwner) {
-        BillingManager.provider.queryPurchases()
         XposedState.isAvailable = XposedServiceHolder.service != null
         XposedState.bluetoothScopeEnabled = XposedServiceHolder.service?.scope?.contains("com.google.android.bluetooth") == true || XposedServiceHolder.service?.scope?.contains("com.android.bluetooth") == true
     }

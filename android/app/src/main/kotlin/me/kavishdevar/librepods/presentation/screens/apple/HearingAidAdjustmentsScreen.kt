@@ -1,5 +1,5 @@
 /*
-    LibrePods - AirPods liberated from Apple’s ecosystem
+    LibrePods - AirPods liberated from Appleâ€™s ecosystem
     Copyright (C) 2025 LibrePods contributors
 
     This program is free software: you can redistribute it and/or modify
@@ -19,6 +19,14 @@
 package me.kavishdevar.librepods.presentation.screens.apple
 
 import android.util.Log
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.snapshotFlow
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.debounce
+import kotlin.time.Duration.Companion.milliseconds
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -32,19 +40,12 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.flow.debounce
 import me.kavishdevar.librepods.R
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommandIdentifier
 import me.kavishdevar.librepods.core.bluetooth.att.ATTHandle
@@ -57,7 +58,6 @@ import me.kavishdevar.librepods.presentation.components.primitives.StyledSlider
 import me.kavishdevar.librepods.presentation.components.primitives.StyledToggle
 import me.kavishdevar.librepods.presentation.icons.LocalIcons
 import me.kavishdevar.librepods.presentation.viewmodel.AppleViewModel
-import kotlin.time.Duration.Companion.milliseconds
 
 private const val TAG = "HearingAidAdjustments"
 
@@ -72,8 +72,8 @@ fun HearingAidAdjustmentsScreen(
     val state = uiState.state
 
     val data = state.hearingAidData
-    val writable = hearingAidSettingsWritable(data)
-    val settings = remember(data) { mutableStateOf(parseHearingAidSettingsResponse(data)) }
+    val writable = hearingAidSettingsWritable(data) && state.hearingModes.pending == null && state.hearingModes.uncertain == null
+    val settings = remember(data, state.hearingModes.pending, state.hearingModes.uncertain) { mutableStateOf(parseHearingAidSettingsResponse(data)) }
     fun updateSettings(edit: (HearingAidSettings) -> HearingAidSettings) {
         if (!writable) return
         val current = settings.value ?: return

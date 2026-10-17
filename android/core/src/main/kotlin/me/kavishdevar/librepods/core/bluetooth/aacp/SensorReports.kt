@@ -22,13 +22,13 @@ internal class SensorReports {
     }
 
     private fun discover(data: SensorDataWX): Boolean {
-        if (data.logType !in setOf(1, 3) || data.sensorDescriptorCount > 96) return false
+        if (data.logType !in setOf(1, 3) || data.sensorDescriptorCount !in 1..96) return false
         val announced = data.sensorDescriptorList.mapNotNull { descriptor ->
             val service = descriptor.serviceValue.takeIf { it in 1..127 } ?: return false
             SensorDescriptorLayout.parse(descriptor.sensorDescriptor.toByteArray())?.let { service to it }
         }
-        val restart = data.sensorDescriptorCount > 0 && data.seq == 1 && (lastDescriptorSequence ?: 0) > 1
-        if ((!restart && announced.isEmpty()) || announced.any { item -> announced.any {
+        val restart = data.seq == 1 && (lastDescriptorSequence ?: 0) > 1
+        if (announced.any { item -> announced.any {
                 (item.first == it.first) != (item.second == it.second) } }) return false
         var motion = if (restart) null else motionService
         var heart = if (restart) null else heartRateService

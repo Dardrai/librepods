@@ -49,7 +49,6 @@
 <!--        android:maxSdkVersion="30" />-->
 <!--    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"-->
 <!--        android:maxSdkVersion="30" />-->
-    <uses-permission android:name="com.android.vending.BILLING" />
 
     <uses-permission android:name="android.permission.health.WRITE_HEART_RATE"/>
 

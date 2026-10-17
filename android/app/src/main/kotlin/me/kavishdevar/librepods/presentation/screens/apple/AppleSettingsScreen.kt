@@ -1,5 +1,5 @@
 /*
-    LibrePods - AirPods liberated from Apple’s ecosystem
+    LibrePods - AirPods liberated from Appleâ€™s ecosystem
     Copyright (C) 2025 LibrePods contributors
 
     This program is free software: you can redistribute it and/or modify
@@ -18,6 +18,7 @@
 
 package me.kavishdevar.librepods.presentation.screens.apple
 
+import androidx.compose.runtime.getValue
 import android.annotation.SuppressLint
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -36,7 +37,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -87,7 +87,6 @@ fun AppleSettingsRoute(
     navigateToHearingAid: () -> Unit,
     navigateToLeftLongPress: () -> Unit,
     navigateToRightLongPress: () -> Unit,
-    navigateToPurchase: () -> Unit,
     navigateToEqualizer: () -> Unit,
     navigateToHeadTracking: () -> Unit,
     navigateToAccessibility: () -> Unit,
@@ -127,7 +126,6 @@ fun AppleSettingsRoute(
         navigateToHearingAid = navigateToHearingAid,
         navigateToLeftLongPress = navigateToLeftLongPress,
         navigateToRightLongPress = navigateToRightLongPress,
-        navigateToPurchase = navigateToPurchase,
         navigateToEqualizer = navigateToEqualizer,
         navigateToHeadTracking = navigateToHeadTracking,
         navigateToAccessibility = navigateToAccessibility,
@@ -165,7 +163,6 @@ fun AppleSettingsScreen(
     navigateToHearingAid: () -> Unit,
     navigateToLeftLongPress: () -> Unit,
     navigateToRightLongPress: () -> Unit,
-    navigateToPurchase: () -> Unit,
     navigateToEqualizer: () -> Unit,
     navigateToHeadTracking: () -> Unit,
     navigateToAccessibility: () -> Unit,
@@ -278,7 +275,7 @@ fun AppleSettingsScreen(
                                 onAdaptiveStrengthChanged = {
                                     setControlCommandInt(ControlCommandIdentifier.AUTO_ANC_STRENGTH, it)
                                 },
-                                enabled = uiState.isPremium
+                                enabled = true
                             )
 
                             Spacer(modifier = Modifier.height(16.dp))
@@ -347,7 +344,7 @@ fun AppleSettingsScreen(
                 )
             }
 
-//                if (baseCapabilities.contains(BaseCapability.RAW_GESTURES_CONFIG) && !BuildConfig.PLAY_BUILD) {
+//                if (baseCapabilities.contains(BaseCapability.RAW_GESTURES_CONFIG)) {
 //                    item(key = "spacer_camera") { Spacer(modifier = Modifier.height(16.dp)) }
 //                    item(key = "camera_control") {
 //                        StyledListItem(
@@ -360,25 +357,6 @@ fun AppleSettingsScreen(
 //                    }
 //                }
 
-            item(key = "upgrade_button") {
-                if (!uiState.isPremium) {
-                    Spacer(modifier = Modifier.height(28.dp))
-                    StyledButton(
-                        onClick = navigateToPurchase,
-                        backdrop = rememberLayerBackdrop(),
-                        modifier = Modifier.fillMaxWidth(),
-                        maxScale = 0.05f,
-                        surfaceColor = MaterialTheme.colorScheme.primary
-                    ) {
-                        Text(
-                            stringResource(R.string.unlock_advanced_features),
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onPrimary
-                        )
-                    }
-                    Spacer(modifier = Modifier.height(8.dp))
-                }
-            }
 
             item(key = "spacer_audio") { Spacer(modifier = Modifier.height(16.dp)) }
             item(key = "audio") {
@@ -401,7 +379,7 @@ fun AppleSettingsScreen(
                             checked
                         )
                     },
-                    conversationAwarenessChecked = conversationAwarenessChecked && uiState.isPremium,
+                    conversationAwarenessChecked = conversationAwarenessChecked,
                     onConversationAwarenessCheckedChange = { checked ->
                         setControlCommandBoolean(
                             ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG,
@@ -417,7 +395,6 @@ fun AppleSettingsScreen(
                     },
                     navigateToEqualizer = navigateToEqualizer,
                     vendorIdHook = uiState.vendorIdHook,
-                    isPremium = uiState.isPremium
                 )
             }
 
@@ -444,8 +421,6 @@ fun AppleSettingsScreen(
                     onTakeoverWhenRingingCallChanged = { enabled -> updateSettings { it.copy(takeoverWhenRingingCall = enabled) } },
                     takeoverWhenMediaStart = settings.takeoverWhenMediaStart,
                     onTakeoverWhenMediaStartChanged = { enabled -> updateSettings { it.copy(takeoverWhenMediaStart = enabled) } },
-
-                    isPremium = uiState.isPremium
                 )
             }
 
@@ -476,7 +451,6 @@ fun AppleSettingsScreen(
                         label = stringResource(R.string.sleep_detection),
                         checked = state.controlStates[id]?.getOrNull(0) == 0x01.toByte(),
                         onCheckedChange = { setControlCommandBoolean(id, it) },
-                        enabled = uiState.isPremium
                     )
                 }
             }
@@ -528,7 +502,7 @@ fun AppleSettingsScreen(
                     modelName = metadata.modelName,
                     actualModel = metadata.modelNumber,
                     serialNumbers = listOf(metadata.serialNumber, metadata.leftSerialNumber, metadata.rightSerialNumber),
-                    version = metadata.publicFirmware ?: "—",
+                    version = metadata.publicFirmware ?: "â€”",
                     navigateToVersion = navigateToVersion
                 )
             }
@@ -537,7 +511,7 @@ fun AppleSettingsScreen(
             item(key = "refresh_settings") {
                 StyledButton(
                     onClick = refreshDeviceSettings,
-                    enabled = canRefreshSettings && !refreshingSettings,
+                    enabled = canRefreshSettings && !refreshingSettings && state.hearingModes.pending == null,
                     isInteractive = false,
                     modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)
                 ) {
@@ -627,7 +601,6 @@ fun AppleSettingsScreenPreviewApple() {
                 navigateToHearingAid = {},
                 navigateToLeftLongPress = {},
                 navigateToRightLongPress = {},
-                navigateToPurchase = {},
                 navigateToEqualizer = {},
                 navigateToHeadTracking = {},
                 navigateToAccessibility = {},
@@ -670,7 +643,6 @@ fun AppleSettingsScreenPreviewMaterial() {
                 navigateToHearingAid = {},
                 navigateToLeftLongPress = {},
                 navigateToRightLongPress = {},
-                navigateToPurchase = {},
                 navigateToEqualizer = {},
                 navigateToHeadTracking = {},
                 navigateToAccessibility = {},

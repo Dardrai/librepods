@@ -1,5 +1,5 @@
 /*
-    LibrePods - AirPods liberated from Apple’s ecosystem
+    LibrePods - AirPods liberated from Appleâ€™s ecosystem
     Copyright (C) 2025 LibrePods contributors
 
     This program is free software: you can redistribute it and/or modify
@@ -18,6 +18,8 @@
 
 package me.kavishdevar.librepods.presentation.screens.apple
 
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -27,28 +29,24 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
-import com.kyant.backdrop.backdrops.rememberLayerBackdrop
 import kotlinx.coroutines.flow.debounce
 import me.kavishdevar.librepods.R
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommandIdentifier
 import me.kavishdevar.librepods.core.bluetooth.att.ATTHandle
 import me.kavishdevar.librepods.core.devices.AirPodsSpecs
+import me.kavishdevar.librepods.core.devices.AirPodsModel
 import me.kavishdevar.librepods.core.devices.BaseCapability
-import me.kavishdevar.librepods.presentation.components.primitives.StyledButton
 import me.kavishdevar.librepods.presentation.components.primitives.StyledList
 import me.kavishdevar.librepods.presentation.components.primitives.StyledListItem
 import me.kavishdevar.librepods.presentation.components.primitives.styledListItem
@@ -65,7 +63,6 @@ import kotlin.time.Duration.Companion.milliseconds
 fun AccessibilitySettingsScreen(
     viewModel: AppleViewModel,
     navigateBack: (() -> Unit)?,
-    navigateToPurchase: () -> Unit,
     navigateToTransparencyCustomization: () -> Unit
 ) {
     val uiState by viewModel.uiState.collectAsState()
@@ -73,13 +70,9 @@ fun AccessibilitySettingsScreen(
     val state = uiState.state
     val metadata = uiState.metadata
 
-    val hearingAidEnabled =
-        state.controlStates[ControlCommandIdentifier.HEARING_AID]?.getOrNull(
-            1
-        )
-            ?.toInt() == 1 && state.controlStates[ControlCommandIdentifier.HEARING_AID]?.getOrNull(
-            0
-        )?.toInt() == 1
+    val hearingModesOff = metadata.model != AirPodsModel.UNKNOWN &&
+        (!AirPodsSpecs.getSpec(metadata.model).baseCapabilities.contains(BaseCapability.HEARING_AID) ||
+            state.hearingModes.customTransparencyAllowed)
 
 
     StyledScaffold(
@@ -95,22 +88,6 @@ fun AccessibilitySettingsScreen(
         ) {
             Spacer(modifier = Modifier.height(topPadding))
 
-            if (!uiState.isPremium) {
-                StyledButton(
-                    onClick = navigateToPurchase,
-                    backdrop = rememberLayerBackdrop(),
-                    modifier = Modifier.fillMaxWidth(),
-                    maxScale = 0.05f,
-                    surfaceColor = MaterialTheme.colorScheme.primary
-                ) {
-                    Text(
-                        stringResource(R.string.unlock_advanced_features),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onPrimary
-                    )
-                }
-                Spacer(modifier = Modifier.height(16.dp))
-            }
 
 //            val phoneMediaEQ = remember { mutableStateOf(FloatArray(8) { 0.5f }) }
 //            val phoneEQEnabled = remember { mutableStateOf(false) }
@@ -242,7 +219,6 @@ fun AccessibilitySettingsScreen(
                         ControlCommandIdentifier.ONE_BUD_ANC_MODE, it
                     )
                 },
-                enabled = uiState.isPremium
             )
 
             if (AirPodsSpecs.getSpec(metadata.model).baseCapabilities.contains(BaseCapability.LOUD_SOUND_REDUCTION) && uiState.vendorIdHook) {
@@ -256,15 +232,13 @@ fun AccessibilitySettingsScreen(
                             if (it) byteArrayOf(0x01) else byteArrayOf(0x00)
                         )
                     },
-                    enabled = uiState.isPremium
                 )
             }
 
-            if (!hearingAidEnabled && uiState.vendorIdHook) {
+            if (hearingModesOff && uiState.vendorIdHook) {
                 StyledListItem(
                     contentText = stringResource(R.string.customize_transparency_mode),
                     onClick = navigateToTransparencyCustomization,
-                    enabled = uiState.isPremium
                 )
             }
 
@@ -295,7 +269,6 @@ fun AccessibilitySettingsScreen(
                 startImageVector = LocalIcons.current.SpeakerMin,
                 endImageVector = LocalIcons.current.SpeakerMax,
                 independent = true,
-                enabled = uiState.isPremium
             )
 
             if (AirPodsSpecs.getSpec(metadata.model).baseCapabilities.contains(BaseCapability.SWIPE_FOR_VOLUME)) {
@@ -312,7 +285,6 @@ fun AccessibilitySettingsScreen(
                             ControlCommandIdentifier.VOLUME_SWIPE_MODE, it
                         )
                     },
-                    enabled = uiState.isPremium
                 )
 
                 StyledList(

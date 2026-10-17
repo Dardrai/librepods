@@ -50,3 +50,13 @@ typedef struct t_sdp_di_record {
     char service_description[400];
     char documentation_url[400];
 } tSDP_DI_RECORD;
+
+inline tBTA_STATUS setLocalDiRecord(tSDP_DI_RECORD* record, uint32_t* handle, bool enabled,
+                                  tBTA_STATUS (*original)(tSDP_DI_RECORD*, uint32_t*)) {
+    if (!original) return BTA_FAILURE;
+    if (enabled && record) {
+        record->vendor = 0x004C;
+        record->vendor_id_source = 0x0001;
+    }
+    return original(record, handle);
+}

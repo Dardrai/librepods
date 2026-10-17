@@ -1,5 +1,5 @@
 /*
-    LibrePods - AirPods liberated from Apple’s ecosystem
+    LibrePods - AirPods liberated from Appleâ€™s ecosystem
     Copyright (C) 2025 LibrePods contributors
 
     This program is free software: you can redistribute it and/or modify
@@ -18,6 +18,8 @@
 
 package me.kavishdevar.librepods.presentation.screens.apple
 
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import android.graphics.Paint
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.tween
@@ -51,14 +53,12 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -97,7 +97,6 @@ import kotlin.time.Duration.Companion.seconds
 fun HeadTrackingScreen(
     viewModel: AppleViewModel,
     navigateBack: (() -> Unit)?,
-    navigateToPurchase: () -> Unit
 ) {
     val uiState by viewModel.uiState.collectAsState()
 
@@ -174,28 +173,11 @@ fun HeadTrackingScreen(
                     .padding(top = 8.dp)
             ) {
 
-                if (!uiState.isPremium) {
-                    StyledButton(
-                        onClick = navigateToPurchase,
-                        backdrop = rememberLayerBackdrop(),
-                        modifier = Modifier.fillMaxWidth(),
-                        maxScale = 0.05f,
-                        surfaceColor = MaterialTheme.colorScheme.primary
-                    ) {
-                        Text(
-                            stringResource(R.string.unlock_advanced_features),
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onPrimary
-                        )
-                    }
-                    Spacer(modifier = Modifier.height(16.dp))
-                }
 
                 StyledToggle(
                     label = "Head Gestures",
                     checked = settings.headGesturesEnabled,
                     onCheckedChange = { viewModel.setHeadGesturesEnabled(it) },
-                    enabled = uiState.isPremium || settings.headGesturesEnabled,
                     description = stringResource(R.string.head_gestures_details),
                     header = true
                 )
@@ -295,7 +277,6 @@ fun HeadTrackingScreen(
                     snapPoints = listOf(40f),
                     independent = true,
                     description = "how often airpods report sensor information",
-                    enabled = uiState.isPremium
                 )
             }
 
