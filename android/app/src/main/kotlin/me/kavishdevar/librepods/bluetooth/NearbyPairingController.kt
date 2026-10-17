@@ -38,7 +38,7 @@ class NearbyPairingController(
     private val onPaired: (BluetoothDevice) -> Unit = {}
 ) {
     private class ConsentHint(val receivedAt: Long, @Volatile var active: Boolean = true) {
-        fun isCurrent(now: Long) = active && now >= receivedAt && now - receivedAt < 5_000
+        fun isCurrent(now: Long) = active && now >= receivedAt && now - receivedAt < CONSENT_HINT_MS
     }
     private class BondSelection(val device: BluetoothDevice, var bondingObserved: Boolean,
         var consentRequested: Boolean = false)
@@ -371,7 +371,7 @@ class NearbyPairingController(
             device.bondState != BluetoothDevice.BOND_BONDING) return
         selected.consentRequested = true
         val pending = hold()
-        val consentDeadline = minOf(hint.receivedAt + 5_000, SystemClock.elapsedRealtime() + 1_500)
+        val consentDeadline = minOf(hint.receivedAt + CONSENT_HINT_MS, SystemClock.elapsedRealtime() + 1_500)
         if (pending != null) pendingConsent = pending
         lateinit var job: Job
         job = scope.launch(start = CoroutineStart.LAZY) {
@@ -552,5 +552,8 @@ class NearbyPairingController(
         }
     }
 
-    private companion object { const val TAG = "NearbyPairing" }
+    private companion object {
+        const val TAG = "NearbyPairing"
+        const val CONSENT_HINT_MS = 15_000L
+    }
 }

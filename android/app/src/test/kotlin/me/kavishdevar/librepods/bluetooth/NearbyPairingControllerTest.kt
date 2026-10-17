@@ -584,8 +584,8 @@ class NearbyPairingControllerTest {
         }
     }
 
-    @Test fun capturedConsentCannotCrossCycleVariantDeadlineDismissalOrAmbiguity() {
-        for (retirement in listOf("cycle", "variant", "deadline", "dismiss", "ambiguity")) {
+    @Test fun capturedConsentCannotCrossCycleVariantDismissalOrAmbiguity() {
+        for (retirement in listOf("cycle", "variant", "dismiss", "ambiguity")) {
             controller.close()
             val calls = AtomicInteger()
             controller = NearbyPairingController(context, confirmConsent = { _, _ -> calls.incrementAndGet(); true })
@@ -603,7 +603,6 @@ class NearbyPairingControllerTest {
                     bondChanged(selected, BluetoothDevice.BOND_BONDING)
                 }
                 "variant" -> orderedPairingRequest(selected, 2)
-                "deadline" -> advance(5_000)
                 "dismiss" -> {
                     controller.cancelPending()
                     idle()
@@ -624,7 +623,7 @@ class NearbyPairingControllerTest {
             if (retirement == "cycle") {
                 orderedPairingRequest(selected, 3)
                 awaitMainCondition { calls.get() == 1 }
-            } else if (retirement in listOf("variant", "deadline")) {
+            } else if (retirement == "variant") {
                 orderedPairingRequest(selected, 3)
                 assertNull("Duplicates cannot renew a retired hint in the same native cycle", field("consentJob"))
                 assertEquals(0, calls.get())
@@ -731,7 +730,7 @@ class NearbyPairingControllerTest {
         awaitMainCondition { calls.get() == 1 }
     }
 
-    @Test fun twoPreselectionNativeCyclesKeepTheLatestConsentThroughoutOneContinuousInquiry() {
+    @Test fun twoPreselectionNativeCyclesKeepDelayedConsentThroughoutOneContinuousInquiry() {
         val native = nativeFallback()
         for (bondingBroadcastFirst in listOf(true, false)) {
             controller.close()
@@ -761,7 +760,7 @@ class NearbyPairingControllerTest {
             assertEquals("Unselected consent remains available to Android", beforeNative + 1, native.get())
             assertNull(field("pendingConsent"))
             assertNull(field("consentJob"))
-            advance(14)
+            advance(3_660)
             found(selected)
             val foundAt = field("firstCandidateAt") as Long
             advanceTo(foundAt + 1_900)
@@ -778,6 +777,75 @@ class NearbyPairingControllerTest {
             bondChanged(selected, BluetoothDevice.BOND_BONDED)
             assertEquals(PopupWindow.Stage.COMPLETE, stage())
         }
+    }
+
+    @Test fun duplicateConsentCannotRenewTheFifteenSecondWindowAtItsExactBoundary() {
+        controller.close()
+        val calls = AtomicInteger()
+        controller = NearbyPairingController(context, confirmConsent = { _, _ -> calls.incrementAndGet(); true })
+        connect()
+        val selected = device(1)
+        pairing(selected).setBondState(BluetoothDevice.BOND_BONDING)
+        bondChanged(selected, BluetoothDevice.BOND_BONDING)
+        val receivedAt = SystemClock.elapsedRealtime()
+        orderedPairingRequest(selected, 3)
+        assertEquals("The fixture must retain the request's exact receipt clock", receivedAt, SystemClock.elapsedRealtime())
+        val original = field("receiver")
+        advanceTo(receivedAt + 13_000)
+        found(selected)
+        assertEquals(receivedAt + 13_000, field("firstCandidateAt"))
+        advanceTo(receivedAt + 14_900)
+        orderedPairingRequest(selected, 3)
+        assertEquals(0, calls.get())
+        advanceTo(receivedAt + 15_000)
+        assertSame("Inquiry completion must not mask hint expiry by retiring the receiver", original, field("receiver"))
+        assertEquals(BluetoothDevice.BOND_BONDING, selected.bondState)
+        assertEquals(PopupWindow.Stage.CONNECTING, stage())
+        assertEquals("Exactly fifteen seconds expires the original request despite its duplicate", 0, calls.get())
+        assertNull(field("consentJob"))
+        assertEquals(0, pairing(selected).requests)
+        orderedPairingRequest(selected, 3)
+        assertNull("A duplicate after expiry cannot revive that cycle's request", field("consentJob"))
+        assertEquals(0, calls.get())
+    }
+
+    @Test fun lateSelectedConsentGetsOnlyItsOriginalRemainingHintTime() {
+        controller.close()
+        val entered = CountDownLatch(1)
+        val canceled = CountDownLatch(1)
+        val guard = AtomicReference<(() -> Boolean)?>()
+        val calls = AtomicInteger()
+        controller = NearbyPairingController(context, confirmConsent = { _, current ->
+            calls.incrementAndGet()
+            guard.set(current)
+            entered.countDown()
+            try { awaitCancellation() } finally { canceled.countDown() }
+        })
+        connect()
+        val selected = device(1)
+        pairing(selected).setBondState(BluetoothDevice.BOND_BONDING)
+        bondChanged(selected, BluetoothDevice.BOND_BONDING)
+        val receivedAt = SystemClock.elapsedRealtime()
+        orderedPairingRequest(selected, 3)
+        assertEquals(receivedAt, SystemClock.elapsedRealtime())
+        val original = field("receiver")
+        advanceTo(receivedAt + 12_500)
+        found(selected)
+        assertEquals(receivedAt + 12_500, field("firstCandidateAt"))
+        advanceTo(receivedAt + 14_500)
+        assertTrue("A valid late selection must still reach confirmation", entered.await(2, TimeUnit.SECONDS))
+        assertSame(original, field("receiver"))
+        advanceTo(receivedAt + 14_900)
+        orderedPairingRequest(selected, 3)
+        advanceTo(receivedAt + 14_999)
+        assertTrue(requireNotNull(guard.get()).invoke())
+        assertNotNull(field("consentJob"))
+        advanceTo(receivedAt + 15_000)
+        assertTrue("The helper gets the remaining 500ms, not a fresh 1500ms", canceled.await(2, TimeUnit.SECONDS))
+        assertFalse(requireNotNull(guard.get()).invoke())
+        assertNull(field("consentJob"))
+        assertEquals("A duplicate must not start or extend another confirmation", 1, calls.get())
+        assertEquals(BluetoothDevice.BOND_BONDING, selected.bondState)
     }
 
     private fun connect() {

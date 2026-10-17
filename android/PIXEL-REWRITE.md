@@ -20,7 +20,7 @@ pair, local behavior choices and correctly owner-bound BLE keys once. Existing
 rewrite database rows are preserved. Unconfirmed device control values are not
 migrated as device reports. The Android Bluetooth bond stays with Android.
 
-The current fork version is `2.0.0-alpha.1-pixel23`, code `200000108`.
+The current fork version is `2.0.0-alpha.1-pixel24`, code `200000109`.
 
 ## Pairing and island latency
 
@@ -37,7 +37,7 @@ The current fork version is `2.0.0-alpha.1-pixel23`, code `200000108`.
   The same attempt receiver tracks that progress, admits fresh Classic results
   already bonding, and adopts only the sole stable selected address instead of
   starting another bond. A protected consent request received during discovery
-  can be revisited once that address is selected, for at most five seconds from
+  can be revisited once that address is selected, for at most fifteen seconds from
   receipt, provided the exact bond remains active. Before selection it neither
   confirms nor holds the request. Removing the bond, changing the variant,
   retrying or closing retires
@@ -166,6 +166,21 @@ fallback, and is not presented as a device report.
 
 ## Validation
 
+Pixel24 retains an exact active incoming consent for fifteen seconds from its
+original receipt, allowing the observed 5667 ms discovery/selection path to
+reach Shizuku. Duplicate requests do not renew it. The selected helper still
+has at most 1500 ms and never outlives the hint; shell and client deadlines,
+native fallback, cycle/variant retirement and fresh candidate selection are
+unchanged. Tests reproduce the observed delayed candidate and cover exact
+fifteen-second expiry plus a late selection with only 500 ms remaining.
+On 2026-10-17, `verifyPixel` passed with 218 tests in 42 suites, no failures,
+errors or skips, lint with 0 errors, 289 warnings and 1 hint, and successful
+debug and minified release builds. Independent review found no remaining
+blockers. Pixel24 was signed with the existing certificate and installed in
+place; Android confirmed version `2.0.0-alpha.1-pixel24`, code `200000109`,
+and the retained Shizuku grant. The physical repeat is pending. Layout and
+motion are unchanged; no experimental microphone route or call was started.
+
 Pixel23 adds release-visible, identity-free pairing diagnostics for request
 variant and native state, selected consent age, helper availability and guard
 rejection. No names, addresses, keys or pairing codes are recorded. Pairing
@@ -177,8 +192,13 @@ errors or skips, lint with 0 errors, 289 warnings and 1 hint, and successful
 debug and minified release builds. Pixel23 was signed with the existing
 certificate and installed in place. Android confirmed version
 `2.0.0-alpha.1-pixel23`, code `200000108`, and the retained Shizuku grant.
-The physical diagnostic repeat is pending; intermittent automatic pairing is
-still unresolved. No experimental microphone route or call was started.
+The physical diagnostic repeat still required Android's Pair button on one
+attempt. The trace captured protected consent with native BONDING state, then
+its first Classic candidate 3660 ms later. Sole stable selection followed
+another 2007 ms later, while the same bond remained active. Its valid consent
+hint was 5667 ms old and skipped the former five-second limit, identifying a
+concrete cause of the intermittent manual confirmation. No experimental
+microphone route or call was started.
 
 On 2026-10-17, Pixel22's `verifyPixel` passed with 215 tests in 42 suites,
 no failures, errors or skips, lint with 0 errors, 289 warnings and 1 hint,
