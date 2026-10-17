@@ -213,6 +213,19 @@ stopped, the worker service is unbound, and the original empty logging property
 is retained. No microphone or call route was started; normal Android audio mode
 was verified before installation.
 
+A subsequent controlled timing check on the unchanged Pixel27 build put the
+case into flashing-white pairing mode before tapping Connect. The user reported
+noticeably faster pairing. First fresh Classic discovery arrived at 708 ms,
+sole-candidate selection at 2709 ms, BR/EDR bond creation at 2716 ms, consent at
+3183 ms, guarded confirmation at 3286 ms, and native BONDED at 4087 ms after
+Connect. This is one physical sample, compared with the earlier 11270/10616 ms
+attempts whose gesture happened after Connect; it does not isolate all radio
+variation or prove a fixed 6–7 second improvement. Keep the current two-second
+identity/ambiguity window and prompt fallback. No implementation or rebuild was
+needed for this faster order. Do not start ambient Classic inquiry just to hide
+the wait: it uses the shared Bluetooth radio and can degrade other connections.
+The timing capture is stopped and the original logging setting is retained.
+
 Pixel26 repairs a one-shot selection callback that could drop a still-valid
 candidate when it ran just before the elapsed-time eligibility deadline.
 It rechecks and re-arms only for a positive remaining interval; ambiguity,
