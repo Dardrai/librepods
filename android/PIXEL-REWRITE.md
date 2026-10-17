@@ -20,7 +20,7 @@ pair, local behavior choices and correctly owner-bound BLE keys once. Existing
 rewrite database rows are preserved. Unconfirmed device control values are not
 migrated as device reports. The Android Bluetooth bond stays with Android.
 
-The current fork version is `2.0.0-alpha.1-pixel21`, code `200000106`.
+The current fork version is `2.0.0-alpha.1-pixel22`, code `200000107`.
 
 ## Pairing and island latency
 
@@ -33,6 +33,15 @@ The current fork version is `2.0.0-alpha.1-pixel21`, code `200000106`.
   seconds, without waiting for the full inquiry and another fixed delay. Name
   updates are accepted only for Classic addresses found in that scan; multiple
   matching addresses prevent automatic selection.
+- Incoming native pairing can begin before discovery selects the device.
+  The same attempt receiver tracks that progress, admits fresh Classic results
+  already bonding, and adopts only the sole stable selected address instead of
+  starting another bond. A protected consent request received during discovery
+  can be revisited once that address is selected, for at most five seconds from
+  receipt, provided the exact bond remains active. Before selection it neither
+  confirms nor holds the request. Removing the bond, changing the variant,
+  retrying or closing retires
+  the hint. PIN/passkey prompts retain Android's normal confirmation flow.
 - With already-authorized Shizuku, Connect warms the shell bridge without
   delaying discovery. It can confirm only the active selected AirPods request's
   consent step while Android reports that exact device is bonding. Closing,
@@ -156,6 +165,23 @@ connection-owned. Pro 3's saved Allow Off choice is a separate presentation
 fallback, and is not presented as a device report.
 
 ## Validation
+
+On 2026-10-17, Pixel22's `verifyPixel` passed with 215 tests in 42 suites,
+no failures, errors or skips, lint with 0 errors, 289 warnings and 1 hint,
+and successful debug and minified release builds. Six new controller regressions
+cover incoming consent before selection, continuous receiver ownership, adoption
+without duplicate bonding, completed-bond reconciliation, expired and invalidated
+hints, changed variants, native fallback and a new bond cycle with a delayed
+state broadcast. Independent review found no remaining blockers. Layout and
+animations are unchanged; existing rendering and input tests still pass.
+
+Pixel22 was signed with the existing certificate and installed in place.
+Android confirmed version `2.0.0-alpha.1-pixel22`, code `200000107`, and the
+retained Shizuku grant. The physical repeat is pending. Android's earlier
+history showed one local bond completing in 895 ms, while an incoming pairing
+request waited 3423 ms for the user's manual confirmation. These are native bond
+timings, not measurements from tapping Connect. No experimental microphone
+route or call was started for this update.
 
 On 2026-10-17, Pixel21's `verifyPixel` passed with 209 tests in 42 suites,
 no failures, errors or skips, lint with 0 errors, 289 warnings and 1 hint,

@@ -388,7 +388,7 @@ class NearbyPairingControllerTest {
         pairing(selected).setBondState(BluetoothDevice.BOND_BONDING)
         bondChanged(selected, BluetoothDevice.BOND_BONDING)
         pairingRequest(device(2), 3)
-        pairingRequest(selected, 1) // PIN/passkey variants always remain Android's responsibility.
+        pairingRequest(device(3), 1) // PIN/passkey variants always remain Android's responsibility.
         assertEquals(0, calls.get())
         pairingRequest(selected, 3)
         assertTrue("Consent job did not run", entered.await(2, TimeUnit.SECONDS))
@@ -544,6 +544,193 @@ class NearbyPairingControllerTest {
         assertNull(field("pendingConsent"))
     }
 
+    @Test fun incomingConsentWaitsForFreshStableSelectionWithoutRestartingTheNativeBond() {
+        val native = nativeFallback()
+        for (foundFirst in listOf(true, false)) {
+            controller.close()
+            val entered = CountDownLatch(1)
+            var completed = 0
+            controller = NearbyPairingController(context, confirmConsent = { _, current ->
+                assertTrue(current())
+                entered.countDown()
+                true
+            }, onPaired = { completed++ })
+            connect()
+            val selected = device(1)
+            if (foundFirst) found(selected)
+            pairing(selected).setBondState(BluetoothDevice.BOND_BONDING)
+            bondChanged(selected, BluetoothDevice.BOND_BONDING)
+            val original = field("receiver")
+            val before = native.get()
+            orderedPairingRequest(selected, 3)
+            assertEquals("An unselected request must remain Android's normal prompt", before + 1, native.get())
+            assertNull(field("pendingConsent"))
+            if (!foundFirst) found(selected)
+            val first = field("firstCandidateAt") as Long
+            advanceTo(first + 1_900)
+            assertEquals(1L, entered.count)
+            assertNull(field("consentJob"))
+            advanceTo(first + 2_000)
+            assertTrue("Selected incoming consent must reach the same helper path", entered.await(2, TimeUnit.SECONDS))
+            assertSame("Selection must retain the receiver that observed the native cycle", original, field("receiver"))
+            assertEquals("An incoming native bond must not call createBond again", 0, pairing(selected).requests)
+            assertEquals(PopupWindow.Stage.CONNECTING, stage())
+            assertNull("Captured requests must not be replayed as ordered broadcasts", field("pendingConsent"))
+            pairing(selected).setBondState(BluetoothDevice.BOND_BONDED)
+            bondChanged(selected, BluetoothDevice.BOND_BONDED)
+            bondChanged(selected, BluetoothDevice.BOND_BONDED)
+            assertEquals(PopupWindow.Stage.COMPLETE, stage())
+            assertEquals(1, completed)
+        }
+    }
+
+    @Test fun capturedConsentCannotCrossCycleVariantDeadlineDismissalOrAmbiguity() {
+        for (retirement in listOf("cycle", "variant", "deadline", "dismiss", "ambiguity")) {
+            controller.close()
+            val calls = AtomicInteger()
+            controller = NearbyPairingController(context, confirmConsent = { _, _ -> calls.incrementAndGet(); true })
+            connect()
+            val selected = device(1)
+            pairing(selected).setBondState(BluetoothDevice.BOND_BONDING)
+            bondChanged(selected, BluetoothDevice.BOND_BONDING)
+            orderedPairingRequest(selected, 3)
+            val retiredReceiver = field("receiver") as BroadcastReceiver
+            when (retirement) {
+                "cycle" -> {
+                    pairing(selected).setBondState(BluetoothDevice.BOND_NONE)
+                    bondChanged(selected, BluetoothDevice.BOND_NONE)
+                    pairing(selected).setBondState(BluetoothDevice.BOND_BONDING)
+                    bondChanged(selected, BluetoothDevice.BOND_BONDING)
+                }
+                "variant" -> orderedPairingRequest(selected, 2)
+                "deadline" -> advance(5_000)
+                "dismiss" -> {
+                    controller.cancelPending()
+                    idle()
+                    connect()
+                }
+            }
+            found(selected)
+            if (retirement == "ambiguity") found(device(2))
+            advance(2_000)
+            assertEquals("$retirement must retire the captured consent", 0, calls.get())
+            assertNull("$retirement must not start confirmation work", field("consentJob"))
+            assertEquals(0, pairing(selected).requests)
+            if (retirement == "ambiguity") assertEquals(PopupWindow.Stage.SETUP, stage())
+            if (retirement == "dismiss") {
+                retiredReceiver.onReceive(context, request(selected, 3))
+                assertNull("A retired receiver must not revive its captured request", field("consentJob"))
+            }
+            if (retirement == "cycle") {
+                orderedPairingRequest(selected, 3)
+                awaitMainCondition { calls.get() == 1 }
+            } else if (retirement in listOf("variant", "deadline")) {
+                orderedPairingRequest(selected, 3)
+                assertNull("Duplicates cannot renew a retired hint in the same native cycle", field("consentJob"))
+                assertEquals(0, calls.get())
+            }
+        }
+    }
+
+    @Test fun alreadyCompletedIncomingBondRequiresThisAttemptsNativeBondingEvidence() {
+        for (observed in listOf(true, false)) {
+            controller.close()
+            var completed = 0
+            controller = NearbyPairingController(context, confirmConsent = { _, _ -> false }, onPaired = { completed++ })
+            connect()
+            val selected = device(1)
+            if (observed) {
+                pairing(selected).setBondState(BluetoothDevice.BOND_BONDING)
+                bondChanged(selected, BluetoothDevice.BOND_BONDING)
+            }
+            pairing(selected).setBondState(BluetoothDevice.BOND_BONDED)
+            bondChanged(selected, BluetoothDevice.BOND_BONDED)
+            found(selected)
+            advance(2_000)
+            assertEquals(0, pairing(selected).requests)
+            assertEquals(if (observed) 1 else 0, completed)
+            assertEquals(if (observed) PopupWindow.Stage.COMPLETE else PopupWindow.Stage.SETUP, stage())
+        }
+    }
+
+    @Test fun aChangedVariantRetiresInFlightConsentWithoutAbortingItsNativeFallback() {
+        controller.close()
+        val entered = CountDownLatch(1)
+        val answer = CompletableDeferred<Boolean>()
+        val guard = AtomicReference<(() -> Boolean)?>()
+        controller = NearbyPairingController(context, confirmConsent = { _, current ->
+            guard.set(current)
+            entered.countDown()
+            withContext(NonCancellable) { answer.await() }
+        })
+        val selected = bondingCandidate()
+        orderedPairingRequest(selected, 3)
+        assertTrue(entered.await(2, TimeUnit.SECONDS))
+        val held = field("pendingConsent") as BroadcastReceiver.PendingResult
+        val confirming = field("consentJob") as Job
+        orderedPairingRequest(selected, 2)
+        assertFalse(requireNotNull(guard.get()).invoke())
+        assertNull(field("pendingConsent"))
+        assertFinishedConsent(held, aborted = false)
+        answer.complete(true)
+        awaitMainCondition { confirming.isCompleted }
+        assertFinishedConsent(held, aborted = false)
+    }
+
+    @Test fun capturedIncomingConsentKeepsItsOwnHelperDeadlineWithoutHoldingTheNativePrompt() {
+        controller.close()
+        val entered = CountDownLatch(1)
+        val canceled = CountDownLatch(1)
+        val guard = AtomicReference<(() -> Boolean)?>()
+        controller = NearbyPairingController(context, confirmConsent = { _, current ->
+            guard.set(current)
+            entered.countDown()
+            try { awaitCancellation() } finally { canceled.countDown() }
+        })
+        val native = nativeFallback()
+        connect()
+        val selected = device(1)
+        pairing(selected).setBondState(BluetoothDevice.BOND_BONDING)
+        bondChanged(selected, BluetoothDevice.BOND_BONDING)
+        orderedPairingRequest(selected, 3)
+        found(selected)
+        advance(2_000)
+        assertTrue(entered.await(2, TimeUnit.SECONDS))
+        assertEquals(1, native.get())
+        assertNull(field("pendingConsent"))
+        advance(1_500)
+        assertTrue(canceled.await(2, TimeUnit.SECONDS))
+        assertFalse(requireNotNull(guard.get()).invoke())
+        assertNull(field("consentJob"))
+        assertEquals("The original native request remains available", 1, native.get())
+    }
+
+    @Test fun aQueuedNoneCannotCarryOldConsentIntoASynchronouslyStartedLocalBond() {
+        controller.close()
+        val calls = AtomicInteger()
+        controller = NearbyPairingController(context, confirmConsent = { _, current ->
+            assertTrue(current())
+            calls.incrementAndGet()
+            true
+        })
+        connect()
+        val selected = device(1)
+        pairing(selected).setBondState(BluetoothDevice.BOND_BONDING)
+        bondChanged(selected, BluetoothDevice.BOND_BONDING)
+        orderedPairingRequest(selected, 3)
+        // Native state can reach NONE before the corresponding broadcast is delivered.
+        pairing(selected).setBondState(BluetoothDevice.BOND_NONE)
+        pairing(selected).onCreateBond = { pairing(selected).setBondState(BluetoothDevice.BOND_BONDING) }
+        found(selected)
+        advance(2_000)
+        assertEquals(1, pairing(selected).requests)
+        assertEquals("A new local bond must not reuse the prior native cycle's consent", 0, calls.get())
+        assertNull(field("consentJob"))
+        bondChanged(selected, BluetoothDevice.BOND_BONDING)
+        orderedPairingRequest(selected, 3)
+        awaitMainCondition { calls.get() == 1 }
+    }
+
     private fun connect() {
         controller.onNearbyDevice(NearbyAirPods.Event(0x2720, true))
         idle()
@@ -663,6 +850,7 @@ class PairingDeviceShadow : ShadowBluetoothDevice() {
     var transport: Int? = null
     var discoveringAtBond = false
     var bondAt = 0L
+    var onCreateBond: (() -> Unit)? = null
 
     @Implementation public override fun createBond(): Boolean = record(null)
     @Implementation public override fun createBond(transport: Int): Boolean = record(transport)
@@ -672,6 +860,7 @@ class PairingDeviceShadow : ShadowBluetoothDevice() {
         transport = selectedTransport
         bondAt = SystemClock.elapsedRealtime()
         discoveringAtBond = BluetoothAdapter.getDefaultAdapter()!!.isDiscovering
+        onCreateBond?.invoke()
         return true
     }
 }

@@ -17,6 +17,7 @@ import android.provider.Settings
 import android.util.Log
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -36,6 +37,14 @@ class NearbyPairingController(
     private val confirmConsent: (suspend (String, () -> Boolean) -> Boolean)? = null,
     private val onPaired: (BluetoothDevice) -> Unit = {}
 ) {
+    private class ConsentHint(val receivedAt: Long, @Volatile var active: Boolean = true) {
+        fun isCurrent(now: Long) = active && now >= receivedAt && now - receivedAt < 5_000
+    }
+    private class BondSelection(val device: BluetoothDevice, var bondingObserved: Boolean,
+        var consentRequested: Boolean = false)
+    private abstract class AttemptReceiver : BroadcastReceiver() {
+        abstract fun retire()
+    }
     private val handler = Handler(Looper.getMainLooper())
     private val session = NearbyAirPods.Session()
     private val adapter = context.getSystemService(BluetoothManager::class.java).adapter
@@ -112,6 +121,13 @@ class NearbyPairingController(
         val model = session.modelId ?: return
         val devices = linkedMapOf<String, BluetoothDevice>()
         val candidates = NearbyAirPods.Discovery(model)
+        val hints = linkedMapOf<String, ConsentHint>()
+        val bondingSeen = mutableSetOf<String>()
+        var selected: BondSelection? = null
+        fun select(device: BluetoothDevice) {
+            val owner = receiver ?: return
+            pair(token, attempt, device, owner, bondingSeen, hints) { selected = it }
+        }
         fun observe(device: BluetoothDevice, name: String?) {
             val now = SystemClock.elapsedRealtime()
             if (candidates.observe(device.address, name, now) && firstCandidateAt == null) {
@@ -119,7 +135,7 @@ class NearbyPairingController(
                 Log.d(TAG, "Connect to first Classic candidate: ${now - requestedAt}ms")
             }
             showInstructions(token, if (candidates.ambiguous) R.string.pairing_multiple_cases else null)
-            scheduleSelection(token, attempt, devices, candidates)
+            scheduleSelection(token, attempt, devices, candidates, ::select)
         }
         try {
             if (adapter?.isEnabled != true) {
@@ -131,10 +147,54 @@ class NearbyPairingController(
                 showRetry(token, R.string.pairing_discovery_busy)
                 return
             }
-            receiver = object : BroadcastReceiver() {
+            receiver = object : AttemptReceiver() {
+                override fun retire() {
+                    hints.values.forEach { it.active = false }
+                    hints.clear()
+                    bondingSeen.clear()
+                }
                 override fun onReceive(context: Context, intent: Intent) {
                     if (!canContinue(token, attempt) || receiver !== this) return
                     try {
+                        val changed = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
+                        if (changed != null) {
+                            val address = changed.address
+                            if (intent.action == BluetoothDevice.ACTION_BOND_STATE_CHANGED) {
+                                when (intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.ERROR)) {
+                                    BluetoothDevice.BOND_NONE -> {
+                                        hints.remove(address)?.active = false
+                                        bondingSeen.remove(address)
+                                    }
+                                    BluetoothDevice.BOND_BONDING -> if (bondingSeen.size < 16 || address in bondingSeen) {
+                                        if (bondingSeen.add(address)) hints.remove(address)?.active = false
+                                    }
+                                }
+                            } else if (intent.action == BluetoothDevice.ACTION_PAIRING_REQUEST) {
+                                val consent = intent.getIntExtra(BluetoothDevice.EXTRA_PAIRING_VARIANT, BluetoothDevice.ERROR) == 3
+                                if (!consent) {
+                                    hints[address]?.active = false
+                                    if (hints.size < 16) hints.putIfAbsent(address, ConsentHint(SystemClock.elapsedRealtime(), false))
+                                    if (selected?.device?.address == address) {
+                                        consentJob?.cancel()
+                                        consentJob = null
+                                        consentFallback?.let(handler::removeCallbacks)
+                                        consentFallback = null
+                                        finishConsent()
+                                    }
+                                } else if (changed.bondState == BluetoothDevice.BOND_BONDING &&
+                                    (hints.size < 16 || address in hints) &&
+                                    (bondingSeen.size < 16 || address in bondingSeen)) {
+                                    bondingSeen.add(address)
+                                    if (hints.putIfAbsent(address, ConsentHint(SystemClock.elapsedRealtime())) == null) {
+                                        Log.d(TAG, "Captured incoming consent: ${SystemClock.elapsedRealtime() - requestedAt}ms")
+                                    }
+                                }
+                            }
+                        }
+                        selected?.let { selection ->
+                            handleBondEvent(token, attempt, this, selection, intent, hints[selection.device.address])
+                            return
+                        }
                         when (intent.action) {
                             BluetoothDevice.ACTION_FOUND -> {
                                 val device = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
@@ -142,8 +202,11 @@ class NearbyPairingController(
                                 val type = if (Build.VERSION.SDK_INT >= 37 || intent.hasExtra(BluetoothDevice.EXTRA_DISCOVERY_RESULT_TYPE)) intent.getIntExtra(
                                     BluetoothDevice.EXTRA_DISCOVERY_RESULT_TYPE, BluetoothDevice.DEVICE_TYPE_UNKNOWN)
                                     else device.type
-                                if (device.bondState != BluetoothDevice.BOND_NONE ||
+                                val bondState = device.bondState
+                                if ((bondState !in setOf(BluetoothDevice.BOND_NONE, BluetoothDevice.BOND_BONDING) &&
+                                    !(bondState == BluetoothDevice.BOND_BONDED && device.address in bondingSeen)) ||
                                     type !in setOf(BluetoothDevice.DEVICE_TYPE_CLASSIC, BluetoothDevice.DEVICE_TYPE_DUAL)) return
+                                if (bondState == BluetoothDevice.BOND_BONDING && bondingSeen.size < 16) bondingSeen.add(device.address)
                                 // Keep unnamed Classic results so their later name event can finish this scan.
                                 devices[device.address] = device
                                 observe(device, intent.getStringExtra(BluetoothDevice.EXTRA_NAME) ?: device.name)
@@ -158,7 +221,7 @@ class NearbyPairingController(
                                 // A late completion from an earlier scan must not finish this one.
                                 if (!adapter.isDiscovering) {
                                     discoveryOwned = false
-                                    finishDiscovery(token, attempt, devices, candidates)
+                                    finishDiscovery(token, attempt, devices, candidates, ::select)
                                 }
                             }
                         }
@@ -171,6 +234,9 @@ class NearbyPairingController(
                 addAction(BluetoothDevice.ACTION_FOUND)
                 addAction(BluetoothDevice.ACTION_NAME_CHANGED)
                 addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED)
+                addAction(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
+                addAction(BluetoothDevice.ACTION_PAIRING_REQUEST)
+                priority = IntentFilter.SYSTEM_HIGH_PRIORITY - 1
             }, Context.RECEIVER_EXPORTED)
             discoveryOwned = adapter.startDiscovery()
             if (!discoveryOwned) {
@@ -178,7 +244,7 @@ class NearbyPairingController(
                 return
             }
             showInstructions(token)
-            continuation = Runnable { finishDiscovery(token, attempt, devices, candidates) }
+            continuation = Runnable { finishDiscovery(token, attempt, devices, candidates, ::select) }
                 .also { handler.postDelayed(it, minOf(15_000L, session.remainingMillis(token, attempt, SystemClock.elapsedRealtime()))) }
         } catch (e: SecurityException) {
             Log.w(TAG, "Nearby pairing requires Bluetooth permission", e)
@@ -187,138 +253,175 @@ class NearbyPairingController(
         }
     }
 
-    private fun finishDiscovery(token: Long, attempt: Long, devices: Map<String, BluetoothDevice>, candidates: NearbyAirPods.Discovery) {
+    private fun finishDiscovery(token: Long, attempt: Long, devices: Map<String, BluetoothDevice>, candidates: NearbyAirPods.Discovery,
+        onSelect: (BluetoothDevice) -> Unit) {
         if (!canContinue(token, attempt)) return
-        stopScan()
+        stopScan(keepReceiver = receiver)
         candidates.finish()
         Log.d(TAG, "Classic discovery finished with ${devices.size} fresh Classic devices")
         if (candidates.readyInMillis(SystemClock.elapsedRealtime()) != null) {
-            scheduleSelection(token, attempt, devices, candidates)
+            scheduleSelection(token, attempt, devices, candidates, onSelect)
         } else {
             scheduleScan(token, attempt, if (candidates.ambiguous) R.string.pairing_multiple_cases else null)
         }
     }
 
-    private fun scheduleSelection(token: Long, attempt: Long, devices: Map<String, BluetoothDevice>, candidates: NearbyAirPods.Discovery) {
+    private fun scheduleSelection(token: Long, attempt: Long, devices: Map<String, BluetoothDevice>, candidates: NearbyAirPods.Discovery,
+        onSelect: (BluetoothDevice) -> Unit) {
         selection?.let(handler::removeCallbacks)
         selection = null
         val remaining = candidates.readyInMillis(SystemClock.elapsedRealtime()) ?: return
         selection = Runnable {
             selection = null
             if (canContinue(token, attempt)) {
-                candidates.automatic(SystemClock.elapsedRealtime())?.let(devices::get)?.let { pair(token, attempt, it) }
+                candidates.automatic(SystemClock.elapsedRealtime())?.let(devices::get)?.let(onSelect)
             }
         }.also { handler.postDelayed(it, remaining) }
     }
 
-    private fun pair(token: Long, attempt: Long, device: BluetoothDevice) {
-        if (!canContinue(token, attempt)) return
-        stopScan()
+    private fun pair(token: Long, attempt: Long, device: BluetoothDevice, owner: BroadcastReceiver,
+        bondingSeen: MutableSet<String>, hints: MutableMap<String, ConsentHint>, select: (BondSelection) -> Unit) {
+        if (!canContinue(token, attempt) || receiver !== owner) return
         try {
-            if (device.bondState != BluetoothDevice.BOND_NONE ||
+            val bondState = device.bondState
+            if ((bondState !in setOf(BluetoothDevice.BOND_NONE, BluetoothDevice.BOND_BONDING) &&
+                !(bondState == BluetoothDevice.BOND_BONDED && device.address in bondingSeen)) ||
                 device.name?.let { !NearbyAirPods.matchesName(session.modelId ?: 0, it) } == true) {
                 showRetry(token, R.string.pairing_device_changed)
                 return
             }
-            var bondingObserved = false
-            var consentRequested = false
-            receiver = object : BroadcastReceiver() {
-                override fun onReceive(context: Context, intent: Intent) {
-                    if (!canContinue(token, attempt) || receiver !== this) return
-                    try {
-                        val changed = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
-                        if (changed?.address != device.address) return
-                        if (intent.action == BluetoothDevice.ACTION_PAIRING_REQUEST) {
-                            if (consentRequested || intent.getIntExtra(BluetoothDevice.EXTRA_PAIRING_VARIANT, BluetoothDevice.ERROR) != 3 ||
-                                device.bondState != BluetoothDevice.BOND_BONDING) return
-                            consentRequested = true
-                            val owner = this
-                            // Keep Android's dialog as the fallback until the chosen consent succeeds.
-                            val pending = if (isOrderedBroadcast) goAsync() else null
-                            val consentDeadline = SystemClock.elapsedRealtime() + 1_500
-                            if (pending != null) {
-                                pendingConsent = pending
-                                consentFallback = Runnable {
-                                    if (pendingConsent === pending) {
-                                        consentJob?.cancel()
-                                        consentJob = null
-                                        finishConsent(pending)
-                                    }
-                                }
-                                    .also { handler.postDelayed(it, 1_500) }
-                            }
-                            consentJob = scope.launch {
-                                var confirmed = false
-                                val stillCurrent = {
-                                    receiver === owner && canContinue(token, attempt) &&
-                                        (pending == null || pendingConsent === pending && SystemClock.elapsedRealtime() < consentDeadline) &&
-                                        runCatching { device.bondState == BluetoothDevice.BOND_BONDING }.getOrDefault(false)
-                                }
-                                try {
-                                    if (stillCurrent()) {
-                                        confirmed = confirmConsent?.invoke(device.address, stillCurrent)
-                                            ?: client?.confirmPairing(device.address, stillCurrent) ?: false
-                                        Log.d(TAG, "Consent confirmation available: $confirmed")
-                                    }
-                                } catch (error: Exception) {
-                                    if (error is CancellationException) throw error
-                                    Log.w(TAG, "Consent confirmation unavailable", error)
-                                } finally {
-                                    if (pending != null) handler.post {
-                                        finishConsent(pending, confirmed && receiver === owner && canContinue(token, attempt) &&
-                                            SystemClock.elapsedRealtime() < consentDeadline)
-                                    }
-                                }
-                            }
-                            return
-                        }
-                        if (intent.action != BluetoothDevice.ACTION_BOND_STATE_CHANGED) return
-                        when (intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.ERROR)) {
-                            BluetoothDevice.BOND_BONDING -> {
-                                bondingObserved = true
-                                Log.d(TAG, "Connect to BONDING: ${SystemClock.elapsedRealtime() - requestedAt}ms")
-                            }
-                            BluetoothDevice.BOND_BONDED -> {
-                                if (!bondingObserved || device.bondState != BluetoothDevice.BOND_BONDED) return
-                                Log.d(TAG, "Connect to BONDED: ${SystemClock.elapsedRealtime() - requestedAt}ms")
-                                finishConsent(accepted = true)
-                                stopDiscovery()
-                                pairedAddress = device.address
-                                popup?.showPairingActions(context.getString(R.string.pairing_complete), listOf(
-                                    context.getString(R.string.pairing_continue) to {
-                                        if (session.isCurrentAttempt(token, attempt)) dismiss()
-                                    }
-                                ), busy = false, stage = PopupWindow.Stage.COMPLETE)
-                                onPaired(device)
-                            }
-                            BluetoothDevice.BOND_NONE -> {
-                                if (!bondingObserved || device.bondState != BluetoothDevice.BOND_NONE) return
-                                scheduleScan(token, attempt, R.string.pairing_bond_failed)
-                            }
-                        }
-                    } catch (e: SecurityException) {
-                        permissionDenied(token, e)
-                    }
-                }
-            }
-            context.registerReceiver(receiver, IntentFilter().apply {
-                addAction(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
-                addAction(BluetoothDevice.ACTION_PAIRING_REQUEST)
-                priority = IntentFilter.SYSTEM_HIGH_PRIORITY - 1
-            }, Context.RECEIVER_EXPORTED)
-            Log.d(TAG, "Connect to createBond: ${SystemClock.elapsedRealtime() - requestedAt}ms")
-            val started = if (Build.VERSION.SDK_INT >= 37) device.createBond(BluetoothDevice.TRANSPORT_BREDR)
-                else device.createBond()
-            if (!started) {
+            if (bondState != BluetoothDevice.BOND_BONDING) hints.remove(device.address)?.active = false
+            if (bondState == BluetoothDevice.BOND_NONE) bondingSeen.remove(device.address)
+            val selected = BondSelection(device, bondState == BluetoothDevice.BOND_BONDING ||
+                bondState == BluetoothDevice.BOND_BONDED && device.address in bondingSeen)
+            select(selected)
+            // Keep the attempt's bond receiver across selection; only retire its inquiry and timers.
+            stopScan(keepReceiver = owner)
+            val currentState = device.bondState
+            if (currentState == BluetoothDevice.BOND_NONE && bondState != BluetoothDevice.BOND_NONE) {
+                hints.remove(device.address)?.active = false
+                bondingSeen.remove(device.address)
                 scheduleScan(token, attempt, R.string.pairing_bond_failed)
                 return
             }
+            val hint = hints[device.address]?.takeIf {
+                bondState == BluetoothDevice.BOND_BONDING && currentState == BluetoothDevice.BOND_BONDING
+            }
+            if (currentState == BluetoothDevice.BOND_NONE) {
+                Log.d(TAG, "Connect to createBond: ${SystemClock.elapsedRealtime() - requestedAt}ms")
+                val started = if (Build.VERSION.SDK_INT >= 37) device.createBond(BluetoothDevice.TRANSPORT_BREDR)
+                    else device.createBond()
+                if (!started && device.bondState != BluetoothDevice.BOND_BONDING) {
+                    scheduleScan(token, attempt, R.string.pairing_bond_failed)
+                    return
+                }
+            } else Log.d(TAG, "Adopted incoming bond: ${SystemClock.elapsedRealtime() - requestedAt}ms")
             showInstructions(token, R.string.pairing_confirm_system)
+            when (device.bondState) {
+                BluetoothDevice.BOND_BONDED -> if (selected.bondingObserved) completeBond(token, attempt, device)
+                BluetoothDevice.BOND_BONDING -> {
+                    selected.bondingObserved = true
+                    if (hint != null) confirmSelectedConsent(token, attempt, owner, selected, hint)
+                }
+            }
         } catch (e: SecurityException) {
             Log.w(TAG, "Pairing permission denied", e)
             stopDiscovery()
             showRetry(token, R.string.pairing_permission_needed)
         }
+    }
+
+    private fun handleBondEvent(token: Long, attempt: Long, owner: BroadcastReceiver, selected: BondSelection,
+        intent: Intent, hint: ConsentHint?) {
+        val device = selected.device
+        val changed = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
+        if (changed?.address != device.address) return
+        if (intent.action == BluetoothDevice.ACTION_PAIRING_REQUEST) {
+            if (intent.getIntExtra(BluetoothDevice.EXTRA_PAIRING_VARIANT, BluetoothDevice.ERROR) == 3 && hint != null) {
+                confirmSelectedConsent(token, attempt, owner, selected, hint) {
+                    if (owner.isOrderedBroadcast) owner.goAsync() else null
+                }
+            }
+            return
+        }
+        if (intent.action != BluetoothDevice.ACTION_BOND_STATE_CHANGED) return
+        when (intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.ERROR)) {
+            BluetoothDevice.BOND_BONDING -> {
+                selected.bondingObserved = true
+                Log.d(TAG, "Connect to BONDING: ${SystemClock.elapsedRealtime() - requestedAt}ms")
+            }
+            BluetoothDevice.BOND_BONDED -> if (selected.bondingObserved && device.bondState == BluetoothDevice.BOND_BONDED) {
+                completeBond(token, attempt, device)
+            }
+            BluetoothDevice.BOND_NONE -> if (selected.bondingObserved) {
+                scheduleScan(token, attempt, R.string.pairing_bond_failed)
+            }
+        }
+    }
+
+    private fun confirmSelectedConsent(token: Long, attempt: Long, owner: BroadcastReceiver,
+        selected: BondSelection, hint: ConsentHint,
+        hold: () -> BroadcastReceiver.PendingResult? = { null }) {
+        val device = selected.device
+        if (selected.consentRequested || !hint.isCurrent(SystemClock.elapsedRealtime()) ||
+            device.bondState != BluetoothDevice.BOND_BONDING) return
+        selected.consentRequested = true
+        val pending = hold()
+        val consentDeadline = minOf(hint.receivedAt + 5_000, SystemClock.elapsedRealtime() + 1_500)
+        if (pending != null) pendingConsent = pending
+        lateinit var job: Job
+        job = scope.launch(start = CoroutineStart.LAZY) {
+            var confirmed = false
+            val stillCurrent = {
+                receiver === owner && canContinue(token, attempt) && hint.isCurrent(SystemClock.elapsedRealtime()) &&
+                    SystemClock.elapsedRealtime() < consentDeadline &&
+                    (pending == null || pendingConsent === pending) &&
+                    runCatching { device.bondState == BluetoothDevice.BOND_BONDING }.getOrDefault(false)
+            }
+            try {
+                if (stillCurrent()) {
+                    confirmed = confirmConsent?.invoke(device.address, stillCurrent)
+                        ?: client?.confirmPairing(device.address, stillCurrent) ?: false
+                    Log.d(TAG, "Consent confirmation available: $confirmed after ${SystemClock.elapsedRealtime() - requestedAt}ms")
+                }
+            } catch (error: Exception) {
+                if (error is CancellationException) throw error
+                Log.w(TAG, "Consent confirmation unavailable", error)
+            } finally {
+                handler.post {
+                    if (consentJob === job) {
+                        consentJob = null
+                        consentFallback?.let(handler::removeCallbacks)
+                        consentFallback = null
+                    }
+                    if (pending != null) finishConsent(pending,
+                        confirmed && receiver === owner && canContinue(token, attempt) &&
+                            hint.isCurrent(SystemClock.elapsedRealtime()) && SystemClock.elapsedRealtime() < consentDeadline)
+                }
+            }
+        }
+        consentJob = job
+        consentFallback = Runnable {
+            if (consentJob === job) {
+                hint.active = false
+                job.cancel()
+                consentJob = null
+                consentFallback = null
+                if (pending != null) finishConsent(pending)
+            }
+        }.also { handler.postDelayed(it, (consentDeadline - SystemClock.elapsedRealtime()).coerceAtLeast(0)) }
+        job.start()
+    }
+
+    private fun completeBond(token: Long, attempt: Long, device: BluetoothDevice) {
+        Log.d(TAG, "Connect to BONDED: ${SystemClock.elapsedRealtime() - requestedAt}ms")
+        finishConsent(accepted = true)
+        stopDiscovery()
+        pairedAddress = device.address
+        popup?.showPairingActions(context.getString(R.string.pairing_complete), listOf(
+            context.getString(R.string.pairing_continue) to { if (session.isCurrentAttempt(token, attempt)) dismiss() }
+        ), busy = false, stage = PopupWindow.Stage.COMPLETE)
+        onPaired(device)
     }
 
     private fun showRetry(token: Long, message: Int) {
@@ -367,17 +470,20 @@ class NearbyPairingController(
         stopScan()
     }
 
-    private fun stopScan() {
+    private fun stopScan(keepReceiver: BroadcastReceiver? = null) {
         val oldReceiver = receiver
-        receiver = null
+        receiver = keepReceiver
+        if (oldReceiver !== keepReceiver) (oldReceiver as? AttemptReceiver)?.retire()
         consentJob?.cancel()
         consentJob = null
+        consentFallback?.let(handler::removeCallbacks)
+        consentFallback = null
         finishConsent()
         selection?.let(handler::removeCallbacks)
         selection = null
         continuation?.let(handler::removeCallbacks)
         continuation = null
-        oldReceiver?.let {
+        oldReceiver?.takeIf { it !== keepReceiver }?.let {
             try {
                 context.unregisterReceiver(it)
             } catch (e: IllegalArgumentException) {
