@@ -7,6 +7,7 @@ import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
 import android.content.BroadcastReceiver
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -60,6 +61,13 @@ class NearbyPairingControllerTest {
     private val nativeReceivers = mutableListOf<BroadcastReceiver>()
 
     @Before fun setUp() {
+        shadowOf(context).setComponentNameAndServiceForBindService(ComponentName(context, PairingConsentService::class.java),
+            object : IPairingConsentGate.Stub() {
+                override fun watch(modelId: Int, owner: IPairingConsentOwner) = Unit
+                override fun finish(requestId: Long, accepted: Boolean) = Unit
+                override fun stop(owner: IPairingConsentOwner) = Unit
+            })
+        shadowOf(context).setUnbindServiceCallsOnServiceDisconnected(false)
         shadowOf(context).grantPermissions(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
         ShadowSettings.setCanDrawOverlays(true)
         Settings.Global.putFloat(context.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 0f)
@@ -471,7 +479,7 @@ class NearbyPairingControllerTest {
         val selected = bondingCandidate()
         orderedPairingRequest(selected, 3)
         assertTrue(entered.await(2, TimeUnit.SECONDS))
-        val held = field("pendingConsent") as BroadcastReceiver.PendingResult
+        val held = nativeConsent()
         assertEquals(0, native.get())
 
         answer.complete(true)
@@ -493,7 +501,7 @@ class NearbyPairingControllerTest {
         val selected = bondingCandidate()
         orderedPairingRequest(selected, 3)
         assertTrue(entered.await(2, TimeUnit.SECONDS))
-        val held = field("pendingConsent") as BroadcastReceiver.PendingResult
+        val held = nativeConsent()
         assertEquals(0, native.get())
 
         // Exercise an early bond callback before its confirmation IPC has returned.
@@ -523,7 +531,7 @@ class NearbyPairingControllerTest {
         val selected = bondingCandidate()
         orderedPairingRequest(selected, 3)
         assertTrue(entered.await(2, TimeUnit.SECONDS))
-        val held = field("pendingConsent") as BroadcastReceiver.PendingResult
+        val held = nativeConsent()
         val confirming = field("consentJob") as Job
         controller.cancelPending()
         idle()
@@ -715,7 +723,7 @@ class NearbyPairingControllerTest {
         val selected = bondingCandidate()
         orderedPairingRequest(selected, 3)
         assertTrue(entered.await(2, TimeUnit.SECONDS))
-        val held = field("pendingConsent") as BroadcastReceiver.PendingResult
+        val held = nativeConsent()
         val confirming = field("consentJob") as Job
         orderedPairingRequest(selected, 2)
         assertFalse(requireNotNull(guard.get()).invoke())
@@ -896,6 +904,184 @@ class NearbyPairingControllerTest {
         assertNull(field("consentJob"))
         assertEquals("A duplicate must not start or extend another confirmation", 1, calls.get())
         assertEquals(BluetoothDevice.BOND_BONDING, selected.bondState)
+    }
+
+    @Test fun workerHeldConsentWaitsForDelayedFreshSelectionBeforeSkippingTheNativePrompt() {
+        controller.close()
+        val gate = TestConsentWatch()
+        val entered = CountDownLatch(1)
+        controller = NearbyPairingController(context, confirmConsent = { _, current ->
+            assertTrue(current())
+            entered.countDown()
+            true
+        }, consentGateFactory = { _, callback -> gate.apply { offer = callback } })
+        connect()
+        val selected = device(1)
+        pairing(selected).setBondState(BluetoothDevice.BOND_BONDING)
+        bondChanged(selected, BluetoothDevice.BOND_BONDING)
+        pairingRequest(selected, 3)
+        val pending = gate.send(selected)
+        val owner = field("receiver")
+        advance(3_660)
+        assertNull(field("consentJob"))
+        found(selected)
+        val first = field("firstCandidateAt") as Long
+        advanceTo(first + 1_999)
+        assertEquals(1L, entered.count)
+        advanceTo(first + 2_000)
+        assertTrue(entered.await(2, TimeUnit.SECONDS))
+        awaitMainCondition { pending.answers.isNotEmpty() }
+        assertEquals(listOf(true), pending.answers)
+        assertSame(owner, field("receiver"))
+        assertEquals(0, pairing(selected).requests)
+        controller.cancelPending()
+        idle()
+        assertTrue(gate.closed)
+        assertEquals("Retiring the gate must not finish accepted consent twice", listOf(true), pending.answers)
+    }
+
+    @Test fun anArmedWorkerCapturesTheSelectedRequestBeforeAnyShizukuConfirmation() {
+        controller.close()
+        val gate = TestConsentWatch()
+        val calls = AtomicInteger()
+        controller = NearbyPairingController(context, confirmConsent = { _, current ->
+            assertTrue(current())
+            calls.incrementAndGet()
+            true
+        }, consentGateFactory = { _, callback -> gate.apply { offer = callback } })
+        val selected = bondingCandidate()
+        orderedPairingRequest(selected, 3)
+        assertNull(field("consentJob"))
+        assertNull(field("pendingConsent"))
+        assertEquals(0, calls.get())
+        val pending = gate.send(selected)
+        awaitMainCondition { pending.answers.isNotEmpty() }
+        assertEquals(1, calls.get())
+        assertEquals(listOf(true), pending.answers)
+    }
+
+    @Test fun workerConsentRetirementAndLateCallbacksAlwaysLeaveTheNativeFallbackAvailable() {
+        for (retirement in listOf("cycle", "variant", "ambiguity", "foreign", "dismiss")) {
+            controller.close()
+            val gate = TestConsentWatch()
+            val calls = AtomicInteger()
+            controller = NearbyPairingController(context, confirmConsent = { _, _ -> calls.incrementAndGet(); true },
+                consentGateFactory = { _, callback -> gate.apply { offer = callback } })
+            connect()
+            val selected = device(1)
+            pairing(selected).setBondState(BluetoothDevice.BOND_BONDING)
+            bondChanged(selected, BluetoothDevice.BOND_BONDING)
+            pairingRequest(selected, 3)
+            val receipt = SystemClock.elapsedRealtime()
+            val pending = gate.send(selected, receipt)
+            val originalOffer = gate.offer
+            assertSame(pending, field("pendingConsent"))
+            when (retirement) {
+                "cycle" -> {
+                    pairing(selected).setBondState(BluetoothDevice.BOND_NONE)
+                    bondChanged(selected, BluetoothDevice.BOND_NONE)
+                    pairing(selected).setBondState(BluetoothDevice.BOND_BONDING)
+                    bondChanged(selected, BluetoothDevice.BOND_BONDING)
+                    pairingRequest(selected, 3)
+                }
+                "variant" -> pairingRequest(selected, 2)
+                "ambiguity" -> { found(selected); found(device(2)) }
+                "foreign" -> { found(device(2)); advance(2_000) }
+                "dismiss" -> { controller.cancelPending(); idle() }
+            }
+            assertEquals("$retirement must release the exact worker request", listOf(false), pending.answers)
+            val late = TestConsent(receipt + 7_000).also { originalOffer(selected, receipt, it) }
+            assertEquals("$retirement must reject a late callback", listOf(false), late.answers)
+            assertEquals(0, calls.get())
+        }
+    }
+
+    @Test fun workerHoldExpiryCannotBeRenewedAndLateSelectionUsesOnlyTheRemainingBudget() {
+        controller.close()
+        val gate = TestConsentWatch()
+        val entered = CountDownLatch(1)
+        val canceled = CountDownLatch(1)
+        val guard = AtomicReference<(() -> Boolean)?>()
+        controller = NearbyPairingController(context, confirmConsent = { _, current ->
+            guard.set(current)
+            entered.countDown()
+            try { awaitCancellation() } finally { canceled.countDown() }
+        }, consentGateFactory = { _, callback -> gate.apply { offer = callback } })
+        connect()
+        val selected = device(1)
+        pairing(selected).setBondState(BluetoothDevice.BOND_BONDING)
+        bondChanged(selected, BluetoothDevice.BOND_BONDING)
+        pairingRequest(selected, 3)
+        val pending = gate.send(selected)
+        val deadline = pending.deadline
+        advanceTo(deadline - 2_500)
+        found(selected)
+        advanceTo((field("firstCandidateAt") as Long) + 2_000)
+        assertTrue(entered.await(2, TimeUnit.SECONDS))
+        assertTrue(requireNotNull(guard.get()).invoke())
+        pairingRequest(selected, 3)
+        advanceTo(deadline - 1)
+        assertTrue(pending.answers.isEmpty())
+        advanceTo(deadline)
+        assertEquals(listOf(false), pending.answers)
+        assertFalse(requireNotNull(guard.get()).invoke())
+        assertTrue(canceled.await(2, TimeUnit.SECONDS))
+        val duplicate = gate.send(selected)
+        assertEquals(listOf(false), duplicate.answers)
+    }
+
+    @Test fun anUnavailableShizukuBridgeNeverKeepsAWorkerRequestFromAndroid() {
+        controller.close()
+        val gate = TestConsentWatch()
+        controller = NearbyPairingController(context,
+            consentGateFactory = { _, callback -> gate.apply { offer = callback } })
+        connect()
+        val selected = device(1)
+        pairing(selected).setBondState(BluetoothDevice.BOND_BONDING)
+        bondChanged(selected, BluetoothDevice.BOND_BONDING)
+        pairingRequest(selected, 3)
+        val pending = gate.send(selected)
+        assertEquals(listOf(false), pending.answers)
+        assertNull(field("pendingConsent"))
+        assertNull(field("consentJob"))
+    }
+
+    @Test fun aMissingWorkerCaptureFallsBackAfterOneShortGraceInsteadOfStrandingConsent() {
+        controller.close()
+        val gate = TestConsentWatch()
+        val entered = CountDownLatch(1)
+        controller = NearbyPairingController(context, confirmConsent = { _, current ->
+            assertTrue(current())
+            entered.countDown()
+            true
+        }, consentGateFactory = { _, callback -> gate.apply { offer = callback } })
+        val selected = bondingCandidate()
+        orderedPairingRequest(selected, 3)
+        assertNull(field("consentJob"))
+        advance(100)
+        assertTrue(entered.await(2, TimeUnit.SECONDS))
+        awaitMainCondition { field("consentJob") == null }
+        assertNull(field("pendingConsent"))
+    }
+
+    private class TestConsentWatch : PairingConsentWatch {
+        var closed = false
+        override val isWatching get() = !closed
+        lateinit var offer: (BluetoothDevice, Long, PairingConsentGate.Consent) -> Unit
+        override fun close() { closed = true }
+        fun send(device: BluetoothDevice, receivedAt: Long = SystemClock.elapsedRealtime()) = TestConsent(receivedAt + 7_000).also {
+            offer(device, receivedAt, it)
+        }
+    }
+
+    private class TestConsent(override val deadline: Long) : PairingConsentGate.Consent {
+        val answers = mutableListOf<Boolean>()
+        override fun finish(accepted: Boolean) { answers += accepted }
+    }
+
+    private fun nativeConsent(): BroadcastReceiver.PendingResult {
+        val held = requireNotNull(field("pendingConsent"))
+        return held.javaClass.getDeclaredField("result").apply { isAccessible = true }.get(held) as BroadcastReceiver.PendingResult
     }
 
     private fun connect() {

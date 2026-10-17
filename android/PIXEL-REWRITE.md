@@ -20,7 +20,7 @@ pair, local behavior choices and correctly owner-bound BLE keys once. Existing
 rewrite database rows are preserved. Unconfirmed device control values are not
 migrated as device reports. The Android Bluetooth bond stays with Android.
 
-The current fork version is `2.0.0-alpha.1-pixel26`, code `200000111`.
+The current fork version is `2.0.0-alpha.1-pixel27`, code `200000112`.
 
 ## Pairing and island latency
 
@@ -173,6 +173,36 @@ connection-owned. Pro 3's saved Allow Off choice is a separate presentation
 fallback, and is not presented as a device report.
 
 ## Validation
+
+Pixel27 defers compatible incoming consent in a separate, non-exported app
+process during an explicit pairing attempt. Android serializes broadcasts per
+process, so this lets the main process continue fresh Classic discovery while
+the worker holds the dialog for at most seven seconds from receipt. The main
+observer runs first and retains native-cycle/variant invalidation. Approval
+still requires the sole stable fresh Classic selection, a live attempt,
+native bonding, and the existing guarded Shizuku confirmation. The helper gets
+at most 1500 ms and never extends the worker's original deadline. Unavailable
+Shizuku, ambiguity, another selected identity, expiry, cancellation, owner death
+and process teardown return the request to Android without aborting it.
+A one-time 100 ms capture grace preserves automatic confirmation if a worker
+acknowledges but misses an already-resolved broadcast. No native dialog is
+disabled globally.
+On 2026-10-17, `verifyPixel` passed with 233 tests in 43 suites, no failures,
+errors or skips, lint with 0 errors, 289 warnings and 1 hint, and successful
+debug and minified release builds. Eleven new tests cover worker admission,
+exact request ownership, native fallback, acknowledgement and disconnect
+retirement, late callbacks, delayed fresh selection, a lost capture callback,
+and the original hold deadline limiting a late helper. Existing controller
+tests supply a valid service binding because Robolectric's default null
+connection callback does not match Android's separate `onNullBinding` callback.
+An initial compile failure was repaired by retaining the paired-device callback
+as the trailing constructor argument; a second run exposed that fixture gap.
+The full third run passed after fixture repair, with production unchanged.
+Independent review found no remaining blockers. Pixel27 was signed with the
+existing certificate and installed in place; Android confirmed version
+`2.0.0-alpha.1-pixel27`, code `200000112`, and the retained Shizuku grant.
+Fresh-pairing prompt-flash validation is pending. No microphone or call route
+was started; normal Android audio mode was verified before installation.
 
 Pixel26 repairs a one-shot selection callback that could drop a still-valid
 candidate when it ran just before the elapsed-time eligibility deadline.

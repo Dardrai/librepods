@@ -35,10 +35,20 @@ class NearbyPairingController(
     private val context: Context,
     private val onInteractionChanged: (Int?) -> Unit = {},
     private val confirmConsent: (suspend (String, () -> Boolean) -> Boolean)? = null,
+    private val consentGateFactory: (Int, (BluetoothDevice, Long, PairingConsentGate.Consent) -> Unit) -> PairingConsentWatch =
+        { model, onConsent -> PairingConsentGate(context, model, onConsent) },
     private val onPaired: (BluetoothDevice) -> Unit = {}
 ) {
     private class ConsentHint(val receivedAt: Long, @Volatile var active: Boolean = true) {
+        var pending: PairingConsentGate.Consent? = null
+        var awaitingGate = false
         fun isCurrent(now: Long) = active && now >= receivedAt && now - receivedAt < CONSENT_HINT_MS
+    }
+    private class NativeConsent(val result: BroadcastReceiver.PendingResult, override val deadline: Long) : PairingConsentGate.Consent {
+        override fun finish(accepted: Boolean) {
+            if (accepted) result.abortBroadcast()
+            result.finish()
+        }
     }
     private class BondSelection(val device: BluetoothDevice, var bondingObserved: Boolean,
         var consentRequested: Boolean = false)
@@ -52,8 +62,9 @@ class NearbyPairingController(
     @Volatile private var receiver: BroadcastReceiver? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var consentJob: Job? = null
-    @Volatile private var pendingConsent: BroadcastReceiver.PendingResult? = null
+    @Volatile private var pendingConsent: PairingConsentGate.Consent? = null
     private var consentFallback: Runnable? = null
+    private var consentGate: PairingConsentWatch? = null
     private var client: ShizukuAudioClient? = null
     private var discoveryOwned = false
     private var timeout: Runnable? = null
@@ -124,9 +135,51 @@ class NearbyPairingController(
         val hints = linkedMapOf<String, ConsentHint>()
         val bondingSeen = mutableSetOf<String>()
         var selected: BondSelection? = null
+        fun retireHint(hint: ConsentHint?) {
+            hint?.let {
+                it.active = false
+                finishConsent(it.pending)
+            }
+        }
         fun select(device: BluetoothDevice) {
             val owner = receiver ?: return
             pair(token, attempt, device, owner, bondingSeen, hints) { selected = it }
+        }
+        var gateGeneration = 0
+        fun startConsentGate() {
+            consentGate?.close()
+            val generation = ++gateGeneration
+            val owner = receiver
+            consentGate = consentGateFactory(model) { device, receivedAt, pending ->
+                if (generation != gateGeneration || receiver !== owner || !canContinue(token, attempt)) {
+                    pending.finish(false)
+                } else try {
+                    val now = SystemClock.elapsedRealtime()
+                    if (!consentReady() || candidates.ambiguous || receivedAt > now || now >= pending.deadline ||
+                        device.bondState != BluetoothDevice.BOND_BONDING ||
+                        device.type !in setOf(BluetoothDevice.DEVICE_TYPE_CLASSIC, BluetoothDevice.DEVICE_TYPE_DUAL) ||
+                        !NearbyAirPods.matchesName(model, device.name) ||
+                        selected?.device?.address?.let { it != device.address } == true) {
+                        pending.finish(false)
+                    } else {
+                        val hint = hints[device.address]
+                        if (hint == null || receivedAt < hint.receivedAt || !hint.isCurrent(now) ||
+                            hint.pending != null || pendingConsent != null || selected?.consentRequested == true) {
+                            pending.finish(false)
+                        } else {
+                            hint.pending = pending
+                            pendingConsent = pending
+                            consentFallback = Runnable { finishConsent(pending) }
+                                .also { handler.postDelayed(it, (pending.deadline - now).coerceAtLeast(0)) }
+                            Log.i(TAG, "Incoming consent held for Classic selection: ${now - requestedAt}ms")
+                            selected?.let { confirmSelectedConsent(token, attempt, requireNotNull(owner), it, hint) }
+                        }
+                    }
+                } catch (error: SecurityException) {
+                    pending.finish(false)
+                    permissionDenied(token, error)
+                }
+            }
         }
         fun observe(device: BluetoothDevice, name: String?) {
             val now = SystemClock.elapsedRealtime()
@@ -134,6 +187,7 @@ class NearbyPairingController(
                 firstCandidateAt = now
                 Log.i(TAG, "Connect to first Classic candidate: ${now - requestedAt}ms")
             }
+            if (candidates.ambiguous) finishConsent()
             showInstructions(token, if (candidates.ambiguous) R.string.pairing_multiple_cases else null)
             scheduleSelection(token, attempt, devices, candidates, ::select)
         }
@@ -162,11 +216,13 @@ class NearbyPairingController(
                             if (intent.action == BluetoothDevice.ACTION_BOND_STATE_CHANGED) {
                                 when (intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.ERROR)) {
                                     BluetoothDevice.BOND_NONE -> {
-                                        hints.remove(address)?.active = false
+                                        val hint = hints.remove(address)
+                                        retireHint(hint)
+                                        if (hint != null && selected == null) startConsentGate()
                                         bondingSeen.remove(address)
                                     }
                                     BluetoothDevice.BOND_BONDING -> if (bondingSeen.size < 16 || address in bondingSeen) {
-                                        if (bondingSeen.add(address)) hints.remove(address)?.active = false
+                                        if (bondingSeen.add(address)) retireHint(hints.remove(address))
                                     }
                                 }
                             } else if (intent.action == BluetoothDevice.ACTION_PAIRING_REQUEST) {
@@ -175,7 +231,7 @@ class NearbyPairingController(
                                 val nativeState = if (consent) changed.bondState else null
                                 Log.i(TAG, "Pairing request: variant=$variant state=$nativeState selected=${selected?.device?.address == address} after=${SystemClock.elapsedRealtime() - requestedAt}ms")
                                 if (!consent) {
-                                    hints[address]?.active = false
+                                    retireHint(hints[address])
                                     if (hints.size < 16) hints.putIfAbsent(address, ConsentHint(SystemClock.elapsedRealtime(), false))
                                     if (selected?.device?.address == address) {
                                         consentJob?.cancel()
@@ -188,7 +244,11 @@ class NearbyPairingController(
                                     (hints.size < 16 || address in hints) &&
                                     (bondingSeen.size < 16 || address in bondingSeen)) {
                                     bondingSeen.add(address)
-                                    if (hints.putIfAbsent(address, ConsentHint(SystemClock.elapsedRealtime())) == null) {
+                                    if (hints.putIfAbsent(address, ConsentHint(SystemClock.elapsedRealtime()).also {
+                                        it.awaitingGate = isOrderedBroadcast && consentGate?.isWatching == true && consentReady() &&
+                                            changed.type in setOf(BluetoothDevice.DEVICE_TYPE_CLASSIC, BluetoothDevice.DEVICE_TYPE_DUAL) &&
+                                            NearbyAirPods.matchesName(model, changed.name)
+                                    }) == null) {
                                         Log.i(TAG, "Captured incoming consent: ${SystemClock.elapsedRealtime() - requestedAt}ms")
                                     }
                                 }
@@ -241,6 +301,7 @@ class NearbyPairingController(
                 addAction(BluetoothDevice.ACTION_PAIRING_REQUEST)
                 priority = IntentFilter.SYSTEM_HIGH_PRIORITY - 1
             }, Context.RECEIVER_EXPORTED)
+            startConsentGate()
             discoveryOwned = adapter.startDiscovery()
             if (!discoveryOwned) {
                 scheduleScan(token, attempt, R.string.pairing_discovery_failed)
@@ -301,7 +362,11 @@ class NearbyPairingController(
                 showRetry(token, R.string.pairing_device_changed)
                 return
             }
-            if (bondState != BluetoothDevice.BOND_BONDING) hints.remove(device.address)?.active = false
+            if (pendingConsent !== hints[device.address]?.pending) finishConsent()
+            if (bondState != BluetoothDevice.BOND_BONDING) hints.remove(device.address)?.let {
+                it.active = false
+                finishConsent(it.pending)
+            }
             if (bondState == BluetoothDevice.BOND_NONE) bondingSeen.remove(device.address)
             val selected = BondSelection(device, bondState == BluetoothDevice.BOND_BONDING ||
                 bondState == BluetoothDevice.BOND_BONDED && device.address in bondingSeen)
@@ -377,10 +442,23 @@ class NearbyPairingController(
         val device = selected.device
         if (selected.consentRequested || !hint.isCurrent(SystemClock.elapsedRealtime()) ||
             device.bondState != BluetoothDevice.BOND_BONDING) return
+        // Let the worker capture this request; a lost callback must not strand consent.
+        if (hint.pending == null && hint.awaitingGate) {
+            hint.awaitingGate = false
+            handler.postDelayed({
+                if (receiver === owner && canContinue(token, attempt)) {
+                    confirmSelectedConsent(token, attempt, owner, selected, hint)
+                }
+            }, 100)
+            return
+        }
         selected.consentRequested = true
-        val pending = hold()
-        val consentDeadline = minOf(hint.receivedAt + CONSENT_HINT_MS, SystemClock.elapsedRealtime() + 1_500)
+        val incoming = hint.pending?.takeIf { pendingConsent === it }
+        val consentDeadline = minOf(hint.receivedAt + CONSENT_HINT_MS, SystemClock.elapsedRealtime() + 1_500,
+            incoming?.deadline ?: Long.MAX_VALUE)
+        val pending = incoming ?: hold()?.let { NativeConsent(it, consentDeadline) }
         if (pending != null) pendingConsent = pending
+        consentFallback?.let(handler::removeCallbacks)
         lateinit var job: Job
         job = scope.launch(start = CoroutineStart.LAZY) {
             var confirmed = false
@@ -424,6 +502,8 @@ class NearbyPairingController(
         }.also { handler.postDelayed(it, (consentDeadline - SystemClock.elapsedRealtime()).coerceAtLeast(0)) }
         job.start()
     }
+
+    private fun consentReady() = confirmConsent != null || client?.canConfirmPairing() == true
 
     private fun completeBond(token: Long, attempt: Long, device: BluetoothDevice) {
         Log.i(TAG, "Connect to BONDED: ${SystemClock.elapsedRealtime() - requestedAt}ms")
@@ -486,11 +566,15 @@ class NearbyPairingController(
         val oldReceiver = receiver
         receiver = keepReceiver
         if (oldReceiver !== keepReceiver) (oldReceiver as? AttemptReceiver)?.retire()
-        consentJob?.cancel()
-        consentJob = null
-        consentFallback?.let(handler::removeCallbacks)
-        consentFallback = null
-        finishConsent()
+        if (keepReceiver == null || oldReceiver !== keepReceiver) {
+            consentJob?.cancel()
+            consentJob = null
+            consentFallback?.let(handler::removeCallbacks)
+            consentFallback = null
+            finishConsent()
+            consentGate?.close()
+            consentGate = null
+        }
         selection?.let(handler::removeCallbacks)
         selection = null
         continuation?.let(handler::removeCallbacks)
@@ -513,13 +597,12 @@ class NearbyPairingController(
     }
 
     /** PendingResult is completed only on the main thread, once, including cancellation. */
-    private fun finishConsent(expected: BroadcastReceiver.PendingResult? = pendingConsent, accepted: Boolean = false) {
+    private fun finishConsent(expected: PairingConsentGate.Consent? = pendingConsent, accepted: Boolean = false) {
         if (expected == null || pendingConsent !== expected) return
         pendingConsent = null
         consentFallback?.let(handler::removeCallbacks)
         consentFallback = null
-        if (accepted) expected.abortBroadcast()
-        expected.finish()
+        expected.finish(accepted)
     }
 
     @androidx.annotation.MainThread

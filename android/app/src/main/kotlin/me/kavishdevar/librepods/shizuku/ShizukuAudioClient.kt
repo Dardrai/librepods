@@ -398,6 +398,8 @@ class ShizukuAudioClient(context: Context) : Closeable {
         }
     }
 
+    internal fun canConfirmPairing(): Boolean = bridge?.let(::pairingAllowed) == true
+
     private fun pairingAllowed(remote: IAudioBridge): Boolean = !closed && bridge === remote && runCatching {
         context.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED &&
             Shizuku.pingBinder() && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED

@@ -131,6 +131,10 @@
             android:exported="false" />
 
         <service
+            android:name=".bluetooth.PairingConsentService"
+            android:exported="false"
+            android:process=":pairing_consent" />
+        <service
             android:name=".services.LibrePodsService"
             android:enabled="true"
             android:exported="false"

@@ -59,6 +59,10 @@ class LibrePodsApplication: Application(), XposedServiceHelper.OnServiceListener
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     override fun onCreate() {
+        if (Application.getProcessName() == "$packageName:pairing_consent") {
+            super<Application>.onCreate()
+            return
+        }
         System.loadLibrary("hiddenapi")
 
         database = Room.databaseBuilder(
