@@ -39,6 +39,16 @@ class NearbyBatteryHandoffTest {
     private val key = ByteArray(16) { (it + 1).toByte() }
     private val keys = mapOf(MagicKeyType.IRK to irk, MagicKeyType.ENC_KEY to key)
 
+    @Test fun availableDeviceConstructionNeverPagesAPeer() {
+        val context = RuntimeEnvironment.getApplication()
+        shadowOf(context).grantPermissions(Manifest.permission.BLUETOOTH_CONNECT)
+        val adapter = context.getSystemService(BluetoothManager::class.java).adapter
+        val device = AppleDevice(context, adapter, adapter.getRemoteDevice("00:11:22:33:44:55"), ConnectionState.AVAILABLE)
+        assertEquals(0, device.connectionNumber.value)
+        assertEquals(ConnectionState.AVAILABLE, device.connectionState.value)
+        assertNull(device.aacp.captureAudioSocket())
+    }
+
     @Test fun connectedInitialFillPreservesLiveReadingsAndRejectsUnavailableFutureOrStaleSeeds() {
         val device = createDevice()
         val socket = Shadow.newInstanceOf(BluetoothSocket::class.java).apply { connect() }

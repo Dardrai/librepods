@@ -405,9 +405,6 @@ fun AppleSettingsScreen(
                     onAutomaticEarDetectionChanged = { enabled -> setControlCommandBoolean(ControlCommandIdentifier.EAR_DETECTION_CONFIG, enabled); updateSettings { it.copy(earDetectionEnabled = enabled) } },
                     automaticConnectionEnabled = state.controlStates[ControlCommandIdentifier.SMART_ROUTING_MODE]?.getOrNull(0) == 0x01.toByte(),
                     onAutomaticConnectionChanged = { setControlCommandBoolean(ControlCommandIdentifier.SMART_ROUTING_MODE, it) },
-                    disconnectWhenNotWearing = settings.disconnectWhenNotWearing,
-                    onDisconnectWhenNotWearingChanged = { enabled -> updateSettings { it.copy(disconnectWhenNotWearing = enabled) } },
-
                     takeoverWhenDisconnected = settings.takeoverWhenDisconnected,
                     onTakeoverWhenDisconnectedChanged = { enabled -> updateSettings { it.copy(takeoverWhenDisconnected = enabled) } },
                     takeoverWhenIdle = settings.takeoverWhenIdle,

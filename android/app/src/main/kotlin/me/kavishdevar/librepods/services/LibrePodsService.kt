@@ -31,6 +31,7 @@ import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.media.AudioManager
 import android.media.AudioDeviceInfo
+import android.media.AudioDeviceCallback
 import android.os.BatteryManager
 import android.os.Binder
 import android.os.Build
@@ -168,7 +169,14 @@ class LibrePodsService: Service() {
     private var bleScanCallback: ScanCallback? = null
     private val pairedLids = mutableMapOf<MacAddress, Boolean>()
     private val pairedObservations = mutableMapOf<MacAddress, Long>()
-    private val bleReconnectAt = mutableMapOf<MacAddress, Long>()
+    private val nativeAudioCallback = object : AudioDeviceCallback() {
+        override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>) {
+            devices.value.values.filterIsInstance<AppleDevice>().forEach { device ->
+                if (hasNativeAudioOutput(device.bluetoothDevice))
+                    serviceScope.launch(Dispatchers.IO) { onDeviceConnected(device.bluetoothDevice) }
+            }
+        }
+    }
 
     private val appleRepository by lazy {
         (application as LibrePodsApplication).appleRepository
@@ -280,6 +288,7 @@ class LibrePodsService: Service() {
         observeAppSettings()
 
         registerBluetoothReceivers()
+        getSystemService(AudioManager::class.java).registerAudioDeviceCallback(nativeAudioCallback, bleHandler)
 
         nearbyPairing = NearbyPairingController(this, onInteractionChanged = { pairingModel = it },
             onInvitationRejected = nearbyVisits::retry) { paired ->
@@ -301,8 +310,7 @@ class LibrePodsService: Service() {
             bleReady = true
             startBleScanner()
             devices.value.values.forEach { device ->
-                if (runCatching { BluetoothDevice::class.java.getMethod("isConnected").invoke(device.bluetoothDevice) as Boolean }
-                        .getOrDefault(false)) launch(Dispatchers.IO) { onDeviceConnected(device.bluetoothDevice) }
+                launch(Dispatchers.IO) { onDeviceConnected(device.bluetoothDevice) }
             }
             while (isActive) {
                 delay(5.seconds)
@@ -381,6 +389,7 @@ class LibrePodsService: Service() {
         islandWindow.clearPairingOpening()
         runCatching { getSystemService(TelephonyManager::class.java).unregisterTelephonyCallback(telephonyCallback) }
         serviceScope.cancel()
+        getSystemService(AudioManager::class.java).unregisterAudioDeviceCallback(nativeAudioCallback)
         bleHandler.removeCallbacksAndMessages(null)
         unregisterBluetoothReceivers()
         stopBleScanner()
@@ -398,6 +407,14 @@ class LibrePodsService: Service() {
             device.bluetoothDevice.bondState == BluetoothDevice.BOND_BONDED &&
             getSystemService(AudioManager::class.java).getDevices(AudioManager.GET_DEVICES_OUTPUTS).any {
                 it.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP && it.address.equals(device.macAddress.value, true)
+            }
+    }.getOrDefault(false)
+
+    private fun hasNativeAudioOutput(device: BluetoothDevice): Boolean = runCatching {
+        device.bondState == BluetoothDevice.BOND_BONDED &&
+            getSystemService(AudioManager::class.java).getDevices(AudioManager.GET_DEVICES_OUTPUTS).any {
+                it.type in setOf(AudioDeviceInfo.TYPE_BLUETOOTH_A2DP, AudioDeviceInfo.TYPE_BLUETOOTH_SCO) &&
+                    it.address.equals(device.address, true)
             }
     }.getOrDefault(false)
 
@@ -806,15 +823,17 @@ class LibrePodsService: Service() {
     }
 
     private suspend fun onDeviceConnected(bluetoothDevice: BluetoothDevice) {
-        if (destroying || bluetoothDevice.bondState != BluetoothDevice.BOND_BONDED) return
+        // ACL/SDP and BLE presence do not authorize reclaiming another host's audio.
+        if (destroying || !hasNativeAudioOutput(bluetoothDevice)) return
         val device = createDevice(bluetoothDevice) ?: return
         if (destroying || device.bluetoothDevice.bondState != BluetoothDevice.BOND_BONDED ||
             device.connectionState.value in setOf(ConnectionState.CONNECTED, ConnectionState.CONNECTING)) return
         if (device is AppleDevice) withContext(Dispatchers.Main.immediate) {
             if (!destroying && devices.value[device.macAddress] === device) attachExperimentalAudio(device)
         }
-        if (destroying || devices.value[device.macAddress] !== device) return
-        device.connect()
+        fun current() = !destroying && devices.value[device.macAddress] === device && hasNativeAudioOutput(bluetoothDevice)
+        if (!current()) return
+        if (device is AppleDevice) device.connect(::current) else device.connect()
     }
 
     private fun onDeviceDisconnected(mac: MacAddress) {
@@ -981,21 +1000,6 @@ class LibrePodsService: Service() {
                 isAudioConnected = { isNearbyDeviceAudioConnected(device) },
                 deferConnectAction = { shouldDeferNearbyConnect(device) })
             Log.d(TAG, "Lid advertisement to paired overlay: ${(SystemClock.elapsedRealtimeNanos() - observed) / 1_000_000}ms")
-        }
-        if (report.mayReconnect && report.connection == 0 && device.settings.value.takeoverWhenDisconnected &&
-            device.connectionState.value in setOf(ConnectionState.DISCONNECTED, ConnectionState.AVAILABLE) && !bleCaptureBlocked &&
-            SystemClock.elapsedRealtime() - (bleReconnectAt[device.macAddress] ?: -60_000L) >= 60_000L) {
-            bleReconnectAt[device.macAddress] = SystemClock.elapsedRealtime()
-            serviceScope.launch(Dispatchers.IO) {
-                if (!destroying && !bleCaptureBlocked && devices.value[device.macAddress] === device &&
-                    device.bluetoothDevice.bondState == BluetoothDevice.BOND_BONDED &&
-                    device.settings.value.takeoverWhenDisconnected &&
-                    device.connectionState.value in setOf(ConnectionState.DISCONNECTED, ConnectionState.AVAILABLE) &&
-                    device.state.value.magicKeys[MagicKeyType.IRK]?.contentEquals(irk) == true &&
-                    device.state.value.magicKeys[MagicKeyType.ENC_KEY]?.contentEquals(encryption) == true) {
-                    device.connect()
-                }
-            }
         }
     }
 
@@ -1345,8 +1349,7 @@ class LibrePodsService: Service() {
                         processComponentStateChange(
                             device = device,
                             previousComponentState = previousState.componentState,
-                            newComponentState = state.componentState,
-                            disconnectWhenNotWearing = deviceSettings.disconnectWhenNotWearing
+                            newComponentState = state.componentState
                         )
                     }
 
@@ -1743,12 +1746,11 @@ class LibrePodsService: Service() {
     private fun processComponentStateChange(
         device: Device<*, *, *>,
         previousComponentState: Set<DeviceComponentState>,
-        newComponentState: Set<DeviceComponentState>,
-        disconnectWhenNotWearing: Boolean
+        newComponentState: Set<DeviceComponentState>
     ) {
         val old = earPresenceOf(previousComponentState)
         val new = earPresenceOf(newComponentState)
-        if (old == new) return
+        if (old == new || !MediaController.isMediaRoute(device.macAddress.value)) return
 
         Log.d(TAG, "earPresence: $old -> $new")
 
@@ -1765,23 +1767,8 @@ class LibrePodsService: Service() {
             islandWindow.close()
         }
 
-        var justEnabledA2dp = false
-
         when {
             old == EarPresence.NONE -> {
-                Log.d(
-                    TAG,
-                    "User put in at least one component, enabling audio for device ${device.macAddress.toRedactedString()}"
-                )
-                device.enableAudio()
-                device.connectA2dp()
-                justEnabledA2dp = true
-
-                device.waitForA2dpConnection(this) {
-                    MediaController.sendPlay()
-                    MediaController.iPausedTheMedia = false
-                }
-
                 if (MediaController.getMusicActive()) {
                     MediaController.userPlayedTheMedia = true
                 }
@@ -1793,14 +1780,6 @@ class LibrePodsService: Service() {
 
             new == EarPresence.NONE -> {
                 MediaController.sendPause(force = true)
-                if (disconnectWhenNotWearing) {
-                    Log.d(
-                        TAG,
-                        "Disconnecting audio for device ${device.macAddress.toRedactedString()} because user took out all components and disconnectWhenNotWearing is true"
-                    )
-                    device.disableAudio()
-                    device.disconnectAudio()
-                }
             }
         }
 
@@ -1808,10 +1787,8 @@ class LibrePodsService: Service() {
             new == EarPresence.FULL -> {
                 Log.d("AirPodsParser", "User put in all components.")
                 MediaController.userPlayedTheMedia = false
-                if (!justEnabledA2dp) {
-                    MediaController.sendPlay()
-                    MediaController.iPausedTheMedia = false
-                }
+                MediaController.sendPlay()
+                MediaController.iPausedTheMedia = false
             }
 
             old == EarPresence.FULL -> {

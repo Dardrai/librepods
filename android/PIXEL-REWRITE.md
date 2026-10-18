@@ -23,7 +23,7 @@ pair, local behavior choices and correctly owner-bound BLE keys once. Existing
 rewrite database rows are preserved. Unconfirmed device control values are not
 migrated as device reports. The Android Bluetooth bond stays with Android.
 
-The current fork version is `2.0.0-alpha.1-pixel37`, code `200000122`.
+The current fork version is `2.0.0-alpha.1-pixel38`, code `200000123`.
 
 Protocol formats, hearing-mode safety and the current profile-reading limitation
 are documented in [PROTOCOL.md](PROTOCOL.md).
@@ -101,6 +101,24 @@ Status changes use a short clipped vertical transition, while Connect and its
 progress state animate inside a fixed action area. The name and artwork keep
 their positions. Hidden controls stop accepting input immediately; system
 animation settings also apply to these transitions.
+
+Pixel38 removes the old BLE reconnect path, including its hidden, previously
+default-enabled takeover choice. Existing saved flags cannot reactivate it.
+Case openings remain fast battery/presence observations and offer the explicit
+Connect button when another host owns audio. Available-device construction and
+late ACL/SDP notifications cannot initiate a control connection without a native
+local A2DP or headset audio output; newly published Android outputs attach control
+without paging an otherwise remote device.
+
+Ear detection now pauses or resumes only while Android selects this pair for
+media. It never enables, disables or reconnects media/call profiles. The old
+Disconnect when not wearing control is removed; its serialized value is retained
+for compatibility. Android's native reconnection and the AirPods' Automatic
+Connection preference remain separate from LibrePods' explicit Connect action.
+The optional microphone's selected-transport recovery is unchanged: Android does
+not expose a reliable peer-owner signal during that deliberate media transition,
+so switching to another host during microphone cleanup still needs a hardware
+check. No cross-host test was performed for this change.
 
 ## Android audit fixes
 

@@ -33,9 +33,6 @@ fun ConnectionSettings(
     onAutomaticEarDetectionChanged: (Boolean) -> Unit,
     automaticConnectionEnabled: Boolean,
     onAutomaticConnectionChanged: (Boolean) -> Unit,
-    disconnectWhenNotWearing: Boolean,
-    onDisconnectWhenNotWearingChanged: (Boolean) -> Unit,
-
     takeoverWhenDisconnected: Boolean,
     onTakeoverWhenDisconnectedChanged: (Boolean) -> Unit,
     takeoverWhenIdle: Boolean,
@@ -65,12 +62,6 @@ fun ConnectionSettings(
             onCheckedChange = onAutomaticConnectionChanged
         )
 
-        styledToggle(
-            label = stringResource(R.string.disconnect_when_not_wearing),
-            description = stringResource(R.string.disconnect_when_not_wearing_description),
-            checked = disconnectWhenNotWearing,
-            onCheckedChange = onDisconnectWhenNotWearingChanged
-        )
     }
 
 //    StyledList(title = stringResource(R.string.takeover_airpods_state)) {

@@ -8,6 +8,7 @@ import kotlin.time.Duration.Companion.milliseconds
 
 @Serializable
 data class AppleSettings(
+    // Legacy routing choices are retained for saved settings; wear/proximity cannot claim audio.
     val disconnectWhenNotWearing: Boolean = true, // disconnect_when_not_wearing
 
     val earDetectionEnabled: Boolean = true,

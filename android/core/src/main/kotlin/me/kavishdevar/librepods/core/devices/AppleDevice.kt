@@ -183,17 +183,20 @@ class AppleDevice(
                 name = bluetoothDevice.alias ?: bluetoothDevice.name ?: "Unknown"
             )
         }
-
-        if (currentState == ConnectionState.AVAILABLE) {
-            connect()
-        }
     }
 
-    override fun connect(): Boolean {
-        val connected = connectControl(aacp::connect)
+    override fun connect(): Boolean = connect { true }
+
+    /** Native-route attachment retires if Android no longer has this pair's audio output. */
+    fun connect(stillCurrent: () -> Boolean): Boolean {
+        if (!stillCurrent()) return false
+        val connected = connectControl { aacp.connect(stillCurrent) {} }
         val transport = aacp.captureAudioSocket()
         if (connected && transport != null) CoroutineScope(Dispatchers.IO).launch {
-            for (handle in ATTHandle.entries) readATTCharacteristic(handle, transport)
+            for (handle in ATTHandle.entries) {
+                if (!stillCurrent()) break
+                readATTCharacteristic(handle, transport)
+            }
         }
         return connected
     }
@@ -445,7 +448,6 @@ class AppleDevice(
     fun requestMicrophoneStream() = aacp.requestMicrophoneStream()
     fun endMicrophoneStream() {
         aacp.endMicrophoneStream()
-        reconnectA2dp()
     }
 
     fun startRecording(recording: Recording) {

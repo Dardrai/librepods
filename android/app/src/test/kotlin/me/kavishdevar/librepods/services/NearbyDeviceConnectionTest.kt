@@ -34,6 +34,7 @@ import me.kavishdevar.librepods.core.devices.AirPodsModel
 import me.kavishdevar.librepods.core.devices.AppleDevice
 import me.kavishdevar.librepods.core.devices.AppleMetadata
 import me.kavishdevar.librepods.core.devices.AppleState
+import me.kavishdevar.librepods.core.devices.AppleSettings
 import me.kavishdevar.librepods.core.devices.Battery
 import me.kavishdevar.librepods.core.devices.BatteryComponent
 import me.kavishdevar.librepods.core.devices.BatteryStatus
@@ -64,6 +65,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import javax.crypto.Cipher
 import javax.crypto.spec.SecretKeySpec
+import kotlin.coroutines.Continuation
+import kotlin.coroutines.intrinsics.suspendCoroutineUninterceptedOrReturn
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [37], application = Application::class)
@@ -110,6 +113,65 @@ class NearbyDeviceConnectionTest {
     }
 
     @After fun close() { (field("serviceScope").get(service) as CoroutineScope).cancel() }
+
+    @Test fun aLateUuidOrAclNotificationCannotPageControlWithoutALocalAudioProfile() = runBlocking<Unit> {
+        connectionState.value = ConnectionState.AVAILABLE
+        attachNativeAudio()
+        verify(device, never()).connect()
+        verify(device, never()).connect(anyCurrent())
+        verify(device, never()).connect(anyCurrent(), anyPending())
+        verifyNoInteractions(bridge)
+    }
+
+    @Test fun nativeAudioAttachmentRetiresAsSoonAsItsExactPairLosesTheOutput() = runBlocking<Unit> {
+        connectionState.value = ConnectionState.AVAILABLE
+        publishOutput()
+        `when`(device.connect(anyCurrent())).thenAnswer { invocation ->
+            val current = invocation.getArgument<() -> Boolean>(0)
+            assertTrue(current())
+            clearOutput()
+            assertFalse("An SDP/ACL callback must not retain permission to reclaim a retired route", current())
+            false
+        }
+        attachNativeAudio()
+        verify(device).connect(anyCurrent())
+        verify(device, never()).connect()
+        verifyNoInteractions(bridge)
+    }
+
+    @Test fun passiveAuthenticatedReconnectAdvertisementsNeverPageEvenWithLegacyTakeoverEnabled() {
+        advance(2_000)
+        connectionState.value = ConnectionState.AVAILABLE
+        val irk = byteArrayOf(0x79, 4, 0x65, 0x1e, 0xe2.toByte(), 0xcc.toByte(), 0xd9.toByte(),
+            0x26, 0xf2.toByte(), 0x6e, 0x20, 0xee.toByte(), 0x3e, 0xcc.toByte(), 0xde.toByte(), 0x79)
+        val key = ByteArray(16) { (it + 1).toByte() }
+        `when`(device.state).thenReturn(MutableStateFlow(AppleState(
+            magicKeys = mapOf(MagicKeyType.IRK to irk, MagicKeyType.ENC_KEY to key))))
+        `when`(device.settings).thenReturn(MutableStateFlow(AppleSettings(
+            takeoverWhenDisconnected = true, showIslandPopup = false)))
+        val manufacturer = ByteArray(27).apply {
+            this[0] = 7; this[1] = 25; this[2] = 1; this[3] = 0x27; this[4] = 0x20
+            this[5] = 0x60 // Open lid, at least one bud out; no connected peer in byte 10.
+            val plain = ByteArray(16).apply { this[1] = 90; this[2] = 85; this[3] = 80 }
+            Cipher.getInstance("AES/ECB/NoPadding").apply { init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES")) }
+                .doFinal(plain).copyInto(this, 11)
+        }
+        val advertised = mock(BluetoothDevice::class.java)
+        `when`(advertised.address).thenReturn("5A:16:2B:91:D1:CD")
+        val record = mock(ScanRecord::class.java)
+        `when`(record.getManufacturerSpecificData(0x004c)).thenReturn(manufacturer)
+        val result = mock(ScanResult::class.java)
+        `when`(result.device).thenReturn(advertised)
+        `when`(result.scanRecord).thenReturn(record)
+        `when`(result.timestampNanos).thenReturn(SystemClock.elapsedRealtimeNanos())
+        LibrePodsService::class.java.getDeclaredMethod("handleScanResult", ScanResult::class.java)
+            .apply { isAccessible = true }.invoke(service, result)
+        verify(device).receiveNearbyBattery(any<Set<Battery>>() ?: emptySet())
+        verify(device, never()).connect()
+        verify(device, never()).connect(anyCurrent())
+        verify(device, never()).connect(anyCurrent(), anyPending())
+        verifyNoInteractions(bridge)
+    }
 
     @Test fun controlOnlyConnectionStillRequiresVerifiedMediaConnection() = runBlocking<Unit> {
         `when`(bridge.connectNativePlayback(anyString(), anyCurrent())).thenAnswer { publishOutput(); true }
@@ -673,6 +735,11 @@ class NearbyDeviceConnectionTest {
     private fun caseLid(open: Boolean): Boolean = LibrePodsService::class.java
         .getDeclaredMethod("observeNearbyCase", AppleDevice::class.java, Boolean::class.javaPrimitiveType)
         .apply { isAccessible = true }.invoke(service, device, open) as Boolean
+
+    private suspend fun attachNativeAudio(): Unit = suspendCoroutineUninterceptedOrReturn { continuation ->
+        LibrePodsService::class.java.getDeclaredMethod("onDeviceConnected", BluetoothDevice::class.java, Continuation::class.java)
+            .apply { isAccessible = true }.invoke(service, bluetooth, continuation)
+    }
 
     private fun mediaState(state: Int?) {
         val intent = Intent(BluetoothA2dp.ACTION_CONNECTION_STATE_CHANGED).putExtra(BluetoothDevice.EXTRA_DEVICE, bluetooth)

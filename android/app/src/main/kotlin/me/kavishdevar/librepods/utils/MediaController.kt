@@ -329,7 +329,7 @@ object MediaController {
         if (!conversationVolume.owns(owner)) {
             conversationVolume.owner?.let { cancelConversation(it, restoreVolume = false) }
         }
-        if (!isConversationRoute(address)) {
+        if (!isMediaRoute(address)) {
             cancelConversation(owner, restoreVolume = false)
             return
         }
@@ -348,7 +348,7 @@ object MediaController {
     @Synchronized
     fun stopSpeaking(owner: Any) {
         if (!conversationVolume.owns(owner)) return
-        if (!isConversationRoute(conversationAddress)) {
+        if (!isMediaRoute(conversationAddress)) {
             cancelConversation(owner, restoreVolume = false)
             return
         }
@@ -369,7 +369,7 @@ object MediaController {
         volumeTransition = null
         val current = runCatching { audioManager.getStreamVolume(AudioManager.STREAM_MUSIC) }.getOrNull()
         val restore = conversationVolume.cancel(current ?: -1, owner,
-            restoreAllowed = restoreVolume && current != null && isConversationRoute(conversationAddress))
+            restoreAllowed = restoreVolume && current != null && isMediaRoute(conversationAddress))
         restore?.let {
             runCatching {
                 audioManager.setStreamVolume(AudioManager.STREAM_MUSIC,
@@ -381,7 +381,7 @@ object MediaController {
         conversationPausedMedia = false
     }
 
-    private fun isConversationRoute(address: String?): Boolean = address != null && runCatching {
+    internal fun isMediaRoute(address: String?): Boolean = address != null && runCatching {
         audioManager.getAudioDevicesForAttributes(mediaAttributes).singleOrNull()?.address
             ?.equals(address, ignoreCase = true) == true
     }.getOrDefault(false)
@@ -391,7 +391,7 @@ object MediaController {
         volumeTransition = object : Runnable {
             override fun run() = synchronized(this@MediaController) {
                 if (volumeTransition !== this) return@synchronized
-                if (!isConversationRoute(conversationAddress)) {
+                if (!isMediaRoute(conversationAddress)) {
                     cancelConversation(owner, restoreVolume = false)
                     return@synchronized
                 }
