@@ -19,7 +19,6 @@
 package me.kavishdevar.librepods.presentation.activities
 
 import android.app.Activity
-import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -44,20 +43,20 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
+import com.google.accompanist.permissions.rememberMultiplePermissionsState
 import kotlinx.coroutines.flow.MutableStateFlow
 import me.kavishdevar.librepods.BuildConfig
 import me.kavishdevar.librepods.LibrePodsApplication
 import me.kavishdevar.librepods.bluetooth.DeviceSettingsRefreshResult
+import me.kavishdevar.librepods.bluetooth.nearbyDevicesPermissions
 import me.kavishdevar.librepods.presentation.design.LibrePodsTheme
 import me.kavishdevar.librepods.presentation.design.NightTheme
 import me.kavishdevar.librepods.presentation.navigation.NavigationRoot
+import me.kavishdevar.librepods.presentation.screens.onboarding.OnboardingScreen
 import me.kavishdevar.librepods.presentation.utils.LocalDebugMode
 import me.kavishdevar.librepods.repository.AppDataRepository
 import me.kavishdevar.librepods.services.LibrePodsService
 import me.kavishdevar.librepods.utils.XposedState
-
-private lateinit var serviceConnection: ServiceConnection
-private lateinit var connectionStatusReceiver: BroadcastReceiver
 
 class MainActivity: ComponentActivity() {
     companion object {
@@ -92,21 +91,7 @@ class MainActivity: ComponentActivity() {
                 WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = !darkTheme
             }
 
-            LaunchedEffect(settings.swipeAnywhereForBack) {
-                if (settings.useHighestRefreshRate) {
-                    val display = getSystemService(DisplayManager::class.java)
-                        .getDisplay(Display.DEFAULT_DISPLAY)
-
-                    val highest = display.supportedModes
-                        .maxByOrNull { it.refreshRate }
-
-                    highest?.let {
-                        window.attributes = window.attributes.apply {
-                            preferredRefreshRate = it.refreshRate
-                        }
-                    }
-                }
-            }
+            RefreshRatePreference(settings.useHighestRefreshRate)
 
             CompositionLocalProvider(
                 LocalDebugMode provides settings.debugMode
@@ -129,33 +114,33 @@ class MainActivity: ComponentActivity() {
         }
     }
 
-    override fun onDestroy() {
-        if (::serviceConnection.isInitialized) try {
-            unbindService(serviceConnection)
-            Log.d("MainActivity", "Unbound service")
-        } catch (e: Exception) {
-            Log.e("MainActivity", "Error while unbinding service: $e")
+}
+
+@Composable
+internal fun RefreshRatePreference(enabled: Boolean) {
+    val context = LocalContext.current
+    val window = (LocalView.current.context as Activity).window
+    LaunchedEffect(enabled, window) {
+        val display = context.getSystemService(DisplayManager::class.java).getDisplay(Display.DEFAULT_DISPLAY)
+        window.attributes = window.attributes.apply {
+            preferredRefreshRate = if (enabled) display.supportedModes.maxOfOrNull { it.refreshRate } ?: 0f else 0f
         }
-        if (::connectionStatusReceiver.isInitialized) try {
-            unregisterReceiver(connectionStatusReceiver)
-            Log.d("MainActivity", "Unregistered receiver")
-        } catch (e: Exception) {
-            Log.e("MainActivity", "Error while unregistering receiver: $e")
-        }
-        super.onDestroy()
     }
 }
 
 @Composable
-fun Main() {
+fun Main(
+    appDataRepository: AppDataRepository = (LocalContext.current.applicationContext as LibrePodsApplication).appDataRepository,
+) {
     val context = LocalContext.current
     val librepodsService = remember { mutableStateOf<LibrePodsService?>(null) }
 
-    val appDataRepository: AppDataRepository = (LocalContext.current.applicationContext as LibrePodsApplication).appDataRepository
     val appState by appDataRepository.state.collectAsState()
 
 
     val onboardingComplete = appState.hasCompletedOnboarding
+    val bluetoothPermissions = rememberMultiplePermissionsState(nearbyDevicesPermissions)
+    val bluetoothGranted = bluetoothPermissions.allPermissionsGranted
 
     val currentVersion = BuildConfig.VERSION_NAME.removeSuffix("-debug")
     val lastVersionShown = appState.lastVersionShown
@@ -166,8 +151,9 @@ fun Main() {
         librepodsService.value?.devices ?: MutableStateFlow(emptyMap())
     }.collectAsState()
 
-    DisposableEffect(onboardingComplete) {
-        if (!onboardingComplete) {
+    DisposableEffect(onboardingComplete, bluetoothGranted) {
+        if (!onboardingComplete || !bluetoothGranted) {
+            librepodsService.value = null
             onDispose { }
         } else {
             val connection = object : ServiceConnection {
@@ -181,17 +167,18 @@ fun Main() {
                 }
             }
 
-            context.startForegroundService(Intent(context, LibrePodsService::class.java))
-
-            context.bindService(
-                Intent(context, LibrePodsService::class.java),
-                connection,
-                Context.BIND_AUTO_CREATE
-            )
+            var bound = false
+            try {
+                context.startForegroundService(Intent(context, LibrePodsService::class.java))
+                bound = context.bindService(Intent(context, LibrePodsService::class.java), connection, Context.BIND_AUTO_CREATE)
+            } catch (denied: SecurityException) {
+                Log.w("Main", "Bluetooth permission changed before service startup", denied)
+            }
 
             onDispose {
                 try {
-                    context.unbindService(connection)
+                    if (bound) context.unbindService(connection)
+                    librepodsService.value = null
                 } catch(e: Exception) {
                     Log.w("Main", "Error while unbinding service: $e")
                 }
@@ -199,25 +186,9 @@ fun Main() {
         }
     }
 
-    fun bindService() {
-        context.startForegroundService(Intent(context, LibrePodsService::class.java))
-        serviceConnection = object: ServiceConnection {
-            override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
-                val binder = service as LibrePodsService.LocalBinder
-                val service = binder.getService()
-                librepodsService.value = service
-            }
-
-            override fun onServiceDisconnected(name: ComponentName?) {
-                librepodsService.value = null
-            }
-        }
-
-        context.bindService(
-            Intent(context, LibrePodsService::class.java),
-            serviceConnection,
-            Context.BIND_AUTO_CREATE
-        )
+    if (onboardingComplete && !bluetoothGranted) {
+        OnboardingScreen(initialItem = 3) { }
+        return
     }
 
     NavigationRoot(
@@ -232,7 +203,6 @@ fun Main() {
             appDataRepository.updateState {
                 it.copy(hasCompletedOnboarding = true)
             }
-            bindService()
         },
         devicesState = devicesState,
         refreshDeviceSettings = { device ->

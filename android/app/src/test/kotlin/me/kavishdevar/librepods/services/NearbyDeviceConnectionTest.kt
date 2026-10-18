@@ -1,5 +1,6 @@
 package me.kavishdevar.librepods.services
 
+import android.Manifest
 import android.app.Application
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothAdapter
@@ -52,6 +53,8 @@ import org.mockito.ArgumentMatchers.anyString
 import org.mockito.Mockito.*
 import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.RuntimeEnvironment
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import org.robolectric.shadow.api.Shadow
 import org.robolectric.shadows.ShadowContextImpl
@@ -88,6 +91,8 @@ class NearbyDeviceConnectionTest {
     private val devices = field("_devices").get(service) as MutableStateFlow<Map<MacAddress, Device<*, *, *>>>
 
     init {
+        shadowOf(RuntimeEnvironment.getApplication()).grantPermissions(
+            Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_SCAN)
         ReflectionHelpers.setField(service, "mApplication", app)
         ReflectionHelpers.setField(app, "islandWindow", mock(IslandWindow::class.java))
         `when`(bluetooth.address).thenReturn(address.value)

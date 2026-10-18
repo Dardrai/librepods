@@ -19,6 +19,7 @@
 package me.kavishdevar.librepods.core.utils
 
 import android.util.Log
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -26,8 +27,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.util.Collections
-import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -49,24 +48,25 @@ class GestureDetector {
         private const val MAX_VALID_ORIENTATION_VALUE = 6000
     }
 
-    private val horizontalBuffer = Collections.synchronizedList(ArrayList<Double>())
-    private val verticalBuffer = Collections.synchronizedList(ArrayList<Double>())
+    private val stateLock = Any()
+    private val horizontalBuffer: MutableList<Double> = ArrayList()
+    private val verticalBuffer: MutableList<Double> = ArrayList()
 
-    private val horizontalAvgBuffer = Collections.synchronizedList(ArrayList<Double>())
-    private val verticalAvgBuffer = Collections.synchronizedList(ArrayList<Double>())
+    private val horizontalAvgBuffer: MutableList<Double> = ArrayList()
+    private val verticalAvgBuffer: MutableList<Double> = ArrayList()
 
     private var prevHorizontal: Double = 0.0
     private var prevVertical: Double = 0.0
 
-    private val horizontalPeaks = CopyOnWriteArrayList<Triple<Int, Double, Long>>()
-    private val horizontalTroughs = CopyOnWriteArrayList<Triple<Int, Double, Long>>()
-    private val verticalPeaks = CopyOnWriteArrayList<Triple<Int, Double, Long>>()
-    private val verticalTroughs = CopyOnWriteArrayList<Triple<Int, Double, Long>>()
+    private val horizontalPeaks = ArrayList<Triple<Int, Double, Long>>()
+    private val horizontalTroughs = ArrayList<Triple<Int, Double, Long>>()
+    private val verticalPeaks = ArrayList<Triple<Int, Double, Long>>()
+    private val verticalTroughs = ArrayList<Triple<Int, Double, Long>>()
 
     private var lastPeakTime: Long = 0
-    private val peakIntervals = Collections.synchronizedList(ArrayList<Double>())
+    private val peakIntervals = ArrayList<Double>()
 
-    private val movementSpeedIntervals = Collections.synchronizedList(ArrayList<Long>())
+    private val movementSpeedIntervals = ArrayList<Long>()
 
     private val peakThreshold = 400
     private val directionChangeThreshold = DIRECTION_CHANGE_SENSITIVITY
@@ -77,69 +77,84 @@ class GestureDetector {
 
     private val minConfidenceThreshold = 0.7
 
-    private var isRunning = false
-    private var detectionJob: Job? = null
-    private var processingJob: Job? = null
+    private var activeSession: Job? = null
 
     private var significantMotion = false
     private var lastSignificantMotionTime = 0L
 
-    init {
-        while (horizontalAvgBuffer.size < 3) horizontalAvgBuffer.add(0.0)
-        while (verticalAvgBuffer.size < 3) verticalAvgBuffer.add(0.0)
-    }
-
-    fun startDetection(acceleration: StateFlow<Acceleration>, callback: (Boolean) -> Unit): Boolean {
-        if (isRunning) return false
+    fun startDetection(acceleration: StateFlow<Acceleration>, callback: (Boolean) -> Unit): Boolean = synchronized(stateLock) {
+        if (activeSession != null) return false
 
         Log.d(TAG, "Starting gesture detection...")
-        isRunning = true
+        val session = Job()
+        activeSession = session
+        val scope = CoroutineScope(Dispatchers.Default + session)
 
         clearData()
 
         prevHorizontal = 0.0
         prevVertical = 0.0
 
-        processingJob = CoroutineScope(Dispatchers.Default).launch {
-            acceleration.collect {
-                processHeadOrientation(it.horizontal.toInt(), it.vertical.toInt())
-            }
-        }
-
-        detectionJob = CoroutineScope(Dispatchers.Default).launch {
-            while (isRunning) {
-                delay(50.milliseconds)
-
-                val gesture = detectGestures()
-                if (gesture != null) {
-                    withContext(Dispatchers.Main) {
-                        GestureFeedback.playConfirmation(gesture)
-
-                        callback.invoke(gesture)
-                        stopDetection()
+        scope.launch {
+            try {
+                acceleration.collect {
+                    synchronized(stateLock) {
+                        if (activeSession === session) processHeadOrientation(it.horizontal.toInt(), it.vertical.toInt())
                     }
-                    break
                 }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "Gesture processing stopped", e)
+            } finally {
+                stopDetection(session)
             }
         }
 
-        return true
+        scope.launch {
+            try {
+                while (session.isActive) {
+                    delay(50.milliseconds)
+                    val gesture = synchronized(stateLock) {
+                        if (activeSession === session) detectGestures() else null
+                    }
+                    if (gesture != null) {
+                        withContext(Dispatchers.Main) {
+                            if (synchronized(stateLock) { activeSession === session }) {
+                                GestureFeedback.playConfirmation(gesture)
+                                callback.invoke(gesture)
+                            }
+                        }
+                        break
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "Gesture detection stopped", e)
+            } finally {
+                stopDetection(session)
+            }
+        }
+
+        true
     }
-    fun stopDetection() {
-        if (!isRunning) return
 
-        Log.d(TAG, "Stopping gesture detection")
-        isRunning = false
+    fun stopDetection(): Unit = synchronized(stateLock) {
+        activeSession?.let(::stopDetection)
+        Unit
+    }
 
-        detectionJob?.cancel()
-        detectionJob = null
+    private fun stopDetection(session: Job): Unit = synchronized(stateLock) {
+        if (activeSession === session) {
+            Log.d(TAG, "Stopping gesture detection")
+            activeSession = null
+            session.cancel()
+        }
+    }
 
-        processingJob?.cancel()
-        processingJob = null
-   }
-
-    fun processHeadOrientation(horizontal: Int, vertical: Int) {
-        if (!isRunning) return
+    fun processHeadOrientation(horizontal: Int, vertical: Int): Unit = synchronized(stateLock) {
+        val session = activeSession ?: return
 
         if (abs(horizontal) > MAX_VALID_ORIENTATION_VALUE || abs(vertical) > MAX_VALID_ORIENTATION_VALUE) {
             Log.d(TAG, "Ignoring likely calibration data: h=$horizontal, v=$vertical")
@@ -153,7 +168,7 @@ class GestureDetector {
         val significantVertical = abs(verticalDelta) > IMMEDIATE_FEEDBACK_THRESHOLD
 
         if (significantHorizontal && (!significantVertical || abs(horizontalDelta) > abs(verticalDelta))) {
-            CoroutineScope(Dispatchers.Main).launch {
+            CoroutineScope(Dispatchers.Main + session).launch {
                 GestureFeedback.playDirectional(isVertical = false, value = horizontalDelta)
             }
             significantMotion = true
@@ -161,7 +176,7 @@ class GestureDetector {
             Log.d(TAG, "Significant HORIZONTAL movement: $horizontalDelta")
         }
         else if (significantVertical) {
-            CoroutineScope(Dispatchers.Main).launch {
+            CoroutineScope(Dispatchers.Main + session).launch {
                 GestureFeedback.playDirectional(isVertical = true, value = verticalDelta)
             }
             significantMotion = true
@@ -179,25 +194,19 @@ class GestureDetector {
         val smoothHorizontal = applySmoothing(horizontal.toDouble(), horizontalAvgBuffer)
         val smoothVertical = applySmoothing(vertical.toDouble(), verticalAvgBuffer)
 
-        synchronized(horizontalBuffer) {
-            horizontalBuffer.add(smoothHorizontal)
-            if (horizontalBuffer.size > 100) horizontalBuffer.removeAt(0)
-        }
+        horizontalBuffer.add(smoothHorizontal)
+        if (horizontalBuffer.size > 100) horizontalBuffer.removeAt(0)
 
-        synchronized(verticalBuffer) {
-            verticalBuffer.add(smoothVertical)
-            if (verticalBuffer.size > 100) verticalBuffer.removeAt(0)
-        }
+        verticalBuffer.add(smoothVertical)
+        if (verticalBuffer.size > 100) verticalBuffer.removeAt(0)
 
         detectPeaksAndTroughs()
     }
 
     private fun applySmoothing(newValue: Double, buffer: MutableList<Double>): Double {
-        synchronized(buffer) {
-            buffer.add(newValue)
-            if (buffer.size > 3) buffer.removeAt(0)
-            return buffer.average()
-        }
+        buffer.add(newValue)
+        if (buffer.size > 3) buffer.removeAt(0)
+        return buffer.average()
     }
 
 
@@ -250,15 +259,11 @@ class GestureDetector {
                     val interval = (now - lastPeakTime) / 1000.0
                     val timeDiff = now - lastPeakTime
 
-                    synchronized(peakIntervals) {
-                        peakIntervals.add(interval)
-                        if (peakIntervals.size > 5) peakIntervals.removeAt(0)
-                    }
+                    peakIntervals.add(interval)
+                    if (peakIntervals.size > 5) peakIntervals.removeAt(0)
 
-                    synchronized(movementSpeedIntervals) {
-                        movementSpeedIntervals.add(timeDiff)
-                        if (movementSpeedIntervals.size > 5) movementSpeedIntervals.removeAt(0)
-                    }
+                    movementSpeedIntervals.add(timeDiff)
+                    if (movementSpeedIntervals.size > 5) movementSpeedIntervals.removeAt(0)
                 }
                 lastPeakTime = now
             }
@@ -271,15 +276,11 @@ class GestureDetector {
                     val interval = (now - lastPeakTime) / 1000.0
                     val timeDiff = now - lastPeakTime
 
-                    synchronized(peakIntervals) {
-                        peakIntervals.add(interval)
-                        if (peakIntervals.size > 5) peakIntervals.removeAt(0)
-                    }
+                    peakIntervals.add(interval)
+                    if (peakIntervals.size > 5) peakIntervals.removeAt(0)
 
-                    synchronized(movementSpeedIntervals) {
-                        movementSpeedIntervals.add(timeDiff)
-                        if (movementSpeedIntervals.size > 5) movementSpeedIntervals.removeAt(0)
-                    }
+                    movementSpeedIntervals.add(timeDiff)
+                    if (movementSpeedIntervals.size > 5) movementSpeedIntervals.removeAt(0)
                 }
                 lastPeakTime = now
             }
@@ -359,7 +360,7 @@ class GestureDetector {
         }
     }
 
-    private fun detectGestures(): Boolean? {
+    private fun detectGestures(): Boolean? = synchronized(stateLock) {
         val requiredExtremes = getRequiredExtremes()
 //        Log.d(TAG, "Current required extremes: $requiredExtremes")
 
@@ -389,12 +390,15 @@ class GestureDetector {
             }
         }
 
-        return null
+        null
     }
 
     private fun clearData() {
         horizontalBuffer.clear()
         verticalBuffer.clear()
+        horizontalAvgBuffer.clear()
+        verticalAvgBuffer.clear()
+        repeat(3) { horizontalAvgBuffer.add(0.0); verticalAvgBuffer.add(0.0) }
         horizontalPeaks.clear()
         horizontalTroughs.clear()
         verticalPeaks.clear()

@@ -444,6 +444,55 @@ class IslandStateTest {
         }
     }
 
+    @Test fun aRecentlyUnavailableCaseGetsDisplayGraceWithoutRenewingItsAgeOrCharging() {
+        val observedAt = 100_000L
+        val case = Battery(BatteryComponent.CASE, 67, BatteryStatus.DISCONNECTED, observedAt, present = false)
+        val missingBud = Battery(BatteryComponent.RIGHT, 98, BatteryStatus.CHARGING, observedAt, present = false)
+        val batteries = setOf(case, missingBud)
+        fun cells(now: Long) = islandBatteryCells(AirPodsModel.AIRPODS_PRO_3, batteries, now)
+        for (elapsed in listOf(0L, 1_000L, 89_999L)) {
+            val displayed = cells(observedAt + elapsed)
+            assertTrue(displayed[2].live)
+            assertEquals(67, displayed[2].level)
+            assertEquals(elapsed / 1000, displayed[2].ageSeconds)
+            assertFalse(displayed[2].charging)
+            assertFalse("Unavailable earbuds do not get the case's grace", displayed[1].live)
+            assertFalse(displayed[1].charging)
+        }
+        for (elapsed in listOf(90_000L, 90_001L, 180_000L)) {
+            val expired = cells(observedAt + elapsed)[2]
+            assertFalse(expired.live)
+            assertFalse(expired.charging)
+            assertEquals(67, expired.level)
+            assertEquals(elapsed / 1000, expired.ageSeconds)
+        }
+        assertFalse(case.present)
+        assertEquals(observedAt, case.observedAt)
+        val chargingCase = case.copy(status = BatteryStatus.CHARGING)
+        val displayed = islandBatteryCells(AirPodsModel.AIRPODS_PRO_3, setOf(chargingCase), observedAt + 1000)[2]
+        assertTrue(displayed.live)
+        assertFalse("Display grace never restores a stale charging flag", displayed.charging)
+    }
+
+    @Test fun caseDisplayGraceRejectsUnknownInvalidMissingAndFutureObservations() {
+        val now = 100_000L
+        val recent = Battery(BatteryComponent.CASE, 67, BatteryStatus.DISCONNECTED, now - 1000, present = false)
+        val invalid = listOf(recent.copy(status = BatteryStatus.UNKNOWN), recent.copy(level = -1),
+            recent.copy(level = 101), recent.copy(observedAt = null), recent.copy(observedAt = -1),
+            recent.copy(observedAt = now + 1))
+        for (battery in invalid) {
+            val cell = islandBatteryCells(AirPodsModel.AIRPODS_PRO_3, setOf(battery), now)[2]
+            assertFalse(cell.live)
+            assertFalse(cell.charging)
+            assertNull(cell.level)
+            assertNull(cell.ageSeconds)
+        }
+        assertFalse(islandBatteryCells(AirPodsModel.AIRPODS_PRO_3, emptySet(), now)[2].live)
+        val duplicate = islandBatteryCells(AirPodsModel.AIRPODS_PRO_3, setOf(recent, recent.copy(level = 66)), now)[2]
+        assertFalse(duplicate.live)
+        assertNull(duplicate.level)
+    }
+
     @Test fun explicitMissingComponentKeepsPercentageButCannotClaimCharging() {
         val cells = islandBatteryCells(AirPodsModel.AIRPODS_PRO_3, setOf(
             Battery(BatteryComponent.LEFT, 0, BatteryStatus.NOT_CHARGING, 10_000),

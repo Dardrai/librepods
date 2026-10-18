@@ -49,15 +49,14 @@ fun IslandCompactSizeAndPositionRoute(
     val context = LocalContext.current
     val islandWindow = (context.applicationContext as LibrePodsApplication).islandWindow // I know, not a good way. TODO
 
-    val previousState = islandWindow.islandState
+    val previousState = remember(islandWindow) { islandWindow.islandState }
 
-    val currentSettings = settings.islandSettings
+    val currentSettings = remember { settings.islandSettings }
 
-    DisposableEffect(Unit) {
+    DisposableEffect(islandWindow) {
         onDispose {
-            if (previousState != islandWindow.islandState) {
-                islandWindow.changeState(previousState)
-            }
+            if (previousState == IslandState.CLOSE) islandWindow.close()
+            else islandWindow.show(forcedState = previousState)
         }
     }
 
@@ -85,7 +84,7 @@ fun IslandCompactSizeAndPositionRoute(
             )
         },
         hideIsland = {
-            islandWindow.changeState(previousState)
+            islandWindow.close()
         }
     )
 }

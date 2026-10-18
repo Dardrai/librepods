@@ -15,13 +15,13 @@ data class AudioSourcePacket(
     override val type: AACPPacketType = AACPPacketType.MESSAGE
     override val service: Byte = 0x04
 
-    override val opcode = MessageOpcode.STEM_PRESS
+    override val opcode = MessageOpcode.AUDIO_SOURCE
 
     companion object {
         fun parse(
             packet: ByteArray,
         ): AudioSourcePacket {
-            if (packet.size < 9) {
+            if (packet.size < 13) {
                 throw IllegalArgumentException("Data array too short to parse Audio Source Response")
             }
 

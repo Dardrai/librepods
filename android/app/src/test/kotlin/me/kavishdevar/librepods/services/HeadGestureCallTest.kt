@@ -37,17 +37,21 @@ class HeadGestureCallTest {
     private val telecom = mock(TelecomManager::class.java)
     private val settings = MutableStateFlow(AppleSettings(headGesturesEnabled = false))
     private var gesture: ((Boolean) -> Unit)? = null
+    private val address = MacAddress("00:11:22:33:44:55")
+    private val connections = MutableStateFlow(ConnectionState.CONNECTED)
+    private val states = MutableStateFlow(AppleState(componentState = setOf(
+        DeviceComponentState(DeviceComponent.LEFT, ComponentStatus.IN_EAR))))
 
     init {
+        `when`(device.macAddress).thenReturn(address)
         `when`(device.settings).thenReturn(settings)
-        `when`(device.connectionState).thenReturn(MutableStateFlow(ConnectionState.CONNECTED))
-        `when`(device.state).thenReturn(MutableStateFlow(AppleState(componentState = setOf(
-            DeviceComponentState(DeviceComponent.LEFT, ComponentStatus.IN_EAR)))))
+        `when`(device.connectionState).thenReturn(connections)
+        `when`(device.state).thenReturn(states)
         doAnswer { invocation -> gesture = invocation.getArgument(0); null }
             .`when`(device).detectHeadGestures(anyGesture())
         @Suppress("UNCHECKED_CAST")
         val devices = field("_devices").get(service) as MutableStateFlow<Map<MacAddress, Device<*, *, *>>>
-        devices.value = mapOf(MacAddress("00:11:22:33:44:55") to device)
+        devices.value = mapOf(address to device)
         Shadow.extract<ShadowContextImpl>(service.baseContext).setSystemService(Context.TELECOM_SERVICE, telecom)
     }
 
@@ -64,7 +68,7 @@ class HeadGestureCallTest {
         callback(true)
         callback(false)
         verifyNoInteractions(telecom)
-        verify(device, never()).stopHeadTracking()
+        verify(device).stopHeadTracking()
     }
 
     @Suppress("DEPRECATION")
@@ -90,6 +94,56 @@ class HeadGestureCallTest {
         }
         verifyNoInteractions(telecom)
         verify(device, times(2)).stopHeadTracking()
+    }
+
+    @Test fun disconnectedRemovedOrReplacedDevicesCannotUseQueuedGestures() {
+        settings.value = settings.value.copy(headGesturesEnabled = true)
+        for (change in listOf<() -> Unit>(
+            { connections.value = ConnectionState.DISCONNECTED },
+            { states.value = states.value.copy(componentState = emptySet()) },
+            {
+                @Suppress("UNCHECKED_CAST")
+                val devices = field("_devices").get(service) as MutableStateFlow<Map<MacAddress, Device<*, *, *>>>
+                devices.value = mapOf(address to mock(AppleDevice::class.java))
+            }
+        )) {
+            connections.value = ConnectionState.CONNECTED
+            states.value = states.value.copy(componentState = setOf(
+                DeviceComponentState(DeviceComponent.LEFT, ComponentStatus.IN_EAR)))
+            ringing()
+            val callback = checkNotNull(gesture)
+            change()
+            callback(true)
+            callback(false)
+        }
+        verifyNoInteractions(telecom)
+        verify(device, times(3)).stopHeadTracking()
+    }
+
+    @Suppress("DEPRECATION")
+    @Test fun anOldCallbackCannotActDuringANewCallWithTheSameDevice() {
+        settings.value = settings.value.copy(headGesturesEnabled = true)
+        ringing()
+        val old = checkNotNull(gesture)
+        (field("telephonyCallback").get(service) as TelephonyCallback.CallStateListener)
+            .onCallStateChanged(TelephonyManager.CALL_STATE_IDLE)
+        ringing()
+        old(true)
+        verifyNoInteractions(telecom)
+        checkNotNull(gesture)(true)
+        verify(telecom).acceptRingingCall(VideoProfile.STATE_AUDIO_ONLY)
+    }
+
+    @Test fun callEndStopsTheOriginalOwnerAfterItHasAlreadyDisconnectedAndLeftTheEar() {
+        settings.value = settings.value.copy(headGesturesEnabled = true)
+        ringing()
+        connections.value = ConnectionState.DISCONNECTED
+        states.value = states.value.copy(componentState = emptySet())
+        (field("telephonyCallback").get(service) as TelephonyCallback.CallStateListener)
+            .onCallStateChanged(TelephonyManager.CALL_STATE_IDLE)
+        verify(device).stopHeadTracking()
+        checkNotNull(gesture)(false)
+        verifyNoInteractions(telecom)
     }
 
     private fun ringing() = (field("telephonyCallback").get(service) as TelephonyCallback.CallStateListener)

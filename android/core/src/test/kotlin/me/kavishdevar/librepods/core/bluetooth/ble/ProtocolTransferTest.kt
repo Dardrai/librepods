@@ -88,6 +88,22 @@ class ProtocolTransferTest {
         }
     }
 
+    @Test fun unknownBatteryStatusRetainsOnlyAPreviouslyKnownPercentageWithoutRenewingIt() {
+        val known = Battery(BatteryComponent.CASE, 60, BatteryStatus.CHARGING, 1000)
+        val unknown = BatteryInfoPacket.parse(batteryPacket(row(8, 0, 0))).batteries
+        val merged = mergeBatteryReports(setOf(known), unknown).single()
+        assertEquals(known.copy(status = BatteryStatus.DISCONNECTED, present = false), merged)
+        assertFalse(merged.isLive(1001))
+        assertEquals(unknown, mergeBatteryReports(setOf(known), unknown, retainUnavailable = false))
+        assertEquals(unknown, mergeBatteryReports(emptySet(), unknown))
+        val unobserved = Battery(BatteryComponent.CASE, 0, BatteryStatus.DISCONNECTED)
+        assertEquals(unknown, mergeBatteryReports(setOf(unobserved), unknown))
+        val previousUnknown = Battery(BatteryComponent.CASE, 0, BatteryStatus.UNKNOWN, 500)
+        assertEquals(unknown, mergeBatteryReports(setOf(previousUnknown), unknown))
+        val fresh = Battery(BatteryComponent.CASE, 59, BatteryStatus.NOT_CHARGING, 2000)
+        assertEquals(setOf(fresh), mergeBatteryReports(setOf(merged), setOf(fresh)))
+    }
+
     @Test fun keyRecordsValidateWholeResponseWithoutSignedLengthOrDuplicateConfusion() {
         fun keyRecord(type: Int, size: Int = 16) = byteArrayOf(type.toByte(), (type shr 8).toByte(),
             size.toByte(), (size shr 8).toByte()) + ByteArray(size) { (it + 1).toByte() }

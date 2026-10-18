@@ -57,13 +57,12 @@ fun IslandSettingsRoute(
     val context = LocalContext.current
     val islandWindow = (context.applicationContext as LibrePodsApplication).islandWindow
 
-    val previousState = islandWindow.islandState
+    val previousState = remember(islandWindow) { islandWindow.islandState }
 
-    DisposableEffect(Unit) {
+    DisposableEffect(islandWindow) {
         onDispose {
-            if (previousState != islandWindow.islandState) {
-                islandWindow.changeState(previousState)
-            }
+            if (previousState == IslandState.CLOSE) islandWindow.close()
+            else islandWindow.show(forcedState = previousState)
         }
     }
 
@@ -109,7 +108,7 @@ fun IslandSettingsRoute(
             )
         },
         hideIsland = {
-            islandWindow.changeState(previousState)
+            islandWindow.close()
         }
     )
 }

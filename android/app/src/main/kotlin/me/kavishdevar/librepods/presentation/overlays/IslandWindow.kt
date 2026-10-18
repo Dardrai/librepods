@@ -125,6 +125,7 @@ class IslandWindow(
     private var batteryNow by mutableStateOf(System.currentTimeMillis())
     private var effectiveSettings by mutableStateOf(appSettings.islandSettings)
     private var cameraPadding by mutableIntStateOf(0)
+    private var maximumHeight by mutableIntStateOf(Int.MAX_VALUE)
     private var cameraCapsuleWidth by mutableFloatStateOf(0f)
     private val ageHandler = Handler(Looper.getMainLooper())
     private val updateAge = object : Runnable {
@@ -460,6 +461,7 @@ class IslandWindow(
             expandedHeight = placement.expandedHeight.toFloat(), compactWidth = placement.compactWidth.toFloat(),
             compactHeight = placement.compactHeight.toFloat())
         cameraPadding = placement.contentTop
+        maximumHeight = placement.maximumHeight
         cameraCapsuleWidth = camera?.let { it.width() + 12 * context.resources.displayMetrics.density }
             ?: placement.compactHeight.toFloat()
         val windowType = if (context is android.accessibilityservice.AccessibilityService) {
@@ -542,7 +544,7 @@ class IslandWindow(
                         onAdaptiveStrengthChanged = this@IslandWindow.onAdaptiveStrengthChanged,
                         model = model, batteries = batteries, batteryNow = batteryNow,
                         paired = ownerAddress != null, nearby = nearby, cameraPaddingPx = cameraPadding,
-                        cameraCapsuleWidthPx = cameraCapsuleWidth,
+                        cameraCapsuleWidthPx = cameraCapsuleWidth, maximumHeightPx = maximumHeight,
                         onConnect = this@IslandWindow.onConnect
                             ?.takeUnless { connectState == IslandConnectState.IDLE && connectActionDeferred }
                             ?.let { { requestConnect() } },

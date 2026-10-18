@@ -23,24 +23,18 @@ package me.kavishdevar.librepods.receivers
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import me.kavishdevar.librepods.bluetooth.hasNearbyDevicesPermissions
 import me.kavishdevar.librepods.services.LibrePodsService
 import kotlin.io.encoding.ExperimentalEncodingApi
 
 class BootReceiver: BroadcastReceiver() {
     override fun onReceive(context: Context?, intent: Intent?) {
-        when (intent?.action) {
-            Intent.ACTION_MY_PACKAGE_REPLACED -> try { context?.startForegroundService(
-                Intent(
-                    context,
-                    LibrePodsService::class.java
-                )
-            ) } catch (e: Exception) { e.printStackTrace() }
-            Intent.ACTION_BOOT_COMPLETED -> try { context?.startForegroundService(
-                Intent(
-                    context,
-                    LibrePodsService::class.java
-                )
-            ) } catch (e: Exception) { e.printStackTrace() }
+        if (context == null || !hasNearbyDevicesPermissions(context)) return
+        if (intent?.action != Intent.ACTION_MY_PACKAGE_REPLACED && intent?.action != Intent.ACTION_BOOT_COMPLETED) return
+        try {
+            context.startForegroundService(Intent(context, LibrePodsService::class.java))
+        } catch (error: Exception) {
+            android.util.Log.w("BootReceiver", "Unable to start Bluetooth service", error)
         }
     }
 }

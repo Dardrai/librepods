@@ -23,7 +23,16 @@ pair, local behavior choices and correctly owner-bound BLE keys once. Existing
 rewrite database rows are preserved. Unconfirmed device control values are not
 migrated as device reports. The Android Bluetooth bond stays with Android.
 
-The current fork version is `2.0.0-alpha.1-pixel38`, code `200000123`.
+The current fork version is `2.0.0-alpha.1-pixel41`, code `200000126`.
+
+Bluetooth startup rechecks current Nearby devices permissions, including boot
+and upgrade entry points. Missing grants return to the existing permissions step.
+Screen changes retain a healthy nearby scan, and actual scan registrations obey a
+rolling restart limit. Independent device-state changes are handled independently.
+Call gestures are bound to their current connected, worn device and stop when that
+owner retires. Heart-rate alerts respect the enabled setting and measurement state.
+Island customization restores its entry values; short displays retain a bounded,
+scrollable payload without changing the normal portrait animation.
 
 Protocol formats, hearing-mode safety and the current profile-reading limitation
 are documented in [PROTOCOL.md](PROTOCOL.md).
@@ -43,6 +52,14 @@ Tapping a compact nearby island expands it to reach the action. Unpairing,
 Bluetooth shutdown, calls and microphone work prevent obsolete or conflicting
 requests. The existing recovery guard preserves other connected Android audio
 devices and does not change profile policies. Shizuku must already be authorized.
+
+Case readings can refresh from newer authenticated BLE reports while the earbuds
+are connected. With battery caching enabled, unknown or unavailable reports keep
+the last valid percentage and its original age, without a charging indication.
+The island keeps a recently observed case percentage current for up to 90 seconds
+from its original report when the buds are removed, without retaining a charging
+indication. It then shows the original age. One reserved age line keeps live, mixed
+and cached readings from shifting the content.
 
 Pixel30 was installed in place on the Pixel 10 Pro XL. The user confirmed that
 Connect takes the AirPods back from another host, but reported a slow connection

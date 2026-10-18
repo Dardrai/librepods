@@ -66,12 +66,14 @@ data class Battery(
         now >= observedAt && now - observedAt < 90_000
 }
 
-/** Omitted components keep their age; explicitly unavailable components retain only their last percentage. */
+/** Omitted components keep their age; unavailable or unknown reports retain only their last known percentage. */
 fun mergeBatteryReports(previous: Set<Battery>, reported: Set<Battery>, retainUnavailable: Boolean = true): Set<Battery> {
     val merged = previous.associateBy { it.component }.toMutableMap()
     for (battery in reported) {
         val old = merged[battery.component]
-        merged[battery.component] = if (!battery.present && retainUnavailable && old != null)
+        merged[battery.component] = if ((!battery.present || battery.status == BatteryStatus.UNKNOWN) &&
+            retainUnavailable && old != null && old.status != BatteryStatus.UNKNOWN &&
+            old.level in 0..100 && old.observedAt != null)
             old.copy(status = BatteryStatus.DISCONNECTED, present = false) else battery
     }
     return merged.values.toSet()

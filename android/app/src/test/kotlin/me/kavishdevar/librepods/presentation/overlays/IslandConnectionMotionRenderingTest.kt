@@ -3,6 +3,8 @@ package me.kavishdevar.librepods.presentation.overlays
 import android.animation.ValueAnimator
 import android.app.Application
 import android.graphics.Bitmap
+import android.graphics.Insets
+import android.graphics.RectF
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.requiredSize
@@ -28,13 +30,16 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.printToString
 import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import me.kavishdevar.librepods.core.devices.AirPodsModel
 import me.kavishdevar.librepods.core.devices.Battery
 import me.kavishdevar.librepods.core.devices.BatteryComponent
 import me.kavishdevar.librepods.core.devices.BatteryStatus
+import me.kavishdevar.librepods.data.app.IslandBatteryStyle
 import me.kavishdevar.librepods.data.app.IslandSettings
 import me.kavishdevar.librepods.presentation.design.LibrePodsTheme
 import org.junit.Assert.assertEquals
@@ -63,6 +68,11 @@ class IslandConnectionMotionRenderingTest {
     private val settings = mutableStateOf(IslandSettings(expandedWidth = 1248f, expandedHeight = 630f,
         compactWidth = 300f, compactHeight = 132f))
     private val fontScale = mutableStateOf(1f)
+    private val batteryNow = mutableStateOf(1_000L)
+    private val batteries = mutableStateOf(setOf(
+        Battery(BatteryComponent.LEFT, 80, BatteryStatus.CHARGING, 1_000L),
+        Battery(BatteryComponent.RIGHT, 75, BatteryStatus.CHARGING, 1_000L),
+        Battery(BatteryComponent.CASE, 90, BatteryStatus.NOT_CHARGING, 1_000L)))
     private var clicks = 0
     private var originalMotionScale = 1f
 
@@ -213,22 +223,116 @@ class IslandConnectionMotionRenderingTest {
         capture("small-font-connecting")
     }
 
-    private fun render() {
+    @Test fun batteryFreshnessAndConnectionUpdatesKeepOneStableLayoutAtPixelSize() {
+        batteryFreshnessKeepsGeometry(1f)
+    }
+
+    @Test fun largerTextKeepsTheSameLayoutAcrossLiveMixedCachedAndMissingReadings() {
+        batteryFreshnessKeepsGeometry(1.3f)
+    }
+
+    @Test fun twoHundredPercentTextKeepsVisibleContentAndFullSizeActionsAcrossFreshnessChanges() {
+        batteryFreshnessKeepsGeometry(2f)
+    }
+
+    @Test @Config(qualifiers = "w998dp-h360dp-xxhdpi")
+    fun shortLandscapeKeepsTheShellOnScreenAndScrollsLargeTextControlsIntoView() {
+        settings.value = settings.value.copy(showListeningModeControl = true)
+        fontScale.value = 2f
+        val placement = islandPlacement(android.graphics.Rect(0, 0, 2992, 960), Insets.of(0, 0, 0, 72),
+            RectF(1472f, 18f, 1520f, 114f), 3f, settings.value)
+        settings.value = settings.value.copy(expandedWidth = placement.expandedWidth.toFloat(),
+            expandedHeight = placement.expandedHeight.toFloat())
+        render(maximumHeight = placement.maximumHeight, hostHeight = (placement.maximumHeight / 3f).dp,
+            cameraTop = placement.contentTop)
+        val shell = taggedBounds("island-shell")
+        assertTrue("The final content minimum must respect the available display height",
+            shell.height <= placement.maximumHeight + 0.5f)
+        compose.onNodeWithText(title).assertIsDisplayed()
+        val button = taggedBounds("island-connect")
+        assertTrue("Large text cannot shrink the Connect target", button.width >= 144f && button.height >= 144f)
+        assertTrue("The header must remain camera-safe", button.top >= shell.top + placement.contentTop - 0.5f)
+        capture("landscape-large-text-top")
+        compose.onNodeWithTag("island-listening-controls").performScrollTo().assertIsDisplayed()
+        val controls = taggedBounds("island-listening-controls")
+        assertTrue("Listening controls must scroll above the bottom inset", controls.bottom <= shell.bottom + 0.5f)
+        assertTrue("Listening controls must not scroll behind the camera", controls.top >= shell.top + placement.contentTop - 0.5f)
+        assertSameBounds(shell, taggedBounds("island-shell"))
+        capture("landscape-large-text-controls")
+        compose.onNodeWithText(title).performScrollTo().assertIsDisplayed()
+        compose.onNodeWithTag("island-connect").assertIsDisplayed()
+    }
+
+    private fun batteryFreshnessKeepsGeometry(scale: Float) {
+        fontScale.value = scale
+        batteryNow.value = 600_000L
+        val current = batteries.value.map { it.copy(observedAt = batteryNow.value) }.toSet()
+        val stages = linkedMapOf(
+            "live" to current,
+            "case-grace" to current.map { if (it.component == BatteryComponent.CASE)
+                it.copy(status = BatteryStatus.DISCONNECTED, present = false) else it }.toSet(),
+            "mixed" to current.map { if (it.component == BatteryComponent.CASE) it.copy(observedAt = 1_000L) else it }.toSet(),
+            "one-bud-in-case" to current.map { if (it.component == BatteryComponent.RIGHT)
+                it.copy(status = BatteryStatus.DISCONNECTED, present = false, observedAt = 1_000L) else it }.toSet(),
+            "shared-age" to current.map { it.copy(observedAt = 1_000L) }.toSet(),
+            "different-ages" to current.map { it.copy(observedAt = when (it.component) {
+                BatteryComponent.LEFT -> 300_000L
+                BatteryComponent.RIGHT -> 420_000L
+                else -> 1_000L
+            }) }.toSet(),
+            "missing-case" to current.filterNot { it.component == BatteryComponent.CASE }.toSet(),
+            "missing" to emptySet(),
+        )
+        batteries.value = current
+        render()
+        for (style in listOf(IslandBatteryStyle.CIRCLE_TEXT, IslandBatteryStyle.CIRCLE, IslandBatteryStyle.TEXT)) {
+            mutate { settings.value = settings.value.copy(expandedBatteryStyle = style); batteries.value = current; nearby.value = true }
+            advance(240)
+            compose.onNodeWithText(title).assertIsDisplayed()
+            val button = taggedBounds("island-connect")
+            assertTrue("Every text scale needs a complete 48dp action", button.height >= 144f && button.width >= 144f)
+            val baseline = stableBatteryBounds()
+            for ((label, readings) in stages) {
+                mutate { batteries.value = readings; nearby.value = label == "live" }
+                advance(240)
+                val actual = stableBatteryBounds()
+                for ((tag, expected) in baseline) assertSameBounds(expected, actual.getValue(tag), "$scale/$style/$label: $tag")
+                val caption = taggedBounds("island-status")
+                val name = compose.onNodeWithText(title).assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+                val cells = listOf("left", "right", "case").map { taggedBounds("island-battery-$it") }
+                assertTrue("Freshness must not move the status into the name", caption.bottom <= name.top + 0.5f)
+                assertTrue("The header must remain separate from the batteries", name.bottom <= cells.minOf { it.top } + 0.5f)
+                if (label == "live") {
+                    compose.onNodeWithTag("island-connect").assertIsDisplayed()
+                    val action = taggedBounds("island-connect")
+                    assertTrue("Freshness must preserve a complete 48dp action", action.height >= 144f && action.width >= 144f)
+                }
+                if (style == IslandBatteryStyle.CIRCLE_TEXT) capture("freshness-${scale}x-$label")
+                if (label == "case-grace") compose.onNodeWithContentDescription("Case, 90%, Current").assertExists()
+                if (label == "mixed") compose.onNodeWithContentDescription("Case, 90%, Cached, Last seen 9m ago").assertExists()
+                if (label == "missing-case") compose.onNodeWithContentDescription("Case, —, Unavailable").assertExists()
+            }
+        }
+    }
+
+    private fun stableBatteryBounds(): Map<String, Rect> =
+        (listOf("island-shell", "island-header", "island-status", "island-artwork", "island-action-slot") +
+            listOf("left", "right", "case").map { "island-battery-$it" }).associateWith { taggedBounds(it) } +
+            ("title" to bounds(title))
+
+    private fun render(maximumHeight: Int = Int.MAX_VALUE, hostHeight: Dp = 310.dp, cameraTop: Int = 150) {
         compose.setContent {
             CompositionLocalProvider(LocalDensity provides Density(3f, fontScale.value)) {
                 LibrePodsTheme(darkTheme = true) {
-                    Box(Modifier.requiredSize(416.dp, 310.dp).background(Color(0xFF666666))
+                    Box(Modifier.requiredSize(416.dp, hostHeight).background(Color(0xFF666666))
                         .testTag("connection-motion-host"), contentAlignment = Alignment.TopCenter) {
                         IslandContent(name = title, type = IslandType.CONNECTED, batteryLevel = 80,
                             reversed = false, otherDeviceName = null, islandSettings = settings.value,
                             islandState = IslandState.EXPANDED, showOffListeningMode = false,
                             noiseControlModeValue = 3, onNoiseControlModeChanged = {}, onAdaptiveStrengthChanged = {},
                             model = AirPodsModel.AIRPODS_PRO_3,
-                            batteries = setOf(Battery(BatteryComponent.LEFT, 80, BatteryStatus.CHARGING, 1_000L),
-                                Battery(BatteryComponent.RIGHT, 75, BatteryStatus.CHARGING, 1_000L),
-                                Battery(BatteryComponent.CASE, 90, BatteryStatus.NOT_CHARGING, 1_000L)),
-                            batteryNow = 1_000L, paired = true, nearby = nearby.value,
-                            cameraPaddingPx = 150, cameraCapsuleWidthPx = 132f,
+                            batteries = batteries.value, batteryNow = batteryNow.value, paired = true, nearby = nearby.value,
+                            cameraPaddingPx = cameraTop, cameraCapsuleWidthPx = 132f, maximumHeightPx = maximumHeight,
                             onConnect = { clicks++ }, connectState = state.value)
                     }
                 }
@@ -257,11 +361,11 @@ class IslandConnectionMotionRenderingTest {
         ValueAnimator::class.java.getDeclaredMethod("setDurationScale", Float::class.javaPrimitiveType)
             .apply { isAccessible = true }.invoke(null, scale)
     }
-    private fun assertSameBounds(expected: Rect, actual: Rect) {
-        assertEquals(expected.left, actual.left, 0.5f)
-        assertEquals(expected.top, actual.top, 0.5f)
-        assertEquals(expected.right, actual.right, 0.5f)
-        assertEquals(expected.bottom, actual.bottom, 0.5f)
+    private fun assertSameBounds(expected: Rect, actual: Rect, message: String? = null) {
+        assertEquals(message, expected.left, actual.left, 0.5f)
+        assertEquals(message, expected.top, actual.top, 0.5f)
+        assertEquals(message, expected.right, actual.right, 0.5f)
+        assertEquals(message, expected.bottom, actual.bottom, 0.5f)
     }
 
     private fun capture(label: String): Bitmap {

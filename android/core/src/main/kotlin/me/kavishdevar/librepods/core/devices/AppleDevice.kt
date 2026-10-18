@@ -91,12 +91,13 @@ class AppleDevice(
             val keepLive = connectionState.value == ConnectionState.CONNECTED && aacp.captureAudioSocket() != null
             val now = System.currentTimeMillis()
             _state.update { state ->
-                // shortcut: keep all live slots; add source arbitration if live BLE refresh is needed during AACP.
                 val reported = if (!keepLive) batteries else batteries.filter { incoming ->
                     incoming.isLive(now) && incoming.status != BatteryStatus.UNKNOWN &&
                         incoming.level in 0..100 && state.battery.none { old ->
                             old.component == incoming.component && old.level in 0..100 &&
-                                old.status != BatteryStatus.UNKNOWN && old.isLive(now)
+                                old.status != BatteryStatus.UNKNOWN && old.isLive(now) &&
+                                // The case reports independently of the connected earbuds over BLE.
+                                (incoming.component != BatteryComponent.CASE || incoming.observedAt!! <= old.observedAt!!)
                         }
                 }.toSet()
                 state.copy(battery = mergeBatteryReports(state.battery, reported,
@@ -226,6 +227,7 @@ class AppleDevice(
     }
 
     override fun disconnect() {
+        gestureDetector.stopDetection()
         _connectionState.update {
             ConnectionState.DISCONNECTING
         }
@@ -247,6 +249,7 @@ class AppleDevice(
     }
 
     internal fun onAacpDisconnected() {
+        gestureDetector.stopDetection()
         recordingHandler?.invoke(null)
         _connectionState.value = ConnectionState.DISCONNECTED
     }

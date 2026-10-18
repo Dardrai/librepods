@@ -76,6 +76,42 @@ class NearbyBatteryHandoffTest {
         } finally { device.aacp.disconnect(); socket.close() }
     }
 
+    @Test fun connectedCaseCanUseNewerOwnedBleWithOneUnavailableBudWhileTheLiveBudKeepsPriority() {
+        val device = createDevice()
+        val socket = Shadow.newInstanceOf(BluetoothSocket::class.java).apply { connect() }
+        bind(device, socket)
+        val now = System.currentTimeMillis()
+        val left = Battery(BatteryComponent.LEFT, 95, BatteryStatus.NOT_CHARGING, now)
+        val right = Battery(BatteryComponent.RIGHT, 0, BatteryStatus.DISCONNECTED)
+        val oldCase = Battery(BatteryComponent.CASE, 65, BatteryStatus.CHARGING, now - 89_000)
+        device.loadInitialState(AppleState(battery = setOf(left, right, oldCase)), AppleSettings(), AppleMetadata())
+        try {
+            val freshCase = Battery(BatteryComponent.CASE, 64, BatteryStatus.NOT_CHARGING, now - 100)
+            device.receiveNearbyBattery(setOf(Battery(BatteryComponent.LEFT, 80, BatteryStatus.CHARGING, now),
+                right, freshCase))
+            val refreshed = device.state.value.battery.associateBy { it.component }
+            assertEquals(left, refreshed[BatteryComponent.LEFT])
+            assertEquals(right, refreshed[BatteryComponent.RIGHT])
+            assertEquals(freshCase, refreshed[BatteryComponent.CASE])
+            assertTrue("Fresh case observations must survive the old reading's expiry", freshCase.isLive(now + 1000))
+            for (rejected in listOf(oldCase, freshCase.copy(level = 1),
+                freshCase.copy(observedAt = now + 60_000), freshCase.copy(observedAt = now - 100_000),
+                Battery(BatteryComponent.CASE, 0, BatteryStatus.DISCONNECTED),
+                Battery(BatteryComponent.CASE, 0, BatteryStatus.UNKNOWN, now))) {
+                device.receiveNearbyBattery(setOf(rejected))
+                assertEquals(freshCase, device.state.value.battery.first { it.component == BatteryComponent.CASE })
+            }
+            // A real unavailable control report still invalidates charging/presence without losing the value or its age.
+            device.aacp.processPacket(byteArrayOf(4, 0, 4, 0, 4, 0, 1, 8, 1, -1, 4, 1), socket)
+            val unavailable = device.state.value.battery.first { it.component == BatteryComponent.CASE }
+            assertEquals(freshCase.copy(status = BatteryStatus.DISCONNECTED, present = false), unavailable)
+            assertFalse(unavailable.isLive(now))
+            val reopenedCase = freshCase.copy(level = 63, observedAt = now)
+            device.receiveNearbyBattery(setOf(reopenedCase))
+            assertEquals(reopenedCase, device.state.value.battery.first { it.component == BatteryComponent.CASE })
+        } finally { device.aacp.disconnect(); socket.close() }
+    }
+
     @Test fun realServiceReplayRequiresCurrentOwnerBondKeysTransportAndLifetimeAndUsesOnlyLatestFrame() {
         ShadowSystemClock.advanceBy(Duration.ofSeconds(2))
         val context = RuntimeEnvironment.getApplication()

@@ -20,7 +20,6 @@
 
 package me.kavishdevar.librepods.utils
 
-import android.content.SharedPreferences
 import android.media.AudioAttributes
 import android.media.AudioManager
 import android.media.AudioPlaybackConfiguration
@@ -42,9 +41,7 @@ object MediaController {
     private lateinit var audioManager: AudioManager
     var iPausedTheMedia = false
     var userPlayedTheMedia = false
-    private lateinit var sharedPreferences: SharedPreferences
     private val handler = Handler(Looper.getMainLooper())
-    private lateinit var preferenceChangeListener: SharedPreferences.OnSharedPreferenceChangeListener
 
     var pausedWhileTakingOver = false
     var pausedForOtherDevice = false
@@ -61,10 +58,6 @@ object MediaController {
         Log.d("MediaController", "Cleared pausedForOtherDevice after timeout, resuming normal playback monitoring")
     }
 
-    private var relativeVolume: Boolean = false
-    private var conversationAwarenessVolume: Int = 2
-    private var conversationAwarenessPauseMusic: Boolean = false
-
     var recentlyLostOwnership: Boolean = false
 
     private var lastPlayWithReplay: Boolean = false
@@ -72,33 +65,13 @@ object MediaController {
 
     private var localMac: String? = null
 
-    fun initialize(audioManager: AudioManager, sharedPreferences: SharedPreferences, localMac: String?) {
+    fun initialize(audioManager: AudioManager, localMac: String?) {
         this.localMac = localMac
         if (this::audioManager.isInitialized) {
             return
         }
         this.audioManager = audioManager
-        this.sharedPreferences = sharedPreferences
         Log.d("MediaController", "Initializing MediaController")
-        relativeVolume = sharedPreferences.getBoolean("relative_conversation_awareness_volume", false)
-        conversationAwarenessVolume = sharedPreferences.getInt("conversation_awareness_volume", (audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC) / 0.4).toInt())
-        conversationAwarenessPauseMusic = sharedPreferences.getBoolean("conversation_awareness_pause_music", false)
-
-        preferenceChangeListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
-            when (key) {
-                "relative_conversation_awareness_volume" -> {
-                    relativeVolume = sharedPreferences.getBoolean("relative_conversation_awareness_volume", false)
-                }
-                "conversation_awareness_volume" -> {
-                    conversationAwarenessVolume = sharedPreferences.getInt("conversation_awareness_volume", (audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC) * 0.4).toInt())
-                }
-                "conversation_awareness_pause_music" -> {
-                    conversationAwarenessPauseMusic = sharedPreferences.getBoolean("conversation_awareness_pause_music", false)
-                }
-            }
-        }
-
-        sharedPreferences.registerOnSharedPreferenceChangeListener(preferenceChangeListener)
 
         audioManager.registerAudioPlaybackCallback(cb, null)
     }

@@ -110,7 +110,7 @@ fun HeartRateScreen(
                 }
                 if (LocalDesignSystem.current == DesignSystem.Material) {
                     FilledTonalIconToggleButton(
-                        checked = state.hrmState == BuddyState.ACTIVE,
+                        checked = state.hrmState != BuddyState.INACTIVE,
                         onCheckedChange = { if (it) startHr() else stopHr() },
                         modifier = Modifier
                             .minimumInteractiveComponentSize()

@@ -20,6 +20,8 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
@@ -84,6 +86,7 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.semantics
@@ -100,6 +103,10 @@ import me.kavishdevar.librepods.data.app.resolve
 import me.kavishdevar.librepods.presentation.components.apple.NoiseControlSettings
 import me.kavishdevar.librepods.presentation.icons.LocalIcons
 import java.util.concurrent.TimeUnit
+
+private val islandBatteryLabelLineHeight = 16.sp
+private val islandBatteryAgeLineHeight = 14.sp
+private val islandBatteryPercentageLineHeight = 24.sp
 
 internal fun islandInitialSize(settings: IslandSettings, state: IslandState, motionEnabled: Boolean,
     cameraCapsuleWidth: Float = settings.compactHeight): Pair<Float, Float> = when {
@@ -174,6 +181,7 @@ fun IslandContent(
     paired: Boolean = false,
     nearby: Boolean = false,
     cameraPaddingPx: Int = 0,
+    maximumHeightPx: Int = Int.MAX_VALUE,
     cameraCapsuleWidthPx: Float = islandSettings.compactHeight,
     statusText: String? = null,
     transitionGeneration: Long = 0L,
@@ -188,9 +196,33 @@ fun IslandContent(
     val displayBatteryLevel = if (paired) compactCell?.level else batteryLevel
     val batteryLive = !paired || compactCell?.live == true
     val spec = AirPodsSpecs.getSpec(model)
+    val captionLineHeight = maxOf(MaterialTheme.typography.bodyMedium.lineHeight.value,
+        islandSettings.fontSize * 0.65f * 1.4f).sp
+    val titleLineHeight = maxOf(MaterialTheme.typography.titleLarge.lineHeight.value,
+        islandSettings.fontSize * 1.4f).sp
+    val headerMinimum = with(density) { maxOf(80.dp.toPx(), titleLineHeight.toPx() +
+        if (islandSettings.fontSize > 15) captionLineHeight.toPx() else 0f).toDp() }
+    val separateBatteries = paired && islandSettings.expandedBatteryStyle != IslandBatteryStyle.NONE
+    // The endpoint fits the largest supported payload, independent of reading freshness or connection status.
+    val minimumExpandedHeight = with(density) {
+        val batteryStyle = islandSettings.expandedBatteryStyle
+        val ringHeight = if (batteryStyle == IslandBatteryStyle.CIRCLE || batteryStyle == IslandBatteryStyle.CIRCLE_TEXT) 28.dp.toPx() else 0f
+        val percentageHeight = if (batteryStyle == IslandBatteryStyle.TEXT || batteryStyle == IslandBatteryStyle.CIRCLE_TEXT)
+            islandBatteryPercentageLineHeight.toPx() else 0f
+        val batteriesHeight = if (separateBatteries) maxOf(ringHeight, percentageHeight) + 4.dp.toPx() +
+            islandBatteryLabelLineHeight.toPx() + 6.dp.toPx() + islandBatteryAgeLineHeight.toPx() else 0f
+        val controlsHeight = if (islandSettings.showListeningModeControl) headerMinimum.toPx() else 0f
+        val gaps = (if (separateBatteries) 12.dp.toPx() else 0f) +
+            if (islandSettings.showListeningModeControl) 12.dp.toPx() else 0f
+        maxOf(16.dp.toPx(), cameraPaddingPx.toFloat()) + 16.dp.toPx() + headerMinimum.toPx() + batteriesHeight + controlsHeight + gaps
+    }
+    val naturalExpandedHeight = maxOf(islandSettings.expandedHeight, kotlin.math.ceil(minimumExpandedHeight))
+    val expandedHeight = naturalExpandedHeight.coerceAtMost(maximumHeightPx.coerceAtLeast(1).toFloat())
+    val scrollExpandedContent = expandedHeight < naturalExpandedHeight
+    val bodyScroll = rememberScrollState()
 
     val initialMotionEnabled = remember { ValueAnimator.areAnimatorsEnabled() }
-    val initialSize = remember { islandInitialSize(islandSettings, islandState, initialMotionEnabled, cameraCapsuleWidthPx) }
+    val initialSize = remember { islandInitialSize(islandSettings.copy(expandedHeight = expandedHeight), islandState, initialMotionEnabled, cameraCapsuleWidthPx) }
     val animWidth = remember { Animatable(initialSize.first) }
     val animHeight = remember { Animatable(initialSize.second) }
     val animRadius = remember { Animatable(if (!initialMotionEnabled && islandState == IslandState.EXPANDED) islandSettings.expandedBorderRadius else islandSettings.compactBorderRadius) }
@@ -198,7 +230,7 @@ fun IslandContent(
     var contentState by remember { mutableStateOf(if (islandState == IslandState.COMPACT) IslandState.COMPACT else IslandState.EXPANDED) }
     val expandedContent = contentState == IslandState.EXPANDED
     val payloadWidth = if (expandedContent) islandSettings.expandedWidth else islandSettings.compactWidth
-    val payloadHeight = if (expandedContent) islandSettings.expandedHeight else islandSettings.compactHeight
+    val payloadHeight = if (expandedContent) expandedHeight else islandSettings.compactHeight
     val capsuleWidth = minOf(islandSettings.compactWidth, maxOf(islandSettings.compactHeight, cameraCapsuleWidthPx))
     val revealProgress = if (expandedContent)
         ((animHeight.value - islandSettings.compactHeight) / (payloadHeight - islandSettings.compactHeight).coerceAtLeast(1f)).coerceIn(0f, 1f)
@@ -216,7 +248,7 @@ fun IslandContent(
         transitionGeneration,
         cameraCapsuleWidthPx,
         islandSettings.expandedWidth,
-        islandSettings.expandedHeight,
+        expandedHeight,
         islandSettings.compactWidth,
         islandSettings.compactHeight,
         islandSettings.expandedBorderRadius,
@@ -225,7 +257,7 @@ fun IslandContent(
         islandSettings.compactBorderWidth
     ) {
         val (targetW, targetH) = when (islandState) {
-            IslandState.EXPANDED -> islandSettings.expandedWidth to islandSettings.expandedHeight
+            IslandState.EXPANDED -> islandSettings.expandedWidth to expandedHeight
             IslandState.COMPACT -> islandSettings.compactWidth to islandSettings.compactHeight
             IslandState.CLOSE -> capsuleWidth to islandSettings.compactHeight
         }
@@ -264,7 +296,9 @@ fun IslandContent(
     val scale = remember { Animatable(0f) }
 
     val widthDp = with(density) { animWidth.value.coerceAtLeast(1f).toDp() * (1f + scale.value * if (islandState == IslandState.EXPANDED) 0.01f else 0.1f) }
-    val heightDp = with(density) { animHeight.value.coerceAtLeast(1f).toDp() * (1f + scale.value * if (islandState == IslandState.EXPANDED) 0.01f else 0.05f) }
+    val heightDp = with(density) { (animHeight.value.coerceAtLeast(1f) *
+        (1f + scale.value * if (islandState == IslandState.EXPANDED) 0.01f else 0.05f))
+        .coerceAtMost(maximumHeightPx.coerceAtLeast(1).toFloat()).toDp() }
     val borderWidthDp = with(density) { animBorderWidth.value.toDp() }
 
     val padding = if (expandedContent) 16.dp else 8.dp
@@ -288,6 +322,8 @@ fun IslandContent(
         onConnect != null && (nearby || connectState != IslandConnectState.IDLE)
     val reserveConnectAction = paired && type == IslandType.CONNECTED && statusText == null
     val actionIconOnly = with(density) { islandSettings.expandedWidth.toDp() } < 340.dp
+    val actionContentHeight = with(density) { MaterialTheme.typography.labelLarge.lineHeight.toDp() }.coerceAtLeast(20.dp)
+    val actionMinimumHeight = maxOf(48.dp, actionContentHeight + 16.dp)
     val motionEnabled = ValueAnimator.areAnimatorsEnabled()
     val expandConnectLabel = stringResource(R.string.island_show_connection_controls, name)
     val typeText = if (showConnectAction && connectState == IslandConnectState.CONNECTING)
@@ -314,7 +350,7 @@ fun IslandContent(
 
     Box(
         modifier = Modifier
-            .requiredSize(width = widthDp, height = heightDp),
+            .requiredSize(width = widthDp, height = heightDp).testTag("island-shell"),
         contentAlignment = Alignment.Center
     ) {
         Column(
@@ -335,7 +371,8 @@ fun IslandContent(
                         }
                     }
                 }
-                .pointerInput(Unit) {
+                .pointerInput(scrollExpandedContent, expandedContent) {
+                    if (scrollExpandedContent && expandedContent) return@pointerInput
                     detectVerticalDragGestures { _, dragAmount ->
                         if (dragAmount > 0) changeState(IslandState.EXPANDED, true)
                         else changeState(
@@ -358,13 +395,19 @@ fun IslandContent(
                     Column(
                         modifier = Modifier.fillMaxSize()
                             .padding(start = padding, end = padding, bottom = padding,
-                                top = if (expandedContent) maxOf(padding, with(density) { cameraPaddingPx.toDp() }) else padding),
+                                top = if (expandedContent) maxOf(padding, with(density) { cameraPaddingPx.toDp() }) else padding)
+                            .then(if (expandedContent && scrollExpandedContent) Modifier
+                                .testTag("island-scroll-content")
+                                .verticalScroll(bodyScroll)
+                                .height(with(density) { (naturalExpandedHeight - maxOf(padding.toPx(), cameraPaddingPx.toFloat()) - padding.toPx())
+                                    .coerceAtLeast(1f).toDp() }) else Modifier),
                         verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .weight(1f)
+                                .then(if (expandedContent) Modifier.heightIn(min = headerMinimum) else Modifier)
                                 .testTag("island-header")
                                 .then(if (!expandedContent && showConnectAction)
                                     Modifier.combinedClickable(role = Role.Button, onClickLabel = expandConnectLabel,
@@ -458,8 +501,6 @@ fun IslandContent(
                                     .padding(horizontal = 12.dp)
                             ) {
                                     if (islandSettings.fontSize > 15) {
-                                        val captionLineHeight = maxOf(MaterialTheme.typography.bodyMedium.lineHeight.value,
-                                            islandSettings.fontSize * 0.65f * 1.4f).sp
                                         val captionModifier = Modifier.fillMaxWidth().height(with(density) { captionLineHeight.toDp() })
                                             .clipToBounds().testTag("island-status")
                                         val captionContent: @Composable (String) -> Unit = { caption ->
@@ -487,6 +528,7 @@ fun IslandContent(
                                         text = name,
                                         style = MaterialTheme.typography.titleLarge,
                                         fontSize = islandSettings.fontSize.sp,
+                                        lineHeight = titleLineHeight,
                                         color = textColor,
                                         maxLines = 1,
                                         softWrap = false,
@@ -558,7 +600,7 @@ fun IslandContent(
                                         (maxHeight / 2.5f).toSp()
                                     }
                                     Text(
-                                        text = displayBatteryLevel?.toString() ?: "â€”",
+                                        text = displayBatteryLevel?.toString() ?: "\u2014",
                                         style = MaterialTheme.typography.bodyLarge.copy(
                                             fontSize = fontSize,
                                             fontWeight = FontWeight.SemiBold
@@ -572,10 +614,10 @@ fun IslandContent(
                             }
                             if (expandedContent && reserveConnectAction) {
                                 // Connection changes keep the name and artwork in their established positions.
-                                Box(Modifier.width(if (actionIconOnly) 48.dp else 108.dp).heightIn(min = 48.dp)
+                                Box(Modifier.width(if (actionIconOnly) 48.dp else 108.dp).heightIn(min = actionMinimumHeight)
                                     .testTag("island-action-slot"), contentAlignment = Alignment.Center) {
                                     val actionContent: @Composable () -> Unit = {
-                                        IslandConnectButton(name, connectState, textColor, actionIconOnly,
+                                        IslandConnectButton(name, connectState, textColor, actionIconOnly, actionContentHeight,
                                             visible = showConnectAction, motionEnabled = motionEnabled) {
                                             if (showConnectAction && connectState != IslandConnectState.CONNECTING)
                                                 onConnect?.invoke()
@@ -594,14 +636,26 @@ fun IslandContent(
                         if (paired && expandedContent && islandSettings.expandedBatteryStyle != IslandBatteryStyle.NONE) {
                             val commonAge = islandCommonAge(cells)
                             Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                                cells.forEach { cell ->
-                                    IslandBatteryIndicator(cell, islandSettings.expandedBatteryStyle, textColor, Modifier.weight(1f),
-                                        showAge = commonAge == null)
+                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                                    cells.forEach { cell ->
+                                        IslandBatteryIndicator(cell, islandSettings.expandedBatteryStyle, textColor,
+                                            Modifier.weight(1f).testTag("island-battery-${cell.component.name.lowercase()}"))
+                                    }
                                 }
-                            }
-                            if (commonAge != null) Text(stringResource(R.string.island_battery_last_seen, islandAgeText(commonAge)),
-                                color = textColor.copy(alpha = 0.6f), fontSize = 11.sp)
+                                // One age line keeps the header and artwork still when readings become cached.
+                                Box(Modifier.fillMaxWidth().clearAndSetSemantics { }) {
+                                    Text(commonAge?.let { stringResource(R.string.island_battery_last_seen, islandAgeText(it)) } ?: "",
+                                        modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center,
+                                        color = textColor.copy(alpha = 0.6f), fontSize = 11.sp, lineHeight = islandBatteryAgeLineHeight, maxLines = 1)
+                                    if (commonAge == null) Row(Modifier.fillMaxWidth()) {
+                                        cells.forEach { cell ->
+                                            val age = cell.ageSeconds?.takeIf { !cell.live && cell.level != null }
+                                            Text(age?.let { islandAgeText(islandAgeBucket(it)) } ?: "",
+                                                modifier = Modifier.weight(1f), textAlign = TextAlign.Center,
+                                                color = textColor.copy(alpha = 0.5f), fontSize = 11.sp, lineHeight = islandBatteryAgeLineHeight, maxLines = 1)
+                                        }
+                                    }
+                                }
                             }
                         }
 
@@ -610,6 +664,7 @@ fun IslandContent(
                             enter = fadeIn(animationSpec = tween(180, delayMillis = 80)),
                             exit = fadeOut(animationSpec = tween(100)),
                             modifier = Modifier
+                                .testTag("island-listening-controls")
                                 .requiredHeightIn(min = 20.dp, max = 64.dp)
                                 .requiredWidth(with(density) { islandSettings.expandedWidth.toDp() - padding - 12.dp })
                                 .weight(1f)
@@ -633,7 +688,7 @@ fun IslandContent(
 }
 
 @Composable
-private fun IslandConnectButton(name: String, state: IslandConnectState, textColor: Color, iconOnly: Boolean,
+private fun IslandConnectButton(name: String, state: IslandConnectState, textColor: Color, iconOnly: Boolean, contentHeight: Dp,
     visible: Boolean, motionEnabled: Boolean, onClick: () -> Unit) {
     val connecting = state == IslandConnectState.CONNECTING
     val description = stringResource(if (connecting) R.string.island_connecting_device else R.string.island_connect_device, name)
@@ -651,9 +706,8 @@ private fun IslandConnectButton(name: String, state: IslandConnectState, textCol
         ),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 8.dp),
     ) {
-        val density = LocalDensity.current
         val labelModifier = Modifier.fillMaxWidth()
-            .height(with(density) { MaterialTheme.typography.labelLarge.lineHeight.toDp() }.coerceAtLeast(20.dp))
+            .height(contentHeight)
             .testTag("island-connect-content")
         val labelContent: @Composable (String?) -> Unit = { content ->
             Box(modifier = if (content == label) Modifier else Modifier.clearAndSetSemantics { },
@@ -686,15 +740,14 @@ private fun islandAgeText(age: Pair<Long, TimeUnit>): String = when (age.second)
 }
 
 @Composable
-private fun IslandBatteryIndicator(cell: IslandBatteryCell, style: IslandBatteryStyle, textColor: Color, modifier: Modifier,
-    showAge: Boolean = true) {
+private fun IslandBatteryIndicator(cell: IslandBatteryCell, style: IslandBatteryStyle, textColor: Color, modifier: Modifier) {
     val label = stringResource(when (cell.component) {
         BatteryComponent.LEFT -> R.string.island_battery_left
         BatteryComponent.RIGHT -> R.string.island_battery_right
         BatteryComponent.CASE -> R.string.island_battery_case
         BatteryComponent.HEADSET -> R.string.island_battery_headset
     })
-    val percentage = cell.level?.let { "$it%" } ?: "â€”"
+    val percentage = cell.level?.let { "$it%" } ?: "\u2014"
     val age = if (!cell.live && cell.ageSeconds != null)
         islandAgeText(islandAgeBucket(cell.ageSeconds)) else null
     val freshness = stringResource(when {
@@ -720,10 +773,11 @@ private fun IslandBatteryIndicator(cell: IslandBatteryCell, style: IslandBattery
                 }
             }
             if (style == IslandBatteryStyle.TEXT || style == IslandBatteryStyle.CIRCLE_TEXT)
-                Text(percentage, color = if (cell.live) textColor else color, fontSize = 17.sp, maxLines = 1)
+                Text(percentage, color = if (cell.live) textColor else color, fontSize = 17.sp,
+                    lineHeight = islandBatteryPercentageLineHeight, maxLines = 1)
         }
-        Text(label, color = textColor.copy(alpha = 0.65f), fontSize = 12.sp, maxLines = 1)
-        if (showAge && age != null) Text(age, color = color, fontSize = 11.sp, maxLines = 1)
+        Text(label, color = textColor.copy(alpha = 0.65f), fontSize = 12.sp,
+            lineHeight = islandBatteryLabelLineHeight, maxLines = 1)
     }
 }
 

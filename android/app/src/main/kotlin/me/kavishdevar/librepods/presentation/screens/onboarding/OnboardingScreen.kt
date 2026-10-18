@@ -49,13 +49,14 @@ import me.kavishdevar.librepods.utils.isSupported
 
 @Composable
 fun OnboardingScreen(
+    initialItem: Int = 0,
     onOnboardingComplete: () -> Unit,
 ) {
     val sharedPreferences = LocalContext.current.getSharedPreferences("settings", Context.MODE_PRIVATE)
     val isSupported = isSupported(sharedPreferences) || XposedState.bluetoothScopeEnabled
 
     val state = rememberCarouselState(
-        initialItem = 0,
+        initialItem = initialItem,
         itemCount = { 4 }
     )
 
