@@ -82,16 +82,11 @@ data class HearingAidSettings(
 }
 
 fun parseHearingAidSettingsResponse(data: ByteArray): HearingAidSettings? {
-    if (data.size < 104) return null
-    if (data[2].toInt() !in setOf(0, 0x64) &&
-        !(data[0] == 2.toByte() && data[1] in byteArrayOf(0, 2) &&
-            data[2] == 0x60.toByte() && data[3] == 0.toByte())) return null
+    if (data.size != 104 || data[0] != 2.toByte() || data[1] !in byteArrayOf(0, 2) ||
+        data[2] !in byteArrayOf(0x60, 0x64) || data[3] != 0.toByte()) return null
     val buffer = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN)
-    if ((4 until 104 step 4).any { !buffer.getFloat(it).isFinite() }) return null
 
-    buffer.get() // skip 0x02
-    buffer.get() // skip 0x02
-    buffer.getShort() // skip 0x60 0x00
+    buffer.position(4)
 
     val leftEQ = FloatArray(8)
     for (i in 0..7) {
@@ -100,7 +95,8 @@ fun parseHearingAidSettingsResponse(data: ByteArray): HearingAidSettings? {
     val leftAmplification = buffer.float
     val leftTone = buffer.float
     val leftConvFloat = buffer.float
-    val leftConversationBoost = leftConvFloat > 0.5f
+    if (leftConvFloat != 0f && leftConvFloat != 1f) return null
+    val leftConversationBoost = leftConvFloat == 1f
     val leftAmbientNoiseReduction = buffer.float
 
     val rightEQ = FloatArray(8)
@@ -110,7 +106,8 @@ fun parseHearingAidSettingsResponse(data: ByteArray): HearingAidSettings? {
     val rightAmplification = buffer.float
     val rightTone = buffer.float
     val rightConvFloat = buffer.float
-    val rightConversationBoost = rightConvFloat > 0.5f
+    if (rightConvFloat != 0f && rightConvFloat != 1f) return null
+    val rightConversationBoost = rightConvFloat == 1f
     val rightAmbientNoiseReduction = buffer.float
 
     val ownVoiceAmplification = buffer.float
@@ -133,22 +130,32 @@ fun parseHearingAidSettingsResponse(data: ByteArray): HearingAidSettings? {
         netAmplification = avg,
         balance = diff,
         ownVoiceAmplification = ownVoiceAmplification
-    )
+    ).takeIf { it.isValid() }
 }
 
 fun hearingAidSettingsWritable(data: ByteArray): Boolean =
-    data.size == 104 && data[2].toInt() in setOf(0, 0x64) && parseHearingAidSettingsResponse(data) != null
+    parseHearingAidSettingsResponse(data) != null && data[1] == 2.toByte()
+
+private fun HearingAidSettings.isValid(): Boolean =
+    leftEQ.size == 8 && rightEQ.size == 8 &&
+        leftEQ.all { it in 0f..90f } && rightEQ.all { it in 0f..90f } &&
+        leftAmplification in -1.5f..1.5f && rightAmplification in -1.5f..1.5f &&
+        leftTone in -1f..1f && rightTone in -1f..1f &&
+        leftAmbientNoiseReduction in 0f..1f && rightAmbientNoiseReduction in 0f..1f &&
+        ownVoiceAmplification in 0f..1f
 
 fun sendHearingAidSettings(
     currentData: ByteArray,
     hearingAidSettings: HearingAidSettings,
-    sender: (ATTHandle, ByteArray) -> Unit
+    sender: (ATTHandle, ByteArray, ByteArray) -> Unit
 ) {
-    if (!hearingAidSettingsWritable(currentData)) return
-    val original = parseHearingAidSettingsResponse(currentData) ?: return
-    if (hearingAidSettings.leftEQ.size != 8 || hearingAidSettings.rightEQ.size != 8
-    ) return
-    val buffer = ByteBuffer.wrap(currentData.copyOf()).order(ByteOrder.LITTLE_ENDIAN)
+    val baseline = currentData.copyOf()
+    if (!hearingAidSettingsWritable(baseline)) return
+    val original = parseHearingAidSettingsResponse(baseline) ?: return
+    if (!hearingAidSettings.isValid()) return
+    val buffer = ByteBuffer.wrap(baseline.copyOf()).order(ByteOrder.LITTLE_ENDIAN)
+    // Apple's writer uses 100 in the prefix; fitted reads may report 96.
+    buffer.put(byteArrayOf(2, 2, 0x64, 0))
 
     // Left EQ
     for (i in 0..7) {
@@ -180,5 +187,5 @@ fun sendHearingAidSettings(
     buffer.putFloat(100, hearingAidSettings.ownVoiceAmplification)
 
     val data = buffer.array()
-    if (parseHearingAidSettingsResponse(data) != null) sender(ATTHandle.HEARING_AID, data)
+    if (parseHearingAidSettingsResponse(data) != null) sender(ATTHandle.HEARING_AID, data, baseline)
 }

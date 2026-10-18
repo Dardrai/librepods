@@ -85,10 +85,12 @@ data class TransparencySettings(
 }
 
 fun parseTransparencySettingsResponse(data: ByteArray): TransparencySettings? {
-    if (data.size < 100 || data.size in 101..103) return null
+    if (data.size != 100 && data.size != 104) return null
     val buffer = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN)
-    val floatBytes = if (data.size >= 104) 104 else 100
-    if ((0 until floatBytes step 4).any { !buffer.getFloat(it).isFinite() }) return null
+    if ((data.indices step 4).any { !buffer.getFloat(it).isFinite() }) return null
+    if (listOf(0, 44, 92).any { buffer.getFloat(it) != 0f && buffer.getFloat(it) != 1f }) return null
+    if (listOf(36, 40, 84, 88).any { buffer.getFloat(it) !in -1f..1f } ||
+        listOf(48, 96).any { buffer.getFloat(it) !in 0f..1f }) return null
 
     val enabled = buffer.float
 
@@ -99,7 +101,7 @@ fun parseTransparencySettingsResponse(data: ByteArray): TransparencySettings? {
     val leftAmplification = buffer.float
     val leftTone = buffer.float
     val leftConvFloat = buffer.float
-    val leftConversationBoost = leftConvFloat > 0.5f
+    val leftConversationBoost = leftConvFloat == 1f
     val leftAmbientNoiseReduction = buffer.float
 
     val rightEQ = FloatArray(8)
@@ -110,7 +112,7 @@ fun parseTransparencySettingsResponse(data: ByteArray): TransparencySettings? {
     val rightAmplification = buffer.float
     val rightTone = buffer.float
     val rightConvFloat = buffer.float
-    val rightConversationBoost = rightConvFloat > 0.5f
+    val rightConversationBoost = rightConvFloat == 1f
     val rightAmbientNoiseReduction = buffer.float
 
     val ownVoiceAmplification = if (buffer.remaining() >= 4) {
@@ -124,7 +126,7 @@ fun parseTransparencySettingsResponse(data: ByteArray): TransparencySettings? {
     if (!diff.isFinite()) return null
 
     return TransparencySettings(
-        enabled = enabled > 0.5f,
+        enabled = enabled == 1f,
         leftEQ = leftEQ,
         rightEQ = rightEQ,
         leftAmplification = leftAmplification,
@@ -141,53 +143,48 @@ fun parseTransparencySettingsResponse(data: ByteArray): TransparencySettings? {
     )
 }
 
+fun customTransparencyEnabled(data: ByteArray): Boolean? =
+    if (data.contentEquals(byteArrayOf(2, 0, 0, 0))) false
+    else parseTransparencySettingsResponse(data)?.enabled
+
 fun sendTransparencySettings(
     currentData: ByteArray,
     transparencySettings: TransparencySettings,
-    writer: (ATTHandle, ByteArray) -> Unit
+    writer: (ATTHandle, ByteArray, ByteArray) -> Unit
 ) {
-    val original = parseTransparencySettingsResponse(currentData) ?: return
+    val baseline = currentData.copyOf()
+    if (parseTransparencySettingsResponse(baseline) == null) return
     if (transparencySettings.leftEQ.size != 8 || transparencySettings.rightEQ.size != 8 ||
-        (transparencySettings.ownVoiceAmplification != null && currentData.size < 104)
+        (transparencySettings.ownVoiceAmplification != null && baseline.size < 104)
     ) return
-    val buffer = ByteBuffer.wrap(currentData.copyOf()).order(ByteOrder.LITTLE_ENDIAN)
+    val buffer = ByteBuffer.wrap(baseline.copyOf()).order(ByteOrder.LITTLE_ENDIAN)
 
-    if (transparencySettings.enabled != original.enabled) {
-        buffer.putFloat(0, if (transparencySettings.enabled) 1.0f else 0.0f)
+    // Numeric equality keeps untouched signed-zero fields byte-for-byte intact.
+    fun patch(offset: Int, value: Float) {
+        if (buffer.getFloat(offset) != value) buffer.putFloat(offset, value)
     }
-    buffer.position(4)
-
-    for (eq in transparencySettings.leftEQ) {
-        buffer.putFloat(eq)
+    patch(0, if (transparencySettings.enabled) 1f else 0f)
+    for (index in 0 until 8) {
+        patch(4 + index * 4, transparencySettings.leftEQ[index])
+        patch(52 + index * 4, transparencySettings.rightEQ[index])
     }
-    buffer.putFloat(transparencySettings.leftAmplification)
-    buffer.putFloat(transparencySettings.leftTone)
-    if (transparencySettings.leftConversationBoost != original.leftConversationBoost) {
-        buffer.putFloat(44, if (transparencySettings.leftConversationBoost) 1.0f else 0.0f)
-    }
-    buffer.position(48)
-    buffer.putFloat(transparencySettings.leftAmbientNoiseReduction)
-
-    for (eq in transparencySettings.rightEQ) {
-        buffer.putFloat(eq)
-    }
-    buffer.putFloat(transparencySettings.rightAmplification)
-    buffer.putFloat(transparencySettings.rightTone)
-    if (transparencySettings.rightConversationBoost != original.rightConversationBoost) {
-        buffer.putFloat(92, if (transparencySettings.rightConversationBoost) 1.0f else 0.0f)
-    }
-    buffer.position(96)
-    buffer.putFloat(transparencySettings.rightAmbientNoiseReduction)
-
-    if (transparencySettings.ownVoiceAmplification != null) {
-        buffer.putFloat(transparencySettings.ownVoiceAmplification)
+    patch(36, transparencySettings.leftAmplification)
+    patch(40, transparencySettings.leftTone)
+    patch(44, if (transparencySettings.leftConversationBoost) 1f else 0f)
+    patch(48, transparencySettings.leftAmbientNoiseReduction)
+    patch(84, transparencySettings.rightAmplification)
+    patch(88, transparencySettings.rightTone)
+    patch(92, if (transparencySettings.rightConversationBoost) 1f else 0f)
+    patch(96, transparencySettings.rightAmbientNoiseReduction)
+    transparencySettings.ownVoiceAmplification?.let {
+        patch(100, it)
     }
 
     val data = buffer.array()
-    if (parseTransparencySettingsResponse(data) != null) writer(ATTHandle.TRANSPARENCY, data)
+    if (parseTransparencySettingsResponse(data) != null) writer(ATTHandle.TRANSPARENCY, data, baseline)
 }
 
-fun disableCustomizedTransparency(currentData: ByteArray, writer: (ATTHandle, ByteArray) -> Unit) {
+fun disableCustomizedTransparency(currentData: ByteArray, writer: (ATTHandle, ByteArray, ByteArray) -> Unit) {
     val settings = parseTransparencySettingsResponse(currentData) ?: return
     if (settings.enabled) sendTransparencySettings(currentData, settings.copy(enabled = false), writer)
 }

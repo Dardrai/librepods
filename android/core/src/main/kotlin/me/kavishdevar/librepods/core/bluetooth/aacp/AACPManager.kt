@@ -190,7 +190,8 @@ class AACPManager(private val device: AppleDevice,
     }
 
     fun prepareControlSessionRefresh(): ControlSessionRefresh? = synchronized(this) {
-        if (device.state.value.hearingModes.pending != null) null else captureAudioSocket()?.let(::ControlSessionRefresh)
+        if (device.attOperationPending || device.state.value.hearingModes.pending != null) null
+        else captureAudioSocket()?.let(::ControlSessionRefresh)
     }
 
     /** Reopen only AACP; native media/call profiles and the last confirmed settings are retained. */
@@ -202,7 +203,7 @@ class AACPManager(private val device: AppleDevice,
             val heartWanted = sensorState.hrmState != BuddyState.INACTIVE
             synchronized(this) {
                 if (request.cancelled || !stillCurrent() || !ownsAudioSocket(request.original) ||
-                    device.state.value.hearingModes.pending != null) return false
+                    device.attOperationPending || device.state.value.hearingModes.pending != null) return false
                 request.epoch = connectionEpoch.get() + 1
             }
             if (!disconnect(request.original, preserveControlState = true)) return false
@@ -462,6 +463,11 @@ class AACPManager(private val device: AppleDevice,
                 val controlCommandPacket = try { ControlCommandPacket.parse(packet) }
                     catch (_: IllegalArgumentException) { Log.w(TAG, "Ignoring malformed control report"); return }
                 val controlCommand = controlCommandPacket.controlCommand
+                if (controlCommand.identifier == ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG &&
+                    controlCommand.value.singleOrNull() !in listOf(1.toByte(), 2.toByte())) {
+                    Log.w(TAG, "Ignoring invalid conversation awareness setting")
+                    return
+                }
 
                 Log.i(TAG, "Received control command: ${controlCommand.identifier}")
 
@@ -733,7 +739,7 @@ class AACPManager(private val device: AppleDevice,
             controlTimeouts.remove(controlCommand.identifier)?.cancel()
             val request = device.state.value.requestedControls[controlCommand.identifier]
             if (request != null && controlCommand.identifier !in setOf(ControlCommandIdentifier.ALLOW_OFF_OPTION,
-                    ControlCommandIdentifier.AUTO_ANC_STRENGTH)) {
+                    ControlCommandIdentifier.AUTO_ANC_STRENGTH, ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG)) {
                 controlTimeouts[controlCommand.identifier] = CoroutineScope(Dispatchers.Default).launch {
                     delay(10.seconds)
                     publishForTransport(this@AACPManager, originalSocket, ::captureAudioSocket) {
@@ -1149,6 +1155,7 @@ class AACPManager(private val device: AppleDevice,
                     else -> emptySet()
                 }
                 it.copy(battery = retainedBatteries, connectedDevices = emptyList(), capabilities = emptySet(),
+                    conversationAwarenessState = 0,
                     controlStates = if (preserveControlState)
                         it.cachedControlStates(device.settings.value, device.metadata.value.modelNumber) else emptyMap(),
                     requestedControls = emptyMap(), requestedCustomEq = null, aacpPackets = emptyList(),
@@ -1200,7 +1207,7 @@ class AACPManager(private val device: AppleDevice,
     fun requestMicrophoneStream(expected: BluetoothSocket? = captureAudioSocket()): Boolean {
         if (expected == null) return false
         val reserved = synchronized(this) {
-            if (!ownsAudioSocket(expected) || device.state.value.hearingModes.pending != null) false
+            if (!ownsAudioSocket(expected) || device.attOperationPending || device.state.value.hearingModes.pending != null) false
             else { microphoneRequested = expected; true }
         }
         if (!reserved) return false

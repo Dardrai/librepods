@@ -1,7 +1,7 @@
 # Android protocol contracts
 
 These contracts follow the captured formats and NTPods implementation at
-[`17c91110`](https://github.com/Ripthulhu/ntpods/tree/17c91110fab6066146c7967724fd49d88f708a16).
+[`58ad399`](https://github.com/Ripthulhu/ntpods/tree/58ad3998f18e89ea1ed611b9a2e8aec11b7382bf).
 They describe wire handling, not a guarantee that every feature works on every host.
 
 ## Connection state and parsing
@@ -21,6 +21,16 @@ rejected. Values remain raw bytes: Apple mappings can use `2` affirmatively, so
 Connected-host reports (`0x002E`) must contain exactly `9 + 8 * count` bytes.
 Duplicate or malformed entries and trailing data are rejected. Routing logs do
 not expose peer names or addresses.
+
+## Conversation Awareness
+
+The enabled setting is control `0x28` in opcode `0x09`; accept only normalized
+`1`/`2` values. Activity opcode `0x4B`, byte 9, drives owned media ducking and
+recovery only. It never changes the enabled setting. A successful current-session
+setting request remains separate from the last report until a fresh valid report
+or disconnect; lack of an echo is not confirmation of the older value. A report
+received during the write wins over that request. Retiring the transport also
+clears the activity stage so a new session's first speech event is observable.
 
 ## Independent hearing modes
 
@@ -59,12 +69,61 @@ Custom Transparency enable requires both hearing modes confirmed off; unknown is
 not off. Fitting edits remain separate from pure mode switches and do not inherit
 authorization from an older connection or an in-progress mode request.
 
-`A4120005` fitting headers `02 00 60 00` and `02 02 60 00` are readable, but not
-editable. Their eight-band per-ear curves are preserved. **The Android ATT reader
-and writer currently return unavailable.** Consequently this build cannot confirm
-a fresh fitting or enable these modes, even if a profile was fitted on an iPhone.
-No Windows host-identity override or connection-refresh workaround is assumed to
-work on Android. A successful packet send alone never enables a UI switch.
+Hearing fitting values are exactly 104 bytes, with header `02 00 60 00`,
+`02 00 64 00`, `02 02 60 00` or `02 02 64 00`. The `02 00` forms are read-only;
+`02 02` permits validated edits. Writes normalize the header to `02 02 64 00`
+and preserve untouched body bytes, including both eight-band audiograms and
+own-voice values. Unknown headers, lengths, flags and out-of-range values fail
+closed. The complete Custom Transparency value `02 00 00 00` establishes only
+inactive, unenrolled state; it cannot supply an editable profile.
+
+The edit coordinator carries the caller's original raw baseline. Before a write,
+it must match both the current cache and a fresh read in the same connection.
+Only matching device readback is published. Hearing readback must have a known
+fitted header and the exact 100-byte requested body; Custom Transparency must
+match every requested byte. An unchanged complete original record permits at
+most four further reads, 75 ms apart, without repeating the write. Other
+mismatches fail immediately and retire that cached editing baseline. ATT work
+reserves microphone/refresh admission and cannot publish into a replacement
+control session. These coordinator checks do not supply the missing transport.
+
+**The Android ATT reader and writer currently return unavailable.** Consequently
+this build cannot confirm a fresh fitting or enable these modes, even if a
+profile was fitted on an iPhone. A parser or successful packet send alone does
+not authorize enablement.
+
+## Android ATT access
+
+Classic ATT uses authenticated, encrypted BR/EDR PSM `0x001F`. Android's public
+`createL2capChannel` selects LE; its internal `createL2capSocket` selects secure
+Classic L2CAP. The existing socket helper already selects Classic type 3 with
+authentication and encryption. The regular socket-manager path checks the active
+user and Bluetooth connect permission; offload has an additional privileged gate.
+See the pinned [BluetoothDevice](https://android.googlesource.com/platform/packages/modules/Bluetooth/+/745ee92b87ed62b5a8a1bac47d5df8cad623bf59/framework/java/android/bluetooth/BluetoothDevice.java)
+and [socket manager](https://android.googlesource.com/platform/packages/modules/Bluetooth/+/745ee92b87ed62b5a8a1bac47d5df8cad623bf59/android/app/src/com/android/bluetooth/btservice/BluetoothSocketManagerBinder.java).
+These source paths do not prove that a Pixel accepts PSM `0x001F` or that the
+AirPods permit a protected read from this host.
+
+AOSP reads `bluetooth.device_id.vendor_id` and
+`bluetooth.device_id.vendor_id_source` when enabling Bluetooth. Their generated
+API is read-only; this alone is not proof that property-service writes are
+impossible. The property context and caller's SELinux permissions also apply.
+See [Device ID properties](https://android.googlesource.com/platform/packages/modules/Bluetooth/+/745ee92b87ed62b5a8a1bac47d5df8cad623bf59/sysprop/device_id.sysprop),
+[record registration](https://android.googlesource.com/platform/packages/modules/Bluetooth/+/745ee92b87ed62b5a8a1bac47d5df8cad623bf59/system/btif/src/btif_core.cc),
+[property contexts](https://android.googlesource.com/platform/system/sepolicy/+/4571ddd9440721fec583c906a337de949a77749e/private/property_contexts)
+and [shell policy](https://android.googlesource.com/platform/system/sepolicy/+/4571ddd9440721fec583c906a337de949a77749e/private/shell.te).
+The existing native identity hook runs through Xposed inside the Bluetooth
+process. An ADB-started Shizuku service does not run in that process or establish
+an Apple Device ID. No rootless identity change or Pixel ATT probe was performed
+for this comparison; platform denial and AirPods identity rejection remain
+unverified on that device.
+
+An enabled transport still needs UUID discovery for the service and value handle,
+serialized and bounded ATT exchanges, the advertised write method, and exact
+readback tied to the same request and control connection. Properties `0x16` mean
+Write Command `0x52`; use `0x12` and require `0x13` only when Write is advertised.
+Do not revive fixed-handle writes or subscribe to a guessed CCCD. The removed
+legacy socket body never ran and did not meet those requirements.
 
 ## Host clock and sensors
 

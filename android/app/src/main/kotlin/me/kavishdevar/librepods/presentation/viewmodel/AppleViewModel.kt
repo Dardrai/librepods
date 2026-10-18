@@ -209,9 +209,20 @@ class AppleViewModel(
         device.setControlCommand(identifier, value)
 
     fun writeATTCharacteristic(handle: ATTHandle, value: ByteArray) {
+        writeATTCharacteristic(handle, value, null)
+    }
+
+    fun writeATTCharacteristic(handle: ATTHandle, value: ByteArray, expected: ByteArray?) {
         val request = value.copyOf()
+        val baseline = expected?.copyOf()
+        val transport = device.aacp.captureAudioSocket()
+        val connection = device.connectionNumber.value
         viewModelScope.launch {
-            if (!device.writeATTCharacteristic(handle, request)) {
+            val confirmed = withContext(Dispatchers.IO) {
+                transport != null && device.aacp.captureAudioSocket() === transport &&
+                    device.connectionNumber.value == connection && device.writeATTCharacteristic(handle, request, baseline)
+            }
+            if (!confirmed) {
                 Toast.makeText(device.context, R.string.att_setting_not_confirmed, Toast.LENGTH_LONG).show()
             }
         }

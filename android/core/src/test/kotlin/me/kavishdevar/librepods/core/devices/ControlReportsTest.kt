@@ -11,6 +11,7 @@ class ControlReportsTest {
     private val id = ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG
 
     @Test fun requestsRemainSeparateUntilAMatchingDeviceReportArrives() {
+        val id = ControlCommandIdentifier.ADAPTIVE_VOLUME_CONFIG
         val original = AppleState().withControlReport(id, byteArrayOf(2, 0, 0, 0))
         val requested = original.withControlRequest(id, byteArrayOf(1), original.controlStates[id])
         assertArrayEquals(byteArrayOf(2), requested.controlStates[id])
@@ -20,6 +21,19 @@ class ControlReportsTest {
         val confirmed = different.withControlReport(id, byteArrayOf(1, 0, 0, 0))
         assertArrayEquals(byteArrayOf(1), confirmed.controlStates[id])
         assertFalse(id in confirmed.requestedControls)
+    }
+
+    @Test fun freshConversationReportsRetireSilentChoicesEvenWhenTheyDisagree() {
+        for (reported in listOf(1, 2)) {
+            val original = AppleState().withControlReport(id, byteArrayOf(reported.toByte()))
+            val sameChoice = original.withControlRequest(id, byteArrayOf(reported.toByte()), original.controlStates[id])
+            assertArrayEquals(byteArrayOf(reported.toByte()), sameChoice.requestedControls[id])
+            val requested = original.withControlRequest(id, byteArrayOf((3 - reported).toByte()), original.controlStates[id])
+            val report = requested.withControlReport(id, byteArrayOf(reported.toByte(), 0, 0, 0))
+            assertArrayEquals(byteArrayOf(reported.toByte()), report.controlStates[id])
+            assertFalse(id in report.requestedControls)
+            assertSame(report, report.withControlRequest(id, byteArrayOf((3 - reported).toByte()), original.controlStates[id]))
+        }
     }
 
     @Test fun reportReceivedDuringAWriteCannotBeOverwrittenByItsCompletion() {

@@ -8,6 +8,7 @@ import android.content.Context
 import android.os.Build
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -31,6 +32,7 @@ import me.kavishdevar.librepods.core.bluetooth.att.ATTManager
 import me.kavishdevar.librepods.core.bluetooth.att.types.hearingAidSettingsWritable
 import me.kavishdevar.librepods.core.bluetooth.att.types.parseHearingAidSettingsResponse
 import me.kavishdevar.librepods.core.bluetooth.att.types.parseTransparencySettingsResponse
+import me.kavishdevar.librepods.core.bluetooth.att.types.customTransparencyEnabled
 import me.kavishdevar.librepods.core.bluetooth.aacp.publishForTransport
 import me.kavishdevar.librepods.core.data.StemAction
 import me.kavishdevar.librepods.core.data.apple.BuddyState
@@ -166,6 +168,8 @@ class AppleDevice(
     val aacp = AACPManager(this)
     val att = ATTManager(this)
     private val hearingLock = Mutex()
+    @Volatile internal var attOperationPending = false
+        private set
 
 
     // ik, probably wrong place. TODO
@@ -187,14 +191,9 @@ class AppleDevice(
 
     override fun connect(): Boolean {
         val connected = connectControl(aacp::connect)
-        CoroutineScope(Dispatchers.IO).launch {
-            _state.update {
-                it.copy(
-                    loudSoundReductionEnabled = readATTCharacteristic(ATTHandle.LOUD_SOUND_REDUCTION)?.getOrNull(0)?.toInt() == 1,
-                    transparencyData = readATTCharacteristic(ATTHandle.TRANSPARENCY)?: byteArrayOf(),
-                    hearingAidData = readATTCharacteristic(ATTHandle.HEARING_AID)?: byteArrayOf()
-                )
-            }
+        val transport = aacp.captureAudioSocket()
+        if (connected && transport != null) CoroutineScope(Dispatchers.IO).launch {
+            for (handle in ATTHandle.entries) readATTCharacteristic(handle, transport)
         }
         return connected
     }
@@ -278,12 +277,12 @@ class AppleDevice(
         var attempted = false
         var confirmed = false
         try {
-            val fitting = if (enabled) readATTCharacteristic(ATTHandle.HEARING_AID) else null
+            val fitting = if (enabled) att.readCharacteristic(ATTHandle.HEARING_AID) else null
             if (!current()) return@withLock false
             if (enabled) {
-                if (fitting?.size != 104 || parseHearingAidSettingsResponse(fitting) == null) return@withLock false
-                val transparency = readATTCharacteristic(ATTHandle.TRANSPARENCY) ?: return@withLock false
-                if (!current() || parseTransparencySettingsResponse(transparency)?.enabled != false) return@withLock false
+                if (fitting == null || !hearingAidSettingsWritable(fitting)) return@withLock false
+                val transparency = att.readCharacteristic(ATTHandle.TRANSPARENCY) ?: return@withLock false
+                if (!current() || customTransparencyEnabled(transparency) != false) return@withLock false
             }
             if (!state.value.hearingModes.sameConfiguration(original)) return@withLock false
             if (enabled && (state.value.microphoneState.isActive || aacp.isMicrophoneRequested())) return@withLock false
@@ -297,7 +296,7 @@ class AppleDevice(
             } ?: return@withLock false
             if (!current() || !report.hearingModes.confirms(plan)) return@withLock false
             if (enabled) {
-                val readback = readATTCharacteristic(ATTHandle.HEARING_AID)
+                val readback = att.readCharacteristic(ATTHandle.HEARING_AID)
                 if (!current() || !fitting.contentEquals(readback) || !state.value.hearingModes.confirms(plan)) return@withLock false
             }
             confirmed = true
@@ -312,42 +311,136 @@ class AppleDevice(
         }
     }
 
-    suspend fun writeATTCharacteristic(handle: ATTHandle, value: ByteArray): Boolean = hearingLock.withLock {
-        val transport = aacp.captureAudioSocket() ?: return@withLock false
-        if (handle == ATTHandle.TRANSPARENCY) {
-            val settings = parseTransparencySettingsResponse(value) ?: return@withLock false
-            if (settings.enabled && BaseCapability.HEARING_AID in AirPodsSpecs.getSpec(metadata.value.model).baseCapabilities &&
-                !state.value.hearingModes.customTransparencyAllowed) return@withLock false
-        }
-        if (handle == ATTHandle.HEARING_AID && (!hearingAidSettingsWritable(state.value.hearingAidData) ||
-                !hearingAidSettingsWritable(value) || !value.take(4).equals(state.value.hearingAidData.take(4)))) return@withLock false
-        val success = att.writeCharacteristic(handle, value)
-        success && publishForTransport(aacp, transport, aacp::captureAudioSocket) {
+    suspend fun writeATTCharacteristic(handle: ATTHandle, value: ByteArray, expected: ByteArray? = null): Boolean {
+        val requested = value.copyOf()
+        val baseline = expected?.copyOf() ?: if (handle == ATTHandle.LOUD_SOUND_REDUCTION)
+            byteArrayOf(if (state.value.loudSoundReductionEnabled) 1 else 0) else return false
+        val transport = aacp.captureAudioSocket() ?: return false
+        return hearingLock.withLock {
+            val modes = state.value.hearingModes
+            val requiresModes = handle == ATTHandle.HEARING_AID ||
+                (handle == ATTHandle.TRANSPARENCY && customTransparencyEnabled(requested) == true)
+            fun cacheMatches(): Boolean = when (handle) {
+                ATTHandle.HEARING_AID -> baseline.contentEquals(state.value.hearingAidData)
+                ATTHandle.TRANSPARENCY -> baseline.contentEquals(state.value.transparencyData)
+                ATTHandle.LOUD_SOUND_REDUCTION -> baseline.contentEquals(byteArrayOf(if (state.value.loudSoundReductionEnabled) 1 else 0))
+            }
+            fun current(): Boolean {
+                val state = state.value
+                return aacp.ownsAudioSocket(transport) && connectionState.value == ConnectionState.CONNECTED &&
+                    !state.microphoneState.isActive && !aacp.isMicrophoneRequested() && cacheMatches() &&
+                    (!requiresModes || (state.hearingModes.pending == null && state.hearingModes.uncertain == null &&
+                        state.hearingModes.sameConfiguration(modes)))
+            }
             when (handle) {
-                ATTHandle.LOUD_SOUND_REDUCTION -> _state.update { it.copy(loudSoundReductionEnabled = value.getOrNull(0)?.toInt() == 1) }
-                ATTHandle.TRANSPARENCY -> _state.update { it.copy(transparencyData = value) }
-                ATTHandle.HEARING_AID -> _state.update { it.copy(hearingAidData = value) }
+                ATTHandle.HEARING_AID -> if (!hearingAidSettingsWritable(baseline) ||
+                    !hearingAidSettingsWritable(requested) || !requested.copyOfRange(0, 4).contentEquals(byteArrayOf(2, 2, 0x64, 0)) ||
+                    metadata.value.model == AirPodsModel.UNKNOWN ||
+                    BaseCapability.HEARING_AID !in AirPodsSpecs.getSpec(metadata.value.model).baseCapabilities ||
+                    modes.enrolled != true || modes.hearingAidEnabled == null || modes.mediaAssistEnabled == null) return@withLock false
+                ATTHandle.TRANSPARENCY -> {
+                    if (parseTransparencySettingsResponse(baseline) == null || baseline.size != requested.size) return@withLock false
+                    val settings = parseTransparencySettingsResponse(requested) ?: return@withLock false
+                    if (settings.enabled && (metadata.value.model == AirPodsModel.UNKNOWN ||
+                        (BaseCapability.HEARING_AID in AirPodsSpecs.getSpec(metadata.value.model).baseCapabilities &&
+                            !modes.customTransparencyAllowed))) return@withLock false
+                }
+                ATTHandle.LOUD_SOUND_REDUCTION -> if (!validATTValue(handle, requested)) return@withLock false
+            }
+            val reserved = synchronized(aacp) {
+                if (attOperationPending || !current()) false else { attOperationPending = true; true }
+            }
+            if (!reserved) return@withLock false
+            var confirmed = false
+            try {
+                val fresh = att.readCharacteristic(handle) ?: return@withLock false
+                if (!current() || !baseline.contentEquals(fresh)) return@withLock false
+                if (!att.writeCharacteristic(handle, requested)) return@withLock false
+                for (attempt in 0..4) {
+                    val readback = att.readCharacteristic(handle) ?: return@withLock false
+                    if (!current() || !validATTValue(handle, readback)) return@withLock false
+                    val matches = if (handle == ATTHandle.HEARING_AID)
+                        hearingAidSettingsWritable(readback) && readback.copyOfRange(4, 104).contentEquals(requested.copyOfRange(4, 104))
+                    else readback.contentEquals(requested)
+                    if (matches) {
+                        synchronized(aacp) {
+                            if (current()) { publishATTValue(handle, readback); confirmed = true }
+                        }
+                        return@withLock confirmed
+                    }
+                    val unchanged = if (handle == ATTHandle.HEARING_AID)
+                        hearingAidSettingsWritable(readback) && readback.copyOfRange(4, 104).contentEquals(baseline.copyOfRange(4, 104))
+                    else readback.contentEquals(baseline)
+                    if (!unchanged || attempt == 4) return@withLock false
+                    delay(75.milliseconds)
+                }
+                false
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                Log.w(TAG, "ATT setting could not be confirmed: ${error.javaClass.simpleName}")
+                false
+            } finally {
+                synchronized(aacp) {
+                    if (!confirmed && aacp.ownsAudioSocket(transport) && cacheMatches()) publishATTValue(handle, null)
+                    attOperationPending = false
+                }
             }
         }
     }
 
-    // can't use att notifications; keeping ATT connected causes airpods to disconnect every few seconds for some reason
-    // we will poll the characteristic every 1 seconds instead.
+    private fun validATTValue(handle: ATTHandle, value: ByteArray): Boolean = when (handle) {
+        ATTHandle.HEARING_AID -> parseHearingAidSettingsResponse(value) != null
+        ATTHandle.TRANSPARENCY -> customTransparencyEnabled(value) != null
+        ATTHandle.LOUD_SOUND_REDUCTION -> value.size == 1 && value[0] in byteArrayOf(0, 1)
+    }
+
+    private fun publishATTValue(handle: ATTHandle, value: ByteArray?) {
+        _state.update {
+            when (handle) {
+                ATTHandle.LOUD_SOUND_REDUCTION -> if (value == null) it else it.copy(loudSoundReductionEnabled = value[0] == 1.toByte())
+                ATTHandle.TRANSPARENCY -> it.copy(transparencyData = value?.copyOf() ?: byteArrayOf())
+                ATTHandle.HEARING_AID -> it.copy(hearingAidData = value?.copyOf() ?: byteArrayOf())
+            }
+        }
+    }
+
     fun observeATTCharacteristic(handle: ATTHandle): Job = CoroutineScope(Dispatchers.IO).launch {
         while (true) {
-            val value = readATTCharacteristic(handle)
-            if (value != null) {
-                when (handle) {
-                    ATTHandle.LOUD_SOUND_REDUCTION -> _state.update { it.copy(loudSoundReductionEnabled = value.getOrNull(0)?.toInt() == 1) }
-                    ATTHandle.TRANSPARENCY -> _state.update { it.copy(transparencyData = value) }
-                    ATTHandle.HEARING_AID -> _state.update { it.copy(hearingAidData = value) }
-                }
-            }
+            readATTCharacteristic(handle)
             delay(1000.milliseconds)
         }
     }
 
-    suspend fun readATTCharacteristic(handle: ATTHandle): ByteArray? = att.readCharacteristic(handle)
+    suspend fun readATTCharacteristic(handle: ATTHandle): ByteArray? {
+        val transport = aacp.captureAudioSocket() ?: return null
+        return readATTCharacteristic(handle, transport)
+    }
+
+    private suspend fun readATTCharacteristic(handle: ATTHandle, transport: BluetoothSocket): ByteArray? {
+        return hearingLock.withLock {
+            fun current() = aacp.ownsAudioSocket(transport) && connectionState.value == ConnectionState.CONNECTED &&
+                !state.value.microphoneState.isActive && !aacp.isMicrophoneRequested()
+            val reserved = synchronized(aacp) {
+                if (attOperationPending || !current()) false else { attOperationPending = true; true }
+            }
+            if (!reserved) return@withLock null
+            try {
+                val value = att.readCharacteristic(handle)?.copyOf()?.takeIf { validATTValue(handle, it) }
+                synchronized(aacp) {
+                    if (!current()) null else { publishATTValue(handle, value); value }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                Log.w(TAG, "ATT setting read failed: ${error.javaClass.simpleName}")
+                synchronized(aacp) { if (aacp.ownsAudioSocket(transport)) publishATTValue(handle, null) }
+                null
+            } finally {
+                synchronized(aacp) { attOperationPending = false }
+            }
+        }
+    }
 
     fun requestMicrophoneStream() = aacp.requestMicrophoneStream()
     fun endMicrophoneStream() {

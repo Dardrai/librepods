@@ -3,7 +3,7 @@ For this fork's Pixel/Shizuku build, upgrade notes and known limitations, see
 
 ## Root Requirement
 
-- Features requiring the VendorID hook ([the features marked with an asterisk here](https://github.com/kavishdevar/librepods#key-features)) will always require root regardless of your device/OS.
+- The existing VendorID hook needs a root/Xposed setup. This fork's ATT reader and writer are currently unavailable, so protected ATT settings and hearing-assistance enablement remain disabled. See [Android ATT access](PROTOCOL.md#android-att-access) for the socket and host-identity limits.
 - You can use LibrePods without root on following device configurations:
   - All devices running Android 17+
   - Oppo/OnePlus/Realme devices running Android 16

@@ -6,6 +6,7 @@ import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothSocket
 import me.kavishdevar.librepods.core.bluetooth.aacp.AACPManager
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.Capability
+import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommandIdentifier
 import me.kavishdevar.librepods.core.devices.AppleDevice
 import me.kavishdevar.librepods.core.devices.AppleMetadata
 import me.kavishdevar.librepods.core.devices.AppleSettings
@@ -23,6 +24,7 @@ import org.robolectric.annotation.Implements
 import org.robolectric.shadow.api.Shadow
 import org.robolectric.shadows.ShadowBluetoothSocket
 import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.io.PipedOutputStream
 
 @RunWith(RobolectricTestRunner::class)
@@ -100,6 +102,105 @@ class AacpProtocolReportsTest {
         assertArrayEquals(byteArrayOf(4, 0, 4, 0, 1, 0, 8), shadow.output.bytes.toByteArray())
     }
 
+    @Test fun conversationActivityCannotChangeTheEnabledSettingOrConfirmAPendingChoice() = withTransport { device, socket ->
+        val id = ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG
+        for (enabled in listOf(1, 2)) {
+            val requested = if (enabled == 1) 2 else 1
+            device.loadInitialState(AppleState(controlStates = mapOf(id to byteArrayOf(enabled.toByte())),
+                requestedControls = mapOf(id to byteArrayOf(requested.toByte()))), AppleSettings(), AppleMetadata())
+            for (stage in listOf(1, 2, 3, 4, 6, 7, 8, 9)) {
+                device.aacp.processPacket(byteArrayOf(4, 0, 4, 0, 0x4b, 0, 0, 0, 0, stage.toByte()), socket)
+                assertEquals(stage, device.state.value.conversationAwarenessState)
+                assertArrayEquals(byteArrayOf(enabled.toByte()), device.state.value.controlStates[id])
+                assertArrayEquals(byteArrayOf(requested.toByte()), device.state.value.requestedControls[id])
+            }
+        }
+    }
+
+    @Test fun invalidConversationSettingsPreserveTheLastReportAndPendingChoice() = withTransport { device, socket ->
+        val id = ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG
+        val header = byteArrayOf(4, 0, 4, 0, 9, 0, 0x28)
+        device.aacp.processPacket(header + byteArrayOf(1, 0, 0, 0), socket)
+        val confirmed = device.state.value
+        device.loadInitialState(confirmed.copy(requestedControls = mapOf(id to byteArrayOf(2))),
+            AppleSettings(), AppleMetadata())
+        val previous = device.state.value
+        val malformed = listOf(byteArrayOf(0, 0, 0, 0), byteArrayOf(3, 0, 0, 0),
+            byteArrayOf(0xff.toByte(), 0, 0, 0), byteArrayOf(1, 1, 0, 0), byteArrayOf(2, 0, 0, 1))
+        for (value in malformed) {
+            device.aacp.processPacket(header + value, socket)
+            assertSame(previous, device.state.value)
+        }
+        for (length in 0 until 11) {
+            device.aacp.processPacket((header + byteArrayOf(2, 0, 0, 0)).copyOf(length), socket)
+            assertSame(previous, device.state.value)
+        }
+        device.aacp.processPacket(header + byteArrayOf(2, 0, 0, 0), socket)
+        assertArrayEquals(byteArrayOf(2), device.state.value.controlStates[id])
+        assertFalse(id in device.state.value.requestedControls)
+        device.aacp.processPacket(header + byteArrayOf(1, 0, 0, 0), socket)
+        assertArrayEquals(byteArrayOf(1), device.state.value.controlStates[id])
+    }
+
+    @Test fun retiringConversationActivityLetsTheSameStageStartOnTheReplacementTransport() {
+        val device = device()
+        val first = socket()
+        val replacement = socket()
+        val speechStart = byteArrayOf(4, 0, 4, 0, 0x4b, 0, 0, 0, 0, 1)
+        bind(device.aacp, first)
+        try {
+            device.aacp.processPacket(speechStart, first)
+            assertEquals(1, device.state.value.conversationAwarenessState)
+            assertTrue(device.aacp.disconnect())
+            assertEquals(0, device.state.value.conversationAwarenessState)
+            bind(device.aacp, replacement)
+            val beforeReplacement = device.state.value
+            device.aacp.processPacket(speechStart, first)
+            assertSame(beforeReplacement, device.state.value)
+            device.aacp.processPacket(speechStart, replacement)
+            assertEquals(1, device.state.value.conversationAwarenessState)
+            assertTrue(device.state.value.controlStates.isEmpty())
+        } finally { device.aacp.disconnect(); first.close(); replacement.close() }
+    }
+
+    @Test fun aSilentConversationChoiceSurvivesTheGenericTenSecondTimeoutUntilAFreshReportOrDisconnect() = withTransport { device, socket ->
+        val id = ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG
+        fun report(value: Int) = device.aacp.processPacket(byteArrayOf(4, 0, 4, 0, 9, 0, 0x28, value.toByte(), 0, 0, 0), socket)
+        report(2)
+        assertTrue(device.aacp.sendControlCommand(id.value, true))
+        Thread.sleep(11_000)
+        assertArrayEquals(byteArrayOf(2), device.state.value.controlStates[id])
+        assertArrayEquals(byteArrayOf(1), device.state.value.requestedControls[id])
+        report(2)
+        assertFalse(id in device.state.value.requestedControls)
+        assertTrue(device.aacp.sendControlCommand(id.value, false))
+        assertArrayEquals(byteArrayOf(2), device.state.value.requestedControls[id])
+        assertTrue(device.aacp.sendControlCommand(id.value, true))
+        report(1)
+        assertFalse(id in device.state.value.requestedControls)
+        assertTrue(device.aacp.sendControlCommand(id.value, false))
+        assertArrayEquals(byteArrayOf(2), device.state.value.requestedControls[id])
+        device.aacp.disconnect()
+        assertTrue(device.state.value.requestedControls.isEmpty())
+    }
+
+    @Test fun failedConversationWritesKeepThePreviousChoiceAndReportsDuringWritesWin() = withTransport { device, socket ->
+        val id = ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG
+        val report = byteArrayOf(4, 0, 4, 0, 9, 0, 0x28, 2, 0, 0, 0)
+        val output = Shadow.extract<ProtocolReportSocketShadow>(socket).output
+        device.aacp.processPacket(report, socket)
+        assertTrue(device.aacp.sendControlCommand(id.value, true))
+        val beforeFailure = device.state.value
+        output.failWrites = true
+        assertFalse(device.aacp.sendControlCommand(id.value, false))
+        assertSame(beforeFailure, device.state.value)
+        output.failWrites = false
+        output.beforeWrite = { device.aacp.processPacket(report, socket) }
+        assertTrue(device.aacp.sendControlCommand(id.value, true))
+        assertArrayEquals(byteArrayOf(2), device.state.value.controlStates[id])
+        assertFalse(id in device.state.value.requestedControls)
+    }
+
     @Test fun retiringAndAdoptingControlSessionsClearPreviousCapabilities() {
         val device = device()
         val first = socket()
@@ -152,6 +253,12 @@ class ProtocolReportSocketShadow : ShadowBluetoothSocket() {
 
 class ProtocolReportOutput : PipedOutputStream() {
     val bytes = ByteArrayOutputStream()
-    override fun write(data: ByteArray, offset: Int, length: Int) { bytes.write(data, offset, length) }
+    var failWrites = false
+    var beforeWrite: (() -> Unit)? = null
+    override fun write(data: ByteArray, offset: Int, length: Int) {
+        if (failWrites) throw IOException("Test write failure")
+        beforeWrite?.also { beforeWrite = null; it() }
+        bytes.write(data, offset, length)
+    }
     override fun flush() = Unit
 }

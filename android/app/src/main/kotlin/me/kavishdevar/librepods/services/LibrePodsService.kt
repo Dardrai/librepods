@@ -1206,8 +1206,9 @@ class LibrePodsService: Service() {
                 conversationOwner?.let { MediaController.cancelConversation(it) }
                 conversationOwner = conversationSocket
             }
-            if (conversationSocket == null || state.controlStates[ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG]
-                    ?.firstOrNull() == 2.toByte()) {
+            val conversationChoice = state.requestedControls[ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG]
+                ?: state.controlStates[ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG]
+            if (conversationSocket == null || conversationChoice?.firstOrNull() == 2.toByte()) {
                 conversationOwner?.let { MediaController.cancelConversation(it) }
             } else if (state.conversationAwarenessState != previousState.conversationAwarenessState) {
                 when (state.conversationAwarenessState) {

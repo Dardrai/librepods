@@ -89,7 +89,7 @@ fun UpdateHearingTestRoute(
 fun UpdateHearingTestScreen(
     uiState: AppleUiState,
     navigateBack: (() -> Unit)?,
-    setATTCharacteristicValue: (ATTHandle, ByteArray) -> Unit
+    setATTCharacteristicValue: (ATTHandle, ByteArray, ByteArray) -> Unit
 ) {
     val state = uiState.state
 
@@ -197,7 +197,7 @@ fun UpdateHearingTestScreenPreviewApple() {
             UpdateHearingTestScreen(
                 uiState = AppleUiState(),
                 navigateBack = null,
-                setATTCharacteristicValue = { _, _ -> }
+                setATTCharacteristicValue = { _, _, _ -> }
             )
         }
     }
@@ -217,7 +217,7 @@ fun UpdateHearingTestScreenPreviewMaterial() {
             UpdateHearingTestScreen(
                 uiState = AppleUiState(),
                 navigateBack = null,
-                setATTCharacteristicValue = { _, _ -> }
+                setATTCharacteristicValue = { _, _, _ -> }
             )
         }
     }

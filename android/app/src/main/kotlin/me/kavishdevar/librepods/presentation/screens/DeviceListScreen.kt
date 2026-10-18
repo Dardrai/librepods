@@ -520,9 +520,9 @@ fun DeviceListScreen(
                                         if (conversationAwarenessCapability) {
                                             styledToggle(
                                                 label = stringResource(R.string.conversation_awareness),
-                                                checked = deviceState.controlStates[ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG]?.get(
-                                                    0
-                                                ) == 1.toByte(),
+                                                checked = (deviceState.requestedControls[ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG]
+                                                    ?: deviceState.controlStates[ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG])
+                                                    ?.firstOrNull() == 1.toByte(),
                                                 onCheckedChange = { newMode: Boolean ->
                                                     CoroutineScope(
                                                         Dispatchers.IO

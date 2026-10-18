@@ -12,6 +12,9 @@ internal fun AppleState.withControlReport(id: ControlCommandIdentifier, rawValue
         ControlCommandIdentifier.AUTO_ANC_STRENGTH ->
             rawValue.isNotEmpty() && value.size == 1 && (value[0].toInt() and 255) in 0..100
         ControlCommandIdentifier.ALLOW_OFF_OPTION -> allowOffValue(rawValue) != null
+        // Some firmware applies Conversation Awareness silently; any fresh boolean report wins.
+        ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG ->
+            rawValue.size in 1..4 && value.size == 1 && value[0].toInt() in 1..2
         else -> requestedControls[id]?.contentEquals(value) == true
     }
     return copy(controlStates = controlStates + (id to value), requestedControls =
@@ -23,6 +26,7 @@ internal fun AppleState.withControlRequest(id: ControlCommandIdentifier, value: 
     // Reports received while a write was in progress remain authoritative.
     if (controlStates[id] !== previousReport) return this
     val requested = normalizedControl(value)
-    return copy(requestedControls = if (controlStates[id]?.contentEquals(requested) == true)
+    return copy(requestedControls = if (id != ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG &&
+            controlStates[id]?.contentEquals(requested) == true)
         requestedControls - id else requestedControls + (id to requested))
 }
