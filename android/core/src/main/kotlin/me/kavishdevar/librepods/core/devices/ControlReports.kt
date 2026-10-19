@@ -19,7 +19,7 @@ internal fun AppleState.withControlReport(id: ControlCommandIdentifier, rawValue
         }
         // Some firmware applies Conversation Awareness silently; any fresh boolean report wins.
         ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG, ControlCommandIdentifier.EAR_DETECTION_CONFIG -> {
-            if (rawValue.size !in 1..4 || value.size != 1 || value[0].toInt() !in 1..2) return this
+            if (id.decodeBoolean(rawValue) == null) return this
             id == ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG || requestedControls[id]?.contentEquals(value) == true
         }
         else -> requestedControls[id]?.contentEquals(value) == true

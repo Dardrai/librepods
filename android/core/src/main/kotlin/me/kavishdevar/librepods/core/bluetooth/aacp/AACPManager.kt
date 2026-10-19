@@ -766,7 +766,10 @@ class AACPManager(private val device: AppleDevice,
     }
 
     fun sendControlCommand(identifier: Byte, value: Byte): Boolean = sendControlCommand(identifier, byteArrayOf(value))
-    fun sendControlCommand(identifier: Byte, value: Boolean): Boolean = sendControlCommand(identifier, if (value) byteArrayOf(0x01) else byteArrayOf(0x02))
+    fun sendControlCommand(identifier: Byte, value: Boolean): Boolean {
+        val control = ControlCommandIdentifier.fromByte(identifier) ?: return false
+        return sendControlCommand(identifier, control.encodeBoolean(value))
+    }
     fun sendControlCommand(identifier: Byte, value: Int): Boolean =
         value in 0..255 && sendControlCommand(identifier, byteArrayOf(value.toByte()))
 

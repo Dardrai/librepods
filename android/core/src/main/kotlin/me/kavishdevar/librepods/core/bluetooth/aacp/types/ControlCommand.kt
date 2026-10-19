@@ -111,6 +111,19 @@ enum class ControlCommandIdentifier(val value: Byte) {
     DISABLE_BUTTON_INPUT(0x41),
     EXTENDED_HOLD_AND_RELEASE(0x42);
 
+    fun encodeBoolean(enabled: Boolean): Byte =
+        if (this == EAR_DETECTION_CONFIG) { if (enabled) 2 else 1 }
+        else { if (enabled) 1 else 2 }
+
+    fun decodeBoolean(value: ByteArray?): Boolean? {
+        if (value == null || value.size !in 1..4 || value.drop(1).any { it != 0.toByte() }) return null
+        return when (value[0]) {
+            encodeBoolean(true) -> true
+            encodeBoolean(false) -> false
+            else -> null
+        }
+    }
+
     companion object {
         fun fromByte(byte: Byte): ControlCommandIdentifier? = entries.find { it.value == byte }
     }

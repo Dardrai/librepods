@@ -102,6 +102,30 @@ class AacpProtocolReportsTest {
         assertArrayEquals(byteArrayOf(4, 0, 4, 0, 1, 0, 8), shadow.output.bytes.toByteArray())
     }
 
+    @Test fun booleanSendPathsUseEarSpecificEncodingWithoutReversingOtherTogglesOrRawValues() = withTransport { device, socket ->
+        val output = Shadow.extract<ProtocolReportSocketShadow>(socket).output.bytes
+        for (id in listOf(ControlCommandIdentifier.EAR_DETECTION_CONFIG,
+            ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG, ControlCommandIdentifier.ALLOW_OFF_OPTION)) {
+            for (enabled in listOf(true, false)) {
+                val expected = if (id == ControlCommandIdentifier.EAR_DETECTION_CONFIG) {
+                    if (enabled) 2 else 1
+                } else if (enabled) 1 else 2
+                val packet = byteArrayOf(4, 0, 4, 0, 9, 0, id.value, expected.toByte(), 0, 0, 0)
+                output.reset()
+                assertTrue(device.setControlCommand(id, enabled))
+                assertArrayEquals(packet, output.toByteArray())
+                assertArrayEquals(byteArrayOf(expected.toByte()), device.state.value.requestedControls[id])
+                output.reset()
+                assertTrue(device.aacp.sendControlCommand(id.value, enabled))
+                assertArrayEquals(packet, output.toByteArray())
+                assertArrayEquals(byteArrayOf(expected.toByte()), device.state.value.requestedControls[id])
+            }
+        }
+        output.reset()
+        assertTrue(device.setControlCommand(ControlCommandIdentifier.EAR_DETECTION_CONFIG, 1))
+        assertArrayEquals(byteArrayOf(4, 0, 4, 0, 9, 0, 0x0a, 1, 0, 0, 0), output.toByteArray())
+    }
+
     @Test fun conversationActivityCannotChangeTheEnabledSettingOrConfirmAPendingChoice() = withTransport { device, socket ->
         val id = ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG
         for (enabled in listOf(1, 2)) {
@@ -146,7 +170,7 @@ class AacpProtocolReportsTest {
         for ((id, baseline, pending) in listOf(
             Triple(ControlCommandIdentifier.AUTO_ANC_STRENGTH, 50, 25),
             Triple(ControlCommandIdentifier.ALLOW_OFF_OPTION, 1, 2),
-            Triple(ControlCommandIdentifier.EAR_DETECTION_CONFIG, 2, 1))) {
+            Triple(ControlCommandIdentifier.EAR_DETECTION_CONFIG, 1, 2))) {
             val header = byteArrayOf(4, 0, 4, 0, 9, 0, id.value)
             for (request in listOf(null, pending)) {
                 device.loadInitialState(AppleState(controlStates = mapOf(id to byteArrayOf(baseline.toByte())),

@@ -261,7 +261,7 @@ class AppleDevice(
     fun setControlCommand(identifier: ControlCommandIdentifier, value: Int): Boolean =
         value in 0..255 && setControlCommand(identifier, byteArrayOf(value.toByte()))
     fun setControlCommand(identifier: ControlCommandIdentifier, value: Boolean): Boolean =
-        setControlCommand(identifier, if (value) byteArrayOf(1) else byteArrayOf(2))
+        aacp.sendControlCommand(identifier.value, value)
 
     suspend fun setHearingAidEnabled(enabled: Boolean): Boolean = setHearingMode(HearingMode.HEARING_AID, enabled)
     suspend fun setMediaAssistEnabled(enabled: Boolean): Boolean = setHearingMode(HearingMode.MEDIA_ASSIST, enabled)

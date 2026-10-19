@@ -23,7 +23,7 @@ pair, local behavior choices and correctly owner-bound BLE keys once. Existing
 rewrite database rows are preserved. Unconfirmed device control values are not
 migrated as device reports. The Android Bluetooth bond stays with Android.
 
-The current fork version is `2.0.0-alpha.1-pixel56`, code `200000141`.
+The current fork version is `2.0.0-alpha.1-pixel57`, code `200000142`.
 
 The island requests white status-bar icons while its wide, dark shell covers the
 status bar. Its transparent, untouchable application-overlay companion is attached
@@ -47,6 +47,9 @@ controlled by this overlay or Shizuku.
 Automatic Ear Detection uses the same effective choice in the screen and media
 automation: a pending choice, then a valid device report, then the saved local
 setting. Unknown device state never overrides a saved disabled choice.
+Ear Detection control `0x0A` uses `2` for enabled and `1` for disabled, opposite
+to ordinary boolean controls. Both Boolean writes and reported-state decoding
+use this command-specific mapping; cached raw reports are not inverted.
 Targeted noise-control widgets resolve their saved pair before acting and never
 fall back to another connected pair. Invalid Adaptive strength reports preserve
 the last confirmed value and any pending edit.

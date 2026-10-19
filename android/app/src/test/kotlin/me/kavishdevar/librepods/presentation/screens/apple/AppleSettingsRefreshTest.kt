@@ -117,12 +117,12 @@ class AppleSettingsRefreshTest {
         val enabled = AppleSettings(earDetectionEnabled = true)
         val cases = listOf(
             Triple(AppleState(), disabled, true),
-            Triple(AppleState(controlStates = mapOf(id to byteArrayOf(2))), enabled, true),
+            Triple(AppleState(controlStates = mapOf(id to byteArrayOf(1))), enabled, true),
+            Triple(AppleState(controlStates = mapOf(id to byteArrayOf(2)),
+                requestedControls = mapOf(id to byteArrayOf(1))), enabled, true),
             Triple(AppleState(controlStates = mapOf(id to byteArrayOf(1)),
-                requestedControls = mapOf(id to byteArrayOf(2))), enabled, true),
-            Triple(AppleState(controlStates = mapOf(id to byteArrayOf(2)),
-                requestedControls = mapOf(id to byteArrayOf(1))), disabled, false),
-            Triple(AppleState(controlStates = mapOf(id to byteArrayOf(2)),
+                requestedControls = mapOf(id to byteArrayOf(2))), disabled, false),
+            Triple(AppleState(controlStates = mapOf(id to byteArrayOf(1)),
                 requestedControls = mapOf(id to byteArrayOf(0))), enabled, true),
         )
         val choice = mutableStateOf(cases.first())

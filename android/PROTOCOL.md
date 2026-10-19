@@ -4,6 +4,22 @@ These contracts follow the captured formats and NTPods implementation at
 [`58ad399`](https://github.com/Ripthulhu/ntpods/tree/58ad3998f18e89ea1ed611b9a2e8aec11b7382bf).
 They describe wire handling, not a guarantee that every feature works on every host.
 
+## Boolean control values
+
+Ear Detection control `0x0A` uses `2` for enabled and `1` for disabled. Ordinary
+boolean controls such as Conversation Awareness and Allow Off use `1` for
+enabled and `2` for disabled. Boolean writes and state decoding must use the
+identifier's mapping rather than treating `value == 1` as universally enabled.
+The Ear Detection mapping agrees with Apple's consumer setter and NTPods;
+this is static source evidence, not a new controlled Android wire capture.
+
+Known boolean reports require a value of `1` or `2` and zero padding. Invalid
+reports preserve the previous confirmed value and pending request. Ear Detection
+retires a pending choice only on a matching report; a contradictory valid report
+does not confirm it. Pending choices expire through the existing request lifetime.
+Persisted raw reports keep their wire values across upgrades; changing the host
+decoder does not authorize another device write.
+
 ## Connection state and parsing
 
 Only reports from the current control socket update device state. AACP message

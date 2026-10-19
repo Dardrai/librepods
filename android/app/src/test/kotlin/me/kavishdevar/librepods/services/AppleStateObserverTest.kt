@@ -128,7 +128,7 @@ class AppleStateObserverTest {
         val combined = states.value.copy(
             battery = setOf(Battery(BatteryComponent.LEFT, 80, BatteryStatus.NOT_CHARGING)),
             componentState = emptySet(),
-            controlStates = mapOf(ControlCommandIdentifier.EAR_DETECTION_CONFIG to byteArrayOf(1)),
+            controlStates = mapOf(ControlCommandIdentifier.EAR_DETECTION_CONFIG to byteArrayOf(2)),
             currentHeartRate = sample, hrmState = BuddyState.ACTIVE)
         states.value = combined
         await { calls(samples, "insert") == 1 }
@@ -145,19 +145,19 @@ class AppleStateObserverTest {
 
     @Test fun aDisabledEarDetectionReportOverridesAnEnabledSavedChoice() = runBlocking {
         assertEarDetectionPause(AppleState(componentState = full, controlStates = mapOf(
-            ControlCommandIdentifier.EAR_DETECTION_CONFIG to byteArrayOf(2))), saved = true, pauses = false)
+            ControlCommandIdentifier.EAR_DETECTION_CONFIG to byteArrayOf(1))), saved = true, pauses = false)
     }
 
     @Test fun aPendingDisabledChoiceStopsPausingBeforeItsEcho() = runBlocking {
         val id = ControlCommandIdentifier.EAR_DETECTION_CONFIG
-        assertEarDetectionPause(AppleState(componentState = full, controlStates = mapOf(id to byteArrayOf(1)),
-            requestedControls = mapOf(id to byteArrayOf(2))), saved = true, pauses = false)
+        assertEarDetectionPause(AppleState(componentState = full, controlStates = mapOf(id to byteArrayOf(2)),
+            requestedControls = mapOf(id to byteArrayOf(1))), saved = true, pauses = false)
     }
 
     @Test fun aPendingEnabledChoiceCanPauseBeforeItsEcho() = runBlocking {
         val id = ControlCommandIdentifier.EAR_DETECTION_CONFIG
-        assertEarDetectionPause(AppleState(componentState = full, controlStates = mapOf(id to byteArrayOf(2)),
-            requestedControls = mapOf(id to byteArrayOf(1))), saved = false, pauses = true)
+        assertEarDetectionPause(AppleState(componentState = full, controlStates = mapOf(id to byteArrayOf(1)),
+            requestedControls = mapOf(id to byteArrayOf(2))), saved = false, pauses = true)
     }
 
     @Test fun disablingAlertsAndStoppingMeasurementCancelWithoutAnotherSample() = runBlocking {
