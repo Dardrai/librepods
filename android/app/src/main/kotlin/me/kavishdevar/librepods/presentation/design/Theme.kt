@@ -84,7 +84,7 @@ private val AppleLightColorScheme = lightColorScheme(
 @Composable
 fun LibrePodsTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
-    designSystem: DesignSystem = DesignSystem.Material,
+    designSystem: DesignSystem = DesignSystem.Apple,
     overrideMaterialColor: Color? = null,
     accessibilitySettings: AccessibilitySettings = AccessibilitySettings(),
     fontSettings: FontSettings = FontSettings(),

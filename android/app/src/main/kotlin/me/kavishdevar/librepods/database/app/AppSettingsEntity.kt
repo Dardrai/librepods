@@ -16,7 +16,7 @@ data class AppSettingsEntity(
     val id: Int = 0,
 
     val nightMode: NightTheme = NightTheme.System,
-    val designSystem: DesignSystem = DesignSystem.Material,
+    val designSystem: DesignSystem = DesignSystem.Apple,
     val overrideMaterialColor: Color? = null,
     val fontSettings: FontSettings = FontSettings(),
 

@@ -32,6 +32,7 @@ import android.content.pm.ServiceInfo
 import android.media.AudioManager
 import android.media.AudioDeviceInfo
 import android.media.AudioDeviceCallback
+import android.media.AudioAttributes
 import android.os.BatteryManager
 import android.os.Binder
 import android.os.Build
@@ -98,6 +99,7 @@ import me.kavishdevar.librepods.bluetooth.canLoadAppleDevice
 import me.kavishdevar.librepods.bluetooth.nearbyScanSettings
 import me.kavishdevar.librepods.shizuku.A2dpRecoveryGuard
 import me.kavishdevar.librepods.shizuku.BackgroundAudioAccess
+import me.kavishdevar.librepods.shizuku.BluetoothVolumeSync
 import me.kavishdevar.librepods.core.data.apple.BuddyState
 import me.kavishdevar.librepods.core.data.heartrate.HeartRateSample
 import me.kavishdevar.librepods.core.devices.AppleDevice
@@ -130,6 +132,7 @@ import rikka.shizuku.Shizuku
 private const val TAG = "LibrePodsService"
 private const val NEARBY_SCAN_TAG = "NearbyScan"
 private const val STOP_MICROPHONE = "me.kavishdevar.librepods.STOP_MICROPHONE"
+private const val A2DP_ACTIVE_DEVICE_CHANGED = "android.bluetooth.a2dp.profile.action.ACTIVE_DEVICE_CHANGED"
 
 @SuppressLint("MissingPermission")
 class LibrePodsService: Service() {
@@ -165,6 +168,8 @@ class LibrePodsService: Service() {
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val backgroundAudioAccess by lazy { BackgroundAudioAccess(this) }
+    private val bluetoothVolumeSync by lazy { BluetoothVolumeSync(this) }
+    private var bluetoothVolumeSyncJob: Job? = null
     private val backgroundAudioBinderReceived = Shizuku.OnBinderReceivedListener { ensureBackgroundAudioAccess() }
     private val backgroundAudioPermissionResult = Shizuku.OnRequestPermissionResultListener { _, result ->
         if (result == PackageManager.PERMISSION_GRANTED) ensureBackgroundAudioAccess()
@@ -189,10 +194,14 @@ class LibrePodsService: Service() {
     private val pairedObservations = mutableMapOf<MacAddress, Long>()
     private val nativeAudioCallback = object : AudioDeviceCallback() {
         override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>) {
+            checkBluetoothVolumeSync()
             devices.value.values.filterIsInstance<AppleDevice>().forEach { device ->
                 if (hasNativeAudioOutput(device.bluetoothDevice))
                     serviceScope.launch(Dispatchers.IO) { onDeviceConnected(device.bluetoothDevice) }
             }
+        }
+        override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>) {
+            checkBluetoothVolumeSync()
         }
     }
 
@@ -345,6 +354,7 @@ class LibrePodsService: Service() {
             }
             while (isActive) {
                 delay(5.seconds)
+                checkBluetoothVolumeSync()
                 recentProximityReports.expire(SystemClock.elapsedRealtimeNanos())
                 nearbyVisits.expire(SystemClock.elapsedRealtime(), pairingModel).forEach { nearbyPairing?.onNearbyDevice(it) }
                 devices.value.values.filterIsInstance<AppleDevice>().forEach { it.expireNearbyBattery(System.currentTimeMillis()) }
@@ -469,6 +479,59 @@ class LibrePodsService: Service() {
         serviceScope.launch(Dispatchers.IO) {
             if (!destroying) backgroundAudioAccess.ensureAllowed()
         }
+    }
+
+    /** Active A2DP changes need checking even when Android retains both output endpoints. */
+    private fun checkBluetoothVolumeSync() {
+        if (destroying || !startedWithPermissions) return
+        // Retire the previous route's transient state even while its repair is still running.
+        selectBluetoothVolumeSyncRoute()
+        if (bluetoothVolumeSyncJob?.isActive == true) return
+        val operation = serviceScope.launch(Dispatchers.IO, start = CoroutineStart.LAZY) {
+            repeat(2) { attempt ->
+                if (attempt != 0) delay(750)
+                try {
+                    val route = selectBluetoothVolumeSyncRoute() ?: return@launch
+                    val device = devices.value.values.filterIsInstance<AppleDevice>()
+                        .singleOrNull { it.macAddress.value.equals(route.address, ignoreCase = true) } ?: return@launch
+                    val controller = audioControllers[device.macAddress] ?: return@launch
+                    val caller = currentCoroutineContext()[Job]
+                    fun current() = caller?.isActive == true && refreshDeviceIsCurrent(device) &&
+                        audioControllers[device.macAddress] === controller && !callBlocksSettingsRefresh() &&
+                        !settingsRefreshes.containsKey(device.macAddress) && microphoneOwners.isEmpty() &&
+                        !bleCaptureBlocked && !device.state.value.recordingState.isRecording &&
+                        !device.state.value.microphoneState.isActive
+                    if (!current() || !controller.tryBeginSettingsRefresh()) return@launch
+                    try {
+                        // Share the volume lock so a new conversation cannot race the repair's ramp.
+                        MediaController.withIdleMediaVolume {
+                            bluetoothVolumeSync.check(device.macAddress.value, device, ::current)
+                        }
+                    } finally {
+                        controller.endSettingsRefresh()
+                    }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Exception) {
+                    Log.w("BluetoothVolumeSync", "Could not check selected AirPods volume sync", error)
+                }
+            }
+        }
+        bluetoothVolumeSyncJob = operation
+        operation.start()
+    }
+
+    private fun selectBluetoothVolumeSyncRoute(): AudioDeviceInfo? {
+        val route = runCatching {
+            getSystemService(AudioManager::class.java).getAudioDevicesForAttributes(
+                AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).build()
+            ).singleOrNull()?.takeIf { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP }
+        }.getOrElse {
+            Log.w("BluetoothVolumeSync", "Could not resolve selected media route", it)
+            null
+        }
+        bluetoothVolumeSync.selectRoute(route?.address)
+        return route
     }
 
     fun isNearbyDeviceAudioConnected(device: AppleDevice): Boolean = runCatching {
@@ -936,6 +999,10 @@ class LibrePodsService: Service() {
             if (!hasNearbyDevicesPermissions(this@LibrePodsService)) { stopSelf(); return }
             try {
                 when (intent.action) {
+                    A2DP_ACTIVE_DEVICE_CHANGED -> {
+                        checkBluetoothVolumeSync()
+                        return
+                    }
                     Intent.ACTION_SCREEN_ON, Intent.ACTION_SCREEN_OFF -> {
                         bleHandler.removeCallbacks(updateScreenScanMode)
                         if (bleRequested) {
@@ -949,6 +1016,7 @@ class LibrePodsService: Service() {
                         if (intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR) == BluetoothAdapter.STATE_ON) {
                             if (bleRequested) serviceScope.launch { loadDevices(); startBleScanner() }
                         } else {
+                            devices.value.values.filterIsInstance<AppleDevice>().forEach { bluetoothVolumeSync.forget(it) }
                             stopActiveBleScan()
                             nearbyPairing?.cancelPending()
                             nearbyVisits.clear()
@@ -967,6 +1035,7 @@ class LibrePodsService: Service() {
                         if (changed != null && changed.bondState == BluetoothDevice.BOND_NONE) {
                             nearbyPairing?.updatePairingBattery(changed, emptySet())
                             val address = MacAddress(changed.address)
+                            bluetoothVolumeSync.forget(address.value)
                             onDeviceDisconnected(address)
                             deviceJobs.remove(address)?.forEach { it.cancel() }
                             _devices.update { it - address }
@@ -989,6 +1058,10 @@ class LibrePodsService: Service() {
                 if (bluetoothDevice != null) {
                     when (action) {
                         BluetoothA2dp.ACTION_CONNECTION_STATE_CHANGED -> {
+                            if (intent.getIntExtra(BluetoothProfile.EXTRA_STATE, -1) in setOf(
+                                    BluetoothProfile.STATE_DISCONNECTING, BluetoothProfile.STATE_DISCONNECTED))
+                                bluetoothVolumeSync.forget(bluetoothDevice.address)
+                            checkBluetoothVolumeSync()
                             (devices.value[MacAddress(bluetoothDevice.address)] as? AppleDevice)?.let {
                                 observeNearbyMedia(it, intent.getIntExtra(BluetoothProfile.EXTRA_STATE, -1))
                                 islandWindow.updatePairedBattery(it)
@@ -1023,6 +1096,7 @@ class LibrePodsService: Service() {
             addAction(BluetoothAdapter.ACTION_STATE_CHANGED)
             addAction(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
             addAction(BluetoothA2dp.ACTION_CONNECTION_STATE_CHANGED)
+            addAction(A2DP_ACTIVE_DEVICE_CHANGED)
             addAction(Intent.ACTION_SCREEN_ON)
             addAction(Intent.ACTION_SCREEN_OFF)
         }

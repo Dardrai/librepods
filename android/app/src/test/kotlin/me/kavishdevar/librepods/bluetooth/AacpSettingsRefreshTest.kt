@@ -37,7 +37,6 @@ import org.robolectric.annotation.Implementation
 import org.robolectric.annotation.Implements
 import org.robolectric.shadow.api.Shadow
 import org.robolectric.shadows.ShadowBluetoothDevice
-import org.robolectric.shadows.ShadowBluetoothSocket
 import java.io.IOException
 import java.io.PipedOutputStream
 import java.util.concurrent.CountDownLatch
@@ -649,7 +648,7 @@ class AacpSettingsRefreshTest {
 }
 
 @Implements(BluetoothSocket::class)
-class RefreshSocketShadow : ShadowBluetoothSocket() {
+class RefreshSocketShadow : ClosingBluetoothSocketShadow() {
     val connectEntered = CountDownLatch(1)
     val closes = AtomicInteger()
     val output = RefreshOutput()
@@ -661,11 +660,8 @@ class RefreshSocketShadow : ShadowBluetoothSocket() {
         afterConnectedCheck?.also { afterConnectedCheck = null; it() }
         return connected
     }
-    @Implementation public override fun close() {
+    protected override fun onClosing() {
         closes.incrementAndGet()
-        super.close()
-        inputStreamFeeder.close()
-        outputStreamSink.close()
     }
 }
 

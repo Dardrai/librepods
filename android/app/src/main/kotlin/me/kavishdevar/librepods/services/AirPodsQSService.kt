@@ -33,6 +33,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
@@ -56,15 +57,29 @@ class AirPodsQSService : TileService() {
     private var picker: ListeningModeDialog? = null
     private var pickerOwner: AppleDevice? = null
     private var destroyed = false
+    private var listening = false
+    private var pendingClick: Job? = null
+    private var publishedAvailable: Boolean? = null
     private var pickerGeneration = 0L
 
     override fun onStartListening() {
         super.onStartListening()
+        listening = true
+        Log.d("AirPodsQSService", "Listening started")
+        bindDeviceControls()
+    }
+
+    private fun bindDeviceControls() {
         if (connection != null) return
         val owner = object : ServiceConnection {
             override fun onServiceConnected(name: ComponentName, binder: IBinder) {
                 if (connection !== this) return
-                val service = (binder as? LibrePodsService.LocalBinder)?.getService() ?: return
+                val service = (binder as? LibrePodsService.LocalBinder)?.getService() ?: run {
+                    Log.w("AirPodsQSService", "Device controls returned an invalid binder")
+                    releaseBinding()
+                    return
+                }
+                Log.d("AirPodsQSService", "Device controls bound")
                 source = service
                 observation?.cancel()
                 observation = scope.launch {
@@ -74,6 +89,12 @@ class AirPodsQSService : TileService() {
                             fun refresh() {
                                 selected = pods.firstOrNull(::canControl)
                                 updateTile()
+                                if (pendingClick?.isActive == true) {
+                                    cancelPendingClick()
+                                    Log.d("AirPodsQSService", "Pending click resolved")
+                                    openPicker(pickerGeneration)
+                                    if (!listening) releaseBinding(publishUnavailable = false)
+                                }
                             }
                             refresh()
                             pods.forEach { device ->
@@ -89,6 +110,8 @@ class AirPodsQSService : TileService() {
 
             override fun onServiceDisconnected(name: ComponentName) {
                 if (connection !== this) return
+                Log.w("AirPodsQSService", "Device controls disconnected")
+                cancelPendingClick()
                 observation?.cancel()
                 observation = null
                 selected = null
@@ -96,31 +119,45 @@ class AirPodsQSService : TileService() {
                 updateTile()
             }
 
-            override fun onBindingDied(name: ComponentName) { if (connection === this) releaseBinding() }
-            override fun onNullBinding(name: ComponentName) { if (connection === this) releaseBinding() }
+            override fun onBindingDied(name: ComponentName) {
+                if (connection === this) {
+                    Log.w("AirPodsQSService", "Device controls binding died")
+                    releaseBinding()
+                }
+            }
+            override fun onNullBinding(name: ComponentName) {
+                if (connection === this) {
+                    Log.w("AirPodsQSService", "Device controls returned a null binding")
+                    releaseBinding()
+                }
+            }
         }
         connection = owner
-        updateTile()
         bound = runCatching { bindService(Intent(this, LibrePodsService::class.java), owner, Context.BIND_AUTO_CREATE) }
             .onFailure { Log.w("AirPodsQSService", "Cannot bind device controls", it) }.getOrDefault(false)
-        if (!bound) connection = null
+        if (!bound) releaseBinding()
     }
 
     override fun onStopListening() {
-        releaseBinding()
+        listening = false
+        Log.d("AirPodsQSService", "Listening stopped; pendingClick=${pendingClick?.isActive == true}")
+        if (pendingClick?.isActive != true) releaseBinding(publishUnavailable = false)
         super.onStopListening()
     }
 
     override fun onDestroy() {
+        Log.d("AirPodsQSService", "Tile service destroyed")
         destroyed = true
+        listening = false
         dismissPicker()
-        releaseBinding()
+        releaseBinding(publishUnavailable = false)
         scope.cancel()
         super.onDestroy()
     }
 
     override fun onTileRemoved() {
         pickerGeneration++
+        releaseBinding(publishUnavailable = false)
         dismissPicker()
         super.onTileRemoved()
     }
@@ -132,7 +169,8 @@ class AirPodsQSService : TileService() {
         previous?.dismiss()
     }
 
-    private fun releaseBinding() {
+    private fun releaseBinding(publishUnavailable: Boolean = true) {
+        cancelPendingClick()
         val old = connection
         connection = null
         observation?.cancel()
@@ -141,7 +179,13 @@ class AirPodsQSService : TileService() {
         source = null
         if (bound && old != null) runCatching { unbindService(old) }
         bound = false
-        updateTile()
+        // SystemUI stops listening when the shade closes; that is not a device disconnect.
+        if (publishUnavailable) updateTile()
+    }
+
+    private fun cancelPendingClick() {
+        pendingClick?.cancel()
+        pendingClick = null
     }
 
     private fun canControl(device: AppleDevice): Boolean = device.connectionState.value == ConnectionState.CONNECTED &&
@@ -150,7 +194,27 @@ class AirPodsQSService : TileService() {
     override fun onClick() {
         super.onClick()
         val generation = ++pickerGeneration
-        val device = selected?.takeIf(::canControl) ?: return
+        cancelPendingClick()
+        if (destroyed) return
+        if (source != null) {
+            openPicker(generation)
+            return
+        }
+        Log.d("AirPodsQSService", "Click waiting for current device-controls binding")
+        pendingClick = scope.launch {
+            delay(2_000)
+            pendingClick = null
+            Log.w("AirPodsQSService", "Click expired waiting for device controls")
+            releaseBinding()
+        }
+        bindDeviceControls()
+    }
+
+    private fun openPicker(generation: Long) {
+        val device = selected?.takeIf(::canControl) ?: run {
+            Log.d("AirPodsQSService", "Click skipped: no connected supported device")
+            return
+        }
         val devices = source?.devices ?: return
         val openPicker = Runnable {
             // Unlocking/collapsing may stop tile listening; the clicked pair must still be current.
@@ -174,6 +238,8 @@ class AirPodsQSService : TileService() {
                     dismissPicker()
                     Log.w("AirPodsQSService", "Cannot show listening modes", it)
                 }
+            } else {
+                Log.d("AirPodsQSService", "Click skipped: owner, unlock or generation changed")
             }
         }
         if (isLocked) unlockAndRun(openPicker) else openPicker.run()
@@ -182,8 +248,18 @@ class AirPodsQSService : TileService() {
     private fun updateTile() {
         val tile = qsTile ?: return
         val device = selected?.takeIf(::canControl)
+        val available = device != null
+        if (publishedAvailable != available) {
+            val pods = source?.devices?.value?.values?.filterIsInstance<AppleDevice>().orEmpty()
+            val states = pods.joinToString { pod ->
+                "${pod.connectionState.value}/${pod.metadata.value.model}/supported=" +
+                    (BaseCapability.LISTENING_MODE in AirPodsSpecs.getSpec(pod.metadata.value.model).baseCapabilities)
+            }
+            Log.d("AirPodsQSService", "Tile available=$available bound=$bound service=${source != null} devices=${pods.size} states=[$states]")
+            publishedAvailable = available
+        }
         val mode = device?.state?.value?.controlStates?.get(ControlCommandIdentifier.LISTENING_MODE)?.firstOrNull()?.toInt()
-        tile.state = if (device == null) Tile.STATE_UNAVAILABLE else Tile.STATE_ACTIVE
+        tile.state = if (available) Tile.STATE_ACTIVE else Tile.STATE_UNAVAILABLE
         tile.label = getString(when (mode) {
             NoiseControlMode.OFF.ordinal + 1 -> R.string.off
             NoiseControlMode.TRANSPARENCY.ordinal + 1 -> R.string.transparency

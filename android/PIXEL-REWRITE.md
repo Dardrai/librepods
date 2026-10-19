@@ -2,9 +2,10 @@
 
 This branch starts at upstream `android/rewrite`, commit
 `a4d8377df0bb468f371289a1b53eeba7c23a9f06`. It retains the rewrite's screens,
-design choices, settings and per-device architecture. The older
-`pixel-shizuku-port` branch is a reference for previous hardware checks, not
-the frontend base.
+design choices, settings and per-device architecture. `android/rewrite` is the
+fork's active branch. The older port is preserved at
+`archive/pixel-shizuku-port-2026-10-20` as a reference for previous hardware
+checks, not the frontend base.
 
 ## Build and upgrade
 
@@ -23,7 +24,65 @@ pair, local behavior choices and correctly owner-bound BLE keys once. Existing
 rewrite database rows are preserved. Unconfirmed device control values are not
 migrated as device reports. The Android Bluetooth bond stays with Android.
 
-The current fork version is `2.0.0-alpha.1-pixel57`, code `200000142`.
+The current fork version is `2.0.0-alpha.1-pixel68`, code `200000153`.
+
+Apple is the default design system for new or unset preferences, including the
+initial loading frame. Saved theme choices are preserved, and light/dark mode
+continues to follow the existing night-theme preference.
+
+The listening-mode slider includes the first movement beyond Android's drag
+threshold, so short Adaptive-strength drags commit their changed position.
+Volume recovery receives route changes even while a check is running. A handoff
+clears the old fault timer and pending restoration, then requires a fresh stable
+fault after returning; healthy capability remains tied to the connected owner.
+Disconnect cleanup retires checks immediately without waiting for Bluetooth
+queries or the volume ramp, and retired checks cannot continue writing volume.
+
+The Quick Settings tile preserves its last reported availability while the shade
+stops listening or reattaches to the service. Actual device or binding loss still
+marks it unavailable; a tap during attachment waits briefly for that binding
+before rechecking the current device and opening the picker.
+
+Quick Settings opens the listening rail closer to the camera/status-bar safe
+area. Android's public window APIs blur only the pill-shaped field, with a more
+opaque fallback when system blur is unavailable. It needs no Shizuku or screen
+capture. The island stays suppressed while the picker is open. The shared Apple
+listening slider keeps clear, refractive glass; its 56dp bubble grows to 78dp on
+press without resizing the track or changing drag coordinates. The popup's
+public elevation buffer allows that bubble to extend beyond the blurred field.
+Mode icons stay fixed in the track; the empty bubble optically magnifies the
+captured pixels beneath it without stretching its contents with the glass.
+At rest the selection is a flat tinted pill with normal-size icons. Pressing
+animates the reference tab bubble's refraction to 10dp/14dp and uniform
+magnification to 1.2x; release or
+cancellation returns both to zero refraction and 1x with the press lighting.
+Its capture temporarily backs the icons
+with white or black so the shader can split contrasting RGB samples into
+rainbow edges. A cached shader removes that backing after dispersion, restoring
+transparency so Android's blurred pill remains visible through the lens.
+The outer 3dp retains only the dispersed color, blending back to full content
+by 6dp, so the optical rim does not repeat the icon as a black selection bar.
+Holding the bubble brings in the reference tab bubble's directional highlight
+and a moving radial press light beneath the fixed icons. Inner shading, offset
+shadow and 78/56 expansion on both axes provide the raised shape; horizontal
+growth is limited only near the endpoints to stay inside the popup buffer.
+The track omits the rectangular default press highlight. Material controls
+retain their selected theme.
+
+Apple-theme floating buttons share one Backdrop glass material with a legible
+resting tint, restrained refraction, edge lighting and damped touch feedback.
+Navigation chrome samples the actual scrolling body from a sibling layer,
+avoiding feedback between the source and its glass controls. Titles reserve
+space for the measured actions. Grouped settings retain their solid reading
+surface; switch thumbs and the shared listening-mode rail use matching optical
+details. The Material theme keeps its existing controls. The listening rail also
+serves the island and Quick Settings dialog without changing their layout or
+capturing another application's screen. The library remains pinned to
+`io.github.kyant0:backdrop:2.0.1`.
+
+Back from the root screen returns to Android instead of sliding the only screen
+offscreen. Nested screens retain predictive Back and the optional anywhere swipe;
+stale queued Back requests at the root leave its content in place.
 
 The island requests white status-bar icons while its wide, dark shell covers the
 status bar. Its transparent, untouchable application-overlay companion is attached
@@ -81,6 +140,26 @@ retry this setup; global audio hardening, other applications and microphone
 permissions are unchanged. This allows Conversation Awareness ducking after an
 update or background restart without first opening the app. See Android's
 [background audio hardening guidance](https://developer.android.com/about/versions/17/changes/bg-audio).
+
+After a car/AirPods handoff, Android can lose its AVRCP absolute-volume support
+flag while Bluetooth still remembers the AirPods' capability. The foreground
+service checks active-device changes, output changes and its existing maintenance
+tick. Shizuku recovery requires the sole selected, bonded AirPods route and a
+previous healthy absolute-volume observation for that same device object and
+A2DP connection. Disconnection, unpairing and Bluetooth shutdown retire that
+observation. A bounded, read-only Shizuku Bluetooth dump must also confirm native
+absolute volume is enabled; inaccessible or unknown state prevents repair.
+Calls, microphone operations and Conversation Awareness volume transitions defer
+recovery. The dump runs only for a confirmed fault, never during healthy polling.
+
+Recovery verifies numeric zero before reasserting absolute-volume behavior,
+then ramps back to at most the pre-repair index, the last healthy index and 44%
+of the stream maximum. Each write rechecks route, ownership and volume readback;
+manual changes stop the ramp. Duplicate Bluetooth notifications coalesce, and
+temporary system failures retain only the exact owned restoration for a bounded
+retry. This repairs the framework state through the same
+[volume-behavior API used by Bluetooth](https://android.googlesource.com/platform/packages/modules/Bluetooth/+/refs/heads/main/android/app/src/com/android/bluetooth/avrcp/AvrcpVolumeManager.java);
+it does not reconnect devices or replace Bluetooth's volume controller.
 
 Bluetooth startup rechecks current Nearby devices permissions, including boot
 and upgrade entry points. Missing grants return to the existing permissions step.

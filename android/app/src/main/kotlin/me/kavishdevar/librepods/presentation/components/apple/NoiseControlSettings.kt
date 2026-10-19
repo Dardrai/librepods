@@ -18,7 +18,6 @@
 
 package me.kavishdevar.librepods.presentation.components.apple
 
-import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
@@ -29,11 +28,12 @@ import androidx.compose.animation.expandHorizontally
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkHorizontally
-import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -58,6 +58,7 @@ import androidx.compose.material3.ToggleButton
 import androidx.compose.material3.ToggleButtonDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -71,12 +72,23 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.RoundRect
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.ClipOp
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.clipPath
+import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.input.pointer.util.VelocityTracker
+import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
@@ -99,6 +111,9 @@ import com.kyant.backdrop.backdrops.layerBackdrop
 import com.kyant.backdrop.backdrops.rememberLayerBackdrop
 import com.kyant.backdrop.drawBackdrop
 import com.kyant.backdrop.effects.lens
+import com.kyant.backdrop.effects.vibrancy
+import com.kyant.backdrop.highlight.Highlight
+import com.kyant.backdrop.shadow.InnerShadow
 import com.kyant.backdrop.shadow.Shadow
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.debounce
@@ -111,14 +126,14 @@ import me.kavishdevar.librepods.data.app.FontSettings
 import me.kavishdevar.librepods.core.devices.NoiseControlMode
 import me.kavishdevar.librepods.presentation.components.primitives.StyledButton
 import me.kavishdevar.librepods.presentation.components.primitives.StyledSlider
+import me.kavishdevar.librepods.presentation.components.primitives.rememberMomentumAnimation
+import me.kavishdevar.librepods.presentation.components.primitives.removeLensMatte
 import me.kavishdevar.librepods.presentation.design.DesignSystem
 import me.kavishdevar.librepods.presentation.design.LibrePodsTheme
 import me.kavishdevar.librepods.presentation.design.LocalDesignSystem
 import me.kavishdevar.librepods.presentation.icons.LocalIcons
 import me.kavishdevar.librepods.presentation.utils.LocalDebugMode
-import kotlin.math.abs
 import kotlin.math.roundToInt
-import kotlin.math.sqrt
 import kotlin.time.Duration.Companion.milliseconds
 
 @Composable
@@ -249,7 +264,16 @@ fun NoiseControlSettings(
                 label = "listening-control-enabled"
             )
             val isDarkTheme = MaterialTheme.colorScheme.surface.luminance() < 0.5f
-            val backgroundColor = if (isDarkTheme) (if (showLabels) Color(0xFF1C1C1E) else MaterialTheme.colorScheme.surfaceContainerLow) else Color(0xFFE3E3E8)
+            val railShape = RoundedCornerShape(percent = 100)
+            val railColor = if (isDarkTheme) Color(0xFF787880).copy(alpha = 0.12f) else Color(0xFF787880).copy(alpha = 0.08f)
+            val railWash = Brush.verticalGradient(listOf(
+                Color.White.copy(alpha = if (isDarkTheme) 0.025f else 0.12f),
+                Color.White.copy(alpha = if (isDarkTheme) 0.01f else 0.03f)
+            ))
+            val railRim = Brush.verticalGradient(listOf(
+                Color.White.copy(alpha = if (isDarkTheme) 0.16f else 0.68f),
+                Color.Black.copy(alpha = if (isDarkTheme) 0.12f else 0.07f)
+            ))
 
             val density = LocalDensity.current
             val adaptiveAudioLabel = stringResource(R.string.adaptive_audio)
@@ -301,14 +325,29 @@ fun NoiseControlSettings(
             val targetAncStart by rememberUpdatedState(targetOffWidth + targetModeWidth + targetAdaptiveWidth)
             val currentTargetModeWidth by rememberUpdatedState(targetModeWidth)
 
-            val velocityTracker = remember { VelocityTracker() }
-            val tapProgress = remember { Animatable(0f) }
-            val stretch = remember { Animatable(0f) }
+            val momentum = rememberMomentumAnimation(maxScale = 78f / 56f,
+                scaleXAnimationSpec = spring(0.6f, 250f, 0.001f),
+                scaleYAnimationSpec = spring(0.7f, 250f, 0.001f))
+            val lensScaleX by remember {
+                derivedStateOf {
+                    val restingWidth = currentModeWidth - 8f
+                    val edgeClearance = minOf(offset.value.coerceAtLeast(0f),
+                        (currentWidth - currentModeWidth - offset.value).coerceAtLeast(0f))
+                    // Leave 2dp inside the popup's 16dp outer buffer at the ends of the rail.
+                    if (restingWidth <= 0f) 1f else minOf(momentum.scaleX,
+                        1f + 2f * (edgeClearance + 4f + 14f) / restingWidth)
+                }
+            }
+            LaunchedEffect(enabled, momentum) {
+                if (!enabled) momentum.endPressingAnimation()
+            }
 
             val animationCoroutineScope = rememberCoroutineScope()
 
             var isDragging by remember { mutableStateOf(false) }
             var dragOffset by remember { mutableFloatStateOf(0f) }
+            var dragStartOffset by remember { mutableFloatStateOf(0f) }
+            var thumbCoordinates by remember { mutableStateOf<LayoutCoordinates?>(null) }
 
             LaunchedEffect(width.value, noiseControlModeValue, adaptiveStrength, requestedAdaptiveStrength, showOffListeningMode, showAdaptiveMode, isDragging) {
                 if (!isDragging && width.value > 0.dp) {
@@ -409,13 +448,59 @@ fun NoiseControlSettings(
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .layerBackdrop(backdrop)
                 ) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
                             .height(64.dp)
                             .fillMaxWidth()
+                            .drawWithContent {
+                                if (modeWidth <= 8f) {
+                                    drawContent()
+                                } else {
+                                    val restingWidth = (modeWidth - 8f).dp.toPx()
+                                    val restingHeight = 56.dp.toPx()
+                                    val scaleX = lensScaleX
+                                    val scaleY = momentum.scaleY
+                                    val lensWidth = restingWidth * scaleX
+                                    val lensHeight = restingHeight * scaleY
+                                    val centerX = offset.value.coerceAtLeast(0f).dp.toPx() + modeWidth.dp.toPx() / 2f
+                                    val centerY = size.height / 2f
+                                    val radius = minOf(restingWidth, restingHeight) / 2f
+                                    val path = Path().apply {
+                                        addRoundRect(RoundRect(Rect(centerX - lensWidth / 2f,
+                                            centerY - lensHeight / 2f, centerX + lensWidth / 2f,
+                                            centerY + lensHeight / 2f), CornerRadius(radius * scaleX, radius * scaleY)))
+                                    }
+                                    // Hide only the unmagnified copy; the inner capture keeps the complete track.
+                                    clipPath(path, ClipOp.Difference) { this@drawWithContent.drawContent() }
+                                }
+                            }
+                            .layerBackdrop(backdrop)
+                            .background(railColor, railShape)
+                            .background(railWash, railShape)
+                            .border(0.5.dp, railRim, railShape)
+                            .drawWithContent {
+                                val pressed = momentum.progress.coerceIn(0f, 1f)
+                                if (pressed > 0f) {
+                                    val radius = size.height / 2f
+                                    val outline = Path().apply {
+                                        addRoundRect(RoundRect(Rect(Offset.Zero, size), CornerRadius(radius)))
+                                    }
+                                    // Capture the reference's moving press light beneath the fixed icons.
+                                    clipPath(outline) {
+                                        drawRect(Color.White.copy(alpha = 0.08f * pressed), blendMode = BlendMode.Plus)
+                                        drawRect(Brush.radialGradient(
+                                            0f to Color.White.copy(alpha = 0.15f * pressed),
+                                            0.5f to Color.White.copy(alpha = 0.15f * pressed),
+                                            1f to Color.Transparent,
+                                            center = Offset(offset.value.coerceAtLeast(0f).dp.toPx() + modeWidth.dp.toPx() / 2f, radius),
+                                            radius = size.height * 1.5f
+                                        ), blendMode = BlendMode.Plus)
+                                    }
+                                }
+                                drawContent()
+                            }
                             .selectableGroup()
                             .onGloballyPositioned {
                                 with(density) {
@@ -428,56 +513,29 @@ fun NoiseControlSettings(
                             modifier = Modifier
                                 .fillMaxHeight()
                                 .modeOption(1, currentMode, stringResource(R.string.off), enabled && showOffListeningMode && !adaptiveSelected, currentModeChanged)
-                                .width(offWidth.dp)
-                                .background(
-                                    backgroundColor,
-                                    RoundedCornerShape(
-                                        topStartPercent = 100,
-                                        bottomStartPercent = 100
-                                    )
-                                ),
+                                .width(offWidth.dp),
                             contentAlignment = Alignment.Center
                         ) {
-                            this@Row.AnimatedVisibility(
-                                visible = noiseControlModeValue != 1,
-                                enter = fadeIn(),
-                                exit = fadeOut()
-                            ){
-                                Icon(
-                                    bitmap = ImageBitmap.imageResource(R.drawable.ic_noise_cancellation),
-                                    contentDescription = null,
-                                    modifier = Modifier.size(32.dp),
-                                    tint = MaterialTheme.colorScheme.onSurface
-                                )
-                            }
+                            Icon(
+                                bitmap = ImageBitmap.imageResource(R.drawable.ic_noise_cancellation),
+                                contentDescription = null,
+                                modifier = Modifier.size(32.dp).testTag("noise-control-icon-1"),
+                                tint = MaterialTheme.colorScheme.onSurface
+                            )
                         }
                         Box(
                             modifier = Modifier
                                 .fillMaxHeight()
                                 .width(modeWidth.dp)
-                                .background(
-                                    backgroundColor,
-                                    RoundedCornerShape(
-                                        topStartPercent = if (showOffListeningMode && currentMode != 4) 0 else 100,
-                                        bottomStartPercent = if (showOffListeningMode && currentMode != 4) 0 else 100
-                                    )
-                                )
                                 .modeOption(3, currentMode, stringResource(R.string.transparency), enabled, currentModeChanged),
                             contentAlignment = Alignment.Center
                         ) {
-                            this@Row.AnimatedVisibility(
-                                visible = noiseControlModeValue != 3,
-                                enter = fadeIn(),
-                                exit = fadeOut()
-                            ) {
-                                Icon(
-                                    bitmap = ImageBitmap.imageResource(R.drawable.ic_transparency),
-                                    contentDescription = null,
-                                    modifier = Modifier
-                                        .size(32.dp),
-                                    tint = MaterialTheme.colorScheme.onSurface
-                                )
-                            }
+                            Icon(
+                                bitmap = ImageBitmap.imageResource(R.drawable.ic_transparency),
+                                contentDescription = null,
+                                modifier = Modifier.size(32.dp).testTag("noise-control-icon-3"),
+                                tint = MaterialTheme.colorScheme.onSurface
+                            )
                         }
                         if (showAdaptiveMode) Box(
                             modifier = Modifier
@@ -511,16 +569,11 @@ fun NoiseControlSettings(
                                     }
                                 }
                         ) {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .background(backgroundColor)
-                            )
                             Row(
                                 modifier = Modifier
                                     .fillMaxHeight()
                                     .background(
-                                        if (noiseControlModeValue == 4) MaterialTheme.colorScheme.surfaceDim else Color.Transparent,
+                                        if (noiseControlModeValue == 4) MaterialTheme.colorScheme.onSurface.copy(alpha = if (isDarkTheme) 0.045f else 0.035f) else Color.Transparent,
                                         RoundedCornerShape(percent = 100)
                                     )
 
@@ -544,19 +597,12 @@ fun NoiseControlSettings(
 
                                 Spacer(modifier = Modifier.weight(1f))
 
-                                AnimatedVisibility(
-                                    visible = noiseControlModeValue != 4,
-                                    enter = fadeIn(),
-                                    exit = fadeOut(),
-                                ) {
-                                    Icon(
-                                        bitmap = ImageBitmap.imageResource(R.drawable.ic_adaptive),
-                                        contentDescription = null,
-                                        modifier = Modifier
-                                            .size(32.dp),
-                                        tint = MaterialTheme.colorScheme.onSurface,
-                                    )
-                                }
+                                Icon(
+                                    bitmap = ImageBitmap.imageResource(R.drawable.ic_adaptive),
+                                    contentDescription = null,
+                                    modifier = Modifier.size(32.dp).testTag("noise-control-icon-4"),
+                                    tint = MaterialTheme.colorScheme.onSurface,
+                                )
 
                                 Spacer(modifier = Modifier.weight(1f))
 
@@ -580,26 +626,15 @@ fun NoiseControlSettings(
                             modifier = Modifier
                                 .fillMaxHeight()
                                 .width(modeWidth.dp)
-                                .background(
-                                    backgroundColor,
-                                    RoundedCornerShape(topEndPercent = 100, bottomEndPercent = 100)
-                                )
                                 .modeOption(2, currentMode, stringResource(R.string.noise_cancellation), enabled, currentModeChanged),
                             contentAlignment = Alignment.Center
                         ) {
-                            this@Row.AnimatedVisibility(
-                                visible = noiseControlModeValue != 2,
-                                enter = fadeIn(),
-                                exit = fadeOut()
-                            ) {
-                                Icon(
-                                    bitmap = ImageBitmap.imageResource(R.drawable.ic_noise_cancellation),
-                                    contentDescription = null,
-                                    modifier = Modifier
-                                        .size(32.dp),
-                                    tint = MaterialTheme.colorScheme.onSurface
-                                )
-                            }
+                            Icon(
+                                bitmap = ImageBitmap.imageResource(R.drawable.ic_noise_cancellation),
+                                contentDescription = null,
+                                modifier = Modifier.size(32.dp).testTag("noise-control-icon-2"),
+                                tint = MaterialTheme.colorScheme.onSurface
+                            )
                         }
                     }
 
@@ -649,7 +684,7 @@ fun NoiseControlSettings(
                                 textAlign = TextAlign.Center,
                                 modifier = Modifier.width(modeWidth.dp),
                                 minLines = 2,
-                                maxLines = 3,
+                                maxLines = 2,
                                 overflow = TextOverflow.Ellipsis,
                                 color = MaterialTheme.colorScheme.onSurface
                             )
@@ -661,11 +696,10 @@ fun NoiseControlSettings(
                     modifier = Modifier
                         .graphicsLayer {
                             translationX = with(density) { offset.value.coerceAtLeast(0f).dp.toPx() }
-                            scaleX = 1f + tapProgress.value * 0.04f + (stretch.value * 0.08f)
-                            scaleY = 1f + tapProgress.value * 0.04f - (stretch.value * 0.04f)
                         }
                         .width(modeWidth.dp)
                         .height(iconRowHeight.value)
+                        .onGloballyPositioned { thumbCoordinates = it }
                         .testTag("noise-control-thumb")
                         .semantics {
                             if (!enabled) disabled()
@@ -682,14 +716,13 @@ fun NoiseControlSettings(
                         }
                         .pointerInput(enabled, showAdaptiveMode) {
                             if (!enabled) return@pointerInput
+                            var dragStartRootX: Float? = null
                             detectHorizontalDragGestures(
                                 onDragStart = {
                                     dragOffset = offset.value
+                                    dragStartOffset = dragOffset
+                                    dragStartRootX = null
                                     isDragging = true
-                                    velocityTracker.resetTracking()
-                                    animationCoroutineScope.launch {
-                                        tapProgress.animateTo(1f)
-                                    }
                                 },
                                 onDragEnd = {
                                     val thumbCenter = dragOffset + currentModeWidth / 2f
@@ -717,30 +750,10 @@ fun NoiseControlSettings(
                                         else -> 0f
                                     }
 
-                                    animationCoroutineScope.launch {
-                                        stretch.animateTo(
-                                            targetValue = 0f,
-                                            animationSpec = spring(
-                                                dampingRatio = Spring.DampingRatioHighBouncy,
-                                                stiffness = Spring.StiffnessMedium
-                                            )
-                                        )
-                                    }
-                                    animationCoroutineScope.launch { tapProgress.animateTo(0f) }
                                     animationCoroutineScope.launch { offset.animateTo(finalTarget, motion) }
-                                    velocityTracker.resetTracking()
                                 },
                                 onDragCancel = {
                                     isDragging = false
-                                    animationCoroutineScope.launch {
-                                        stretch.animateTo(
-                                            targetValue = 0f,
-                                            animationSpec = spring(
-                                                dampingRatio = Spring.DampingRatioHighBouncy,
-                                                stiffness = Spring.StiffnessMedium
-                                            )
-                                        )
-                                    }
                                     val restoredOffset = when (currentMode) {
                                         1 -> 0f
                                         3 -> targetTransparencyStart
@@ -749,29 +762,18 @@ fun NoiseControlSettings(
                                         else -> 0f
                                     }
                                     animationCoroutineScope.launch { offset.animateTo(restoredOffset, motion) }
-                                    animationCoroutineScope.launch { tapProgress.animateTo(0f) }
-                                    velocityTracker.resetTracking()
                                 }
                             ) { change, dragAmount ->
                                 change.consume()
-                                velocityTracker.addPosition(change.uptimeMillis, change.position)
-
-                                val velocityPx = velocityTracker.calculateVelocity().x
-                                val rawSensitivity = sqrt(abs(velocityPx) / 50f)
-
-                                val targetStretch = (rawSensitivity / 10f).coerceIn(0f, 1f)
-
-                                animationCoroutineScope.launch {
-                                    stretch.animateTo(
-                                        targetValue = targetStretch,
-                                        animationSpec = spring(
-                                            dampingRatio = Spring.DampingRatioNoBouncy,
-                                            stiffness = Spring.StiffnessMedium
-                                        )
-                                    )
-                                }
-
-                                val newOffset = dragOffset + dragAmount.toDp().value
+                                val coordinates = thumbCoordinates?.takeIf { it.isAttached }
+                                    ?: return@detectHorizontalDragGestures
+                                // The pointer's local position changes as the thumb follows it.
+                                val rootX = coordinates.localToRoot(change.position).x
+                                // The first callback includes the movement beyond touch slop.
+                                val startRootX = dragStartRootX
+                                    ?: coordinates.localToRoot(change.position - Offset(dragAmount, 0f)).x
+                                dragStartRootX = startRootX
+                                val newOffset = dragStartOffset + with(density) { (rootX - startRootX).toDp().value }
                                 val maxTravel = (currentWidth - currentModeWidth).coerceAtLeast(0f)
                                 val safeOffset = newOffset.coerceIn(0f, maxTravel)
                                 dragOffset = safeOffset
@@ -781,55 +783,63 @@ fun NoiseControlSettings(
                                 }
                             }
                         }
-                        .padding(4.dp)
+                        .then(if (enabled) momentum.modifier else Modifier)
+                        .padding(4.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Box(Modifier.fillMaxSize()
                         .drawBackdrop(
                             backdrop = backdrop,
                             shape = { RoundedCornerShape(percent = 100) },
-                            shadow = { Shadow(radius = 3.dp, color = Color.Black.copy(alpha = 0.08f)) },
+                            highlight = {
+                                Highlight.Default.copy(alpha = momentum.progress.coerceIn(0f, 1f))
+                            },
+                            shadow = { Shadow(alpha = momentum.progress.coerceIn(0f, 1f)) },
+                            innerShadow = {
+                                val pressed = momentum.progress.coerceIn(0f, 1f)
+                                InnerShadow(radius = 8.dp * pressed, alpha = pressed)
+                            },
+                            layerBlock = {
+                                scaleX = lensScaleX
+                                scaleY = momentum.scaleY
+                            },
                             effects = {
+                                val pressed = momentum.progress.coerceIn(0f, 1f)
+                                vibrancy()
                                 lens(
-                                    refractionHeight = 12.dp.toPx(),
-                                    refractionAmount = 36.dp.toPx(),
-                                    depthEffect = true,
+                                    // The resting selection is flat; pressing raises the refractive waterdrop.
+                                    refractionHeight = 10.dp.toPx() * pressed,
+                                    refractionAmount = 14.dp.toPx() * pressed,
                                     chromaticAberration = true
                                 )
+                                removeLensMatte(isDarkTheme)
+                            },
+                            onDrawBackdrop = { drawBackdrop ->
+                                // Dispersion needs RGB contrast: black icons on transparent pixels only split alpha.
+                                drawRect(if (isDarkTheme) Color.Black else Color.White)
+                                // Magnification settles with the light and refraction, without moving the source icons.
+                                val magnification = 1f + 0.2f * momentum.progress.coerceIn(0f, 1f)
+                                scale(magnification, magnification) { drawBackdrop() }
                             },
                             onDrawSurface = {
-                                drawRect(Color.White.copy(alpha = if (isDarkTheme) 0.05f else 0.15f))
+                                val pressed = momentum.progress.coerceIn(0f, 1f)
+                                drawRect((if (isDarkTheme) Color.White else Color.Black)
+                                    .copy(alpha = 0.1f * (1f - pressed)))
+                                drawRect(Color.Black.copy(alpha = 0.03f * pressed))
                             },
-                        ),
-                    contentAlignment = Alignment.Center
-                ) {
-                    val imageBitmap = ImageBitmap.imageResource(
-                        when (noiseControlModeValue) {
-                            1,2 -> R.drawable.ic_noise_cancellation
-                            3 -> R.drawable.ic_transparency
-                            4 -> R.drawable.ic_adaptive
-                            else -> R.drawable.ic_adaptive
-                        }
+                        ).testTag("noise-control-bubble"),
                     )
-                    AnimatedContent(
-                        imageBitmap,
-                        transitionSpec = { fadeIn(tween(140)) togetherWith fadeOut(tween(90)) },
-                        label = "listening-mode-icon"
-                    ) {
-                        Icon(
-                            bitmap = it,
-                            contentDescription = null,
-                            modifier = Modifier
-                                .size(32.dp),
-                            tint = MaterialTheme.colorScheme.onSurface
-                        )
-                    }
                 }
             }
         }
     }
 }
 
+@Composable
 private fun Modifier.modeOption(mode: Int, selectedMode: Int, label: String,
     enabled: Boolean, onSelected: (Int) -> Unit): Modifier =
     selectable(selected = mode == selectedMode, enabled = enabled,
+        interactionSource = remember { MutableInteractionSource() }, indication = null,
         role = Role.RadioButton, onClick = { if (enabled) onSelected(mode) })
         .semantics { contentDescription = label }
 

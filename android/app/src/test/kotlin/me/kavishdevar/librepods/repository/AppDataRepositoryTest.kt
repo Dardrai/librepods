@@ -13,14 +13,17 @@ import me.kavishdevar.librepods.database.app.AppSettingsDao
 import me.kavishdevar.librepods.database.app.AppSettingsEntity
 import me.kavishdevar.librepods.database.app.AppStateDao
 import me.kavishdevar.librepods.database.app.AppStateEntity
+import me.kavishdevar.librepods.presentation.design.DesignSystem
+import me.kavishdevar.librepods.presentation.design.NightTheme
 import org.junit.Assert.*
 import org.junit.Test
 
 class AppDataRepositoryTest {
     private class SettingsDao : AppSettingsDao {
         val saved = MutableStateFlow(AppSettingsEntity())
+        var beforeRead: suspend () -> AppSettingsEntity? = { saved.value }
         var beforeWrite: suspend (AppSettingsEntity) -> Unit = {}
-        override suspend fun get() = saved.value
+        override suspend fun get() = beforeRead()
         override suspend fun upsert(settings: AppSettingsEntity) {
             beforeWrite(settings)
             saved.value = settings
@@ -34,6 +37,42 @@ class AppDataRepositoryTest {
         override suspend fun upsert(state: AppStateEntity) {
             beforeWrite(state)
             saved.value = state
+        }
+    }
+
+    @Test fun missingSettingsUseAppleWhileLoadingAndAfterInitialization() = runBlocking {
+        withTimeout(10_000) {
+            val settings = SettingsDao()
+            val loaded = CompletableDeferred<AppSettingsEntity?>()
+            settings.beforeRead = { loaded.await() }
+            val repository = AppDataRepository(settings, StateDao())
+            try {
+                assertEquals(DesignSystem.Apple, repository.settings.value.designSystem)
+                assertEquals(NightTheme.System, repository.settings.value.nightMode)
+            } finally {
+                loaded.complete(null)
+            }
+            repository.awaitInitialized()
+            assertEquals(DesignSystem.Apple, repository.settings.value.designSystem)
+            assertEquals(NightTheme.System, repository.settings.value.nightMode)
+        }
+    }
+
+    @Test fun savedAppearanceChoicesSurviveLoadingAndUnrelatedSettingChanges() = runBlocking {
+        withTimeout(10_000) {
+            for (design in DesignSystem.entries) {
+                val settings = SettingsDao().apply {
+                    saved.value = AppSettingsEntity(designSystem = design, nightMode = NightTheme.Dark)
+                }
+                val repository = AppDataRepository(settings, StateDao())
+                repository.awaitInitialized()
+                assertEquals(design, repository.settings.value.designSystem)
+                assertEquals(NightTheme.Dark, repository.settings.value.nightMode)
+                repository.updateSettings { it.copy(debugMode = true) }
+                val written = settings.saved.first { it.debugMode }
+                assertEquals(design, written.designSystem)
+                assertEquals(NightTheme.Dark, written.nightMode)
+            }
         }
     }
 

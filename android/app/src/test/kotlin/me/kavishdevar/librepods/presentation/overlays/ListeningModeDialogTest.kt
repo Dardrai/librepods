@@ -10,8 +10,12 @@ import android.bluetooth.BluetoothSocket
 import android.content.ComponentName
 import android.content.Context
 import android.content.ContextWrapper
+import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
 import android.os.Looper
 import android.view.Gravity
+import android.view.WindowInsets
+import android.view.WindowManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
@@ -36,6 +40,10 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.mockito.Mockito.mock
 import org.mockito.Mockito.mockingDetails
+import org.mockito.Mockito.doAnswer
+import org.mockito.Mockito.doReturn
+import org.mockito.Mockito.spy
+import org.mockito.ArgumentMatchers.any
 import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
@@ -45,6 +53,8 @@ import org.robolectric.annotation.LooperMode
 import org.robolectric.shadow.api.Shadow
 import org.robolectric.util.ReflectionHelpers
 import org.robolectric.util.ReflectionHelpers.ClassParameter
+import java.util.concurrent.Executor
+import java.util.function.Consumer
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [37], application = Application::class)
@@ -94,6 +104,14 @@ class ListeningModeDialogTest {
         val layout = popup.window!!.attributes
         assertEquals(Gravity.TOP, layout.gravity and Gravity.VERTICAL_GRAVITY_MASK)
         assertTrue("The tile panel should use the available wide display", layout.width >= (550 * context.resources.displayMetrics.density).toInt())
+        assertTrue("The blur field must remain limited to the rail", layout.width <= (600 * context.resources.displayMetrics.density).toInt())
+        assertEquals("The rail sits close below the native safe area", (8 * context.resources.displayMetrics.density).toInt(), layout.y)
+        assertEquals(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout(), layout.fitInsetsTypes)
+        assertEquals("Window elevation must reserve a buffer for the pressed bubble's overflow",
+            8 * context.resources.displayMetrics.density, popup.window!!.decorView.elevation, 0.01f)
+        assertFalse("The pressed bubble must not be clipped to the rail outline", popup.window!!.decorView.clipToOutline)
+        assertEquals("Background blur must not blur the entire screen", 0, layout.flags and WindowManager.LayoutParams.FLAG_BLUR_BEHIND)
+        assertEquals("The rest of the screen must remain undimmed", 0, layout.flags and WindowManager.LayoutParams.FLAG_DIM_BEHIND)
         assertEquals(0, output(target).available())
         assertTrue(popup.writeControl(ControlCommandIdentifier.LISTENING_MODE, 4))
         assertEquals(4, readCommand(target).value.single().toInt())
@@ -105,6 +123,92 @@ class ListeningModeDialogTest {
         assertEquals(72, strength.value.single().toInt())
         assertEquals(0, output(other).available())
     }
+
+    @Test @Config(qualifiers = "notnight")
+    fun lightBackdropTracksBlurAvailabilityAndRetiresItsListener() = assertBlurLifecycle(160, 245)
+
+    @Test @Config(qualifiers = "night")
+    fun darkBackdropTracksBlurAvailabilityAndRetiresItsListener() = assertBlurLifecycle(148, 242)
+
+    @Test fun failedBlurRegistrationKeepsTheBackdropReadableAndStillReleasesDeviceResources() {
+        useBlurManager(onAdd = { throw IllegalStateException("Blur registration unavailable") })
+        val target = device()
+        devices.value = mapOf(target.macAddress to target)
+        val popup = open(target)
+        assertTrue(popup.isShowing)
+        assertTrue("An unavailable blur service needs an opaque fallback", backgroundAlpha(popup) >= 240)
+        popup.dismiss()
+        idle()
+        assertEquals(1, shadowOf(context).unboundServiceConnections.size)
+        assertFalse(islandOwnership().last().second)
+        assertFalse(popup.writeControl(ControlCommandIdentifier.LISTENING_MODE, 2))
+        assertEquals(0, output(target).available())
+    }
+
+    private fun assertBlurLifecycle(blurredAlpha: Int, fallbackAlpha: Int) {
+        val added = mutableListOf<Consumer<Boolean>>()
+        val removed = mutableListOf<Consumer<Boolean>>()
+        useBlurManager(onAdd = { added += it }, onRemove = { removed += it })
+        val target = device()
+        devices.value = mapOf(target.macAddress to target)
+        val popup = open(target)
+        val callback = added.single()
+        assertEquals(blurredAlpha, backgroundAlpha(popup))
+        val background = shadowOf(popup.window!!).backgroundDrawable as GradientDrawable
+        assertEquals("The backdrop outline must also clip native blur to its rounded corners",
+            32 * context.resources.displayMetrics.density, background.cornerRadius, 0.01f)
+
+        callback.accept(false)
+        idle()
+        assertEquals("Disabling native blur must preserve legibility", fallbackAlpha, backgroundAlpha(popup))
+        callback.accept(true)
+        idle()
+        assertEquals(blurredAlpha, backgroundAlpha(popup))
+
+        popup.dismiss()
+        idle()
+        assertEquals(1, removed.size)
+        assertSame("Only this dialog's blur listener may be removed", callback, removed.single())
+        val retiredBackground = shadowOf(popup.window!!).backgroundDrawable
+        callback.accept(true)
+        idle()
+        assertSame("A queued availability callback cannot alter a closed window's backdrop",
+            retiredBackground, shadowOf(popup.window!!).backgroundDrawable)
+        popup.dismiss()
+        idle()
+        assertEquals("Repeated dismissal must not remove another listener", 1, removed.size)
+        assertEquals(1, shadowOf(context).unboundServiceConnections.size)
+        assertFalse(islandOwnership().last().second)
+        assertEquals(0, output(target).available())
+    }
+
+    private fun useBlurManager(onAdd: (Consumer<Boolean>) -> Unit,
+        onRemove: (Consumer<Boolean>) -> Unit = {}) {
+        val manager = spy(context.getSystemService(WindowManager::class.java))
+        doReturn(true).`when`(manager).isCrossWindowBlurEnabled
+        doAnswer { call ->
+            val callback = call.getArgument<Consumer<Boolean>>(1)
+            // DecorView also registers its own listener; leave its unsupported compositor disabled.
+            if (callback === dialog?.let { ReflectionHelpers.getField<Consumer<Boolean>>(it, "blurListener") }) {
+                onAdd(callback)
+                call.getArgument<Executor>(0).execute { callback.accept(true) }
+            }
+            null
+        }.`when`(manager).addCrossWindowBlurEnabledListener(any(Executor::class.java), any<Consumer<Boolean>>())
+        doAnswer { call ->
+            val callback = call.getArgument<Consumer<Boolean>>(0)
+            if (callback === dialog?.let { ReflectionHelpers.getField<Consumer<Boolean>>(it, "blurListener") }) onRemove(callback)
+            null
+        }
+            .`when`(manager).removeCrossWindowBlurEnabledListener(any<Consumer<Boolean>>())
+        dialogContext = object : ContextWrapper(dialogContext) {
+            override fun getSystemService(name: String): Any? =
+                if (name == Context.WINDOW_SERVICE) manager else super.getSystemService(name)
+        }
+    }
+
+    private fun backgroundAlpha(popup: ListeningModeDialog): Int = Color.alpha(
+        (shadowOf(popup.window!!).backgroundDrawable as GradientDrawable).color!!.defaultColor)
 
     @Test fun supportedModesAndAllowOffAreCheckedAtDispatchRatherThanOnlyInTheRenderedButtons() {
         val target = device(model = AirPodsModel.AIRPODS_PRO_1)

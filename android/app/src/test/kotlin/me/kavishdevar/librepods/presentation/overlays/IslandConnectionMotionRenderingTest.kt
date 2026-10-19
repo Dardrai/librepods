@@ -57,7 +57,8 @@ import org.robolectric.annotation.LooperMode
 import java.io.File
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [33], application = Application::class, qualifiers = "w448dp-h998dp-xxhdpi")
+// Robolectric's SDK33 native renderer uses older Skia without AGSL shader.eval support.
+@Config(sdk = [35], application = Application::class, qualifiers = "w448dp-h998dp-xxhdpi")
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 @LooperMode(LooperMode.Mode.PAUSED)
 class IslandConnectionMotionRenderingTest {

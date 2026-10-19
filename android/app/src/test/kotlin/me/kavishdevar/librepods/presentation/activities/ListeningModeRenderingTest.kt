@@ -5,6 +5,7 @@ import android.app.Application
 import android.graphics.Bitmap
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.mutableStateOf
@@ -47,16 +48,16 @@ import org.robolectric.annotation.LooperMode
 import java.io.File
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [35], application = Application::class, qualifiers = "w448dp-h998dp-mdpi")
+@Config(sdk = [35], application = Application::class, qualifiers = "w1200dp-h998dp-mdpi")
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 @LooperMode(LooperMode.Mode.PAUSED)
 class ListeningModeRenderingTest {
     @get:Rule val compose = createComposeRule()
-    private data class Profile(val label: String, val width: Int, val dark: Boolean = false, val fontScale: Float = 1f,
+    private data class Profile(val label: String, val railWidth: Int, val dark: Boolean = false, val fontScale: Float = 1f,
         val model: AirPodsModel = AirPodsModel.AIRPODS_PRO_3)
 
     @Test fun nativeDialogContainsOnlyTheSharedRailAndKeepsItsGeometryAcrossStates() {
-        val profile = mutableStateOf(Profile("light-wide", 416))
+        val profile = mutableStateOf(Profile("light-416", 416))
         val pending = mutableStateOf<Int?>(null)
         val failed = mutableStateOf(false)
         val reading = mutableStateOf(false)
@@ -68,7 +69,8 @@ class ListeningModeRenderingTest {
                     val state = if (reading.value) AppleState() else AppleState(
                         controlStates = mapOf(ControlCommandIdentifier.LISTENING_MODE to byteArrayOf(3)),
                         requestedControls = pending.value?.let { mapOf(ControlCommandIdentifier.LISTENING_MODE to byteArrayOf(it.toByte())) } ?: emptyMap())
-                    Box(Modifier.width(value.width.dp).background(if (value.dark) Color(0xFF38383A) else Color(0xFFE2E2E7))
+                    Box(Modifier.width(value.railWidth.dp).height(64.dp)
+                        .background(if (value.dark) Color(0xFF38383A) else Color(0xFFE2E2E7))
                         .testTag("listening-popup-frame")) {
                         ListeningModeContent(ListeningModeSnapshot(AppleMetadata(name = "Dylan’s AirPods", model = value.model), state, AppleSettings()), commandFailed = failed.value,
                             onMode = { writes++ }, onStrength = { writes++ })
@@ -76,9 +78,10 @@ class ListeningModeRenderingTest {
                 }
             }
         }
-        for (value in listOf(Profile("light-wide", 416), Profile("dark-narrow-large", 320, true, 1.3f),
-            Profile("light-narrow-large", 320, fontScale = 1.3f), Profile("dark-wide", 416, true),
-            Profile("legacy-pro", 360, model = AirPodsModel.AIRPODS_PRO_1))) {
+        for (value in listOf(Profile("light-416", 416), Profile("dark-320-large", 320, true, 1.3f),
+            Profile("light-320-large", 320, fontScale = 1.3f), Profile("dark-416", 416, true),
+            Profile("legacy-pro", 320, model = AirPodsModel.AIRPODS_PRO_1),
+            Profile("dark-tablet-600-large", 600, true, 1.5f))) {
             compose.runOnIdle { profile.value = value; pending.value = null; failed.value = false; reading.value = false }
             settle()
             val before = assertRail(value)
@@ -90,7 +93,7 @@ class ListeningModeRenderingTest {
                 assertStatus("Switching listening mode…")
                 assertEquals("Changing to mode $mode cannot resize its rail", before, assertRail(value))
                 assertModes(value)
-                if (mode == 4 && value.label in listOf("light-wide", "dark-narrow-large")) save(value.label + "-adaptive")
+                if (mode == 4 && value.label in listOf("light-416", "dark-320-large", "dark-tablet-600-large")) save(value.label + "-adaptive")
             }
             compose.runOnIdle { pending.value = null; failed.value = true }
             settle()
@@ -101,7 +104,7 @@ class ListeningModeRenderingTest {
             settle()
             assertStatus("Reading listening mode…")
             assertEquals("Loading cannot resize its rail", before, assertRail(value))
-            if (value.label in listOf("light-wide", "dark-narrow-large")) save(value.label + "-reading")
+            if (value.label in listOf("light-416", "dark-320-large", "dark-tablet-600-large")) save(value.label + "-reading")
         }
         assertEquals("Rendering and reports cannot send commands", 0, writes)
     }
@@ -109,10 +112,10 @@ class ListeningModeRenderingTest {
     private fun assertRail(profile: Profile): Rect {
         val control = compose.onNodeWithTag("listening-mode-control", useUnmergedTree = true).assertIsDisplayed()
         val bounds = control.fetchSemanticsNode().boundsInRoot
-        assertEquals("The rail fills its dialog", profile.width.toFloat(), bounds.width, 0.5f)
-        assertEquals("The dialog is only the 64dp rail", 64f, bounds.height, 0.5f)
-        assertEquals("No container spacing surrounds the rail", bounds,
-            compose.onNodeWithTag("listening-popup-frame").fetchSemanticsNode().boundsInRoot)
+        val frame = compose.onNodeWithTag("listening-popup-frame").fetchSemanticsNode().boundsInRoot
+        assertEquals("The rail fills the pill window", profile.railWidth.toFloat(), bounds.width, 0.5f)
+        assertEquals("The rail stays 64dp high", 64f, bounds.height, 0.5f)
+        assertEquals("The popup contains no band or outer spacing", bounds, frame)
         compose.onAllNodes(SemanticsMatcher.keyIsDefined(SemanticsProperties.Text), useUnmergedTree = true).assertCountEquals(0)
         compose.onNodeWithContentDescription("Close listening modes").assertDoesNotExist()
         return bounds

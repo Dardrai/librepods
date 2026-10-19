@@ -10,6 +10,7 @@ import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothSocket
 import android.content.ComponentName
 import android.content.Intent
+import android.content.ServiceConnection
 import android.os.Looper
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
@@ -91,16 +92,99 @@ class AirPodsQSServiceTest {
 
         tile.onStopListening()
         assertEquals(1, shadowOf(context).unboundServiceConnections.size)
-        assertEquals(Tile.STATE_UNAVAILABLE, tile.qsTile.state)
+        assertEquals(Tile.STATE_ACTIVE, tile.qsTile.state)
         device.loadInitialState(device.state.value, device.settings.value, device.metadata.value.copy(name = "Later"))
         idle()
-        assertEquals(context.getString(R.string.takeover_disconnected), tile.qsTile.subtitle)
+        assertEquals("Studio", tile.qsTile.subtitle)
         tile.onStartListening()
+        assertEquals("Rebinding must retain the last published state until it can observe devices", "Studio", tile.qsTile.subtitle)
         idle()
         assertEquals("Later", tile.qsTile.subtitle)
         devices.value = emptyMap()
         idle()
         assertEquals(Tile.STATE_UNAVAILABLE, tile.qsTile.state)
+    }
+
+    @Test fun pendingBindingPreservesTheTileAndDefersClickUntilTheCurrentPairIsValidated() = withPickerMocks { created ->
+        val device = device()
+        devices.value = mapOf(device.macAddress to device)
+        shadowOf(context).setBindServiceCallsOnServiceConnectedDirectly(false)
+        tile.onStartListening(); idle()
+        assertEquals(Tile.STATE_ACTIVE, tile.qsTile.state)
+        tile.onStopListening()
+        val replacement = device(address = "00:11:22:33:44:66")
+        devices.value = mapOf(replacement.macAddress to replacement)
+        tile.onClick()
+        assertEquals(Tile.STATE_ACTIVE, tile.qsTile.state)
+        assertTrue("An unbound tile cannot use its old device reference", created.constructed().isEmpty())
+
+        tile.onStartListening()
+        tile.onClick()
+        assertEquals(Tile.STATE_ACTIVE, tile.qsTile.state)
+        assertTrue("A pending rebind cannot use its old device reference", created.constructed().isEmpty())
+        tile.onStopListening()
+        idle()
+        assertEquals("The deferred click opens after the new binding resolves, even if the shade stopped listening", 1,
+            created.constructed().size)
+        assertEquals("The temporary click binding must be released", 0, shadowOf(context).boundServiceConnections.size)
+        tile.onDestroy()
+        assertEquals("Normal tile destruction must preserve SystemUI's cached state", Tile.STATE_ACTIVE, tile.qsTile.state)
+    }
+
+    @Test fun serviceLossCallbacksMakeTheTileUnavailableAndRejectStaleControls() = withPickerMocks { created ->
+        val device = device()
+        devices.value = mapOf(device.macAddress to device)
+        val component = ComponentName(context, LibrePodsService::class.java)
+        val losses: List<(ServiceConnection) -> Unit> = listOf(
+            { it.onServiceDisconnected(component) },
+            { it.onBindingDied(component) },
+            { it.onNullBinding(component) },
+        )
+        for (lose in losses) {
+            tile.onStartListening(); idle()
+            assertEquals(Tile.STATE_ACTIVE, tile.qsTile.state)
+            tile.onStopListening()
+            tile.onStartListening()
+            tile.onClick()
+            lose(shadowOf(context).boundServiceConnections.last())
+            assertEquals(Tile.STATE_UNAVAILABLE, tile.qsTile.state)
+            idle()
+            assertTrue("A click queued before binding loss must not later open", created.constructed().isEmpty())
+            tile.onStopListening()
+        }
+    }
+
+    @Test fun failedRebindingClearsThePreviouslyPublishedState() = withPickerMocks { created ->
+        val device = device()
+        devices.value = mapOf(device.macAddress to device)
+        for (throws in listOf(true, false)) {
+            tile.onStartListening(); idle()
+            assertEquals(Tile.STATE_ACTIVE, tile.qsTile.state)
+            tile.onStopListening()
+            if (throws) shadowOf(context).setThrowInBindService(SecurityException("Test binding denied"))
+            else shadowOf(context).declareComponentUnbindable(ComponentName(context, LibrePodsService::class.java))
+            tile.onClick(); idle()
+            assertEquals(Tile.STATE_UNAVAILABLE, tile.qsTile.state)
+            assertEquals(context.getString(R.string.takeover_disconnected), tile.qsTile.subtitle)
+            assertTrue(created.constructed().isEmpty())
+            if (throws) shadowOf(context).setThrowInBindService(null)
+        }
+    }
+
+    @Test fun removingOrDestroyingTheTileCancelsAPendingClick() = withPickerMocks { created ->
+        val device = device()
+        devices.value = mapOf(device.macAddress to device)
+        tile.onStartListening(); idle()
+        for (destroy in listOf(false, true)) {
+            tile.onStopListening()
+            tile.onStartListening()
+            tile.onClick()
+            if (destroy) tile.onDestroy() else tile.onTileRemoved()
+            idle()
+            assertTrue("Retiring a tile must cancel its pending click", created.constructed().isEmpty())
+            assertTrue(shadowOf(context).boundServiceConnections.isEmpty())
+            if (!destroy) tile.onTileAdded()
+        }
     }
 
     @Test fun clickOpensATileDialogForTheSelectedPairWithoutLaunchingAnActivityOrWritingAMode() = withPickerMocks { created ->
@@ -195,6 +279,7 @@ class AirPodsQSServiceTest {
         unlock.run()
         assertTrue(created.constructed().isEmpty())
         tile.onTileAdded()
+        tile.onStartListening(); idle()
         tileShadow().rejectDialogs = true
         tile.onClick()
         verify(created.constructed().single()).dismiss()

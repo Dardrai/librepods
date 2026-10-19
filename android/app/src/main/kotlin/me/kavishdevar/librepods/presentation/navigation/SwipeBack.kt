@@ -16,6 +16,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
@@ -124,6 +125,7 @@ private fun <T : Any> SwipeBackSceneContent(
     }
 
     val scope = rememberCoroutineScope()
+    val canNavigateBack by rememberUpdatedState(previousEntry != null)
 
     LaunchedEffect(
         "${currentEntry.contentKey}_${currentEntry.hashCode()}",
@@ -144,21 +146,22 @@ private fun <T : Any> SwipeBackSceneContent(
 
     LaunchedEffect(Unit) {
         for (completed in backRequests) {
-            animatedOffset.animateTo(
-                screenWidthPx,
-                tween(150)
-            )
+            if (canNavigateBack) {
+                animatedOffset.animateTo(
+                    screenWidthPx,
+                    tween(150)
+                )
 
-            transitionProgress = -1f
-            onDismiss()
+                transitionProgress = -1f
+                onDismiss()
+            }
             completed.complete(Unit)
         }
     }
 
-    PredictiveBackHandler { progressFlow ->
+    PredictiveBackHandler(enabled = previousEntry != null) { progressFlow ->
         try {
             progressFlow.collect { backEvent ->
-                if (previousEntry == null) return@collect
                 val progress = backEvent.progress
 
                 transitionProgress = -progress

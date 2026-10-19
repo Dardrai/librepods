@@ -19,10 +19,8 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
-import org.robolectric.annotation.Implementation
 import org.robolectric.annotation.Implements
 import org.robolectric.shadow.api.Shadow
-import org.robolectric.shadows.ShadowBluetoothSocket
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.PipedOutputStream
@@ -293,14 +291,9 @@ class AacpProtocolReportsTest {
 }
 
 @Implements(BluetoothSocket::class)
-class ProtocolReportSocketShadow : ShadowBluetoothSocket() {
+class ProtocolReportSocketShadow : ClosingBluetoothSocketShadow() {
     val output = ProtocolReportOutput()
     init { setOutputStream(output) }
-    @Implementation public override fun close() {
-        super.close()
-        inputStreamFeeder.close()
-        outputStreamSink.close()
-    }
 }
 
 class ProtocolReportOutput : PipedOutputStream() {

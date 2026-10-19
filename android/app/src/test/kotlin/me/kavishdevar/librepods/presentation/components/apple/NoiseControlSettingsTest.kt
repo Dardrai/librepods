@@ -1,20 +1,24 @@
 package me.kavishdevar.librepods.presentation.components.apple
 
 import android.app.Application
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.click
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithContentDescription
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
@@ -96,6 +100,40 @@ class NoiseControlSettingsTest {
         assertEquals("Report-driven motion must not send another command", beforeReport, writes.size)
     }
 
+    @GraphicsMode(GraphicsMode.Mode.LEGACY)
+    @Test fun singleMovementAdaptiveDragCommitsTheMovementPastTouchSlop() {
+        val requested = mutableStateOf<Int?>(null)
+        val writes = mutableListOf<Int>()
+        compose.setContent {
+            LibrePodsTheme(designSystem = DesignSystem.Apple) {
+                NoiseControlSettings(
+                    modifier = Modifier.width(400.dp).height(64.dp),
+                    showOffListeningMode = false,
+                    noiseControlModeValue = 4,
+                    onNoiseControlModeChanged = {},
+                    adaptiveStrength = 25,
+                    requestedAdaptiveStrength = requested.value,
+                    onAdaptiveStrengthChanged = { writes += it; requested.value = it },
+                    showLabels = false
+                )
+            }
+        }
+        settle()
+        val initialLeft = thumbLeft()
+        compose.onNodeWithTag("noise-control-thumb").performTouchInput {
+            down(center)
+            moveBy(Offset(80f, 0f))
+            up()
+        }
+        settle()
+        val finalRequested = compose.runOnIdle { requireNotNull(requested.value) }
+        assertTrue("A single movement must change Adaptive strength: requested=$finalRequested, writes=$writes",
+            finalRequested > 50)
+        assertEquals("Release must commit the changed strength", finalRequested, writes.last())
+        assertTrue("The thumb must retain the single movement after release", thumbLeft() > initialLeft + 30f)
+        assertEquals("The thumb must display the changed request", 80f + finalRequested * 1.6f, thumbLeft(), 1.5f)
+    }
+
     @Test fun materialStrengthOnlyWritesForUserInputAndFollowsRequestedAndReportedValues() {
         val reported = mutableStateOf(30)
         val requested = mutableStateOf<Int?>(null)
@@ -123,6 +161,151 @@ class NoiseControlSettingsTest {
         settle()
         assertEquals(73f, slider.fetchSemanticsNode().config[SemanticsProperties.ProgressBarRangeInfo].current, 0.01f)
         assertEquals("Opening or receiving reports must never send a command", listOf(15), writes)
+    }
+
+    @GraphicsMode(GraphicsMode.Mode.LEGACY)
+    @Test fun pressedBubbleOverextendsTheRailWithoutResizingItsTouchTargetOrWritingSettings() {
+        val enabled = mutableStateOf(true)
+        val modes = mutableListOf<Int>()
+        val strengths = mutableListOf<Int>()
+        compose.setContent {
+            LibrePodsTheme(designSystem = DesignSystem.Apple) {
+                Box(Modifier.width(440.dp).height(160.dp), contentAlignment = Alignment.Center) {
+                    NoiseControlSettings(
+                        modifier = Modifier.width(400.dp).height(64.dp),
+                        showOffListeningMode = false,
+                        noiseControlModeValue = 4,
+                        onNoiseControlModeChanged = { modes += it },
+                        adaptiveStrength = 25,
+                        onAdaptiveStrengthChanged = { strengths += it },
+                        showLabels = false,
+                        enabled = enabled.value,
+                    )
+                }
+            }
+        }
+        settle()
+        val thumb = compose.onNodeWithTag("noise-control-thumb", useUnmergedTree = true)
+        val bubble = compose.onNodeWithTag("noise-control-bubble", useUnmergedTree = true)
+        val touchBounds = thumb.fetchSemanticsNode().boundsInRoot
+        assertEquals("Adaptive mode keeps an unscaled 80dp touch target", 80f, touchBounds.width, 0.5f)
+        assertEquals("The rail's touch target stays 64dp high", 64f, touchBounds.height, 0.5f)
+        assertEquals("The resting glass stays inset within its track", 56f,
+            bubble.fetchSemanticsNode().boundsInRoot.height, 0.5f)
+
+        for (ending in listOf("cancel", "release", "disable")) {
+            compose.runOnIdle { enabled.value = true }
+            settle()
+            thumb.performTouchInput { down(center) }
+            compose.mainClock.advanceTimeBy(600)
+            compose.waitForIdle()
+            val expanded = bubble.fetchSemanticsNode().boundsInRoot
+            assertEquals("Touch-down expands the actual glass before any drag", 78f, expanded.height, 1.5f)
+            assertTrue("The glass rises above the rail", expanded.top < touchBounds.top)
+            assertTrue("The glass extends below the rail", expanded.bottom > touchBounds.bottom)
+            assertEquals("Visual expansion cannot resize or shift the drag target", touchBounds,
+                thumb.fetchSemanticsNode().boundsInRoot)
+            assertTrue("Pressing alone cannot change the mode", modes.isEmpty())
+            assertTrue("Pressing alone cannot change Adaptive strength", strengths.isEmpty())
+            when (ending) {
+                "cancel" -> thumb.performTouchInput { cancel() }
+                "release" -> thumb.performTouchInput { up() }
+                else -> {
+                    compose.runOnIdle { enabled.value = false }
+                    settle()
+                    thumb.performTouchInput { cancel() }
+                }
+            }
+            settle()
+            assertEquals("The bubble returns to rest after $ending", 56f,
+                bubble.fetchSemanticsNode().boundsInRoot.height, 0.5f)
+            assertEquals("The touch target remains stable after $ending", touchBounds,
+                thumb.fetchSemanticsNode().boundsInRoot)
+            assertTrue("Finishing a press cannot issue mode commands", modes.isEmpty())
+            assertTrue("Finishing a press cannot issue strength commands", strengths.isEmpty())
+        }
+    }
+
+    @GraphicsMode(GraphicsMode.Mode.LEGACY)
+    @Test fun modeIconsStayFixedWhileTheGlassPressesAndMovesOverTheTrack() {
+        val requested = mutableStateOf<Int?>(null)
+        val modes = mutableListOf<Int>()
+        val strengths = mutableListOf<Int>()
+        compose.setContent {
+            LibrePodsTheme(designSystem = DesignSystem.Apple) {
+                Box(Modifier.width(440.dp).height(160.dp), contentAlignment = Alignment.Center) {
+                    NoiseControlSettings(
+                        modifier = Modifier.width(400.dp).height(64.dp),
+                        showOffListeningMode = false,
+                        noiseControlModeValue = 4,
+                        onNoiseControlModeChanged = { modes += it },
+                        adaptiveStrength = 25,
+                        requestedAdaptiveStrength = requested.value,
+                        onAdaptiveStrengthChanged = { strengths += it; requested.value = it },
+                        showLabels = false,
+                    )
+                }
+            }
+        }
+        settle()
+        fun iconBounds() = listOf(3, 4, 2).associateWith { mode ->
+            val tag = "noise-control-icon-$mode"
+            compose.onAllNodesWithTag(tag, useUnmergedTree = true).assertCountEquals(1)
+            compose.onNodeWithTag(tag, useUnmergedTree = true).assertIsDisplayed()
+                .fetchSemanticsNode().boundsInRoot.also { bounds ->
+                    assertEquals("The source icon stays 32dp wide", 32f, bounds.width, 0.5f)
+                    assertEquals("The source icon stays 32dp high", 32f, bounds.height, 0.5f)
+                }
+        }
+        val fixedIcons = iconBounds()
+        val thumb = compose.onNodeWithTag("noise-control-thumb", useUnmergedTree = true)
+        val bubble = compose.onNodeWithTag("noise-control-bubble", useUnmergedTree = true)
+        thumb.performTouchInput { down(center) }
+        compose.mainClock.advanceTimeBy(600)
+        compose.waitForIdle()
+        assertEquals("Pressing glass cannot move or stretch its source icons", fixedIcons, iconBounds())
+        assertTrue("Pressing alone cannot change a mode: modes=$modes", modes.isEmpty())
+        assertTrue("Pressing alone cannot change strength", strengths.isEmpty())
+        val pressedBubble = bubble.fetchSemanticsNode().boundsInRoot
+
+        thumb.performTouchInput { moveBy(Offset(20f, 0f)) }
+        compose.mainClock.advanceTimeBy(32)
+        compose.waitForIdle()
+        thumb.performTouchInput {
+            advanceEventTime(32)
+            moveBy(Offset(60f, 0f))
+        }
+        compose.mainClock.advanceTimeBy(600)
+        compose.waitForIdle()
+        val heldStrength = compose.runOnIdle { requireNotNull(requested.value) }
+        val heldTargetLeft = thumb.fetchSemanticsNode().boundsInRoot.left
+        assertTrue("Moving within Adaptive changes its requested strength", heldStrength > 25)
+        assertTrue("The glass moves independently across the fixed row",
+            bubble.fetchSemanticsNode().boundsInRoot.left > pressedBubble.left + 30f)
+        assertEquals("Dragging glass cannot move or stretch its source icons", fixedIcons, iconBounds())
+        assertTrue("An Adaptive strength drag cannot select another mode: modes=$modes, strengths=$strengths, left=$heldTargetLeft",
+            modes.all { it == 4 })
+
+        thumb.performTouchInput { up() }
+        settle()
+        assertEquals("Release keeps the gesture's pending strength", heldStrength, requested.value)
+        assertEquals(heldStrength, strengths.last())
+        assertEquals("Release cannot snap the thumb back to the old report", heldTargetLeft,
+            thumb.fetchSemanticsNode().boundsInRoot.left, 1.5f)
+        assertEquals("Icons remain fixed after the glass settles", fixedIcons, iconBounds())
+        assertTrue("Finishing a strength drag must keep Adaptive selected: modes=$modes", modes.all { it == 4 })
+
+        compose.runOnIdle { modes.clear() }
+        val transparency = compose.onNodeWithContentDescription("Transparency")
+        transparency.performTouchInput { down(center) }
+        compose.mainClock.advanceTimeBy(600)
+        compose.waitForIdle()
+        assertEquals("Pressing another option leaves the source icons unchanged", fixedIcons, iconBounds())
+        assertTrue("A mode command waits for release: modes=$modes", modes.isEmpty())
+        transparency.performTouchInput { up() }
+        settle()
+        assertEquals("The unselected option still activates exactly once", listOf(3), modes)
+        assertEquals("A mode tap cannot change Adaptive strength", heldStrength, requested.value)
     }
 
     @GraphicsMode(GraphicsMode.Mode.LEGACY)

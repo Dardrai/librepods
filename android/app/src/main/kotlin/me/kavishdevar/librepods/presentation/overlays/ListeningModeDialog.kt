@@ -6,9 +6,14 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.content.res.Configuration
+import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.os.IBinder
 import android.view.Gravity
+import android.view.View
+import android.view.ViewGroup
 import android.view.WindowInsets
 import android.view.WindowManager
 import android.widget.Toast
@@ -18,7 +23,6 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
@@ -47,6 +51,7 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
+import java.util.function.Consumer
 import me.kavishdevar.librepods.LibrePodsApplication
 import me.kavishdevar.librepods.R
 import me.kavishdevar.librepods.core.bluetooth.MacAddress
@@ -78,40 +83,63 @@ class ListeningModeDialog(context: Context, private val address: MacAddress) :
     private val islandWindow by lazy { (context.applicationContext as LibrePodsApplication).islandWindow }
     private val pickerToken = Any()
     private var ownsIslandSuppression = false
+    private val windowManager = context.getSystemService(WindowManager::class.java)
+    private var listeningForBlur = false
+    private val blurListener = Consumer<Boolean> { enabled ->
+        if (scope.coroutineContext[Job]?.isActive == true) updateBackdrop(enabled)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setCanceledOnTouchOutside(true)
         window?.apply {
-            val metrics = context.getSystemService(WindowManager::class.java).currentWindowMetrics
-            val insets = metrics.windowInsets.getInsetsIgnoringVisibility(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
             val density = context.resources.displayMetrics.density
-            setBackgroundDrawableResource(android.R.color.transparent)
-            decorView.setPadding(0, 0, 0, 0)
+            val decor = decorView
+            setDecorFitsSystemWindows(true)
+            setClipToOutline(false)
+            // Elevation reserves an out-of-window buffer for the expanded glass bubble.
+            setElevation(8 * density)
+            decor.setPadding(0, 0, 0, 0)
+            decor.setOnApplyWindowInsetsListener { _, insets ->
+                updateWidth()
+                insets
+            }
             attributes = attributes.apply {
                 gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-                width = minOf(metrics.bounds.width() - insets.left - insets.right - (32 * density).toInt(), (600 * density).toInt())
                 height = WindowManager.LayoutParams.WRAP_CONTENT
-                y = (16 * density).toInt()
+                y = (8 * density).toInt()
+                setFitInsetsTypes(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
             }
         }
+        updateWidth()
+        updateBackdrop(windowManager.isCrossWindowBlurEnabled)
         setContentView(ComposeView(context).apply {
             setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
             setContent {
                 LibrePodsTheme(designSystem = DesignSystem.Apple, darkTheme = isSystemInDarkTheme()) {
-                    Box(Modifier.padding(vertical = 4.dp)) {
-                        ListeningModeContent(snapshot, commandFailed,
-                            onMode = { writeControl(ControlCommandIdentifier.LISTENING_MODE, it) },
-                            onStrength = { writeControl(ControlCommandIdentifier.AUTO_ANC_STRENGTH, it) })
-                    }
+                    ListeningModeContent(snapshot, commandFailed,
+                        onMode = { writeControl(ControlCommandIdentifier.LISTENING_MODE, it) },
+                        onStrength = { writeControl(ControlCommandIdentifier.AUTO_ANC_STRENGTH, it) })
                 }
             }
         })
+        fun allowOverflow(view: View) {
+            if (view is ViewGroup) {
+                view.clipChildren = false
+                view.clipToPadding = false
+                for (index in 0 until view.childCount) allowOverflow(view.getChildAt(index))
+            }
+        }
+        window?.decorView?.let(::allowOverflow)
     }
 
     override fun onStart() {
         super.onStart()
         if (context.getSystemService(KeyguardManager::class.java).isKeyguardLocked) { close(); return }
+        runCatching {
+            windowManager.addCrossWindowBlurEnabledListener(context.mainExecutor, blurListener)
+            listeningForBlur = true
+        }.onFailure { updateBackdrop(false) }
         islandWindow.setListeningPickerVisible(pickerToken, true)
         ownsIslandSuppression = true
         val callback = object : ServiceConnection {
@@ -175,9 +203,39 @@ class ListeningModeDialog(context: Context, private val address: MacAddress) :
     }
 
     private fun retire() {
+        if (listeningForBlur) {
+            listeningForBlur = false
+            runCatching { windowManager.removeCrossWindowBlurEnabledListener(blurListener) }
+        }
+        runCatching { window?.setBackgroundBlurRadius(0) }
         releaseBinding()
         releaseIslandSuppression()
         scope.cancel()
+    }
+
+    private fun updateBackdrop(blurEnabled: Boolean) {
+        val density = context.resources.displayMetrics.density
+        val dark = context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES
+        window?.apply {
+            setBackgroundDrawable(GradientDrawable().apply {
+                cornerRadius = 32 * density
+                setColor(if (dark) {
+                    Color.argb(if (blurEnabled) 148 else 242, 20, 20, 24)
+                } else {
+                    Color.argb(if (blurEnabled) 160 else 245, 248, 248, 250)
+                })
+            })
+            // Background blur stays inside this short window; blur-behind would affect the entire screen.
+            setBackgroundBlurRadius(if (blurEnabled) (28 * density).toInt() else 0)
+        }
+    }
+
+    private fun updateWidth() {
+        val metrics = windowManager.currentWindowMetrics
+        val insets = metrics.windowInsets.getInsetsIgnoringVisibility(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
+        val density = context.resources.displayMetrics.density
+        val width = minOf(metrics.bounds.width() - insets.left - insets.right - (32 * density).toInt(), (600 * density).toInt())
+        window?.let { if (it.attributes.width != width) it.attributes = it.attributes.apply { this.width = width } }
     }
 
     // Dialog.show sets isShowing after onStart; invalid initial bindings must close after that.

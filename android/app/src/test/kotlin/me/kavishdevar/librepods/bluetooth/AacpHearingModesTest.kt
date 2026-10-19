@@ -21,10 +21,8 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
-import org.robolectric.annotation.Implementation
 import org.robolectric.annotation.Implements
 import org.robolectric.shadow.api.Shadow
-import org.robolectric.shadows.ShadowBluetoothSocket
 import java.io.IOException
 import java.io.PipedOutputStream
 import java.nio.ByteBuffer
@@ -251,15 +249,12 @@ class AacpHearingModesTest {
 }
 
 @Implements(BluetoothSocket::class)
-class HearingModeSocketShadow : ShadowBluetoothSocket() {
+class HearingModeSocketShadow : ClosingBluetoothSocketShadow() {
     val output = HearingModeOutput()
     var closes = 0
     init { setOutputStream(output) }
-    @Implementation public override fun close() {
+    protected override fun onClosing() {
         closes++
-        super.close()
-        inputStreamFeeder.close()
-        outputStreamSink.close()
     }
 }
 

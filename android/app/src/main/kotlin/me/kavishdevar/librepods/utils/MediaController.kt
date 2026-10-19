@@ -354,6 +354,13 @@ object MediaController {
         conversationPausedMedia = false
     }
 
+    @Synchronized
+    internal fun withIdleMediaVolume(action: () -> Unit): Boolean {
+        if (microphoneCaptureActive || conversationVolume.speaking || volumeTransition != null) return false
+        action()
+        return true
+    }
+
     internal fun isMediaRoute(address: String?): Boolean = address != null && runCatching {
         audioManager.getAudioDevicesForAttributes(mediaAttributes).singleOrNull()?.address
             ?.equals(address, ignoreCase = true) == true

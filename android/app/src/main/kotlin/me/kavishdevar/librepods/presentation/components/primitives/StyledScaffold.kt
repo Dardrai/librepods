@@ -31,9 +31,10 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.calculateEndPadding
@@ -59,7 +60,10 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -69,6 +73,7 @@ import androidx.compose.ui.graphics.asComposeRenderEffect
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalWindowInfo
@@ -216,6 +221,13 @@ fun StyledScaffold(
                     var sharedTransitionScope = LocalSharedTransitionScope.current
 
                     val showBackButton = if (transitionProgress == 0f) navigateBack != null else !isCurrentEntry
+                    var actionsWidth by remember(actionButtons.size) {
+                        mutableStateOf(48.dp * actionButtons.size + 8.dp * (actionButtons.size - 1).coerceAtLeast(0))
+                    }
+                    val titleInset = maxOf(
+                        if (showBackButton) 72.dp else 16.dp,
+                        if (actionButtons.isNotEmpty()) actionsWidth + 24.dp else 16.dp
+                    )
 
                     @SuppressLint("UnusedSharedTransitionModifierParameter")
                     if (sharedTransitionScope == null) {
@@ -227,24 +239,12 @@ fun StyledScaffold(
                     sharedTransitionScope = sharedTransitionScope!!
 
 
-                    with(sharedTransitionScope) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .renderInSharedTransitionScopeOverlay(
-                                    zIndexInOverlay = 1f,
-                                    renderInOverlay = { transitionProgress != 0f }
-                                )
-                                .layerBackdrop(backdrop)
-                        )
-                    }
-
                     if (showBackButton) {
                         with(sharedTransitionScope) {
                             Box(
                                 modifier = Modifier
                                     .zIndex(3f)
-                                    .padding(top = topPadding, start = 8.dp)
+                                    .padding(top = topPadding + 8.dp, start = 16.dp)
                                     .align(Alignment.TopStart)
                                     .pointerInput(Unit) {
                                         awaitPointerEventScope {
@@ -294,7 +294,7 @@ fun StyledScaffold(
                             ) {
                                 StyledIconButton(
                                     onClick = { navigateBack?.invoke() },
-                                    backdrop = backdrop // i know, this doesn't capture what's actually beneath it. but it's going to matter just in the transition.
+                                    backdrop = backdrop
                                 ) {
                                     Icon(
                                         imageVector = LocalIcons.current.ArrowBack,
@@ -336,13 +336,17 @@ fun StyledScaffold(
                             }
                         ) {
 
-                            Column(modifier = Modifier.fillMaxSize()) {
-                                Spacer(modifier = Modifier.height(topPadding + 12.dp))
+                            Box(
+                                modifier = Modifier.fillMaxSize().padding(top = topPadding),
+                                contentAlignment = Alignment.Center
+                            ) {
                                 Crossfade(targetState = title) {
                                     Text(
                                         text = it,
                                         style = MaterialTheme.typography.titleLarge,
-                                        modifier = Modifier.fillMaxWidth(),
+                                        modifier = Modifier.fillMaxWidth().padding(horizontal = titleInset),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
                                         textAlign = TextAlign.Center
                                     )
                                 }
@@ -362,7 +366,7 @@ fun StyledScaffold(
                         ),
                         modifier = Modifier
                             .zIndex(3f)
-                            .padding(top = topPadding, end = 8.dp)
+                            .padding(top = topPadding + 8.dp, end = 16.dp)
                             .align(Alignment.TopEnd)
                             .pointerInput(Unit) {
                                 awaitPointerEventScope {
@@ -380,7 +384,11 @@ fun StyledScaffold(
                                 }
                             }
                     ) {
-                        Row{
+                        Row(
+                            Modifier.onSizeChanged { actionsWidth = with(density) { it.width.toDp() } },
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
                             actionButtons.forEach { actionButton ->
                                 actionButton(backdrop)
                             }
@@ -389,6 +397,9 @@ fun StyledScaffold(
 
                     Box(
                         modifier = modifier
+                            // Capture only the scrolling body; sampling the sibling chrome avoids a glass feedback loop.
+                            .layerBackdrop(backdrop)
+                            .background(bgColor)
                             .hazeSource(hazeState)
                             .fillMaxSize()
                     ) {

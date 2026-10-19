@@ -48,32 +48,23 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.BlendMode
-import androidx.compose.ui.graphics.BlurEffect
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Paint
-import androidx.compose.ui.graphics.TileMode
-import androidx.compose.ui.graphics.drawOutline
-import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
-import androidx.compose.ui.graphics.drawscope.scale
-import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.graphics.layer.CompositingStrategy
-import androidx.compose.ui.graphics.layer.drawLayer
 import androidx.compose.ui.graphics.luminance
-import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.util.fastCoerceIn
 import androidx.compose.ui.util.lerp
 import com.kyant.backdrop.backdrops.layerBackdrop
-import com.kyant.backdrop.backdrops.rememberCombinedBackdrop
 import com.kyant.backdrop.backdrops.rememberLayerBackdrop
 import com.kyant.backdrop.drawBackdrop
+import com.kyant.backdrop.effects.blur
 import com.kyant.backdrop.effects.lens
 import com.kyant.backdrop.highlight.Highlight
 import com.kyant.backdrop.shadow.Shadow
@@ -104,7 +95,6 @@ fun StyledSwitch(
     val thumbHeight = 24.dp
     val thumbWidth = 39.dp
 
-    val backdrop = rememberLayerBackdrop()
     val switchBackdrop = rememberLayerBackdrop()
     val fraction by remember {
         derivedStateOf { if (checked) 1f else 0f }
@@ -115,9 +105,6 @@ fun StyledSwitch(
     val scope = rememberCoroutineScope()
     val progressAnimationSpec = spring(0.5f, 300f, 0.001f)
     val progressAnimation = remember { Animatable(0f) }
-    val innerShadowLayer = rememberGraphicsLayer().apply {
-        compositingStrategy = CompositingStrategy.Offscreen
-    }
     val targetColor = if (checked) onColor else offColor
     val animatedTrackColor by animateColorAsState(targetColor)
     val totalDrag = remember { mutableFloatStateOf(0f) }
@@ -148,7 +135,8 @@ fun StyledSwitch(
     Box(
         modifier = Modifier
             .width(trackWidth)
-            .height(trackHeight),
+            .height(trackHeight)
+            .testTag("styled-switch"),
         contentAlignment = Alignment.CenterStart
     ) {
         Box(
@@ -248,83 +236,49 @@ fun StyledSwitch(
                     }
                 ) else Modifier)
                 .drawBackdrop(
-                    rememberCombinedBackdrop(backdrop, switchBackdrop),
+                    switchBackdrop,
                     { RoundedCornerShape(thumbHeight / 2) },
                     highlight = {
-                        val progress = progressAnimation.value
+                        val progress = progressAnimation.value.fastCoerceIn(0f, 1f)
                         Highlight.Ambient.copy(
-                            alpha = progress
+                            width = 0.65.dp,
+                            alpha = if (!enabled) 0.25f else lerp(0.5f, 0.8f, progress)
                         )
                     },
                     shadow = {
                         Shadow(
-                            radius = 4f.dp,
-                            color = Color.Black.copy(0.05f)
+                            radius = 3.dp,
+                            offset = DpOffset(0.dp, 1.dp),
+                            color = Color.Black.copy(alpha = if (!enabled) 0.06f else if (isDarkTheme) 0.25f else 0.16f)
                         )
                     },
                     layerBlock = {
-                        val progress = progressAnimation.value
-                        val scale = lerp(1f, 1.5f, progress)
+                        val progress = progressAnimation.value.fastCoerceIn(0f, 1f)
+                        val scale = lerp(1f, 1.12f, progress)
                         scaleX = scale
                         scaleY = scale
                     },
                     onDrawBackdrop = { drawScope ->
-                        drawIntoCanvas { canvas ->
-                            canvas.save()
-                            canvas.drawRect(
-                                left = 0f,
-                                top = 0f,
-                                right = size.width,
-                                bottom = size.height,
-                                paint = Paint().apply {
-                                    color = backgroundColor
-                                }
-                            )
-                            scale(0.7f) {
-                                drawScope()
-                            }
-                        }
+                        drawRect(backgroundColor)
+                        drawScope()
                     },
                     onDrawSurface = {
                         val progress = progressAnimation.value.fastCoerceIn(0f, 1f)
-
-                        val shape = RoundedCornerShape(thumbHeight / 2)
-                        val outline = shape.createOutline(size, layoutDirection, this)
-                        val innerShadowOffset = 4f.dp.toPx()
-                        val innerShadowBlurRadius = 4f.dp.toPx()
-
-                        innerShadowLayer.alpha = progress
-                        innerShadowLayer.renderEffect =
-                            BlurEffect(
-                                innerShadowBlurRadius,
-                                innerShadowBlurRadius,
-                                TileMode.Decal
-                            )
-                        innerShadowLayer.record {
-                            drawOutline(outline, Color.Black.copy(0.2f))
-                            translate(0f, innerShadowOffset) {
-                                drawOutline(
-                                    outline,
-                                    Color.Transparent,
-                                    blendMode = BlendMode.Clear
-                                )
-                            }
-                        }
-                        drawLayer(innerShadowLayer)
-
-                        drawRect(Color.White.copy(1f - progress))
+                        drawRect(Color.White.copy(alpha = if (!enabled) 0.72f else lerp(0.9f, 0.74f, progress)))
                     },
                     effects = {
+                        blur(0.5.dp.toPx())
                         lens(
-                            refractionHeight = 6f.dp.toPx(),
-                            refractionAmount = size.height / 2f,
+                            refractionHeight = 4.dp.toPx(),
+                            refractionAmount = 5.dp.toPx(),
                             depthEffect = true,
-                            chromaticAberration = true
+                            chromaticAberration = false
                         )
                     }
                 )
                 .width(thumbWidth)
                 .height(thumbHeight)
+                .testTag("styled-switch-thumb")
         )
     }
 }
