@@ -70,13 +70,20 @@ fun StyledButton(
     materialButtonStyle: MaterialButtonStyle = MaterialButtonStyle.Tonal,
     content: @Composable RowScope.() -> Unit,
 ) {
+    val haptics = LocalHapticFeedback.current
+    val onUserClick = {
+        if (enabled) {
+            haptics.performHapticFeedback(HapticFeedbackType.ContextClick)
+            onClick()
+        }
+    }
     when (LocalDesignSystem.current) {
         DesignSystem.Material -> {
             when (materialButtonStyle) {
                 MaterialButtonStyle.Filled -> {
                     Button(
                         modifier = modifier.height(48.dp),
-                        onClick = onClick,
+                        onClick = onUserClick,
                         content = content,
                         enabled = enabled,
                     )
@@ -84,7 +91,7 @@ fun StyledButton(
                 MaterialButtonStyle.Tonal -> {
                     FilledTonalButton(
                         modifier = modifier.height(48.dp),
-                        onClick = onClick,
+                        onClick = onUserClick,
                         content = content,
                         enabled = enabled,
                         colors = ButtonDefaults.filledTonalButtonColors(containerColor = surfaceColor)
@@ -94,7 +101,7 @@ fun StyledButton(
                 MaterialButtonStyle.Outlined -> {
                     OutlinedButton(
                         modifier = modifier.height(48.dp),
-                        onClick = onClick,
+                        onClick = onUserClick,
                         content = content,
                         enabled = enabled,
                     )
@@ -103,7 +110,7 @@ fun StyledButton(
                 MaterialButtonStyle.Normal -> {
                     TextButton(
                         modifier = modifier.height(48.dp),
-                        onClick = onClick,
+                        onClick = onUserClick,
                         content = content,
                         enabled = enabled,
                     )
@@ -111,7 +118,6 @@ fun StyledButton(
             }
         }
         DesignSystem.Apple -> {
-            val haptics = LocalHapticFeedback.current
             val interactions = remember { MutableInteractionSource() }
             val pressed by interactions.collectIsPressedAsState()
             val pressProgress by animateFloatAsState(
@@ -134,10 +140,8 @@ fun StyledButton(
                         interactionSource = interactions,
                         indication = null,
                         role = Role.Button,
-                    ) {
-                        haptics.performHapticFeedback(HapticFeedbackType.ContextClick)
-                        onClick()
-                    }
+                        onClick = onUserClick,
+                    )
                     .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
                     .height(48.dp)
                     .padding(horizontal = 16.dp),

@@ -73,7 +73,7 @@ class StyledSwitchRenderingTest {
             compose.mainClock.advanceTimeBy(1500)
             compose.waitForIdle()
             val track = compose.onNodeWithTag("styled-switch").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
-            val thumb = compose.onNodeWithTag("styled-switch-thumb").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+            val thumb = compose.onNodeWithTag("styled-switch-thumb", useUnmergedTree = true).assertIsDisplayed().fetchSemanticsNode().boundsInRoot
             assertEquals("The switch track must retain its width", 192f, track.width, 1f)
             assertEquals("The switch track must retain its height", 84f, track.height, 1f)
             assertEquals("The glass thumb must not inflate its resting width", 117f, thumb.width, 1f)
@@ -104,22 +104,22 @@ class StyledSwitchRenderingTest {
                 }
             }
         }
-        compose.onNodeWithTag("styled-switch-thumb").performTouchInput { click() }
+        compose.onNodeWithTag("styled-switch-thumb", useUnmergedTree = true).performTouchInput { click() }
         compose.waitForIdle()
         assertTrue(checked.value)
         assertEquals(listOf(true), writes)
 
         compose.runOnIdle { checked.value = false; enabled.value = false; writes.clear() }
         compose.waitForIdle()
-        compose.onNodeWithTag("styled-switch-thumb").performTouchInput { click() }
-        compose.onNodeWithTag("styled-switch-thumb").performTouchInput { swipe(center, center + Offset(150f, 0f), 300) }
+        compose.onNodeWithTag("styled-switch-thumb", useUnmergedTree = true).performTouchInput { click() }
+        compose.onNodeWithTag("styled-switch-thumb", useUnmergedTree = true).performTouchInput { swipe(center, center + Offset(150f, 0f), 300) }
         compose.waitForIdle()
         assertFalse(checked.value)
         assertTrue("Disabled gestures cannot send a setting command", writes.isEmpty())
 
         compose.runOnIdle { enabled.value = true }
         compose.waitForIdle()
-        compose.onNodeWithTag("styled-switch-thumb").performTouchInput { swipe(center, center + Offset(150f, 0f), 300) }
+        compose.onNodeWithTag("styled-switch-thumb", useUnmergedTree = true).performTouchInput { swipe(center, center + Offset(150f, 0f), 300) }
         compose.waitForIdle()
         assertTrue("The existing drag gesture must still turn the switch on", checked.value)
         assertTrue(writes.isNotEmpty() && writes.last())

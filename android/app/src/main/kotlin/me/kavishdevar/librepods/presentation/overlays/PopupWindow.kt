@@ -40,6 +40,7 @@ import android.text.StaticLayout
 import android.util.Log
 import android.view.ContextThemeWrapper
 import android.view.Gravity
+import android.view.HapticFeedbackConstants
 import android.view.LayoutInflater
 import android.view.MotionEvent
 import android.view.View
@@ -99,7 +100,12 @@ class PopupWindow(private val context: Context, private val onCloseCallback: () 
         mView.clipToOutline = true
         mView.findViewById<ImageButton>(R.id.close_button).apply {
             imageTintList = ColorStateList.valueOf(Color.rgb(99, 99, 102))
-            setOnClickListener { close() }
+            setOnClickListener {
+                if (!closing && !notified) {
+                    it.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
+                    close()
+                }
+            }
         }
         mView.setOnTouchListener { _, event ->
             when (event.actionMasked) {
@@ -189,7 +195,8 @@ class PopupWindow(private val context: Context, private val onCloseCallback: () 
         progress.contentDescription = context.getString(if (stage == Stage.CONNECTING)
             R.string.pairing_connecting_title else R.string.pairing_searching)
         button.setOnClickListener {
-            if (!closing && action != null) {
+            if (!closing && !notified && button.isEnabled && action != null) {
+                it.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
                 interacted = true
                 handler.removeCallbacks(expire)
                 action.second()

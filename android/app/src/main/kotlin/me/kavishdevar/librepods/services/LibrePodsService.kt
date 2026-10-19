@@ -192,9 +192,11 @@ class LibrePodsService: Service() {
     private val updateScreenScanMode = Runnable { if (bleRequested) startBleScanner(updateMode = true) }
     private val pairedLids = mutableMapOf<MacAddress, Boolean>()
     private val pairedObservations = mutableMapOf<MacAddress, Long>()
+    private val connectionHaptics by lazy { ConnectionHaptics(this) }
     private val nativeAudioCallback = object : AudioDeviceCallback() {
         override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>) {
             checkBluetoothVolumeSync()
+            updateConnectionHaptics()
             devices.value.values.filterIsInstance<AppleDevice>().forEach { device ->
                 if (hasNativeAudioOutput(device.bluetoothDevice))
                     serviceScope.launch(Dispatchers.IO) { onDeviceConnected(device.bluetoothDevice) }
@@ -202,6 +204,7 @@ class LibrePodsService: Service() {
         }
         override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>) {
             checkBluetoothVolumeSync()
+            updateConnectionHaptics()
         }
     }
 
@@ -326,6 +329,7 @@ class LibrePodsService: Service() {
         observeAppSettings()
 
         registerBluetoothReceivers()
+        updateConnectionHaptics(initial = true)
         getSystemService(AudioManager::class.java).registerAudioDeviceCallback(nativeAudioCallback, bleHandler)
 
         nearbyPairing = NearbyPairingController(this, onInteractionChanged = { pairingModel = it },
@@ -458,6 +462,7 @@ class LibrePodsService: Service() {
         stopBleScanner()
         recentProximityReports.clear()
         nearbyMedia.clear()
+        connectionHaptics.clear()
         nearbyCases.clear()
 
         super.onDestroy()
@@ -541,6 +546,28 @@ class LibrePodsService: Service() {
                 it.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP && it.address.equals(device.macAddress.value, true)
             }
     }.getOrDefault(false)
+
+    private fun updateConnectionHaptics(initial: Boolean = false) {
+        if (destroying || !startedWithPermissions) return
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            bleHandler.post { updateConnectionHaptics(initial) }
+            return
+        }
+        if (!initial && !runCatching {
+                getSystemService(BluetoothManager::class.java)?.adapter?.state == BluetoothAdapter.STATE_ON
+            }.getOrDefault(false)) return
+        val outputs = runCatching {
+            getSystemService(AudioManager::class.java).getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+                .filter { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP }
+                .mapNotNull { it.address.takeIf(String::isNotBlank) }.toSet()
+        }.getOrNull() ?: return
+        val paired = runCatching {
+            devices.value.values.filterIsInstance<AppleDevice>().filter {
+                it.bluetoothDevice.bondState == BluetoothDevice.BOND_BONDED
+            }.map { it.macAddress.value }.toSet()
+        }.getOrNull() ?: return
+        connectionHaptics.update(outputs, paired)
+    }
 
     private fun hasNativeAudioOutput(device: BluetoothDevice): Boolean = runCatching {
         device.bondState == BluetoothDevice.BOND_BONDED &&
@@ -1025,6 +1052,7 @@ class LibrePodsService: Service() {
                             pairedLids.clear()
                             nearbyMedia.clear()
                             nearbyCases.clear()
+                            connectionHaptics.clear()
                             islandWindow.clearPairingOpening()
                             islandWindow.close()
                         }
@@ -1343,6 +1371,7 @@ class LibrePodsService: Service() {
                         val encryption = keys[MagicKeyType.ENC_KEY]?.copyOf()
                         if (irk != null && encryption != null)
                             replayRecentBattery(device, device.aacp.captureAudioSocket(), irk, encryption)
+                        updateConnectionHaptics()
                         true
                     }
                 }
@@ -1792,6 +1821,7 @@ class LibrePodsService: Service() {
                             .setContentIntent(pendingIntent)
                             .setCategory(Notification.CATEGORY_STATUS)
                             .setPriority(NotificationCompat.PRIORITY_LOW)
+                            .setOnlyAlertOnce(true)
                             .setOngoing(true)
                             .addAction(
                                 R.drawable.ic_transparency, // icon never shows up?? (tested on AOSP ROMs)

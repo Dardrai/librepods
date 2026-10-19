@@ -12,6 +12,7 @@ import android.graphics.drawable.LayerDrawable
 import android.os.Looper
 import android.provider.Settings
 import android.view.ContextThemeWrapper
+import android.view.HapticFeedbackConstants
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -42,6 +43,38 @@ import java.time.Duration
 @LooperMode(LooperMode.Mode.PAUSED)
 class PairingRenderingTest {
     private data class Profile(val label: String, val width: Int, val height: Int, val fontScale: Float, val night: Boolean = false)
+
+    @Test fun pairingActionsUsePlatformTouchFeedbackButProgressAndBatteryReportsStayQuiet() {
+        val context = context(Profile("touch-feedback", 412, 900, 1f))
+        for (stage in listOf(PopupWindow.Stage.NEARBY, PopupWindow.Stage.RETRY, PopupWindow.Stage.COMPLETE)) {
+            val popup = PopupWindow(context)
+            var actions = 0
+            try {
+                popup.openPairing("AirPods Pro 3", 0x2720)
+                val root = view(popup)
+                val button = root.findViewById<Button>(R.id.pairing_primary)
+                val close = root.findViewById<View>(R.id.close_button)
+                popup.showPairingActions("Connecting", emptyList(), stage = PopupWindow.Stage.CONNECTING)
+                button.performClick()
+                assertEquals("A disabled progress action is silent", -1, shadowOf(button).lastHapticFeedbackPerformed())
+                assertEquals(0, actions)
+                popup.showPairingActions(stage.name, listOf("Action" to { actions++ }), busy = false, stage = stage)
+                popup.updatePairingBattery(setOf(Battery(BatteryComponent.LEFT, 82, BatteryStatus.NOT_CHARGING),
+                    Battery(BatteryComponent.RIGHT, 82, BatteryStatus.NOT_CHARGING),
+                    Battery(BatteryComponent.CASE, 76, BatteryStatus.CHARGING)))
+                assertEquals("Presenting a state or reading is not a touch", -1, shadowOf(button).lastHapticFeedbackPerformed())
+                assertEquals(-1, shadowOf(close).lastHapticFeedbackPerformed())
+                assertEquals(-1, shadowOf(root).lastHapticFeedbackPerformed())
+                button.performClick()
+                assertEquals(1, actions)
+                assertEquals(HapticFeedbackConstants.CONTEXT_CLICK, shadowOf(button).lastHapticFeedbackPerformed())
+                close.performClick()
+                assertEquals(HapticFeedbackConstants.CONTEXT_CLICK, shadowOf(close).lastHapticFeedbackPerformed())
+                button.performClick()
+                assertEquals("Closing retires the active action", 1, actions)
+            } finally { popup.forceClose() }
+        }
+    }
 
     @Test fun phasesRemainLegibleAndActionsStayReachableWithLargeTextAndShortScreens() {
         for (profile in listOf(Profile("light", 412, 900, 1f), Profile("dark-large", 320, 900, 1.3f, true),

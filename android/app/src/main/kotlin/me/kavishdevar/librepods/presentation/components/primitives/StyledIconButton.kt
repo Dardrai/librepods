@@ -64,12 +64,19 @@ fun StyledIconButton(
     materialButtonStyle: MaterialButtonStyle = MaterialButtonStyle.Normal,
     content: @Composable () -> Unit,
 ) {
+    val haptics = LocalHapticFeedback.current
+    val onUserClick = {
+        if (enabled) {
+            haptics.performHapticFeedback(HapticFeedbackType.ContextClick)
+            onClick()
+        }
+    }
     when (LocalDesignSystem.current) {
         DesignSystem.Material -> {
             when (materialButtonStyle) {
                 MaterialButtonStyle.Tonal -> {
                     FilledTonalIconButton(
-                        onClick = onClick,
+                        onClick = onUserClick,
                         enabled = enabled,
                         modifier = Modifier.size(52.dp)
                     ) {
@@ -78,7 +85,7 @@ fun StyledIconButton(
                 }
                 MaterialButtonStyle.Filled -> {
                     FilledIconButton(
-                        onClick = onClick,
+                        onClick = onUserClick,
                         enabled = enabled,
                         modifier = Modifier.size(52.dp)
                     ) {
@@ -87,7 +94,7 @@ fun StyledIconButton(
                 }
                 MaterialButtonStyle.Outlined -> {
                     OutlinedIconButton(
-                        onClick = onClick,
+                        onClick = onUserClick,
                         enabled = enabled,
                         modifier = Modifier.size(52.dp)
                     ) {
@@ -96,7 +103,7 @@ fun StyledIconButton(
                 }
                 MaterialButtonStyle.Normal -> {
                     IconButton(
-                        onClick = onClick,
+                        onClick = onUserClick,
                         enabled = enabled,
                         modifier = Modifier.size(52.dp)
                     ) {
@@ -106,7 +113,6 @@ fun StyledIconButton(
             }
         }
         DesignSystem.Apple -> {
-            val haptics = LocalHapticFeedback.current
             val interactions = remember { MutableInteractionSource() }
             val pressed by interactions.collectIsPressedAsState()
             val pressProgress by animateFloatAsState(
@@ -122,10 +128,8 @@ fun StyledIconButton(
                         interactionSource = interactions,
                         indication = null,
                         role = Role.Button,
-                    ) {
-                        haptics.performHapticFeedback(HapticFeedbackType.ContextClick)
-                        onClick()
-                    }
+                        onClick = onUserClick,
+                    )
                     .size(48.dp),
                 contentAlignment = Alignment.Center,
             ) {

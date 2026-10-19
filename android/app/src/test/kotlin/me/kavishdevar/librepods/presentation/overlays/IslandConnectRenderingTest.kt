@@ -13,7 +13,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asAndroidBitmap
+import androidx.compose.ui.hapticfeedback.HapticFeedback
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
@@ -69,8 +72,12 @@ class IslandConnectRenderingTest {
         val currentSettings = mutableStateOf(settings)
         val fontScale = mutableStateOf(1f)
         var clicks = 0
+        val feedback = mutableListOf<HapticFeedbackType>()
+        val haptics = object : HapticFeedback {
+            override fun performHapticFeedback(hapticFeedbackType: HapticFeedbackType) { feedback += hapticFeedbackType }
+        }
         compose.setContent {
-            CompositionLocalProvider(LocalDensity provides Density(3f, fontScale.value)) {
+            CompositionLocalProvider(LocalDensity provides Density(3f, fontScale.value), LocalHapticFeedback provides haptics) {
                 LibrePodsTheme(darkTheme = true) {
                     Box(Modifier.requiredSize(416.dp, 310.dp).background(Color(0xFF666666))
                         .testTag("connect-host"), contentAlignment = Alignment.TopCenter) {
@@ -87,6 +94,7 @@ class IslandConnectRenderingTest {
             }
         }
         compose.waitForIdle()
+        assertTrue("Nearby appearance must not produce touch feedback", feedback.isEmpty())
         val button = compose.onNodeWithTag("island-connect")
         button.assertIsDisplayed().assertIsEnabled().assertHasClickAction()
         compose.onNodeWithText("Connect").assertIsDisplayed()
@@ -99,6 +107,7 @@ class IslandConnectRenderingTest {
         assertTrue("Connect must remain below the physical camera", idleBounds.top >= host.top + 150f)
         button.performClick()
         assertEquals(1, clicks)
+        assertEquals(listOf(HapticFeedbackType.ContextClick), feedback)
         save("nearby")
 
         compose.runOnIdle { state.value = IslandConnectState.CONNECTING }
@@ -111,6 +120,7 @@ class IslandConnectRenderingTest {
         button.assertIsDisplayed().assertIsNotEnabled()
         assertSameBounds(idleBounds, button.fetchSemanticsNode().boundsInRoot)
         save("connecting")
+        assertEquals("Connection reports must not repeat the click", listOf(HapticFeedbackType.ContextClick), feedback)
 
         compose.runOnIdle { nearby.value = true; state.value = IslandConnectState.FAILED }
         compose.waitForIdle()
@@ -120,6 +130,7 @@ class IslandConnectRenderingTest {
         assertSameBounds(idleBounds, button.fetchSemanticsNode().boundsInRoot)
         button.performClick()
         assertEquals(2, clicks)
+        assertEquals("Retry is another accepted action", listOf(HapticFeedbackType.ContextClick, HapticFeedbackType.ContextClick), feedback)
         save("retry")
 
         for (style in IslandBatteryStyle.entries) {

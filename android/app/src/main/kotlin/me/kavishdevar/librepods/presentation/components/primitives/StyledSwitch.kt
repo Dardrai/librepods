@@ -26,6 +26,10 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.DragInteraction
+import androidx.compose.foundation.interaction.Interaction
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
@@ -45,6 +49,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -56,6 +61,7 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.DpOffset
@@ -82,6 +88,15 @@ fun StyledSwitch(
 ) {
     val isDarkTheme = MaterialTheme.colorScheme.surface.luminance() < 0.5f
     val haptics = LocalHapticFeedback.current
+    val currentChecked by rememberUpdatedState(checked)
+    val currentEnabled by rememberUpdatedState(enabled)
+    val currentOnCheckedChange by rememberUpdatedState(onCheckedChange)
+    val onUserChange = { value: Boolean ->
+        if (currentEnabled && value != currentChecked) {
+            haptics.performHapticFeedback(if (value) HapticFeedbackType.ToggleOn else HapticFeedbackType.ToggleOff)
+            currentOnCheckedChange(value)
+        }
+    }
 
     val differentiateWithoutColor = LocalAccessibilitySettings.current.differentiateWithoutColor
 
@@ -108,15 +123,27 @@ fun StyledSwitch(
     val targetColor = if (checked) onColor else offColor
     val animatedTrackColor by animateColorAsState(targetColor)
     val totalDrag = remember { mutableFloatStateOf(0f) }
+    val dragChecked = remember { mutableStateOf(checked) }
+    val dragCanceled = remember { mutableStateOf(false) }
+    // Draggable calls onDragStopped for cancellation too; a canceled press is not a tap.
+    val dragInteractions = remember {
+        val source = MutableInteractionSource()
+        object : MutableInteractionSource {
+            override val interactions = source.interactions
+            override suspend fun emit(interaction: Interaction) {
+                dragCanceled.value = interaction is DragInteraction.Cancel
+                source.emit(interaction)
+            }
+            override fun tryEmit(interaction: Interaction): Boolean {
+                dragCanceled.value = interaction is DragInteraction.Cancel
+                return source.tryEmit(interaction)
+            }
+        }
+    }
     val tapThreshold = 10f
     val isFirstComposition = remember { mutableStateOf(true) }
     LaunchedEffect(checked) {
         if (!isFirstComposition.value) {
-            if (checked) {
-                haptics.performHapticFeedback(HapticFeedbackType.ToggleOn)
-            } else {
-                haptics.performHapticFeedback(HapticFeedbackType.ToggleOff)
-            }
             coroutineScope {
                 launch {
                     val targetFrac = if (checked) 1f else 0f
@@ -136,6 +163,14 @@ fun StyledSwitch(
         modifier = Modifier
             .width(trackWidth)
             .height(trackHeight)
+            .toggleable(
+                value = checked,
+                enabled = enabled,
+                role = Role.Switch,
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onValueChange = onUserChange,
+            )
             .testTag("styled-switch"),
         contentAlignment = Alignment.CenterStart
     ) {
@@ -191,34 +226,40 @@ fun StyledSwitch(
                 .then(if (enabled) Modifier.draggable(
                     rememberDraggableState { delta ->
                         if (trackWidthPx.floatValue > 0f) {
-                            val oldFraction = animatedFraction.value
                             val newFraction = (animatedFraction.value + delta / trackWidthPx.floatValue).fastCoerceIn(-0.3f, 1.3f)
                             scope.launch {
                                 animatedFraction.snapTo(newFraction)
                             }
                             totalDrag.floatValue += abs(delta)
                             val newChecked = newFraction >= 0.5f
-                            if (newChecked != checked) {
-                                onCheckedChange(newChecked)
-                            }
-                            if ((oldFraction < 0.5f && newFraction >= 0.5f) || (oldFraction >= 0.5f && newFraction < 0.5f)) {
-                                haptics.performHapticFeedback(HapticFeedbackType.SegmentTick)
+                            if (newChecked != dragChecked.value) {
+                                dragChecked.value = newChecked
+                                if (currentEnabled) {
+                                    haptics.performHapticFeedback(if (newChecked) HapticFeedbackType.ToggleOn else HapticFeedbackType.ToggleOff)
+                                    currentOnCheckedChange(newChecked)
+                                }
                             }
                         }
                     },
                     Orientation.Horizontal,
+                    interactionSource = dragInteractions,
                     startDragImmediately = true,
                     onDragStarted = {
                         totalDrag.floatValue = 0f
+                        dragChecked.value = currentChecked
                         scope.launch {
                             progressAnimation.animateTo(1f, progressAnimationSpec)
                         }
                     },
                     onDragStopped = {
-                        scope.launch {
-                            if (totalDrag.floatValue < tapThreshold) {
-                                val newChecked = !checked
-                                onCheckedChange(newChecked)
+                            if (dragCanceled.value) {
+                                coroutineScope {
+                                    launch { progressAnimation.animateTo(0f, progressAnimationSpec) }
+                                    launch { animatedFraction.animateTo(if (dragChecked.value) 1f else 0f, progressAnimationSpec) }
+                                }
+                            } else if (totalDrag.floatValue < tapThreshold) {
+                                val newChecked = !currentChecked
+                                onUserChange(newChecked)
                                 val snappedFraction = if (newChecked) 1f else 0f
                                 coroutineScope {
                                     launch { progressAnimation.animateTo(0f, progressAnimationSpec) }
@@ -226,13 +267,18 @@ fun StyledSwitch(
                                 }
                             } else {
                                 val snappedFraction = if (animatedFraction.value >= 0.5f) 1f else 0f
-                                onCheckedChange(snappedFraction >= 0.5f)
+                                if ((snappedFraction >= 0.5f) != dragChecked.value) {
+                                    val newChecked = snappedFraction >= 0.5f
+                                    if (currentEnabled) {
+                                        haptics.performHapticFeedback(if (newChecked) HapticFeedbackType.ToggleOn else HapticFeedbackType.ToggleOff)
+                                        currentOnCheckedChange(newChecked)
+                                    }
+                                }
                                 coroutineScope {
                                     launch { progressAnimation.animateTo(0f, progressAnimationSpec) }
                                     launch { animatedFraction.animateTo(snappedFraction, progressAnimationSpec) }
                                 }
                             }
-                        }
                     }
                 ) else Modifier)
                 .drawBackdrop(

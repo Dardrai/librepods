@@ -49,6 +49,7 @@ import androidx.compose.material3.SegmentedListItem
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -238,6 +239,27 @@ fun StyledSlider(
         selectedContentColor = MaterialTheme.colorScheme.onPrimaryContainer,
     )
 ) {
+    val haptics = LocalHapticFeedback.current
+    var userChangeStarted by remember { mutableStateOf(false) }
+    var lastUserValue by remember { mutableFloatStateOf(value) }
+    LaunchedEffect(enabled) {
+        if (!enabled) userChangeStarted = false
+    }
+    val onUserValueChange = { newValue: Float ->
+        val snapped = if (snapPoints.isNotEmpty()) snapIfClose(newValue, snapPoints, snapThreshold) else newValue
+        val previous = if (userChangeStarted) lastUserValue else value
+        if (enabled && snapped != previous) {
+            val crossedSnap = snapPoints.any { snap ->
+                (previous < snap && snapped >= snap) || (previous > snap && snapped <= snap)
+            }
+            if (crossedSnap || (snapPoints.isEmpty() && !userChangeStarted)) {
+                haptics.performHapticFeedback(HapticFeedbackType.SegmentTick)
+            }
+            userChangeStarted = true
+            lastUserValue = snapped
+        }
+        if (enabled) onValueChange(snapped)
+    }
     when (LocalDesignSystem.current) {
         DesignSystem.Material -> {
             val defaultShape = when {
@@ -335,20 +357,8 @@ fun StyledSlider(
                                 Slider(
                                     modifier = Modifier.weight(1f),
                                     value = value,
-                                    onValueChange = { newValue ->
-                                        val snapped =
-                                            if (snapPoints.isNotEmpty()) {
-                                                snapIfClose(
-                                                    newValue,
-                                                    snapPoints,
-                                                    snapThreshold
-                                                )
-                                            } else {
-                                                newValue
-                                            }
-
-                                        onValueChange(snapped)
-                                    },
+                                    onValueChange = onUserValueChange,
+                                    onValueChangeFinished = { userChangeStarted = false },
                                     valueRange = valueRange,
                                     enabled = enabled
                                 )
@@ -399,8 +409,6 @@ fun StyledSlider(
             val startIconWidthState = remember { mutableFloatStateOf(0f) }
             val endIconWidthState = remember { mutableFloatStateOf(0f) }
             val density = LocalDensity.current
-            val haptics = LocalHapticFeedback.current
-            var lastDragValue by remember { mutableFloatStateOf(value) }
 
             val momentumAnimation = rememberMomentumAnimation(maxScale = 1.5f)
 
@@ -607,32 +615,17 @@ fun StyledSlider(
                                                                 valueRange.start,
                                                                 valueRange.endInclusive
                                                             )
-                                                    snapPoints.forEach { snap ->
-                                                        if ((lastDragValue < snap && targetValue >= snap) ||
-                                                            (snap in targetValue..<lastDragValue)
-                                                        ) {
-                                                            haptics.performHapticFeedback(
-                                                                HapticFeedbackType.SegmentTick
-                                                            )
-                                                        }
-                                                    }
-                                                    lastDragValue = targetValue
-                                                    val snappedValue =
-                                                        if (snapPoints.isNotEmpty()) snapIfClose(
-                                                            targetValue,
-                                                            snapPoints,
-                                                            snapThreshold,
-                                                        ) else targetValue
-                                                    onValueChange(snappedValue)
+                                                    onUserValueChange(targetValue)
                                                 }
                                             },
                                             Orientation.Horizontal,
                                             startDragImmediately = true,
                                             onDragStarted = {
-                                                lastDragValue = value
+                                                userChangeStarted = false
                                             },
                                             onDragStopped = {
                                                 onValueChange((value * 100).roundToInt() / 100f)
+                                                userChangeStarted = false
                                             }
                                         )
                                         .then(momentumAnimation.modifier)

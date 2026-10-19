@@ -140,6 +140,13 @@ class AppleStateObserverTest {
         verify(notifications, never()).notify(eq(999), any(Notification::class.java))
     }
 
+    @Test fun routineDeviceNotificationUpdatesOnlyAlertOnce() {
+        service.updateDeviceNotification(device)
+        val posted = org.mockito.ArgumentCaptor.forClass(Notification::class.java)
+        verify(notifications).notify(eq(address.toNotificationId()), posted.capture())
+        assertTrue(posted.value.flags and Notification.FLAG_ONLY_ALERT_ONCE != 0)
+    }
+
     @Test fun savedDisabledEarDetectionWithoutAReportDoesNotPauseWhenOneBudIsRemoved() = runBlocking {
         assertEarDetectionPause(AppleState(componentState = full), saved = false, pauses = false)
     }

@@ -20,8 +20,8 @@ package me.kavishdevar.librepods.presentation.components.primitives
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -43,19 +43,16 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import kotlinx.coroutines.launch
 import me.kavishdevar.librepods.presentation.design.DesignSystem
 import me.kavishdevar.librepods.presentation.design.LibrePodsTheme
 import me.kavishdevar.librepods.presentation.design.LocalAccessibilitySettings
@@ -194,7 +191,12 @@ private fun StyledToggleContent(
     val currentChecked by rememberUpdatedState(checked)
 
     val haptics = LocalHapticFeedback.current
-    val scope = rememberCoroutineScope()
+    val onUserChange = { value: Boolean ->
+        if (enabled && value != currentChecked) {
+            haptics.performHapticFeedback(if (value) HapticFeedbackType.ToggleOn else HapticFeedbackType.ToggleOff)
+            onCheckedChange(value)
+        }
+    }
 
     val m3eEnabled = LocalDesignSystem.current == DesignSystem.Material
 
@@ -226,11 +228,11 @@ private fun StyledToggleContent(
                     selectedShape = RoundedCornerShape(24.dp),
                     hoveredShape = RoundedCornerShape(24.dp),
                 ),
-                onClick = { onCheckedChange(!currentChecked) },
+                onClick = { onUserChange(!currentChecked) },
                 trailingContent = {
                     Switch(
                         checked = currentChecked,
-                        onCheckedChange = onCheckedChange,
+                        onCheckedChange = onUserChange,
                         modifier = Modifier.padding(end = if (header) 8.dp else 0.dp),
                         enabled = enabled,
                         thumbContent = if (LocalAccessibilitySettings.current.differentiateWithoutColor) {
@@ -283,33 +285,23 @@ private fun StyledToggleContent(
             }
         }
     } else {
-        val isPressed = remember { mutableStateOf(false) }
+        val interactions = remember { MutableInteractionSource() }
+        val isPressed by interactions.collectIsPressedAsState()
         Column (modifier = modifier) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(
                         shape = RoundedCornerShape(28.dp),
-                        color = if (isPressed.value) Color(0xFFE0E0E0) else Color.Transparent
+                        color = if (enabled && isPressed) Color(0xFFE0E0E0) else Color.Transparent
                     )
                     .padding(16.dp)
-                    .pointerInput(Unit) {
-                        detectTapGestures(
-                            onPress = {
-                                isPressed.value = true
-                                tryAwaitRelease()
-                                isPressed.value = false
-                            }
-                        )
-                    }
                     .clickable(
+                        enabled = enabled,
                         indication = null,
-                        interactionSource = remember { MutableInteractionSource() }
+                        interactionSource = interactions
                     ) {
-                        if (enabled) {
-                            scope.launch { haptics.performHapticFeedback(if (!currentChecked) HapticFeedbackType.ToggleOn else HapticFeedbackType.ToggleOff) }
-                            onCheckedChange(!currentChecked)
-                        }
+                        onUserChange(!currentChecked)
                     },
                 verticalAlignment = Alignment.CenterVertically
             ) {

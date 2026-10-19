@@ -3,6 +3,7 @@ package me.kavishdevar.librepods.services
 import android.Manifest
 import android.app.Application
 import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothA2dp
 import android.bluetooth.BluetoothProfile
@@ -13,9 +14,14 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.media.AudioDeviceInfo
+import android.media.AudioDeviceCallback
 import android.media.AudioManager
 import android.os.ParcelUuid
 import android.os.SystemClock
+import android.os.VibrationAttributes
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
@@ -44,6 +50,7 @@ import me.kavishdevar.librepods.core.devices.Device
 import me.kavishdevar.librepods.shizuku.BridgeState
 import me.kavishdevar.librepods.shizuku.ShizukuAudioClient
 import me.kavishdevar.librepods.shizuku.A2dpRecoveryGuard
+import me.kavishdevar.librepods.shizuku.BluetoothVolumeSync
 import me.kavishdevar.librepods.presentation.overlays.IslandWindow
 import org.junit.After
 import org.junit.Assert.*
@@ -121,6 +128,49 @@ class NearbyDeviceConnectionTest {
     }
 
     @After fun close() { (field("serviceScope").get(service) as CoroutineScope).cancel() }
+
+    @Test fun onlyNewNativeMediaEndpointsEmitConnectionFeedback() = runBlocking<Unit> {
+        val bluetoothManager = mock(BluetoothManager::class.java)
+        val adapter = mock(BluetoothAdapter::class.java)
+        val manager = mock(VibratorManager::class.java)
+        val vibrator = mock(Vibrator::class.java)
+        `when`(bluetoothManager.adapter).thenReturn(adapter)
+        `when`(adapter.state).thenReturn(BluetoothAdapter.STATE_ON)
+        `when`(manager.defaultVibrator).thenReturn(vibrator)
+        `when`(vibrator.hasVibrator()).thenReturn(true)
+        Shadow.extract<ShadowContextImpl>(service.baseContext).setSystemService(Context.BLUETOOTH_SERVICE, bluetoothManager)
+        Shadow.extract<ShadowContextImpl>(service.baseContext).setSystemService(Context.VIBRATOR_MANAGER_SERVICE, manager)
+        field("startedWithPermissions").set(service, true)
+        field("bluetoothVolumeSync\$delegate").set(service, lazyOf(mock(BluetoothVolumeSync::class.java)))
+        val callback = field("nativeAudioCallback").get(service) as AudioDeviceCallback
+        callback.onAudioDevicesAdded(emptyArray())
+        val sco = mock(AudioDeviceInfo::class.java)
+        `when`(sco.type).thenReturn(AudioDeviceInfo.TYPE_BLUETOOTH_SCO)
+        `when`(sco.address).thenReturn(address.value)
+        outputs.set(arrayOf(sco))
+        callback.onAudioDevicesAdded(arrayOf(sco))
+        verifyNoInteractions(vibrator)
+
+        publishOutput()
+        callback.onAudioDevicesAdded(outputs.get())
+        attachNativeAudio()
+        attachNativeAudio()
+        callback.onAudioDevicesAdded(emptyArray())
+        verify(vibrator).vibrate(any(VibrationEffect::class.java), any(VibrationAttributes::class.java))
+
+        clearOutput()
+        callback.onAudioDevicesRemoved(emptyArray())
+        publishOutput()
+        callback.onAudioDevicesAdded(outputs.get())
+        verify(vibrator, times(2)).vibrate(any(VibrationEffect::class.java), any(VibrationAttributes::class.java))
+
+        `when`(adapter.state).thenReturn(BluetoothAdapter.STATE_TURNING_OFF)
+        receive(Intent(BluetoothAdapter.ACTION_STATE_CHANGED)
+            .putExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.STATE_TURNING_OFF))
+        // The output callback can still see Android's old inventory during adapter teardown.
+        callback.onAudioDevicesAdded(outputs.get())
+        verify(vibrator, times(2)).vibrate(any(VibrationEffect::class.java), any(VibrationAttributes::class.java))
+    }
 
     @Test fun aLateUuidOrAclNotificationCannotPageControlWithoutALocalAudioProfile() = runBlocking<Unit> {
         connectionState.value = ConnectionState.AVAILABLE

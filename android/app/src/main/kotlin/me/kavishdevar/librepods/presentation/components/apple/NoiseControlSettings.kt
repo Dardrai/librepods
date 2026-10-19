@@ -88,6 +88,8 @@ import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
@@ -149,13 +151,30 @@ fun NoiseControlSettings(
     showAdaptiveMode: Boolean = true,
     enabled: Boolean = true
 ) {
+    val haptics = LocalHapticFeedback.current
+    var dragFeedbackMode by remember { mutableStateOf<Int?>(null) }
+    var dragStrengthFeedbackSent by remember { mutableStateOf(false) }
     val currentModeChanged by rememberUpdatedState<(Int) -> Unit>({ mode ->
-        if (enabled && (mode != 4 || showAdaptiveMode) && (mode != 1 || showOffListeningMode)) {
+        if (enabled && mode in 1..4 && (mode != 4 || showAdaptiveMode) &&
+            (mode != 1 || showOffListeningMode)) {
+            // Reports can arrive during a drag; only the finger crossing a segment produces feedback.
+            if (mode != (dragFeedbackMode ?: noiseControlModeValue)) {
+                if (dragFeedbackMode != null) dragFeedbackMode = mode
+                haptics.performHapticFeedback(HapticFeedbackType.SegmentTick)
+            }
             onNoiseControlModeChanged(mode)
         }
     })
     val currentStrengthChanged by rememberUpdatedState<(Int) -> Unit>({ strength ->
-        if (enabled && showAdaptiveMode) onAdaptiveStrengthChanged(strength.coerceIn(0, 100))
+        if (enabled && showAdaptiveMode) {
+            val value = strength.coerceIn(0, 100)
+            if (value != (requestedAdaptiveStrength ?: adaptiveStrength).coerceIn(0, 100) &&
+                (dragFeedbackMode == null || !dragStrengthFeedbackSent)) {
+                if (dragFeedbackMode != null) dragStrengthFeedbackSent = true
+                haptics.performHapticFeedback(HapticFeedbackType.SegmentTick)
+            }
+            onAdaptiveStrengthChanged(value)
+        }
     })
     when (LocalDesignSystem.current) {
         DesignSystem.Material -> {
@@ -339,7 +358,11 @@ fun NoiseControlSettings(
                 }
             }
             LaunchedEffect(enabled, momentum) {
-                if (!enabled) momentum.endPressingAnimation()
+                if (!enabled) {
+                    dragFeedbackMode = null
+                    dragStrengthFeedbackSent = false
+                    momentum.endPressingAnimation()
+                }
             }
 
             val animationCoroutineScope = rememberCoroutineScope()
@@ -719,6 +742,8 @@ fun NoiseControlSettings(
                             var dragStartRootX: Float? = null
                             detectHorizontalDragGestures(
                                 onDragStart = {
+                                    dragFeedbackMode = currentMode
+                                    dragStrengthFeedbackSent = false
                                     dragOffset = offset.value
                                     dragStartOffset = dragOffset
                                     dragStartRootX = null
@@ -740,6 +765,8 @@ fun NoiseControlSettings(
                                     // The final offset may not reach snapshotFlow before the gesture ends.
                                     if (finalMode != currentMode) currentModeChanged(finalMode)
                                     if (currentMode == 4 && finalMode == 4) currentStrengthChanged(finalStrength)
+                                    dragFeedbackMode = null
+                                    dragStrengthFeedbackSent = false
                                     isDragging = false
 
                                     val finalTarget = when (finalMode) {
@@ -753,6 +780,8 @@ fun NoiseControlSettings(
                                     animationCoroutineScope.launch { offset.animateTo(finalTarget, motion) }
                                 },
                                 onDragCancel = {
+                                    dragFeedbackMode = null
+                                    dragStrengthFeedbackSent = false
                                     isDragging = false
                                     val restoredOffset = when (currentMode) {
                                         1 -> 0f

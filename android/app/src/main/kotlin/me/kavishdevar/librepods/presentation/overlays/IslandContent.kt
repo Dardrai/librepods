@@ -75,6 +75,8 @@ import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
@@ -197,6 +199,7 @@ fun IslandContent(
     onStatusBarCoverageChanged: (Boolean) -> Unit = {},
 ) {
     val density = LocalDensity.current
+    val haptics = LocalHapticFeedback.current
     val cells = islandBatteryCells(model, batteries, batteryNow)
     val compactCell = cells.filter { it.component != BatteryComponent.CASE }.filter { it.live && it.level != null }
         .minByOrNull { it.level!! } ?: cells.firstOrNull { it.component != BatteryComponent.CASE && it.level != null }
@@ -438,7 +441,10 @@ fun IslandContent(
                                             if (!islandSettings.compactOpenAppOnTap) openApp()
                                             else changeState(IslandState.EXPANDED, true)
                                         },
-                                        onClick = { changeState(IslandState.EXPANDED, true) }
+                                        onClick = {
+                                            haptics.performHapticFeedback(HapticFeedbackType.ContextClick)
+                                            changeState(IslandState.EXPANDED, true)
+                                        }
                                     ).semantics { contentDescription = expandConnectLabel }
                                 else Modifier.pointerInput(islandState, showConnectAction, islandSettings) {
                                     detectTapGestures(
@@ -448,6 +454,9 @@ fun IslandContent(
                                             scale.animateTo(0f)
                                         },
                                         onTap = {
+                                            if (islandState == IslandState.COMPACT || islandState == IslandState.EXPANDED &&
+                                                (islandSettings.expandedOpenAppOnTap || islandSettings.keepCompactVisible))
+                                                haptics.performHapticFeedback(HapticFeedbackType.ContextClick)
                                             when (islandState) {
                                                 IslandState.EXPANDED -> {
                                                     if (islandSettings.expandedOpenAppOnTap) openApp()
@@ -466,6 +475,9 @@ fun IslandContent(
                                             }
                                         },
                                         onLongPress = {
+                                            if (islandState == IslandState.COMPACT || islandState == IslandState.EXPANDED &&
+                                                (!islandSettings.expandedOpenAppOnTap || islandSettings.keepCompactVisible))
+                                                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                                             animationCoroutineScope.launch { scale.animateTo(0f) }
                                             when (islandState) {
                                                 IslandState.EXPANDED -> {
@@ -716,12 +728,18 @@ fun IslandContent(
 @Composable
 private fun IslandConnectButton(name: String, state: IslandConnectState, textColor: Color, iconOnly: Boolean, contentHeight: Dp,
     visible: Boolean, motionEnabled: Boolean, onClick: () -> Unit) {
+    val haptics = LocalHapticFeedback.current
     val connecting = state == IslandConnectState.CONNECTING
     val description = stringResource(if (connecting) R.string.island_connecting_device else R.string.island_connect_device, name)
     val label = if (connecting) null else if (iconOnly) "" else
         stringResource(if (state == IslandConnectState.FAILED) R.string.island_connect_retry else R.string.island_connect)
     Button(
-        onClick = onClick,
+        onClick = {
+            if (visible && !connecting) {
+                haptics.performHapticFeedback(HapticFeedbackType.ContextClick)
+                onClick()
+            }
+        },
         enabled = visible && !connecting,
         modifier = Modifier.width(if (iconOnly) 48.dp else 108.dp).heightIn(min = 48.dp).testTag("island-connect")
             .semantics { contentDescription = description },

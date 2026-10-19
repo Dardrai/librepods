@@ -5,9 +5,13 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.hapticfeedback.HapticFeedback
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsMatcher
@@ -46,6 +50,115 @@ import org.robolectric.annotation.LooperMode
 class NoiseControlSettingsTest {
     @get:Rule val compose = createComposeRule()
 
+    @GraphicsMode(GraphicsMode.Mode.LEGACY)
+    @Test fun userModeSelectionsTickOnceInBothThemesWhileReportsAndDisabledSelectionsStayQuiet() {
+        val mode = mutableStateOf(3)
+        val enabled = mutableStateOf(true)
+        val design = mutableStateOf(DesignSystem.Apple)
+        val writes = mutableListOf<Int>()
+        val feedback = mutableListOf<HapticFeedbackType>()
+        val haptics = object : HapticFeedback {
+            override fun performHapticFeedback(hapticFeedbackType: HapticFeedbackType) { feedback += hapticFeedbackType }
+        }
+        compose.setContent {
+            CompositionLocalProvider(LocalHapticFeedback provides haptics) {
+                LibrePodsTheme(designSystem = design.value) {
+                    NoiseControlSettings(modifier = Modifier.width(400.dp).height(64.dp),
+                        showOffListeningMode = true, noiseControlModeValue = mode.value,
+                        onNoiseControlModeChanged = { writes += it; mode.value = it },
+                        onAdaptiveStrengthChanged = {}, showLabels = false, enabled = enabled.value)
+                }
+            }
+        }
+        for (theme in listOf(DesignSystem.Apple, DesignSystem.Material)) {
+            compose.runOnIdle { design.value = theme; mode.value = 2; enabled.value = true }
+            settle()
+            val before = feedback.size
+            compose.onNodeWithContentDescription("Noise Cancellation").performClick()
+            assertEquals("Selecting the reported mode is not a change", before, feedback.size)
+            compose.onNodeWithContentDescription("Transparency").performClick()
+            settle()
+            assertEquals(before + 1, feedback.size)
+            assertEquals(HapticFeedbackType.SegmentTick, feedback.last())
+            compose.onNodeWithContentDescription("Transparency").performClick()
+            settle()
+            assertEquals("A selected mode must not tick again", before + 1, feedback.size)
+            val writesBeforeDisabled = writes.size
+            compose.runOnIdle { enabled.value = false; mode.value = 4 }
+            settle()
+            compose.onNodeWithContentDescription("Noise Cancellation").performTouchInput { click() }
+            settle()
+            assertEquals("Disabled input and remote state changes stay quiet", before + 1, feedback.size)
+            assertEquals("Disabled input cannot send a command", writesBeforeDisabled, writes.size)
+        }
+    }
+
+    @GraphicsMode(GraphicsMode.Mode.LEGACY)
+    @Test fun modeDragTicksAtTheUserCrossingWithoutAnotherTickOnReleaseOrReport() {
+        val mode = mutableStateOf(3)
+        val writes = mutableListOf<Int>()
+        val feedback = mutableListOf<HapticFeedbackType>()
+        compose.setContent {
+            CompositionLocalProvider(LocalHapticFeedback provides object : HapticFeedback {
+                override fun performHapticFeedback(hapticFeedbackType: HapticFeedbackType) { feedback += hapticFeedbackType }
+            }) {
+                LibrePodsTheme(designSystem = DesignSystem.Apple) {
+                    NoiseControlSettings(modifier = Modifier.width(400.dp).height(64.dp),
+                        showOffListeningMode = false, showAdaptiveMode = false, noiseControlModeValue = mode.value,
+                        onNoiseControlModeChanged = { writes += it }, onAdaptiveStrengthChanged = {}, showLabels = false)
+                }
+            }
+        }
+        settle()
+        compose.onNodeWithTag("noise-control-thumb").performTouchInput {
+            swipe(center, center + Offset(180f, 0f), durationMillis = 480)
+        }
+        settle()
+        assertTrue("The drag must request ANC", writes.isNotEmpty() && writes.all { it == 2 })
+        assertEquals("Crossing into ANC ticks once, including release", listOf(HapticFeedbackType.SegmentTick), feedback)
+        compose.runOnIdle { mode.value = 2 }
+        settle()
+        compose.runOnIdle { mode.value = 3 }
+        settle()
+        assertEquals("Device reports and the resulting animation stay quiet", listOf(HapticFeedbackType.SegmentTick), feedback)
+
+        compose.onNodeWithTag("noise-control-thumb").performTouchInput {
+            down(center)
+            moveBy(Offset(150f, 0f))
+        }
+        compose.mainClock.advanceTimeBy(200)
+        compose.waitForIdle()
+        assertEquals(2, feedback.size)
+        compose.runOnIdle { mode.value = 2 }
+        compose.onNodeWithTag("noise-control-thumb").performTouchInput { moveBy(Offset(10f, 0f)); up() }
+        settle()
+        assertEquals("A report arriving during the drag cannot rearm its feedback", 2, feedback.size)
+    }
+
+    @GraphicsMode(GraphicsMode.Mode.LEGACY)
+    @Test fun aFailedModeRequestCanBeRetriedWithAnotherDeliberateTap() {
+        val writes = mutableListOf<Int>()
+        val feedback = mutableListOf<HapticFeedbackType>()
+        compose.setContent {
+            CompositionLocalProvider(LocalHapticFeedback provides object : HapticFeedback {
+                override fun performHapticFeedback(hapticFeedbackType: HapticFeedbackType) { feedback += hapticFeedbackType }
+            }) {
+                LibrePodsTheme(designSystem = DesignSystem.Apple) {
+                    NoiseControlSettings(modifier = Modifier.width(400.dp).height(64.dp),
+                        showOffListeningMode = false, noiseControlModeValue = 3,
+                        onNoiseControlModeChanged = { writes += it }, onAdaptiveStrengthChanged = {}, showLabels = false)
+                }
+            }
+        }
+        settle()
+        repeat(2) {
+            compose.onNodeWithContentDescription("Noise Cancellation").performClick()
+            settle()
+        }
+        assertEquals("A missing acknowledgement must not latch out a later retry", listOf(2, 2), writes)
+        assertEquals("Each deliberate retry gets its own feedback", listOf(HapticFeedbackType.SegmentTick, HapticFeedbackType.SegmentTick), feedback)
+    }
+
     // This gesture/state test does not need Robolectric's incomplete native AGSL compiler.
     @GraphicsMode(GraphicsMode.Mode.LEGACY)
     @Test fun adaptiveDragKeepsFinalRequestAcrossReopeningUntilAFreshReportReplacesIt() {
@@ -53,18 +166,23 @@ class NoiseControlSettingsTest {
         val requested = mutableStateOf<Int?>(null)
         val visible = mutableStateOf(true)
         val writes = mutableListOf<Int>()
+        val feedback = mutableListOf<HapticFeedbackType>()
         compose.setContent {
-            LibrePodsTheme(designSystem = DesignSystem.Apple) {
-                if (visible.value) NoiseControlSettings(
-                    modifier = Modifier.width(400.dp).height(64.dp),
-                    showOffListeningMode = false,
-                    noiseControlModeValue = 4,
-                    onNoiseControlModeChanged = {},
-                    adaptiveStrength = reported.value,
-                    requestedAdaptiveStrength = requested.value,
-                    onAdaptiveStrengthChanged = { writes += it; requested.value = it },
-                    showLabels = false
-                )
+            CompositionLocalProvider(LocalHapticFeedback provides object : HapticFeedback {
+                override fun performHapticFeedback(hapticFeedbackType: HapticFeedbackType) { feedback += hapticFeedbackType }
+            }) {
+                LibrePodsTheme(designSystem = DesignSystem.Apple) {
+                    if (visible.value) NoiseControlSettings(
+                        modifier = Modifier.width(400.dp).height(64.dp),
+                        showOffListeningMode = false,
+                        noiseControlModeValue = 4,
+                        onNoiseControlModeChanged = {},
+                        adaptiveStrength = reported.value,
+                        requestedAdaptiveStrength = requested.value,
+                        onAdaptiveStrengthChanged = { writes += it; requested.value = it },
+                        showLabels = false
+                    )
+                }
             }
         }
         settle()
@@ -83,6 +201,7 @@ class NoiseControlSettingsTest {
         assertTrue("The final gesture position must be committed: requested=$finalRequested, writes=$writes, left=${thumbLeft()}",
             finalRequested > 50)
         assertEquals("The last gesture command must remain the displayed request", writes.last(), finalRequested)
+        assertEquals("A continuous Adaptive strength gesture ticks only once", listOf(HapticFeedbackType.SegmentTick), feedback)
         assertEquals("A request must not replace the device's report", 25, reported.value)
         val finalLeft = thumbLeft()
         assertTrue("Release must not snap back to the old report", finalLeft > initialLeft + 30f)
@@ -98,6 +217,7 @@ class NoiseControlSettingsTest {
         settle()
         assertEquals("A fresh rounded report must become authoritative", 128f, thumbLeft(), 1.5f)
         assertEquals("Report-driven motion must not send another command", beforeReport, writes.size)
+        assertEquals("Reopening and receiving strength reports stays quiet", listOf(HapticFeedbackType.SegmentTick), feedback)
     }
 
     @GraphicsMode(GraphicsMode.Mode.LEGACY)
@@ -313,18 +433,23 @@ class NoiseControlSettingsTest {
         val enabled = mutableStateOf(false)
         val modes = mutableListOf<Int>()
         val strengths = mutableListOf<Int>()
+        val feedback = mutableListOf<HapticFeedbackType>()
         compose.setContent {
-            LibrePodsTheme(designSystem = DesignSystem.Apple) {
-                NoiseControlSettings(
-                    modifier = Modifier.width(400.dp).height(64.dp),
-                    showOffListeningMode = true,
-                    noiseControlModeValue = 4,
-                    onNoiseControlModeChanged = { modes += it },
-                    adaptiveStrength = 30,
-                    onAdaptiveStrengthChanged = { strengths += it },
-                    showLabels = false,
-                    enabled = enabled.value
-                )
+            CompositionLocalProvider(LocalHapticFeedback provides object : HapticFeedback {
+                override fun performHapticFeedback(hapticFeedbackType: HapticFeedbackType) { feedback += hapticFeedbackType }
+            }) {
+                LibrePodsTheme(designSystem = DesignSystem.Apple) {
+                    NoiseControlSettings(
+                        modifier = Modifier.width(400.dp).height(64.dp),
+                        showOffListeningMode = true,
+                        noiseControlModeValue = 4,
+                        onNoiseControlModeChanged = { modes += it },
+                        adaptiveStrength = 30,
+                        onAdaptiveStrengthChanged = { strengths += it },
+                        showLabels = false,
+                        enabled = enabled.value
+                    )
+                }
             }
         }
         settle()
@@ -338,14 +463,19 @@ class NoiseControlSettingsTest {
         settle()
         assertTrue(modes.isEmpty())
         assertTrue(strengths.isEmpty())
+        assertTrue("Disabled input cannot produce feedback", feedback.isEmpty())
         compose.runOnIdle { enabled.value = true }
         compose.onNodeWithTag("noise-control-thumb").performSemanticsAction(SemanticsActions.SetProgress) {
             assertTrue("Invalid accessibility values must be declined", !it(Float.NaN))
+            assertTrue("An unchanged progress action remains accepted", it(30f))
+            assertTrue("Unchanged progress cannot produce feedback", feedback.isEmpty())
             assertTrue("Valid out-of-range values must be clamped", it(150f))
         }
-        assertEquals(listOf(100), strengths)
+        assertEquals(listOf(30, 100), strengths)
+        assertEquals(listOf(HapticFeedbackType.SegmentTick), feedback)
         compose.onNodeWithContentDescription("Noise Cancellation").performClick()
         assertEquals(listOf(2), modes)
+        assertEquals(listOf(HapticFeedbackType.SegmentTick, HapticFeedbackType.SegmentTick), feedback)
     }
 
     @GraphicsMode(GraphicsMode.Mode.LEGACY)
