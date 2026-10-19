@@ -114,7 +114,8 @@ class NoiseControlSettingsTest {
             swipe(center, center + Offset(180f, 0f), durationMillis = 480)
         }
         settle()
-        assertTrue("The drag must request ANC", writes.isNotEmpty() && writes.all { it == 2 })
+        // The collector may forward the baseline segment before the finger crosses into ANC.
+        assertEquals("The released drag must finish by requesting ANC: writes=$writes", 2, writes.lastOrNull())
         assertEquals("Crossing into ANC ticks once, including release", listOf(HapticFeedbackType.SegmentTick), feedback)
         compose.runOnIdle { mode.value = 2 }
         settle()
@@ -128,6 +129,7 @@ class NoiseControlSettingsTest {
         }
         compose.mainClock.advanceTimeBy(200)
         compose.waitForIdle()
+        assertEquals("The finger must request ANC before its acknowledgement: writes=$writes", 2, writes.lastOrNull())
         assertEquals(2, feedback.size)
         compose.runOnIdle { mode.value = 2 }
         compose.onNodeWithTag("noise-control-thumb").performTouchInput { moveBy(Offset(10f, 0f)); up() }
