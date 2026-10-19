@@ -91,6 +91,54 @@ object NearbyAirPods {
         companion object { const val STABLE_MS = 2_000L }
     }
 
+    /** Public invitations need sustained proximity; paired reports never use this gate. */
+    class InvitationProximity {
+        private data class Candidate(val address: String, val firstStrong: Long, var lastStrong: Long,
+            var admitted: Boolean = false)
+        private val candidates = mutableMapOf<Int, Candidate>()
+        private val observations = mutableMapOf<Int, Long>()
+
+        fun observe(event: Event, address: String, rssi: Int, now: Long): Boolean {
+            if (event.modelId !in modelNames || address.isBlank() || now < 0 ||
+                observations[event.modelId]?.let { now <= it } == true) return false
+            observations[event.modelId] = now
+            var candidate = candidates[event.modelId]
+            if (candidate != null && now - candidate.lastStrong >= ABSENCE_MS) {
+                candidates.remove(event.modelId)
+                candidate = null
+            }
+            if (!event.lidOpen) {
+                if (candidate?.address != address) return false
+                candidates.remove(event.modelId)
+                return candidate.admitted
+            }
+            if (candidate?.admitted == true && candidate.address != address) return false
+            // Android's valid RSSI range is -127..126; 127 means unavailable.
+            if (rssi !in -55..126) {
+                if (candidate?.address == address && !candidate.admitted) candidates.remove(event.modelId)
+                return false
+            }
+            if (candidate == null || candidate.address != address ||
+                (!candidate.admitted && now - candidate.lastStrong > MAX_GAP_MS)) {
+                candidate = Candidate(address, now, now)
+                candidates[event.modelId] = candidate
+            }
+            candidate.lastStrong = now
+            if (now - candidate.firstStrong >= CONFIRM_MS) candidate.admitted = true
+            return candidate.admitted
+        }
+
+        fun clear() {
+            candidates.clear()
+            observations.clear()
+        }
+
+        private companion object {
+            const val CONFIRM_MS = 350L
+            const val MAX_GAP_MS = 1_500L
+        }
+    }
+
     class Visits {
         // shortcut: public reports coalesce same-model pairs; split visits when authenticated identity is available.
         private data class Visit(var at: Long, var open: Boolean, var offered: Boolean, var offeredAt: Long = at)

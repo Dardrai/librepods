@@ -168,6 +168,7 @@ class NearbyDeviceConnectionTest {
         val result = mock(ScanResult::class.java)
         `when`(result.device).thenReturn(advertised)
         `when`(result.scanRecord).thenReturn(record)
+        `when`(result.rssi).thenReturn(-100) // Authenticated battery updates bypass invitation proximity.
         `when`(result.timestampNanos).thenReturn(SystemClock.elapsedRealtimeNanos())
         LibrePodsService::class.java.getDeclaredMethod("handleScanResult", ScanResult::class.java)
             .apply { isAccessible = true }.invoke(service, result)

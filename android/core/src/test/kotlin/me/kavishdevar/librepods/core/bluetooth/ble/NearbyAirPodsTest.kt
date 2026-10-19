@@ -34,6 +34,122 @@ class NearbyAirPodsTest {
         assertNull(NearbyAirPods.lidEvent(report() + report()))
     }
 
+    @Test fun invitationsRequireCurrentSustainedStrongReportsWithoutConsumingTheVisit() {
+        val proximity = NearbyAirPods.InvitationProximity()
+        val visits = NearbyAirPods.Visits()
+        val open = NearbyAirPods.Event(0x2720, true)
+        fun offer(rssi: Int, at: Long) = if (proximity.observe(open, "first", rssi, at))
+            visits.observe(open, at, false) else null
+        assertNull(offer(-90, 0))
+        assertNull(offer(-55, 100))
+        assertNull(offer(-55, 449))
+        assertEquals(open, offer(-55, 450))
+        assertNull(offer(-55, 451))
+    }
+
+    @Test fun aSinglePeakOrLongGapCannotQualifyAnInvitation() {
+        val proximity = NearbyAirPods.InvitationProximity()
+        val open = NearbyAirPods.Event(0x2720, true)
+        assertFalse(proximity.observe(open, "first", -40, 0))
+        assertFalse(proximity.observe(open, "first", -80, 350))
+        assertFalse(proximity.observe(open, "first", -40, 400))
+        assertFalse(proximity.observe(open, "first", -40, 1_901))
+        assertFalse(proximity.observe(open, "first", -40, 2_250))
+        assertTrue(proximity.observe(open, "first", -40, 2_251))
+        assertFalse(proximity.observe(open, "first", -40, 32_251))
+        assertTrue(proximity.observe(open, "first", -40, 32_601))
+        proximity.clear()
+        assertFalse(proximity.observe(open, "first", -40, 0))
+        assertTrue("A 1,500ms report gap still qualifies", proximity.observe(open, "first", -40, 1_500))
+    }
+
+    @Test fun differentAdvertisersCannotCombineTheirQualificationOrCloseAnAdmittedSource() {
+        val proximity = NearbyAirPods.InvitationProximity()
+        val open = NearbyAirPods.Event(0x2720, true)
+        val closed = open.copy(lidOpen = false)
+        assertFalse(proximity.observe(open, "first", -40, 0))
+        assertFalse(proximity.observe(open, "second", -40, 350))
+        assertFalse(proximity.observe(open, "first", -40, 700))
+        assertFalse(proximity.observe(open, "second", -80, 800))
+        assertTrue(proximity.observe(open, "first", -40, 1_050))
+        assertFalse(proximity.observe(closed, "second", -40, 1_051))
+        assertFalse(proximity.observe(open, "second", -40, 1_400))
+        assertFalse(proximity.observe(open, "first", -90, 1_401))
+        assertTrue("Weak reports retain the admitted source without causing a close",
+            proximity.observe(closed, "first", 127, 1_402))
+        assertFalse(proximity.observe(open, "second", -40, 1_403))
+        assertTrue(proximity.observe(open, "second", -40, 1_753))
+    }
+
+    @Test fun invitationRssiUsesAndroidsFullValidRangeAndRejectsUnavailableSamples() {
+        val open = NearbyAirPods.Event(0x2720, true)
+        for (rssi in listOf(-55, 0, 126)) {
+            val proximity = NearbyAirPods.InvitationProximity()
+            assertFalse(proximity.observe(open, "first", rssi, 0))
+            assertTrue("RSSI $rssi is valid and strong", proximity.observe(open, "first", rssi, 350))
+        }
+        for (rssi in listOf(Int.MIN_VALUE, -128, -127, -56, 127, 128, Int.MAX_VALUE)) {
+            val proximity = NearbyAirPods.InvitationProximity()
+            assertFalse(proximity.observe(open, "first", -40, 0))
+            assertFalse("RSSI $rssi must not admit", proximity.observe(open, "first", rssi, 350))
+            assertFalse("A weak or unavailable report resets partial qualification",
+                proximity.observe(open, "first", -40, 351))
+        }
+    }
+
+    @Test fun duplicateAndOlderProximitySamplesCannotQualifyResetOrResurrectAnInvitation() {
+        val proximity = NearbyAirPods.InvitationProximity()
+        val open = NearbyAirPods.Event(0x2720, true)
+        val closed = open.copy(lidOpen = false)
+        assertFalse(proximity.observe(open, "first", -40, 100))
+        assertFalse(proximity.observe(open, "first", -90, 99))
+        assertFalse(proximity.observe(open, "first", -90, 100))
+        assertTrue(proximity.observe(open, "first", -40, 450))
+        assertFalse(proximity.observe(closed, "first", -90, 449))
+        assertFalse(proximity.observe(closed, "first", -90, 450))
+        assertTrue(proximity.observe(closed, "first", -90, 451))
+        assertFalse(proximity.observe(open, "first", -40, 450))
+        assertFalse(proximity.observe(open, "first", -40, 451))
+        assertFalse(proximity.observe(open, "first", -40, 452))
+        assertTrue(proximity.observe(open, "first", -40, 802))
+    }
+
+    @Test fun proximityAbsenceUsesTheOriginalLastStrongReportAndDoesNotMixModels() {
+        val proximity = NearbyAirPods.InvitationProximity()
+        val open = NearbyAirPods.Event(0x2720, true)
+        val other = NearbyAirPods.Event(0x1920, true)
+        assertFalse(proximity.observe(open, "first", -40, 0))
+        assertTrue(proximity.observe(open, "first", -40, 350))
+        assertFalse(proximity.observe(other, "second", -40, 350))
+        assertTrue(proximity.observe(other, "second", -40, 700))
+        assertFalse(proximity.observe(open, "first", -90, 30_349))
+        assertFalse(proximity.observe(open, "foreign", -40, 30_350))
+        assertTrue(proximity.observe(open, "foreign", -40, 30_700))
+        assertFalse("The other model expired independently",
+            proximity.observe(other.copy(lidOpen = false), "second", -40, 30_700))
+    }
+
+    @Test fun proximityCloseAndClearRequireFreshQualificationAndRejectInvalidIdentity() {
+        val proximity = NearbyAirPods.InvitationProximity()
+        val open = NearbyAirPods.Event(0x2720, true)
+        val closed = open.copy(lidOpen = false)
+        assertFalse(proximity.observe(open, "", -40, 0))
+        assertFalse(proximity.observe(open, " ", -40, 350))
+        assertFalse(proximity.observe(open, "first", -40, -1))
+        assertFalse(proximity.observe(open.copy(modelId = 0xffff), "first", -40, 0))
+        assertFalse(proximity.observe(open, "first", -40, 0))
+        assertFalse(proximity.observe(closed, "first", 127, 100))
+        assertFalse(proximity.observe(open, "first", -40, 350))
+        assertTrue(proximity.observe(open, "first", -40, 700))
+        assertTrue(proximity.observe(closed, "first", -90, 701))
+        assertFalse(proximity.observe(open, "first", -40, 702))
+        assertTrue(proximity.observe(open, "first", -40, 1_052))
+        proximity.clear()
+        assertFalse(proximity.observe(closed, "first", -40, 0))
+        assertFalse(proximity.observe(open, "first", -40, 1))
+        assertTrue(proximity.observe(open, "first", -40, 351))
+    }
+
     @Test fun siblingsDoNotRepeatInvitationsAndLidCloseRearmsThem() {
         val visits = NearbyAirPods.Visits()
         val open = NearbyAirPods.Event(0x2720, true)

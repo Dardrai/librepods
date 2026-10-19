@@ -2,6 +2,8 @@
 package me.kavishdevar.librepods.presentation.overlays
 
 import android.animation.ValueAnimator
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
 import android.database.ContentObserver
 import android.graphics.Matrix
 import android.graphics.SurfaceTexture
@@ -24,10 +26,14 @@ internal class PairingArtwork(private val container: View) : TextureView.Surface
     private val video = container.findViewById<TextureView>(R.id.popup_video)
     private val poster = container.findViewById<ImageView>(R.id.popup_artwork)
     private var active = false
+    private var paused = false
     private var animatedModel = false
     private var failed = false
     private var fallbackArt = 0
     private var rendering = false
+    private var frameRendered = false
+    private var entranceComplete = false
+    private var posterAnimation: ValueAnimator? = null
     private var observing = false
     private var player: MediaPlayer? = null
     private var surface: Surface? = null
@@ -50,6 +56,8 @@ internal class PairingArtwork(private val container: View) : TextureView.Surface
         poster.setImageResource(fallbackArt)
         animatedModel = modelId in setOf(0x0e20, 0x1420, 0x2420, 0x2720)
         active = true
+        paused = false
+        entranceComplete = false
         failed = false
         if (animatedModel) {
             observing = runCatching {
@@ -68,7 +76,20 @@ internal class PairingArtwork(private val container: View) : TextureView.Surface
         video.visibility = View.GONE
     }
 
+    fun setEntranceComplete(complete: Boolean) {
+        entranceComplete = complete
+        if (complete) revealVideo()
+    }
+
+    fun pause() {
+        paused = true
+        entranceComplete = false
+        cancelPosterMotion()
+        runCatching { player?.pause() }
+    }
+
     private fun updatePlayback() {
+        if (paused) return
         if (!active || !animatedModel || failed || !ValueAnimator.areAnimatorsEnabled()) {
             releasePlayer()
             if (fallbackArt != 0) poster.setImageResource(fallbackArt)
@@ -90,7 +111,7 @@ internal class PairingArtwork(private val container: View) : TextureView.Surface
             next.setVolume(0f, 0f)
             next.isLooping = true
             next.setOnPreparedListener {
-                if (player === next && active) {
+                if (player === next && active && !paused) {
                     try {
                         fit(next.videoWidth, next.videoHeight)
                         next.start()
@@ -121,13 +142,39 @@ internal class PairingArtwork(private val container: View) : TextureView.Surface
     }
 
     private fun releasePlayer() {
+        cancelPosterMotion()
         val previous = player
         player = null
         rendering = false
+        frameRendered = false
         runCatching { previous?.release() }
         surface?.release()
         surface = null
         poster.visibility = View.VISIBLE
+        poster.alpha = 1f
+    }
+
+    private fun revealVideo() {
+        if (!active || paused || !entranceComplete || !frameRendered || player == null ||
+            posterAnimation != null || poster.visibility != View.VISIBLE) return
+        posterAnimation = ValueAnimator.ofFloat(poster.alpha, 0f).apply {
+            duration = 120
+            addUpdateListener { poster.alpha = it.animatedValue as Float }
+            addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator) {
+                    posterAnimation = null
+                    poster.visibility = View.INVISIBLE
+                }
+            })
+            start()
+        }
+    }
+
+    private fun cancelPosterMotion() {
+        val previous = posterAnimation
+        posterAnimation = null
+        previous?.removeAllListeners()
+        previous?.cancel()
     }
 
     private fun fit(width: Int, height: Int) {
@@ -150,6 +197,9 @@ internal class PairingArtwork(private val container: View) : TextureView.Surface
         return true
     }
     override fun onSurfaceTextureUpdated(texture: SurfaceTexture) {
-        if (active && rendering && player != null && texture === video.surfaceTexture) poster.visibility = View.INVISIBLE
+        if (active && rendering && player != null && texture === video.surfaceTexture) {
+            frameRendered = true
+            revealVideo()
+        }
     }
 }

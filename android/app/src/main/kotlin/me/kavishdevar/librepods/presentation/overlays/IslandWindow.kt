@@ -38,6 +38,8 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.ViewCompositionStrategy
 import androidx.lifecycle.Lifecycle
@@ -53,10 +55,13 @@ import androidx.savedstate.SavedStateRegistryController
 import androidx.savedstate.SavedStateRegistryOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import me.kavishdevar.librepods.database.app.AppSettingsEntity
+import me.kavishdevar.librepods.data.app.IslandColor
 import me.kavishdevar.librepods.R
 import me.kavishdevar.librepods.presentation.activities.MainActivity
 import me.kavishdevar.librepods.core.devices.AirPodsModel
+import me.kavishdevar.librepods.core.devices.AirPodsSpecs
 import me.kavishdevar.librepods.core.devices.AppleDevice
+import me.kavishdevar.librepods.core.devices.BaseCapability
 import me.kavishdevar.librepods.core.devices.effectiveAllowOff
 import me.kavishdevar.librepods.core.devices.Battery
 import me.kavishdevar.librepods.core.devices.ConnectionState
@@ -70,6 +75,8 @@ import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
+import java.util.Collections
+import java.util.IdentityHashMap
 
 enum class IslandType {
     CONNECTED,
@@ -110,6 +117,8 @@ class IslandWindow(
     private var otherDeviceName by mutableStateOf(null as String?)
     private var statusText by mutableStateOf(null as String?)
     private var ownerAddress: String? = null
+    private var ownerDevice by mutableStateOf<AppleDevice?>(null)
+    private val listeningPickerTokens = Collections.newSetFromMap(IdentityHashMap<Any, Boolean>())
     private var ownerAnnouncementAtNanos = Long.MIN_VALUE
     private var onConnect: (suspend () -> Boolean)? = null
     private var isAudioConnected: (() -> Boolean)? = null
@@ -141,6 +150,7 @@ class IslandWindow(
     private var noiseControlModeValue by mutableIntStateOf(4)
     private var adaptiveStrength by mutableIntStateOf(30)
     private var requestedAdaptiveStrength by mutableStateOf<Int?>(null)
+    private var listeningControlsEnabled by mutableStateOf(false)
 
     private var onNoiseControlModeChanged: (Int) -> Unit = { noiseControlModeValue = it }
     private var onAdaptiveStrengthChanged: (Int) -> Unit = { requestedAdaptiveStrength = it }
@@ -159,6 +169,32 @@ class IslandWindow(
 
     val isVisible: Boolean
         get() = islandState != IslandState.CLOSE && composeView?.parent != null && composeView?.visibility == View.VISIBLE
+
+    fun setListeningPickerVisible(token: Any, visible: Boolean) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            Handler(Looper.getMainLooper()).post { setListeningPickerVisible(token, visible) }
+            return
+        }
+        if (!visible) {
+            listeningPickerTokens.remove(token)
+            return
+        }
+        if (!listeningPickerTokens.add(token)) return
+        close()
+        // Retire the queued first attachment before destroying its composition lifecycle.
+        composeView?.let { cleanupAndRemoveView(it, immediately = true) }
+    }
+
+    private fun canControlListening(device: AppleDevice?): Boolean {
+        if (device == null || ownerDevice !== device || !isVisible || type != IslandType.CONNECTED || nearby || listeningPickerTokens.isNotEmpty() ||
+            device.connectionState.value != ConnectionState.CONNECTED) return false
+        val capabilities = AirPodsSpecs.getSpec(device.metadata.value.model).baseCapabilities
+        val state = device.state.value
+        val mode = (state.requestedControls[ControlCommandIdentifier.LISTENING_MODE]
+            ?: state.controlStates[ControlCommandIdentifier.LISTENING_MODE])?.singleOrNull()?.toInt()?.and(255)
+        return BaseCapability.LISTENING_MODE in capabilities && mode != null && mode in 1..4 &&
+            (mode != 4 || BaseCapability.ADAPTIVE_AUDIO in capabilities)
+    }
 
     fun updateContext(context: Context) {
         if (Looper.myLooper() != Looper.getMainLooper()) {
@@ -218,12 +254,13 @@ class IslandWindow(
             Handler(Looper.getMainLooper()).post { updatePairedBattery(device, model) }
             return
         }
-        if (!isVisible || ownerAddress != device.macAddress.value) return
+        if (!isVisible || ownerDevice !== device) return
         this.batteries = device.state.value.battery
         this.name = device.metadata.value.name
         if (model != AirPodsModel.UNKNOWN) this.model = model
         refreshConnectionState(device.connectionState.value != ConnectionState.CONNECTED)
         batteryNow = System.currentTimeMillis()
+        listeningControlsEnabled = canControlListening(device)
     }
 
     private fun refreshConnectionState(fallbackNearby: Boolean = nearby, restartDismissal: Boolean = true) {
@@ -233,6 +270,7 @@ class IslandWindow(
         if (!nearby && connectState == IslandConnectState.FAILED) connectState = IslandConnectState.IDLE
         val wasDeferred = connectActionDeferred
         connectActionDeferred = nearby && deferred
+        listeningControlsEnabled = canControlListening(ownerDevice)
         if (restartDismissal && wasDeferred && !connectActionDeferred && !keepOpenRequested && isVisible &&
             connectState == IslandConnectState.IDLE) resetTimer()
     }
@@ -283,7 +321,8 @@ class IslandWindow(
             openApp = { context.startActivity(Intent(context, MainActivity::class.java)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) },
             showOffListeningMode = state.effectiveAllowOff(device.settings.value, device.metadata.value.modelNumber) == true,
-            noiseControlModeValue = state.controlStates[ControlCommandIdentifier.LISTENING_MODE]?.firstOrNull()?.toInt() ?: 3,
+            noiseControlModeValue = (state.requestedControls[ControlCommandIdentifier.LISTENING_MODE]
+                ?: state.controlStates[ControlCommandIdentifier.LISTENING_MODE])?.firstOrNull()?.toInt() ?: 3,
             onNoiseControlModeChanged = { device.setControlCommand(ControlCommandIdentifier.LISTENING_MODE, it) },
             adaptiveStrength = state.controlStates[ControlCommandIdentifier.AUTO_ANC_STRENGTH]?.firstOrNull()?.toInt() ?: 50,
             requestedAdaptiveStrength = state.requestedControls[ControlCommandIdentifier.AUTO_ANC_STRENGTH]?.firstOrNull()?.toInt(),
@@ -296,11 +335,14 @@ class IslandWindow(
             Handler(Looper.getMainLooper()).post { updateAdaptiveStrength(device) }
             return
         }
-        if (!isVisible || ownerAddress != device.macAddress.value) return
+        if (!isVisible || ownerDevice !== device) return
         val state = device.state.value
+        noiseControlModeValue = (state.requestedControls[ControlCommandIdentifier.LISTENING_MODE]
+            ?: state.controlStates[ControlCommandIdentifier.LISTENING_MODE])?.firstOrNull()?.toInt() ?: noiseControlModeValue
         showOffListeningMode = state.effectiveAllowOff(device.settings.value, device.metadata.value.modelNumber) == true
         adaptiveStrength = state.controlStates[ControlCommandIdentifier.AUTO_ANC_STRENGTH]?.firstOrNull()?.toInt() ?: 50
         requestedAdaptiveStrength = state.requestedControls[ControlCommandIdentifier.AUTO_ANC_STRENGTH]?.firstOrNull()?.toInt()
+        listeningControlsEnabled = canControlListening(device)
     }
 
     fun updateNoiseControl(mode: Int, strength: Int, showOff: Boolean = showOffListeningMode) {
@@ -319,6 +361,7 @@ class IslandWindow(
     }
 
     private fun beginTransition(state: IslandState, force: Boolean = false) {
+        if (state == IslandState.CLOSE) listeningControlsEnabled = false
         if (state == islandState && !force) return
         retainedWindowWidth = maxOf(retainedWindowWidth,
             (composeView?.layoutParams as? WindowManager.LayoutParams)?.width?.coerceAtLeast(0) ?: 0)
@@ -348,9 +391,9 @@ class IslandWindow(
 
         showOffListeningMode: Boolean = this.showOffListeningMode,
         noiseControlModeValue: Int = this.noiseControlModeValue,
-        onNoiseControlModeChanged: (Int) -> Unit = this.onNoiseControlModeChanged,
+        onNoiseControlModeChanged: (Int) -> Unit = {},
         adaptiveStrength: Int = this.adaptiveStrength,
-        onAdaptiveStrengthChanged: (Int) -> Unit = this.onAdaptiveStrengthChanged,
+        onAdaptiveStrengthChanged: (Int) -> Unit = {},
 
         forcedState: IslandState? = null,
         keepOpen: Boolean = false,
@@ -373,12 +416,30 @@ class IslandWindow(
             return
         }
 
+        if (listeningPickerTokens.isNotEmpty()) return
+
+        if (owner != null && ownerDevice === owner && isVisible &&
+            type == IslandType.CONNECTED && this.type == IslandType.CONNECTED && statusText != null) {
+            this.name = name
+            this.batteryLevel = batteryLevel
+            this.batteries = owner.state.value.battery
+            this.batteryNow = System.currentTimeMillis()
+            this.model = ownerModel
+            this.showOffListeningMode = showOffListeningMode
+            this.noiseControlModeValue = noiseControlModeValue
+            this.adaptiveStrength = adaptiveStrength
+            this.requestedAdaptiveStrength = requestedAdaptiveStrength
+            if (this.statusText != null) this.statusText = statusText
+            listeningControlsEnabled = canControlListening(owner)
+            return
+        }
+
         if (owner != null && type == IslandType.CONNECTED && statusText == null &&
             pairingOpenings.containsKey(owner.macAddress.value)) return
 
         Log.d("IslandWindow", "Showing island window: accessibility = $usingAccessibilityService")
 
-        if (ownerAddress != owner?.macAddress?.value || islandState == IslandState.CLOSE ||
+        if (ownerDevice !== owner || islandState == IslandState.CLOSE ||
             type != IslandType.CONNECTED || statusText != null || onConnect == null) cancelConnect()
         this.onConnect = onConnect
         this.isAudioConnected = isAudioConnected
@@ -386,6 +447,7 @@ class IslandWindow(
         this.keepOpenRequested = keepOpen
         this.batteryLevel = batteryLevel
         this.ownerAddress = owner?.macAddress?.value
+        this.ownerDevice = owner
         this.ownerAnnouncementAtNanos = observedAtNanos
         this.model = ownerModel
         this.batteries = owner?.state?.value?.battery.orEmpty()
@@ -407,12 +469,27 @@ class IslandWindow(
         this.requestedAdaptiveStrength = requestedAdaptiveStrength
 
         this.onNoiseControlModeChanged = {
-            this.noiseControlModeValue = it
-            onNoiseControlModeChanged(it)
+            val device = owner
+            if (device != null && canControlListening(device) && it in 1..4 &&
+                (it != 4 || BaseCapability.ADAPTIVE_AUDIO in AirPodsSpecs.getSpec(device.metadata.value.model).baseCapabilities) &&
+                (it != 1 || device.state.value.effectiveAllowOff(device.settings.value, device.metadata.value.modelNumber) == true)) {
+                resetTimer()
+                onNoiseControlModeChanged(it)
+                updateAdaptiveStrength(device)
+            }
         }
 
         this.onAdaptiveStrengthChanged = {
-            onAdaptiveStrengthChanged(it)
+            val device = owner
+            val state = device?.state?.value
+            val mode = (state?.requestedControls?.get(ControlCommandIdentifier.LISTENING_MODE)
+                ?: state?.controlStates?.get(ControlCommandIdentifier.LISTENING_MODE))?.singleOrNull()?.toInt()
+            if (device != null && canControlListening(device) && mode == 4 && it in 0..100 &&
+                BaseCapability.ADAPTIVE_AUDIO in AirPodsSpecs.getSpec(device.metadata.value.model).baseCapabilities) {
+                resetTimer()
+                onAdaptiveStrengthChanged(it)
+                updateAdaptiveStrength(device)
+            }
         }
 
         beginTransition(forcedState ?: if (appSettings.islandSettings.enableExpanded) IslandState.EXPANDED else IslandState.COMPACT)
@@ -437,6 +514,7 @@ class IslandWindow(
         }
 
         updateWindowParams(islandState)
+        listeningControlsEnabled = canControlListening(owner)
         ageHandler.removeCallbacks(updateAge)
         if (owner != null) ageHandler.post(updateAge)
         if (keepOpen) autoCloseRunnable?.let { autoCloseHandler?.removeCallbacks(it) } else resetTimer()
@@ -506,10 +584,17 @@ class IslandWindow(
             setViewTreeViewModelStoreOwner(lifecycleOwner)
 
             setContent {
-                val darkTheme = when (currentAppSettings.nightMode) {
+                val preferredDark = when (currentAppSettings.nightMode) {
                     NightTheme.Dark -> true
                     NightTheme.Light -> false
                     NightTheme.System -> isSystemInDarkTheme()
+                }
+                val darkTheme = if (ownerDevice == null) preferredDark else {
+                    when (val background = currentAppSettings.islandSettings.expandedBackgroundColor) {
+                        IslandColor.SurfaceContainer -> true
+                        IslandColor.Surface -> preferredDark
+                        is IslandColor.Custom -> Color(background.colorValue.toULong()).luminance() < 0.5f
+                    }
                 }
 
                 LibrePodsTheme(
@@ -542,7 +627,9 @@ class IslandWindow(
                         adaptiveStrength = this@IslandWindow.adaptiveStrength,
                         requestedAdaptiveStrength = this@IslandWindow.requestedAdaptiveStrength,
                         onAdaptiveStrengthChanged = this@IslandWindow.onAdaptiveStrengthChanged,
+                        listeningControlsEnabled = listeningControlsEnabled,
                         model = model, batteries = batteries, batteryNow = batteryNow,
+                        batteryOwner = ownerAddress,
                         paired = ownerAddress != null, nearby = nearby, cameraPaddingPx = cameraPadding,
                         cameraCapsuleWidthPx = cameraCapsuleWidth, maximumHeightPx = maximumHeight,
                         onConnect = this@IslandWindow.onConnect
@@ -629,12 +716,14 @@ class IslandWindow(
         if (resetState) connectState = IslandConnectState.IDLE
     }
 
-    private fun cleanupAndRemoveView(expected: ComposeView) {
+    private fun cleanupAndRemoveView(expected: ComposeView) = cleanupAndRemoveView(expected, immediately = false)
+
+    private fun cleanupAndRemoveView(expected: ComposeView, immediately: Boolean) {
         if (composeView !== expected || islandState != IslandState.CLOSE) return
         try {
             composeView?.let { view ->
                 if (view.parent != null) {
-                    windowManager.removeView(view)
+                    if (immediately) windowManager.removeViewImmediate(view) else windowManager.removeView(view)
                 }
             }
             lifecycleOwner?.stop()
@@ -643,6 +732,8 @@ class IslandWindow(
         } finally {
             ageHandler.removeCallbacks(updateAge)
             ownerAddress = null
+            ownerDevice = null
+            listeningControlsEnabled = false
             ownerAnnouncementAtNanos = Long.MIN_VALUE
             onConnect = null
             isAudioConnected = null

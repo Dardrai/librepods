@@ -57,6 +57,7 @@ import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.health.connect.client.permission.HealthPermission
 import androidx.health.connect.client.records.HeartRateRecord
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -84,6 +85,7 @@ import me.kavishdevar.librepods.audio.ExperimentalAudioController
 import me.kavishdevar.librepods.audio.MicrophonePhase
 import me.kavishdevar.librepods.core.bluetooth.MacAddress
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommandIdentifier
+import me.kavishdevar.librepods.core.bluetooth.aacp.types.AppleEvent
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.MagicKeyType
 import me.kavishdevar.librepods.core.bluetooth.verifyRPA
 import me.kavishdevar.librepods.core.bluetooth.ble.NearbyAirPods
@@ -95,6 +97,7 @@ import me.kavishdevar.librepods.bluetooth.hasNearbyDevicesPermissions
 import me.kavishdevar.librepods.bluetooth.canLoadAppleDevice
 import me.kavishdevar.librepods.bluetooth.nearbyScanSettings
 import me.kavishdevar.librepods.shizuku.A2dpRecoveryGuard
+import me.kavishdevar.librepods.shizuku.BackgroundAudioAccess
 import me.kavishdevar.librepods.core.data.apple.BuddyState
 import me.kavishdevar.librepods.core.data.heartrate.HeartRateSample
 import me.kavishdevar.librepods.core.devices.AppleDevice
@@ -121,6 +124,7 @@ import java.time.ZoneOffset
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.toJavaInstant
+import rikka.shizuku.Shizuku
 
 private const val TAG = "LibrePodsService"
 private const val NEARBY_SCAN_TAG = "NearbyScan"
@@ -159,8 +163,14 @@ class LibrePodsService: Service() {
     private val audioControllers get() = (application as LibrePodsApplication).experimentalAudioControllers
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val backgroundAudioAccess by lazy { BackgroundAudioAccess(this) }
+    private val backgroundAudioBinderReceived = Shizuku.OnBinderReceivedListener { ensureBackgroundAudioAccess() }
+    private val backgroundAudioPermissionResult = Shizuku.OnRequestPermissionResultListener { _, result ->
+        if (result == PackageManager.PERMISSION_GRANTED) ensureBackgroundAudioAccess()
+    }
     private val bleHandler = Handler(Looper.getMainLooper())
     private val nearbyVisits = NearbyAirPods.Visits()
+    private val nearbyInvitationProximity = NearbyAirPods.InvitationProximity()
     private val recentProximityReports = RecentProximityReports()
     private var pairingModel: Int? = null
     private var nearbyPairing: NearbyPairingController? = null
@@ -301,6 +311,7 @@ class LibrePodsService: Service() {
             return
         }
         startedWithPermissions = true
+        startBackgroundAudioAccess()
 
         observeAppSettings()
 
@@ -401,6 +412,10 @@ class LibrePodsService: Service() {
 
     override fun onDestroy() {
         destroying = true
+        if (Build.VERSION.SDK_INT >= 37) {
+            runCatching { Shizuku.removeBinderReceivedListener(backgroundAudioBinderReceived) }
+            runCatching { Shizuku.removeRequestPermissionResultListener(backgroundAudioPermissionResult) }
+        }
         if (!startedWithPermissions) {
             serviceScope.cancel()
             bleHandler.removeCallbacksAndMessages(null)
@@ -432,6 +447,22 @@ class LibrePodsService: Service() {
     }
 
     override fun onBind(intent: Intent?): IBinder = binder
+
+    private fun startBackgroundAudioAccess() {
+        if (Build.VERSION.SDK_INT < 37) return
+        runCatching {
+            Shizuku.addBinderReceivedListener(backgroundAudioBinderReceived)
+            Shizuku.addRequestPermissionResultListener(backgroundAudioPermissionResult)
+        }.onFailure { Log.w(TAG, "Could not observe Shizuku background audio access", it) }
+        ensureBackgroundAudioAccess()
+    }
+
+    private fun ensureBackgroundAudioAccess() {
+        if (Build.VERSION.SDK_INT < 37 || destroying || !startedWithPermissions) return
+        serviceScope.launch(Dispatchers.IO) {
+            if (!destroying) backgroundAudioAccess.ensureAllowed()
+        }
+    }
 
     fun isNearbyDeviceAudioConnected(device: AppleDevice): Boolean = runCatching {
         !destroying && devices.value[device.macAddress] === device &&
@@ -914,6 +945,7 @@ class LibrePodsService: Service() {
                             stopActiveBleScan()
                             nearbyPairing?.cancelPending()
                             nearbyVisits.clear()
+                            nearbyInvitationProximity.clear()
                             recentProximityReports.clear()
                             pairedLids.clear()
                             nearbyMedia.clear()
@@ -1011,6 +1043,7 @@ class LibrePodsService: Service() {
         val lidEvent = NearbyAirPods.lidEvent(manufacturer)
         if (Log.isLoggable(NEARBY_SCAN_TAG, Log.DEBUG)) {
             Log.d(NEARBY_SCAN_TAG, "Proximity: ageMs=${(nowNanos - observed) / 1_000_000}, " +
+                "rssi=${result.rssi}, " +
                 "subtype=${proximity[2].toInt() and 255}, flags=${proximity[5].toInt() and 255}, " +
                 "lid=${lidEvent?.lidOpen}, owned=${owned != null}, " +
                 "rpaShaped=${address.substringBefore(':').toIntOrNull(16)?.and(0xc0) == 0x40}, " +
@@ -1021,8 +1054,10 @@ class LibrePodsService: Service() {
                 "encryptedBatteryKey=${owned?.state?.value?.magicKeys?.containsKey(MagicKeyType.ENC_KEY) == true}")
         }
         lidEvent?.let { event ->
-            nearbyVisits.observe(event, observed / 1_000_000, owned != null, protectedModel = pairingModel)?.let {
-                nearbyPairing?.onNearbyDevice(it, observed)
+            if (owned != null || nearbyInvitationProximity.observe(event, address, result.rssi, observed / 1_000_000)) {
+                nearbyVisits.observe(event, observed / 1_000_000, owned != null, protectedModel = pairingModel)?.let {
+                    nearbyPairing?.onNearbyDevice(it, observed)
+                }
             }
         }
         val device = owned ?: return
@@ -1177,6 +1212,7 @@ class LibrePodsService: Service() {
         }
         bleRequested = false
         stopActiveBleScan()
+        nearbyInvitationProximity.clear()
         nearbyVisits.clear().forEach { nearbyPairing?.onNearbyDevice(it) }
     }
     private suspend fun createDevice(bluetoothDevice: BluetoothDevice): Device<*, *, *>? {
@@ -1210,12 +1246,15 @@ class LibrePodsService: Service() {
                     if (destroying || devices.value[address] !== device || bluetoothDevice.bondState != BluetoothDevice.BOND_BONDED) false
                     else {
                         attachExperimentalAudio(device)
-                        deviceJobs[address] = listOf(observeAppleState(device), observeAppleSettings(device), observeAppleMetadata(device),
+                        deviceJobs[address] = listOf(observeConversationAwareness(device), observeAppleState(device), observeAppleSettings(device), observeAppleMetadata(device),
                             serviceScope.launch {
                                 device.connectionState.collect {
                                     retireIneligibleHeadGestures(device)
                                     updateHeartRateAlert(device)
-                                    if (!destroying && devices.value[address] === device) islandWindow.updatePairedBattery(device)
+                                    if (!destroying && devices.value[address] === device) {
+                                        islandWindow.updatePairedBattery(device)
+                                        islandWindow.updateAdaptiveStrength(device)
+                                    }
                                 }
                             })
                         val keys = device.state.value.magicKeys
@@ -1247,12 +1286,57 @@ class LibrePodsService: Service() {
         }
     }
 
+    fun observeConversationAwareness(device: AppleDevice): Job = serviceScope.launch(Dispatchers.IO, start = CoroutineStart.UNDISPATCHED) {
+        var owner: BluetoothSocket? = null
+        val updates = Channel<AppleEvent.ConversationAwareness?>(Channel.BUFFERED)
+        try {
+            // Subscribe before connecting; speech stages cannot pass through the conflated state flow.
+            launch(start = CoroutineStart.UNDISPATCHED) {
+                device.events.collect { event ->
+                    if (event is AppleEvent.ConversationAwareness) updates.send(event)
+                }
+            }
+            launch(start = CoroutineStart.UNDISPATCHED) { device.state.collect { updates.send(null) } }
+            launch(start = CoroutineStart.UNDISPATCHED) { device.connectionState.collect { updates.send(null) } }
+            launch(start = CoroutineStart.UNDISPATCHED) { devices.collect { updates.send(null) } }
+            for (event in updates) {
+                val socket = device.aacp.captureAudioSocket()
+                val state = device.state.value
+                val choice = state.requestedControls[ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG]
+                    ?: state.controlStates[ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG]
+                val eligible = !destroying && devices.value[device.macAddress] === device &&
+                    device.connectionState.value in setOf(ConnectionState.CONNECTED, ConnectionState.CONNECTING) && socket != null &&
+                    choice?.firstOrNull() != 2.toByte()
+                if (!eligible || owner !== socket) {
+                    owner?.let { MediaController.cancelConversation(it) }
+                    owner = null
+                }
+                if (event == null || !eligible || event.sourceSocket !== socket ||
+                    !device.aacp.ownsAudioSocket(event.sourceSocket)) continue
+                owner = event.sourceSocket
+                val settings = device.settings.value
+                try {
+                    when (event.stage) {
+                        1, 2, 3 -> MediaController.startSpeaking(event.stage, event.sourceSocket, device.macAddress.value,
+                            settings.conversationAwarenessVolume.toInt(), settings.relativeConversationAwarenessVolumeEnabled,
+                            settings.conversationAwarenessPauseMusicEnabled, settings.conversationAwarenessReducedVolume.toInt())
+                        4, 6, 7, 8, 9 -> MediaController.stopSpeaking(event.sourceSocket)
+                    }
+                } catch (error: RuntimeException) {
+                    Log.w(TAG, "Could not apply conversation awareness stage", error)
+                    MediaController.cancelConversation(event.sourceSocket)
+                }
+            }
+        } finally {
+            owner?.let { MediaController.cancelConversation(it) }
+        }
+    }
+
     fun observeAppleState(device: AppleDevice): Job = serviceScope.launch(Dispatchers.IO) {
         var previousState = device.state.value
         var pairingBattery: Set<Battery>? = null
         var lastSavedKeys: Map<MagicKeyType, ByteArray>? = null
         val listeningMode = IslandListeningMode()
-        var conversationOwner: Any? = null
 
         try {
         device.state.collect { state ->
@@ -1291,36 +1375,31 @@ class LibrePodsService: Service() {
                 lastSavedKeys = state.magicKeys
             }
 
-            val conversationSocket = device.aacp.captureAudioSocket()
-            if (conversationOwner !== conversationSocket) {
-                conversationOwner?.let { MediaController.cancelConversation(it) }
-                conversationOwner = conversationSocket
-            }
-            val conversationChoice = state.requestedControls[ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG]
-                ?: state.controlStates[ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG]
-            if (conversationSocket == null || conversationChoice?.firstOrNull() == 2.toByte()) {
-                conversationOwner?.let { MediaController.cancelConversation(it) }
-            } else if (state.conversationAwarenessState != previousState.conversationAwarenessState) {
-                when (state.conversationAwarenessState) {
-                    1, 2, 3 -> MediaController.startSpeaking(state.conversationAwarenessState,
-                        conversationSocket, device.macAddress.value,
-                        deviceSettings.conversationAwarenessVolume.toInt(),
-                        deviceSettings.relativeConversationAwarenessVolumeEnabled,
-                        deviceSettings.conversationAwarenessPauseMusicEnabled,
-                        deviceSettings.conversationAwarenessReducedVolume.toInt())
-                    4, 6, 7, 8, 9 -> MediaController.stopSpeaking(conversationSocket)
-                }
-            }
-
-
             // Independent of battery/component updates: StateFlow can coalesce them with a mode report.
             saveChangedControlCache(previousState, state) {
                 appleRepository.saveCacheFromState(device.macAddress, it)
             }
+            val modeId = ControlCommandIdentifier.LISTENING_MODE
+            val conversationId = ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG
+            val previousModeReport = previousState.controlStates[modeId]
+            val modeReport = state.controlStates[modeId]
+            val requestedMode = modeReport != null && sequenceOf(previousState, state).any {
+                it.requestedControls[modeId]?.contentEquals(modeReport) == true
+            }
+            val conversationEnabled = (state.requestedControls[conversationId]
+                ?: state.controlStates[conversationId])?.singleOrNull() == 1.toByte()
+            // Temporary Transparency can precede its speech event; only presentation waits for correlation.
+            if (conversationEnabled && !requestedMode && modeReport?.singleOrNull() == 3.toByte() &&
+                previousModeReport?.singleOrNull() != 3.toByte()) delay(150)
+            val currentModeState = device.state.value
+            val conversationAllowed = (currentModeState.requestedControls[conversationId]
+                ?: currentModeState.controlStates[conversationId])?.singleOrNull() != 2.toByte()
             listeningMode.observeReport(modeTransport?.takeIf(device.aacp::ownsAudioSocket),
-                previousState.controlStates[ControlCommandIdentifier.LISTENING_MODE],
-                state.controlStates[ControlCommandIdentifier.LISTENING_MODE],
-                currentReport = device.state.value.controlStates[ControlCommandIdentifier.LISTENING_MODE])?.let { mode ->
+                previousModeReport, modeReport,
+                currentReport = currentModeState.controlStates[modeId],
+                conversationStage = if (conversationAllowed) currentModeState.conversationAwarenessState else 0,
+                conversationSequence = if (conversationAllowed) currentModeState.conversationAwarenessSequence else 0,
+                requestedMode = currentModeState.lastListeningModeRequest)?.let { mode ->
                 val owner = modeTransport ?: return@let
                 withContext(Dispatchers.Main.immediate) {
                     if (!destroying && devices.value[device.macAddress] === device &&
@@ -1475,7 +1554,6 @@ class LibrePodsService: Service() {
             previousState = state
         }
         } finally {
-            conversationOwner?.let { MediaController.cancelConversation(it) }
             retireHeadGestures(device)
             clearHeartRateAlert(device)
         }
@@ -1486,6 +1564,10 @@ class LibrePodsService: Service() {
         device.settings.collect { settings ->
             retireIneligibleHeadGestures(device)
             updateHeartRateAlert(device)
+            withContext(Dispatchers.Main.immediate) {
+                if (!destroying && devices.value[device.macAddress] === device && device.settings.value == settings)
+                    islandWindow.updateAdaptiveStrength(device)
+            }
             appleRepository.saveSettings(device.macAddress, settings)
         }
     }
@@ -1494,6 +1576,12 @@ class LibrePodsService: Service() {
         var previousMetadata = device.metadata.value
 
         device.metadata.collect { metadata ->
+            withContext(Dispatchers.Main.immediate) {
+                if (!destroying && devices.value[device.macAddress] === device && device.metadata.value == metadata) {
+                    islandWindow.updatePairedBattery(device)
+                    islandWindow.updateAdaptiveStrength(device)
+                }
+            }
             if (metadata != previousMetadata) {
                 Log.i(TAG, "metadata changed for device ${device.macAddress.toRedactedString()}")
                 Log.d(TAG, "metadata: $metadata")
@@ -1572,7 +1660,8 @@ class LibrePodsService: Service() {
                         },
 
                         showOffListeningMode = state.effectiveAllowOff(device.settings.value, metadata.modelNumber) == true,
-                        noiseControlModeValue = state.controlStates[ControlCommandIdentifier.LISTENING_MODE]?.getOrNull(0)?.toInt() ?: 3,
+                        noiseControlModeValue = (state.requestedControls[ControlCommandIdentifier.LISTENING_MODE]
+                            ?: state.controlStates[ControlCommandIdentifier.LISTENING_MODE])?.firstOrNull()?.toInt() ?: 3,
                         onNoiseControlModeChanged = {
                             device.setControlCommand(
                                 ControlCommandIdentifier.LISTENING_MODE, it

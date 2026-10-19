@@ -102,6 +102,10 @@ class PairingArtworkTest {
         playback.invokeInfoListener(MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START, 0)
         assertEquals(View.VISIBLE, poster.visibility)
         artwork.onSurfaceTextureUpdated(requireNotNull(video.surfaceTexture))
+        assertEquals("The rendered frame cannot interrupt the card entrance", View.VISIBLE, poster.visibility)
+        artwork.setEntranceComplete(true)
+        assertEquals("The poster fades rather than disappearing on the first frame", View.VISIBLE, poster.visibility)
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(160))
         assertEquals(View.INVISIBLE, poster.visibility)
 
         playback.invokeErrorListener(MediaPlayer.MEDIA_ERROR_UNKNOWN, 0)
@@ -124,5 +128,23 @@ class PairingArtworkTest {
         assertEquals(ShadowMediaPlayer.State.END, playback.state)
         assertEquals(View.VISIBLE, poster.visibility)
         assertEquals(View.GONE, video.visibility)
+    }
+
+    @Test fun dismissingDuringPreparationCannotStartPlaybackFromALatePreparedCallback() {
+        video.setSurfaceTexture(SurfaceTexture(0))
+        artwork.start(0x2720)
+        val player = requireNotNull(media)
+        val playback = shadowOf(player)
+        artwork.pause()
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(150))
+        assertFalse("A decoder becoming ready during dismissal must stay paused", player.isPlaying)
+        playback.invokeInfoListener(MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START, 0)
+        artwork.onSurfaceTextureUpdated(requireNotNull(video.surfaceTexture))
+        artwork.setEntranceComplete(true)
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(160))
+        assertEquals(View.VISIBLE, poster.visibility)
+        assertEquals(1f, poster.alpha, 0f)
+        artwork.stop()
+        assertEquals(ShadowMediaPlayer.State.END, playback.state)
     }
 }

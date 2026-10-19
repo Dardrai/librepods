@@ -25,8 +25,12 @@ import android.animation.ValueAnimator
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.res.ColorStateList
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.Rect
+import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.LayerDrawable
 import android.os.Handler
 import android.os.Looper
@@ -39,6 +43,7 @@ import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewGroup
 import android.view.WindowInsets
 import android.view.WindowManager
 import android.view.animation.PathInterpolator
@@ -73,6 +78,11 @@ class PopupWindow(private val context: Context, private val onCloseCallback: () 
     private var notified = false
     private var interacted = false
     private var animation: ValueAnimator? = null
+    private var contentAnimation: ValueAnimator? = null
+    private val contentSnapshots = mutableListOf<BitmapDrawable>()
+    private val contentSlots get() = listOf<View>(mView.findViewById(R.id.name),
+        mView.findViewById(R.id.pairing_content), mView.findViewById(R.id.pairing_actions))
+    private var presentation: List<Any?>? = null
     private var generation = 0L
     private var downY = 0f
     private var downScroll = 0
@@ -119,6 +129,7 @@ class PopupWindow(private val context: Context, private val onCloseCallback: () 
         val maxHeight = (bounds.height() - insets.top - insets.bottom - dp(32)).coerceAtLeast(1)
         mView.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
             View.MeasureSpec.makeMeasureSpec(maxHeight, View.MeasureSpec.AT_MOST))
+        retainSlotHeights()
         val params = WindowManager.LayoutParams(width, min(mView.measuredHeight, maxHeight),
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
@@ -136,7 +147,7 @@ class PopupWindow(private val context: Context, private val onCloseCallback: () 
             attached = true
             artwork.start(modelId)
             animate(opening = true)
-            handler.postDelayed(expire, 12_000)
+            if (modelId !in NearbyAirPods.modelNames) handler.postDelayed(expire, 12_000)
         } catch (e: RuntimeException) {
             Log.w("PopupWindow", "Cannot show pairing invitation", e)
             // Post so the controller has stored this card before its dismissal callback.
@@ -147,7 +158,13 @@ class PopupWindow(private val context: Context, private val onCloseCallback: () 
     fun showPairingActions(message: String, actions: List<Pair<String, () -> Unit>>, busy: Boolean = actions.isEmpty(), stage: Stage = Stage.NEARBY) {
         if (closing || notified) return
         // Discovery repeats the same instructions; it must not reset the presentation or layout.
-        if (this.stage == stage && this.message == message && actions.isEmpty()) return
+        val nextPresentation = listOf(stage, message, actions.singleOrNull()?.first, busy)
+        if (presentation == nextPresentation && actions.isEmpty()) return
+        val snapshots = if (presentation != null && presentation != nextPresentation) captureContent() else emptyList()
+        if (presentation != nextPresentation) {
+            finishContentMotion()
+        }
+        presentation = nextPresentation
         if (this.stage != stage) batteries = emptySet()
         this.stage = stage
         this.message = message
@@ -181,6 +198,7 @@ class PopupWindow(private val context: Context, private val onCloseCallback: () 
         if (interacted || busy || stage == Stage.COMPLETE) handler.removeCallbacks(expire)
         renderBattery()
         resize()
+        if (snapshots.isNotEmpty()) animateContent(snapshots)
     }
 
     fun updatePairingBattery(batteries: Set<Battery>) {
@@ -192,8 +210,12 @@ class PopupWindow(private val context: Context, private val onCloseCallback: () 
 
     private fun renderBattery() {
         handler.removeCallbacks(expireBattery)
-        batteryRow.visibility = if (stage == Stage.COMPLETE) View.VISIBLE else View.GONE
-        mView.findViewById<View>(R.id.pairing_message).visibility = if (stage == Stage.COMPLETE) View.GONE else View.VISIBLE
+        batteryRow.visibility = if (stage == Stage.COMPLETE) View.VISIBLE else View.INVISIBLE
+        batteryRow.importantForAccessibility = if (stage == Stage.COMPLETE) View.IMPORTANT_FOR_ACCESSIBILITY_AUTO else View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+        mView.findViewById<View>(R.id.pairing_message).apply {
+            visibility = if (stage == Stage.COMPLETE) View.INVISIBLE else View.VISIBLE
+            importantForAccessibility = if (stage == Stage.COMPLETE) View.IMPORTANT_FOR_ACCESSIBILITY_NO else View.IMPORTANT_FOR_ACCESSIBILITY_AUTO
+        }
         if (stage != Stage.COMPLETE) return
         val now = System.currentTimeMillis()
         fun live(component: BatteryComponent) = batteries.singleOrNull { it.component == component }
@@ -276,13 +298,74 @@ class PopupWindow(private val context: Context, private val onCloseCallback: () 
         val maxHeight = (metrics.bounds.height() - insets.top - insets.bottom - dp(32)).coerceAtLeast(1)
         mView.measure(View.MeasureSpec.makeMeasureSpec(layout.width, View.MeasureSpec.EXACTLY),
             View.MeasureSpec.makeMeasureSpec(maxHeight, View.MeasureSpec.AT_MOST))
+        retainSlotHeights()
         layout.height = min(mView.measuredHeight, maxHeight)
         runCatching { windowManager.updateViewLayout(mView, layout) }.onFailure { forceClose() }
+    }
+
+    private fun retainSlotHeights() {
+        // Retain the initial action's scaled height even while the smaller busy indicator replaces it.
+        for (slot in listOf(mView.findViewById<View>(R.id.pairing_content),
+            mView.findViewById<View>(R.id.name).parent as View, mView.findViewById<View>(R.id.pairing_actions)))
+            slot.minimumHeight = maxOf(slot.minimumHeight, slot.measuredHeight)
+    }
+
+    private fun captureContent(): List<BitmapDrawable> {
+        if (!attached || expansion < 1f || !ValueAnimator.areAnimatorsEnabled()) return emptyList()
+        val root = mView as ViewGroup
+        val snapshots = mutableListOf<BitmapDrawable>()
+        try {
+            for (slot in contentSlots) {
+                if (slot.width <= 0 || slot.height <= 0) continue
+                val bounds = Rect().also { slot.getDrawingRect(it); root.offsetDescendantRectToMyCoords(slot, it) }
+                val bitmap = Bitmap.createBitmap(bounds.width(), bounds.height(), Bitmap.Config.ARGB_8888)
+                val drawable = BitmapDrawable(context.resources, bitmap).apply { this.bounds = bounds }
+                snapshots += drawable
+                // Capture the current composite so an interrupted fade starts from what is visible.
+                root.draw(Canvas(bitmap).apply { translate(-bounds.left.toFloat(), -bounds.top.toFloat()) })
+            }
+        } catch (error: RuntimeException) {
+            return emptyList()
+        }
+        return snapshots
+    }
+
+    private fun animateContent(snapshots: List<BitmapDrawable>) {
+        if (closing || notified || !attached || !ValueAnimator.areAnimatorsEnabled()) {
+            return
+        }
+        contentSnapshots += snapshots
+        snapshots.forEach { mView.overlay.add(it) }
+        contentSlots.forEach { it.alpha = 0f }
+        contentAnimation = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = 350
+            addUpdateListener {
+                val amount = it.animatedValue as Float
+                contentSlots.forEach { slot -> slot.alpha = amount }
+                snapshots.forEach { snapshot -> snapshot.alpha = ((1f - amount) * 255).toInt() }
+            }
+            addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator) { finishContentMotion() }
+            })
+            start()
+        }
+    }
+
+    private fun finishContentMotion() {
+        val previous = contentAnimation
+        contentAnimation = null
+        previous?.removeAllListeners()
+        previous?.cancel()
+        contentSlots.forEach { it.alpha = 1f }
+        contentSnapshots.forEach { mView.overlay.remove(it) }
+        contentSnapshots.clear()
     }
 
     fun close() {
         if (closing || notified) return
         closing = true
+        finishContentMotion()
+        artwork.pause()
         handler.removeCallbacks(expire)
         handler.removeCallbacks(expireBattery)
         notifyDismissed()
@@ -291,6 +374,7 @@ class PopupWindow(private val context: Context, private val onCloseCallback: () 
 
     fun forceClose() {
         closing = true
+        finishContentMotion()
         artwork.stop()
         handler.removeCallbacks(expire)
         cancelAnimation()
@@ -329,6 +413,7 @@ class PopupWindow(private val context: Context, private val onCloseCallback: () 
     private fun render(amount: Float) {
         expansion = amount
         mView.translationY = (mView.measuredHeight + dp(16)) * (1 - amount)
+        artwork.setEntranceComplete(amount >= 1f && !closing)
     }
 
     private fun cancelAnimation() {
@@ -338,6 +423,7 @@ class PopupWindow(private val context: Context, private val onCloseCallback: () 
     }
 
     private fun remove() {
+        finishContentMotion()
         handler.removeCallbacks(expireBattery)
         artwork.stop()
         cancelAnimation()

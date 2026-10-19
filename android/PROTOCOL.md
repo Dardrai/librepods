@@ -32,6 +32,26 @@ or disconnect; lack of an echo is not confirmation of the older value. A report
 received during the write wins over that request. Retiring the transport also
 clears the activity stage so a new session's first speech event is observable.
 
+Speech transitions also travel as ordered, live events carrying their source
+socket. The service subscribes before connecting and handles them independently
+of UI updates and cache writes; the conflated state snapshot is not an event
+queue. Retired sockets, disabled settings and replaced devices cannot start
+ducking, and cached activity is never replayed when the app opens. Stages `2` and
+`3` only modify an existing speech session; terminal stages restore only volume
+still owned by that session.
+
+Island mode announcements correlate the live activity stage with confirmed mode
+reports. A speech-triggered Transparency change and one return to the preceding
+mode are silent. Terminal stages persist, so they do not suppress later manual
+changes; a pending restoration expires two seconds after speech ends. A matching
+local mode request takes precedence over this presentation suppression. An
+unrequested Transparency transition while the feature is enabled waits 150ms for
+a speech event that can arrive just after its mode report. This wait never
+delays speech ducking or changes the reported listening mode.
+Current-session activity sequence and successful mode-request markers survive
+conflated state updates, including a speech start/end or request/echo between
+collector turns. They are cleared on transport retirement and never cached.
+
 ## Independent hearing modes
 
 Control `0x2C` carries enrollment first and Hearing Aid enable second. Preserve

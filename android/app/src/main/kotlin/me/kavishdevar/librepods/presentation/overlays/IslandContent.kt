@@ -11,6 +11,7 @@ import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.Easing
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.snap
@@ -39,9 +40,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.requiredHeightIn
 import androidx.compose.foundation.layout.requiredSize
-import androidx.compose.foundation.layout.requiredWidth
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -97,6 +96,7 @@ import me.kavishdevar.librepods.data.app.IslandBatteryStyle
 import me.kavishdevar.librepods.data.app.IslandSettings
 import me.kavishdevar.librepods.core.devices.AirPodsModel
 import me.kavishdevar.librepods.core.devices.AirPodsSpecs
+import me.kavishdevar.librepods.core.devices.BaseCapability
 import me.kavishdevar.librepods.core.devices.Battery
 import me.kavishdevar.librepods.core.devices.BatteryComponent
 import me.kavishdevar.librepods.data.app.resolve
@@ -177,6 +177,7 @@ fun IslandContent(
     requestedAdaptiveStrength: Int? = null,
     model: AirPodsModel = AirPodsModel.UNKNOWN,
     batteries: Set<Battery> = emptySet(),
+    batteryOwner: String? = null,
     batteryNow: Long = System.currentTimeMillis(),
     paired: Boolean = false,
     nearby: Boolean = false,
@@ -188,6 +189,7 @@ fun IslandContent(
     onTransitionFinished: (Long, IslandState) -> Unit = { _, _ -> },
     onConnect: (() -> Unit)? = null,
     connectState: IslandConnectState = IslandConnectState.IDLE,
+    listeningControlsEnabled: Boolean = true,
 ) {
     val density = LocalDensity.current
     val cells = islandBatteryCells(model, batteries, batteryNow)
@@ -196,11 +198,13 @@ fun IslandContent(
     val displayBatteryLevel = if (paired) compactCell?.level else batteryLevel
     val batteryLive = !paired || compactCell?.live == true
     val spec = AirPodsSpecs.getSpec(model)
+    val showControls = islandSettings.showListeningModeControl &&
+        (!paired || BaseCapability.LISTENING_MODE in spec.baseCapabilities)
     val captionLineHeight = maxOf(MaterialTheme.typography.bodyMedium.lineHeight.value,
         islandSettings.fontSize * 0.65f * 1.4f).sp
     val titleLineHeight = maxOf(MaterialTheme.typography.titleLarge.lineHeight.value,
         islandSettings.fontSize * 1.4f).sp
-    val headerMinimum = with(density) { maxOf(80.dp.toPx(), titleLineHeight.toPx() +
+    val headerMinimum = with(density) { maxOf(64.dp.toPx(), titleLineHeight.toPx() +
         if (islandSettings.fontSize > 15) captionLineHeight.toPx() else 0f).toDp() }
     val separateBatteries = paired && islandSettings.expandedBatteryStyle != IslandBatteryStyle.NONE
     // The endpoint fits the largest supported payload, independent of reading freshness or connection status.
@@ -211,9 +215,9 @@ fun IslandContent(
             islandBatteryPercentageLineHeight.toPx() else 0f
         val batteriesHeight = if (separateBatteries) maxOf(ringHeight, percentageHeight) + 4.dp.toPx() +
             islandBatteryLabelLineHeight.toPx() + 6.dp.toPx() + islandBatteryAgeLineHeight.toPx() else 0f
-        val controlsHeight = if (islandSettings.showListeningModeControl) headerMinimum.toPx() else 0f
+        val controlsHeight = if (showControls) 64.dp.toPx() else 0f
         val gaps = (if (separateBatteries) 12.dp.toPx() else 0f) +
-            if (islandSettings.showListeningModeControl) 12.dp.toPx() else 0f
+            if (showControls) 12.dp.toPx() else 0f
         maxOf(16.dp.toPx(), cameraPaddingPx.toFloat()) + 16.dp.toPx() + headerMinimum.toPx() + batteriesHeight + controlsHeight + gaps
     }
     val naturalExpandedHeight = maxOf(islandSettings.expandedHeight, kotlin.math.ceil(minimumExpandedHeight))
@@ -406,8 +410,7 @@ fun IslandContent(
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .weight(1f)
-                                .then(if (expandedContent) Modifier.heightIn(min = headerMinimum) else Modifier)
+                                .then(if (expandedContent) Modifier.height(headerMinimum) else Modifier.weight(1f))
                                 .testTag("island-header")
                                 .then(if (!expandedContent && showConnectAction)
                                     Modifier.combinedClickable(role = Role.Button, onClickLabel = expandConnectLabel,
@@ -463,7 +466,7 @@ fun IslandContent(
                                         }
                                     )
                                 }),
-                            verticalAlignment = Alignment.CenterVertically,
+                            verticalAlignment = if (expandedContent) Alignment.Top else Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
                             val useMonochrome = when (contentState) {
@@ -482,7 +485,7 @@ fun IslandContent(
                                         imageVector = LocalIcons.current.fromName(spec.genericIconName) ?: LocalIcons.current.Headphones,
                                         contentDescription = null,
                                         tint = textColor,
-                                        modifier = Modifier.fillMaxHeight(0.8f)
+                                        modifier = if (expandedContent) Modifier.size(64.dp) else Modifier.fillMaxHeight(0.8f)
                                     )
                                 } else {
                                     Image(
@@ -639,7 +642,9 @@ fun IslandContent(
                                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
                                     cells.forEach { cell ->
                                         IslandBatteryIndicator(cell, islandSettings.expandedBatteryStyle, textColor,
-                                            Modifier.weight(1f).testTag("island-battery-${cell.component.name.lowercase()}"))
+                                            owner = batteryOwner,
+                                            motionEnabled = motionEnabled, frozen = islandState == IslandState.CLOSE,
+                                            modifier = Modifier.weight(1f).testTag("island-battery-${cell.component.name.lowercase()}"))
                                     }
                                 }
                                 // One age line keeps the header and artwork still when readings become cached.
@@ -660,24 +665,25 @@ fun IslandContent(
                         }
 
                         AnimatedVisibility(
-                            visible = islandSettings.showListeningModeControl && expandedContent,
+                            visible = showControls && expandedContent,
                             enter = fadeIn(animationSpec = tween(180, delayMillis = 80)),
                             exit = fadeOut(animationSpec = tween(100)),
                             modifier = Modifier
                                 .testTag("island-listening-controls")
-                                .requiredHeightIn(min = 20.dp, max = 64.dp)
-                                .requiredWidth(with(density) { islandSettings.expandedWidth.toDp() - padding - 12.dp })
-                                .weight(1f)
+                                .height(64.dp)
+                                .fillMaxWidth()
                         ) {
                             NoiseControlSettings(
                                 modifier = Modifier.fillMaxHeight(),
                                 showOffListeningMode = showOffListeningMode,
+                                showAdaptiveMode = BaseCapability.ADAPTIVE_AUDIO in spec.baseCapabilities,
                                 noiseControlModeValue = noiseControlModeValue,
                                 onNoiseControlModeChanged = onNoiseControlModeChanged,
                                 adaptiveStrength = adaptiveStrength,
                                 requestedAdaptiveStrength = requestedAdaptiveStrength,
                                 onAdaptiveStrengthChanged = onAdaptiveStrengthChanged,
-                                showLabels = false
+                                showLabels = false,
+                                enabled = listeningControlsEnabled && !nearby
                             )
                         }
                     }
@@ -740,7 +746,34 @@ private fun islandAgeText(age: Pair<Long, TimeUnit>): String = when (age.second)
 }
 
 @Composable
-private fun IslandBatteryIndicator(cell: IslandBatteryCell, style: IslandBatteryStyle, textColor: Color, modifier: Modifier) {
+internal fun rememberIslandBatteryGauge(component: BatteryComponent, level: Int?, motionEnabled: Boolean,
+    frozen: Boolean = false, owner: String? = null): Float {
+    val gauge = remember(owner, component) { Animatable(level?.toFloat() ?: 0f) }
+    var previousLevel by remember(owner, component) { mutableStateOf(level) }
+    LaunchedEffect(owner, component, level, motionEnabled, frozen) {
+        // Keep the outgoing ring still while the capsule folds away.
+        if (frozen) return@LaunchedEffect
+        val hadReading = previousLevel != null
+        previousLevel = level
+        val target = level?.toFloat() ?: 0f
+        if (!motionEnabled || !hadReading || level == null || gauge.value == target) gauge.snapTo(target)
+        else gauge.animateTo(target, tween(280, easing = Easing { progress ->
+            val remaining = 1f - progress
+            1f - remaining * remaining * remaining
+        }))
+    }
+    return when {
+        level == null -> 0f
+        !frozen && (previousLevel == null || !motionEnabled) -> level.toFloat()
+        else -> gauge.value
+    }
+}
+
+@Composable
+private fun IslandBatteryIndicator(cell: IslandBatteryCell, style: IslandBatteryStyle, textColor: Color,
+    owner: String?, motionEnabled: Boolean, frozen: Boolean, modifier: Modifier) {
+    val gaugeLevel = if (style == IslandBatteryStyle.CIRCLE || style == IslandBatteryStyle.CIRCLE_TEXT)
+        rememberIslandBatteryGauge(cell.component, cell.level, motionEnabled, frozen, owner) else cell.level?.toFloat() ?: 0f
     val label = stringResource(when (cell.component) {
         BatteryComponent.LEFT -> R.string.island_battery_left
         BatteryComponent.RIGHT -> R.string.island_battery_right
@@ -767,7 +800,7 @@ private fun IslandBatteryIndicator(cell: IslandBatteryCell, style: IslandBattery
                     Canvas(Modifier.fillMaxSize().padding(2.dp)) {
                         val stroke = Stroke(width = 3.dp.toPx(), cap = StrokeCap.Round)
                         drawArc(color.copy(alpha = 0.2f), 0f, 360f, false, style = stroke)
-                        if (cell.level != null) drawArc(color, -90f, 3.6f * cell.level, false, style = stroke)
+                        if (cell.level != null) drawArc(color, -90f, 3.6f * gaugeLevel, false, style = stroke)
                     }
                     if (cell.charging) Icon(LocalIcons.current.Bolt, null, tint = color, modifier = Modifier.size(16.dp))
                 }

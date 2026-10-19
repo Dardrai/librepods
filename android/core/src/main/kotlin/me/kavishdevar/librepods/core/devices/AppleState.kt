@@ -24,6 +24,9 @@ data class AppleState(
     val componentState: Set<DeviceComponentState> = emptySet(),
 
     val conversationAwarenessState: Int = 0,
+    // Live transport markers survive StateFlow conflation without being cached as device settings.
+    val conversationAwarenessSequence: Long = 0,
+    val lastListeningModeRequest: ByteArray? = null,
 
     val capabilities: Set<CapabilityEntry> = emptySet(),
 

@@ -1,0 +1,6 @@
+<resources>
+    <string name="listening_mode_close">Dinleme modlarını kapat</string>
+    <string name="listening_mode_reading">Dinleme modu okunuyor…</string>
+    <string name="listening_mode_pending">Dinleme modu değiştiriliyor…</string>
+    <string name="listening_mode_failed">Dinleme modu değiştirilemedi. Tekrar deneyin.</string>
+</resources>

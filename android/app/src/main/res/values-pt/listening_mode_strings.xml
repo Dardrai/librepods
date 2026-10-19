@@ -1,0 +1,6 @@
+<resources>
+    <string name="listening_mode_close">Fechar modos de audição</string>
+    <string name="listening_mode_reading">Lendo o modo de audição…</string>
+    <string name="listening_mode_pending">Alterando o modo de audição…</string>
+    <string name="listening_mode_failed">Não foi possível alterar o modo de audição. Tente novamente.</string>
+</resources>

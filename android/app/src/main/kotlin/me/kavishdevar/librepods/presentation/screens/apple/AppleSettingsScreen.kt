@@ -240,9 +240,11 @@ fun AppleSettingsScreen(
                 }
                 item(key = "noise_control") {
                     NoiseControlSettings(
-                        modifier = Modifier.height(100.dp),
+                        modifier = Modifier.heightIn(min = 108.dp),
                         showOffListeningMode = state.effectiveAllowOff(settings, metadata.modelNumber) == true,
-                        noiseControlModeValue = state.controlStates[ControlCommandIdentifier.LISTENING_MODE]?.getOrNull(0)?.toInt() ?: 3,
+                        showAdaptiveMode = BaseCapability.ADAPTIVE_AUDIO in baseCapabilities,
+                        noiseControlModeValue = (state.requestedControls[ControlCommandIdentifier.LISTENING_MODE]
+                            ?: state.controlStates[ControlCommandIdentifier.LISTENING_MODE])?.firstOrNull()?.toInt() ?: 3,
                         onNoiseControlModeChanged = {
                             setControlCommandInt(
                                 ControlCommandIdentifier.LISTENING_MODE, it

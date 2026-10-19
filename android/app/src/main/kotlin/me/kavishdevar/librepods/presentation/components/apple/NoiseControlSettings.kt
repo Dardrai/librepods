@@ -29,6 +29,8 @@ import androidx.compose.animation.expandHorizontally
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkHorizontally
+import androidx.compose.animation.togetherWith
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -41,6 +43,9 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -77,6 +82,14 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.imageResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.disabled
+import androidx.compose.ui.semantics.progressBarRangeInfo
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.setProgress
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -86,6 +99,7 @@ import com.kyant.backdrop.backdrops.layerBackdrop
 import com.kyant.backdrop.backdrops.rememberLayerBackdrop
 import com.kyant.backdrop.drawBackdrop
 import com.kyant.backdrop.effects.lens
+import com.kyant.backdrop.shadow.Shadow
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -116,10 +130,18 @@ fun NoiseControlSettings(
     adaptiveStrength: Int = 0,
     onAdaptiveStrengthChanged: (Int) -> Unit,
     showLabels: Boolean = true,
-    requestedAdaptiveStrength: Int? = null
+    requestedAdaptiveStrength: Int? = null,
+    showAdaptiveMode: Boolean = true,
+    enabled: Boolean = true
 ) {
-    val currentModeChanged by rememberUpdatedState(onNoiseControlModeChanged)
-    val currentStrengthChanged by rememberUpdatedState(onAdaptiveStrengthChanged)
+    val currentModeChanged by rememberUpdatedState<(Int) -> Unit>({ mode ->
+        if (enabled && (mode != 4 || showAdaptiveMode) && (mode != 1 || showOffListeningMode)) {
+            onNoiseControlModeChanged(mode)
+        }
+    })
+    val currentStrengthChanged by rememberUpdatedState<(Int) -> Unit>({ strength ->
+        if (enabled && showAdaptiveMode) onAdaptiveStrengthChanged(strength.coerceIn(0, 100))
+    })
     when (LocalDesignSystem.current) {
         DesignSystem.Material -> {
             val options = buildList {
@@ -140,7 +162,7 @@ fun NoiseControlSettings(
                         R.drawable.ic_transparency
                     )
                 )
-                add(
+                if (showAdaptiveMode) add(
                     Triple(
                         NoiseControlMode.ADAPTIVE,
                         R.string.adaptive,
@@ -181,9 +203,10 @@ fun NoiseControlSettings(
                         ) {
                             ToggleButton(
                                 checked = selectedMode == mode,
+                                enabled = enabled,
                                 onCheckedChange = {
                                     if (it) {
-                                        onNoiseControlModeChanged(mode.ordinal + 1)
+                                        currentModeChanged(mode.ordinal + 1)
                                     }
                                 },
                                 shapes = when (index) {
@@ -196,7 +219,7 @@ fun NoiseControlSettings(
                             ) {
                                 Icon(
                                     bitmap = ImageBitmap.imageResource(iconRes),
-                                    contentDescription = null,
+                                    contentDescription = stringResource(labelRes),
                                     modifier = Modifier.size(42.dp),
                                     tint = if (selectedMode == mode) MaterialTheme.colorScheme.onPrimary else if (showLabels) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSecondaryContainer
                                 )
@@ -220,10 +243,18 @@ fun NoiseControlSettings(
         }
 
         DesignSystem.Apple -> {
+            val enabledAlpha by animateFloatAsState(
+                targetValue = if (enabled) 1f else 0.4f,
+                animationSpec = tween(120),
+                label = "listening-control-enabled"
+            )
             val isDarkTheme = MaterialTheme.colorScheme.surface.luminance() < 0.5f
             val backgroundColor = if (isDarkTheme) (if (showLabels) Color(0xFF1C1C1E) else MaterialTheme.colorScheme.surfaceContainerLow) else Color(0xFFE3E3E8)
 
             val density = LocalDensity.current
+            val adaptiveAudioLabel = stringResource(R.string.adaptive_audio)
+            val labelLineHeight = MaterialTheme.typography.labelSmall.lineHeight
+            val labelRowHeight = with(density) { maxOf(44.dp, labelLineHeight.toDp() * 3 + 10.dp) }
 
             val backdrop = rememberLayerBackdrop()
 
@@ -233,6 +264,7 @@ fun NoiseControlSettings(
             val currentMode by rememberUpdatedState(noiseControlModeValue)
             val currentStrength by rememberUpdatedState((requestedAdaptiveStrength ?: adaptiveStrength).coerceIn(0, 100))
             val currentShowOff by rememberUpdatedState(showOffListeningMode)
+            val currentShowAdaptive by rememberUpdatedState(showAdaptiveMode)
             val currentWidth by rememberUpdatedState(width.value.value)
 
             val offset = remember { Animatable(-1f) }
@@ -240,34 +272,36 @@ fun NoiseControlSettings(
 
             val offOffset = if (currentShowOff  && currentMode != 4) 1f else 0f
 
-            val targetModeWidth = currentWidth / if (currentMode == 4) (5f + offOffset) else (3f + offOffset)
-            val targetAdaptiveWidth = targetModeWidth * if (currentMode == 4) 3f else 1f
+            val adaptiveSelected = showAdaptiveMode && currentMode == 4
+            val targetModeWidth = currentWidth / if (adaptiveSelected) 5f else (2f + (if (showAdaptiveMode) 1f else 0f) + offOffset)
+            val targetAdaptiveWidth = if (!showAdaptiveMode) 0f else targetModeWidth * if (adaptiveSelected) 3f else 1f
             val targetOffWidth = if (currentShowOff && currentMode != 4) targetModeWidth else 0f
+            val motion = spring<Float>(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessMedium)
 
             val modeWidth by animateFloatAsState(
                 targetValue = targetModeWidth,
-                animationSpec = if (!isInitialized) snap() else spring(),
+                animationSpec = if (!isInitialized) snap() else motion,
             )
             val adaptiveWidth by animateFloatAsState(
                 targetValue = targetAdaptiveWidth,
-                animationSpec = if (!isInitialized) snap() else spring(),
+                animationSpec = if (!isInitialized) snap() else motion,
             )
             val offWidth by animateFloatAsState(
                 targetValue = targetOffWidth,
-                animationSpec = if (!isInitialized) snap() else spring(),
+                animationSpec = if (!isInitialized) snap() else motion,
             )
 
             val currentModeWidth by rememberUpdatedState(modeWidth)
             val currentTransparencyStart by rememberUpdatedState(offWidth)
             val currentAdaptiveStart by rememberUpdatedState(offWidth + modeWidth)
-            val currentAncStart by rememberUpdatedState(offWidth + modeWidth * if (currentMode == 4) 4f else 2f)
+            val currentAncStart by rememberUpdatedState(offWidth + modeWidth + adaptiveWidth)
 
             val targetTransparencyStart by rememberUpdatedState(targetOffWidth)
             val targetAdaptiveStart by rememberUpdatedState(targetOffWidth + targetModeWidth)
-            val targetAncStart by rememberUpdatedState(targetOffWidth + targetModeWidth * if (currentMode == 4) 4f else 2f)
+            val targetAncStart by rememberUpdatedState(targetOffWidth + targetModeWidth + targetAdaptiveWidth)
             val currentTargetModeWidth by rememberUpdatedState(targetModeWidth)
 
-            val velocityTracker = VelocityTracker()
+            val velocityTracker = remember { VelocityTracker() }
             val tapProgress = remember { Animatable(0f) }
             val stretch = remember { Animatable(0f) }
 
@@ -276,7 +310,7 @@ fun NoiseControlSettings(
             var isDragging by remember { mutableStateOf(false) }
             var dragOffset by remember { mutableFloatStateOf(0f) }
 
-            LaunchedEffect(width.value, noiseControlModeValue, adaptiveStrength, requestedAdaptiveStrength, showOffListeningMode) {
+            LaunchedEffect(width.value, noiseControlModeValue, adaptiveStrength, requestedAdaptiveStrength, showOffListeningMode, showAdaptiveMode, isDragging) {
                 if (!isDragging && width.value > 0.dp) {
                     val targetOffset = when (noiseControlModeValue) {
                         1 -> 0f
@@ -288,7 +322,7 @@ fun NoiseControlSettings(
                     if (!isInitialized) {
                         offset.snapTo(targetOffset)
                     } else {
-                        offset.animateTo(targetOffset)
+                        offset.animateTo(targetOffset, motion)
                     }
                 }
             }
@@ -314,13 +348,13 @@ fun NoiseControlSettings(
                                 when {
                                     thumbCenter < currentTransparencyStart -> 1
                                     thumbCenter < currentAdaptiveStart -> 3
-                                    thumbCenter < currentAncStart -> 4
+                                    currentShowAdaptive && thumbCenter < currentAncStart -> 4
                                     else -> 2
                                 }
                             } else {
                                 when {
                                     thumbCenter < currentAdaptiveStart -> 3
-                                    thumbCenter < currentAncStart -> 4
+                                    currentShowAdaptive && thumbCenter < currentAncStart -> 4
                                     else -> 2
                                 }
                             }
@@ -361,7 +395,7 @@ fun NoiseControlSettings(
             Box(
                 modifier = modifier
                     .fillMaxWidth()
-                    .alpha(if (width.value > 0.dp) 1f else 0f)
+                    .alpha(if (width.value > 0.dp) enabledAlpha else 0f)
             ) {
                 if (LocalDebugMode.current) {
                     Text(
@@ -380,8 +414,9 @@ fun NoiseControlSettings(
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
-                            .weight(1f)
+                            .height(64.dp)
                             .fillMaxWidth()
+                            .selectableGroup()
                             .onGloballyPositioned {
                                 with(density) {
                                     iconRowHeight.value = it.size.height.toDp()
@@ -389,14 +424,10 @@ fun NoiseControlSettings(
                                 }
                             }
                     ) {
-                        Box(
+                        if (offWidth > 0f) Box(
                             modifier = Modifier
                                 .fillMaxHeight()
-                                .pointerInput(Unit) {
-                                    detectTapGestures {
-                                        currentModeChanged(1)
-                                    }
-                                }
+                                .modeOption(1, currentMode, stringResource(R.string.off), enabled && showOffListeningMode && !adaptiveSelected, currentModeChanged)
                                 .width(offWidth.dp)
                                 .background(
                                     backgroundColor,
@@ -415,7 +446,7 @@ fun NoiseControlSettings(
                                 Icon(
                                     bitmap = ImageBitmap.imageResource(R.drawable.ic_noise_cancellation),
                                     contentDescription = null,
-                                    modifier = Modifier.size(36.dp),
+                                    modifier = Modifier.size(32.dp),
                                     tint = MaterialTheme.colorScheme.onSurface
                                 )
                             }
@@ -431,11 +462,7 @@ fun NoiseControlSettings(
                                         bottomStartPercent = if (showOffListeningMode && currentMode != 4) 0 else 100
                                     )
                                 )
-                                .pointerInput(Unit) {
-                                    detectTapGestures {
-                                        currentModeChanged(3)
-                                    }
-                                },
+                                .modeOption(3, currentMode, stringResource(R.string.transparency), enabled, currentModeChanged),
                             contentAlignment = Alignment.Center
                         ) {
                             this@Row.AnimatedVisibility(
@@ -447,16 +474,18 @@ fun NoiseControlSettings(
                                     bitmap = ImageBitmap.imageResource(R.drawable.ic_transparency),
                                     contentDescription = null,
                                     modifier = Modifier
-                                        .size(36.dp),
+                                        .size(32.dp),
                                     tint = MaterialTheme.colorScheme.onSurface
                                 )
                             }
                         }
-                        Box(
+                        if (showAdaptiveMode) Box(
                             modifier = Modifier
                                 .fillMaxHeight()
                                 .width(adaptiveWidth.dp)
-                                .pointerInput(Unit) {
+                                .modeOption(4, currentMode, stringResource(R.string.adaptive), enabled, currentModeChanged)
+                                .pointerInput(enabled) {
+                                    if (!enabled) return@pointerInput
                                     detectTapGestures { tapOffset ->
                                         if (currentMode != 4) {
                                             currentModeChanged(4)
@@ -524,7 +553,7 @@ fun NoiseControlSettings(
                                         bitmap = ImageBitmap.imageResource(R.drawable.ic_adaptive),
                                         contentDescription = null,
                                         modifier = Modifier
-                                            .size(36.dp),
+                                            .size(32.dp),
                                         tint = MaterialTheme.colorScheme.onSurface,
                                     )
                                 }
@@ -555,11 +584,7 @@ fun NoiseControlSettings(
                                     backgroundColor,
                                     RoundedCornerShape(topEndPercent = 100, bottomEndPercent = 100)
                                 )
-                                .pointerInput(Unit) {
-                                    detectTapGestures {
-                                        currentModeChanged(2)
-                                    }
-                                },
+                                .modeOption(2, currentMode, stringResource(R.string.noise_cancellation), enabled, currentModeChanged),
                             contentAlignment = Alignment.Center
                         ) {
                             this@Row.AnimatedVisibility(
@@ -571,7 +596,7 @@ fun NoiseControlSettings(
                                     bitmap = ImageBitmap.imageResource(R.drawable.ic_noise_cancellation),
                                     contentDescription = null,
                                     modifier = Modifier
-                                        .size(36.dp),
+                                        .size(32.dp),
                                     tint = MaterialTheme.colorScheme.onSurface
                                 )
                             }
@@ -581,19 +606,22 @@ fun NoiseControlSettings(
                     if (showLabels) {
                         Row (
                             modifier = Modifier
+                                .heightIn(min = labelRowHeight)
+                                .padding(top = 10.dp)
                                 .background(
                                     @Suppress("KotlinConstantConditions")
                                     if (showLabels) MaterialTheme.colorScheme.surfaceContainer
                                     else MaterialTheme.colorScheme.surfaceContainerHigh
                                 ), // else backdrop doesn't work
                         ) {
-                            if (showOffListeningMode) {
+                            if (showOffListeningMode && offWidth > 0f) {
                                 Text(
                                     text = stringResource(R.string.off),
                                     style = MaterialTheme.typography.labelSmall,
                                     textAlign = TextAlign.Center,
                                     modifier = Modifier.width(offWidth.dp),
                                     maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
                                     color = MaterialTheme.colorScheme.onSurface
                                 )
                             }
@@ -603,14 +631,16 @@ fun NoiseControlSettings(
                                 textAlign = TextAlign.Center,
                                 modifier = Modifier.width(modeWidth.dp),
                                 maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
                                 color = MaterialTheme.colorScheme.onSurface
                             )
-                            Text(
+                            if (showAdaptiveMode) Text(
                                 text = stringResource(R.string.adaptive),
                                 style = MaterialTheme.typography.labelSmall,
                                 textAlign = TextAlign.Center,
                                 modifier = Modifier.width(adaptiveWidth.dp),
                                 maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
                                 color = MaterialTheme.colorScheme.onSurface
                             )
                             Text(
@@ -619,7 +649,8 @@ fun NoiseControlSettings(
                                 textAlign = TextAlign.Center,
                                 modifier = Modifier.width(modeWidth.dp),
                                 minLines = 2,
-                                maxLines = 2,
+                                maxLines = 3,
+                                overflow = TextOverflow.Ellipsis,
                                 color = MaterialTheme.colorScheme.onSurface
                             )
                         }
@@ -630,13 +661,27 @@ fun NoiseControlSettings(
                     modifier = Modifier
                         .graphicsLayer {
                             translationX = with(density) { offset.value.coerceAtLeast(0f).dp.toPx() }
-                            scaleX = 1f + tapProgress.value * 0.2f + (stretch.value * 0.6f)
-                            scaleY = 1f + tapProgress.value * 0.2f - (stretch.value * 0.3f)
+                            scaleX = 1f + tapProgress.value * 0.04f + (stretch.value * 0.08f)
+                            scaleY = 1f + tapProgress.value * 0.04f - (stretch.value * 0.04f)
                         }
                         .width(modeWidth.dp)
                         .height(iconRowHeight.value)
                         .testTag("noise-control-thumb")
-                        .pointerInput(Unit) {
+                        .semantics {
+                            if (!enabled) disabled()
+                            if (currentMode == 4 && showAdaptiveMode) {
+                                contentDescription = adaptiveAudioLabel
+                                progressBarRangeInfo = ProgressBarRangeInfo(currentStrength.toFloat(), 0f..100f)
+                                setProgress { value ->
+                                    if (!enabled || !value.isFinite()) false else {
+                                        currentStrengthChanged(value.coerceIn(0f, 100f).roundToInt())
+                                        true
+                                    }
+                                }
+                            }
+                        }
+                        .pointerInput(enabled, showAdaptiveMode) {
+                            if (!enabled) return@pointerInput
                             detectHorizontalDragGestures(
                                 onDragStart = {
                                     dragOffset = offset.value
@@ -651,7 +696,7 @@ fun NoiseControlSettings(
                                     val finalMode = when {
                                         currentShowOff && thumbCenter < currentTransparencyStart -> 1
                                         thumbCenter < currentAdaptiveStart -> 3
-                                        thumbCenter < currentAncStart -> 4
+                                        currentShowAdaptive && thumbCenter < currentAncStart -> 4
                                         else -> 2
                                     }
                                     val finalStrength = if (currentMode == 4 && finalMode == 4) {
@@ -682,7 +727,7 @@ fun NoiseControlSettings(
                                         )
                                     }
                                     animationCoroutineScope.launch { tapProgress.animateTo(0f) }
-                                    animationCoroutineScope.launch { offset.animateTo(finalTarget) }
+                                    animationCoroutineScope.launch { offset.animateTo(finalTarget, motion) }
                                     velocityTracker.resetTracking()
                                 },
                                 onDragCancel = {
@@ -703,7 +748,7 @@ fun NoiseControlSettings(
                                         2 -> targetAncStart
                                         else -> 0f
                                     }
-                                    animationCoroutineScope.launch { offset.animateTo(restoredOffset) }
+                                    animationCoroutineScope.launch { offset.animateTo(restoredOffset, motion) }
                                     animationCoroutineScope.launch { tapProgress.animateTo(0f) }
                                     velocityTracker.resetTracking()
                                 }
@@ -736,9 +781,11 @@ fun NoiseControlSettings(
                                 }
                             }
                         }
+                        .padding(4.dp)
                         .drawBackdrop(
                             backdrop = backdrop,
                             shape = { RoundedCornerShape(percent = 100) },
+                            shadow = { Shadow(radius = 3.dp, color = Color.Black.copy(alpha = 0.08f)) },
                             effects = {
                                 lens(
                                     refractionHeight = 12.dp.toPx(),
@@ -746,6 +793,9 @@ fun NoiseControlSettings(
                                     depthEffect = true,
                                     chromaticAberration = true
                                 )
+                            },
+                            onDrawSurface = {
+                                drawRect(Color.White.copy(alpha = if (isDarkTheme) 0.05f else 0.15f))
                             },
                         ),
                     contentAlignment = Alignment.Center
@@ -759,13 +809,15 @@ fun NoiseControlSettings(
                         }
                     )
                     AnimatedContent(
-                        imageBitmap
+                        imageBitmap,
+                        transitionSpec = { fadeIn(tween(140)) togetherWith fadeOut(tween(90)) },
+                        label = "listening-mode-icon"
                     ) {
                         Icon(
                             bitmap = it,
                             contentDescription = null,
                             modifier = Modifier
-                                .size(36.dp),
+                                .size(32.dp),
                             tint = MaterialTheme.colorScheme.onSurface
                         )
                     }
@@ -774,6 +826,12 @@ fun NoiseControlSettings(
         }
     }
 }
+
+private fun Modifier.modeOption(mode: Int, selectedMode: Int, label: String,
+    enabled: Boolean, onSelected: (Int) -> Unit): Modifier =
+    selectable(selected = mode == selectedMode, enabled = enabled,
+        role = Role.RadioButton, onClick = { if (enabled) onSelected(mode) })
+        .semantics { contentDescription = label }
 
 @Composable
 internal fun AdaptiveAudioStrengthSlider(

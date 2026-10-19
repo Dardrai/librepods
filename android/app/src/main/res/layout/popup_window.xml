@@ -25,9 +25,11 @@
             <ImageView android:id="@+id/popup_artwork" android:layout_width="match_parent" android:layout_height="match_parent"
                 android:scaleType="fitCenter" android:importantForAccessibility="no" />
         </FrameLayout>
+        <FrameLayout android:id="@+id/pairing_content" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:minHeight="96dp">
         <LinearLayout android:id="@+id/pairing_battery_row" android:layout_width="match_parent" android:layout_height="wrap_content"
             android:minHeight="64dp" android:orientation="horizontal"
-            android:baselineAligned="false" android:gravity="center_vertical" android:visibility="gone"
+            android:layout_gravity="center" android:baselineAligned="false" android:gravity="center_vertical" android:visibility="invisible"
             android:accessibilityLiveRegion="polite">
             <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="0.45"
                 android:orientation="vertical" android:gravity="center" android:paddingHorizontal="4dp">
@@ -52,9 +54,10 @@
             </LinearLayout>
         </LinearLayout>
         <TextView android:id="@+id/pairing_message" android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:minHeight="48dp" android:gravity="center" android:fontFamily="@font/inter"
+            android:minHeight="48dp" android:layout_gravity="center" android:gravity="center" android:fontFamily="@font/inter"
             android:includeFontPadding="false" android:lineSpacingExtra="3dp"
             android:textSize="15sp" android:textColor="#636366" android:accessibilityLiveRegion="polite" />
+        </FrameLayout>
         <FrameLayout android:id="@+id/pairing_actions" android:layout_width="match_parent" android:layout_height="wrap_content"
             android:minHeight="48dp" android:layout_marginTop="12dp">
             <Button android:id="@+id/pairing_primary" android:layout_width="match_parent" android:layout_height="wrap_content"

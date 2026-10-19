@@ -19,7 +19,7 @@ internal fun islandPlacement(bounds: Rect, insets: Insets, camera: RectF?, densi
         .coerceIn(minOf(dp(280), maximumWidth), maximumWidth)
     val y = if (settings.offsetY != defaults.offsetY) settings.offsetY.roundToInt().coerceAtLeast(0)
         else camera?.let { (it.top - dp(6)).roundToInt().coerceAtLeast(dp(6)) } ?: (insets.top + dp(12))
-    val contentTop = camera?.takeIf { y < it.bottom }?.let { (it.bottom - y + dp(12)).roundToInt() } ?: dp(16)
+    val contentTop = camera?.takeIf { y < it.bottom }?.let { (it.bottom - y + dp(4)).roundToInt() } ?: dp(16)
     val minimumHeight = dp(160) + contentTop + if (settings.showListeningModeControl) dp(80) else 0
     val maximumHeight = (bounds.height() - y - insets.bottom - dp(16)).coerceAtLeast(1)
     val height = maxOf(settings.expandedHeight.roundToInt(), minimumHeight).coerceAtMost(maximumHeight)

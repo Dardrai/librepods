@@ -352,7 +352,7 @@ class NearbyPairingControllerTest {
         connect()
         controller.updatePairingBattery(selected, live)
         assertEquals(PopupWindow.Stage.SETUP, stage())
-        assertEquals(View.GONE, popupView().findViewById<View>(R.id.pairing_battery_row).visibility)
+        assertEquals(View.INVISIBLE, popupView().findViewById<View>(R.id.pairing_battery_row).visibility)
     }
 
     @Test fun verifiedInvitationAndPreConnectReadingsCanSeedTheCompletedCardBeforeAnotherReport() {
@@ -380,7 +380,7 @@ class NearbyPairingControllerTest {
         bondChanged(selected, BluetoothDevice.BOND_BONDING)
         controller.updatePairingBattery(selected, verified)
         assertEquals(PopupWindow.Stage.CONNECTING, stage())
-        assertEquals(View.GONE, popupView().findViewById<View>(R.id.pairing_battery_row).visibility)
+        assertEquals(View.INVISIBLE, popupView().findViewById<View>(R.id.pairing_battery_row).visibility)
 
         pairing(selected).setBondState(BluetoothDevice.BOND_BONDED)
         bondChanged(selected, BluetoothDevice.BOND_BONDED)

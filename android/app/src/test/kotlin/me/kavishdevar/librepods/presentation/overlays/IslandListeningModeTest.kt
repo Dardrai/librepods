@@ -102,4 +102,242 @@ class IslandListeningModeTest {
         assertNull(modes.observeReport(null, byteArrayOf(4), null))
         assertNull(modes.observeReport(replacement, null, byteArrayOf(2)))
     }
+
+    @Test fun temporaryTransparencyAndRestorationBeforeTheTerminalAreSilent() {
+        for (original in listOf(1, 2, 4)) {
+            val reports = Reports()
+            assertNull(reports.report(original))
+            assertNull(reports.stage(1))
+            assertNull(reports.report(3, stage = 2))
+            assertNull(reports.report(original, stage = 3))
+            assertNull(reports.stage(4))
+            assertEquals(3, reports.report(3, stage = 4))
+            assertEquals(original, reports.report(original, stage = 4))
+        }
+    }
+
+    @Test fun restorationAfterAnyTerminalOrIdleIsSilentOnlyOnce() {
+        for (terminal in listOf(0, 4, 6, 7, 8, 9)) {
+            val reports = Reports()
+            assertNull(reports.report(2))
+            assertNull(reports.report(3, stage = 1))
+            assertNull(reports.stage(terminal))
+            assertNull(reports.report(2, stage = terminal))
+            assertEquals(3, reports.report(3, stage = terminal))
+            assertEquals(2, reports.report(2, stage = terminal))
+        }
+    }
+
+    @Test fun theLatestSpeechStageCanClassifyAnEntryWhoseEarlierStagesWereCoalesced() {
+        for (stage in listOf(1, 2, 3)) {
+            val reports = Reports()
+            assertNull(reports.report(2))
+            // A mode-before-speech candidate reaches the helper after the caller's delay.
+            assertNull(reports.report(3, stage = stage))
+            assertNull(reports.report(2, stage = 4))
+            assertEquals(4, reports.report(4, stage = 4))
+        }
+    }
+
+    @Test fun ordinaryManualChangesWithoutLiveSpeechRemainVisible() {
+        val reports = Reports()
+        assertNull(reports.report(2))
+        assertEquals(3, reports.report(3))
+        assertEquals(4, reports.report(4))
+        assertEquals(2, reports.report(2))
+        assertNull(reports.stage(9))
+        assertEquals(3, reports.report(3, stage = 9))
+    }
+
+    @Test fun anExplicitTransparencyRequestDuringSpeechAnnouncesAndClearsAutomaticRestoration() {
+        val reports = Reports()
+        assertNull(reports.report(2))
+        assertNull(reports.stage(1))
+        assertEquals(3, reports.report(3, stage = 2, explicitRequest = true))
+        assertNull(reports.stage(4))
+        assertEquals(2, reports.report(2, stage = 4))
+        assertEquals(3, reports.report(3, stage = 4))
+    }
+
+    @Test fun anExplicitRequestForTheRememberedModeCannotBeMistakenForAutomaticRestoration() {
+        val reports = Reports()
+        assertNull(reports.report(2))
+        assertNull(reports.report(3, stage = 1))
+        assertEquals(2, reports.report(2, stage = 2, explicitRequest = true))
+        assertNull(reports.stage(4))
+        assertEquals(3, reports.report(3, stage = 4))
+        assertEquals(2, reports.report(2, stage = 4))
+    }
+
+    @Test fun aDifferentModeDuringSpeechAnnouncesAndRetiresTheOldRestorationExpectation() {
+        val reports = Reports()
+        assertNull(reports.report(2))
+        assertNull(reports.report(3, stage = 1))
+        assertEquals(4, reports.report(4, stage = 2))
+        assertEquals(2, reports.report(2, stage = 4))
+        assertEquals(3, reports.report(3, stage = 4))
+    }
+
+    @Test fun theRestorationLatchExpiresTwoSecondsAfterSpeechEnds() {
+        for (elapsed in listOf(1_999L, 2_001L)) {
+            val reports = Reports()
+            assertNull(reports.report(2))
+            assertNull(reports.report(3, stage = 1))
+            reports.now = 10_000
+            assertNull(reports.stage(4))
+            reports.now += elapsed
+            assertEquals(if (elapsed < 2_000) null else 2, reports.report(2, stage = 4))
+        }
+    }
+
+    @Test fun aPersistedTerminalStageCannotKeepExtendingTheRestorationLatch() {
+        val reports = Reports()
+        assertNull(reports.report(2))
+        assertNull(reports.report(3, stage = 1))
+        reports.now = 1_000
+        assertNull(reports.stage(4))
+        reports.now = 2_500
+        assertNull(reports.stage(4))
+        reports.now = 3_001
+        assertEquals(2, reports.report(2, stage = 4))
+    }
+
+    @Test fun resettingOrReplacingTheTransportClearsItsConversationContext() {
+        val reports = Reports()
+        assertNull(reports.report(2))
+        assertNull(reports.report(3, stage = 1))
+        assertNull(reports.stage(4))
+        reports.modes.reset()
+        assertNull(reports.report(4, stage = 4))
+        assertEquals(2, reports.report(2, stage = 4))
+
+        assertNull(reports.report(3, stage = 1))
+        assertNull(reports.stage(4))
+        val replacement = Any()
+        val baseline = byteArrayOf(4)
+        assertNull(reports.modes.observeReport(replacement, reports.current, baseline, conversationStage = 4))
+        assertEquals(2, reports.modes.observeReport(replacement, baseline, byteArrayOf(2), conversationStage = 4))
+    }
+
+    @Test fun aStaleReportCannotConsumeThePendingRestorationOrAdvanceItsBaseline() {
+        val reports = Reports()
+        assertNull(reports.report(2))
+        assertNull(reports.report(3, stage = 1))
+        assertNull(reports.stage(4))
+        assertNull(reports.modes.observeReport(reports.socket, byteArrayOf(3), byteArrayOf(4),
+            currentReport = reports.current, conversationStage = 4))
+        assertNull(reports.report(2, stage = 4))
+        assertEquals(4, reports.report(4, stage = 4))
+    }
+
+    @Test fun aCompletedSpeechBurstDuringTheEntryDelayStillSuppressesItsTemporaryModeAndRestoration() {
+        for (terminal in listOf(0, 4, 6, 7, 8, 9)) {
+            val reports = Reports()
+            assertNull(reports.report(2))
+            // The caller's 150 ms grace outlasted the entire 1 -> terminal burst.
+            assertNull(reports.report(3, stage = terminal, sequence = 1))
+            assertNull(reports.report(2, stage = terminal, sequence = 1))
+            assertEquals(3, reports.report(3, stage = terminal, sequence = 1))
+        }
+    }
+
+    @Test fun aLaterSpeechSequenceStartsAnotherCompletedCycleOnTheSameTransport() {
+        val reports = Reports()
+        assertNull(reports.report(2))
+        for (sequence in listOf(1L, 2L)) {
+            assertNull(reports.report(3, stage = 4, sequence = sequence))
+            assertNull(reports.report(2, stage = 4, sequence = sequence))
+        }
+        assertEquals(3, reports.report(3, stage = 4, sequence = 2))
+    }
+
+    @Test fun aPersistedCompletedSequenceCannotKeepExtendingTheRestorationDeadline() {
+        val reports = Reports()
+        assertNull(reports.report(2))
+        reports.now = 1_000
+        assertNull(reports.report(3, stage = 4, sequence = 1))
+        reports.now = 2_500
+        assertNull(reports.stage(4, sequence = 1))
+        reports.now = 3_000
+        assertEquals(2, reports.report(2, stage = 4, sequence = 1))
+    }
+
+    @Test fun aSuccessfulRequestMarkerOverridesSpeechEvenWhenRequestAndAcknowledgementWereCoalesced() {
+        for (requested in listOf(3, 2)) {
+            val reports = Reports()
+            val marker = byteArrayOf(requested.toByte())
+            assertNull(reports.report(2))
+            if (requested == 2) assertNull(reports.report(3, stage = 1, sequence = 1))
+            // requestedControls has already been cleared by the acknowledgement.
+            assertEquals(requested, reports.report(requested, stage = 4, sequence = 1,
+                requestedMode = marker))
+            val next = if (requested == 3) 2 else 3
+            assertEquals(next, reports.report(next, stage = 4, sequence = 1,
+                requestedMode = marker))
+        }
+    }
+
+    @Test fun aRequestMarkerIsNotConsumedUntilItsModeIsConfirmed() {
+        val reports = Reports()
+        val marker = byteArrayOf(2)
+        assertNull(reports.report(2))
+        assertNull(reports.report(3, stage = 1, sequence = 1, requestedMode = marker))
+        assertEquals(2, reports.report(2, stage = 2, sequence = 2, requestedMode = marker))
+        assertNull(reports.stage(4, sequence = 2, requestedMode = marker))
+        assertEquals(3, reports.report(3, stage = 4, sequence = 2, requestedMode = marker))
+    }
+
+    @Test fun aMatchingRequestOnAnUnchangedReportStillRetiresTheAutomaticRestoration() {
+        val reports = Reports()
+        val marker = byteArrayOf(3)
+        assertNull(reports.report(2))
+        assertNull(reports.report(3, stage = 1, sequence = 1))
+        assertNull(reports.stage(2, sequence = 2, requestedMode = marker))
+        assertNull(reports.stage(4, sequence = 2, requestedMode = marker))
+        assertEquals(2, reports.report(2, stage = 4, sequence = 2, requestedMode = marker))
+    }
+
+    @Test fun aRequestMarkerIsConsumedByIdentityAndANewSameModeRequestRemainsExplicit() {
+        val reports = Reports()
+        val marker = byteArrayOf(2)
+        assertNull(reports.report(2))
+        assertNull(reports.report(3, stage = 1, sequence = 1))
+        assertEquals(2, reports.report(2, stage = 2, sequence = 2, requestedMode = marker))
+        assertNull(reports.stage(4, sequence = 2, requestedMode = marker))
+
+        assertNull(reports.report(3, stage = 1, sequence = 3, requestedMode = marker))
+        assertNull(reports.report(2, stage = 4, sequence = 3, requestedMode = marker))
+
+        assertNull(reports.report(3, stage = 1, sequence = 4, requestedMode = marker))
+        assertEquals(2, reports.report(2, stage = 4, sequence = 4, requestedMode = marker.copyOf()))
+    }
+
+    @Test fun turningConversationAwarenessOffCannotRewindTheCompletedSpeechSequence() {
+        val reports = Reports()
+        assertNull(reports.report(2))
+        assertNull(reports.report(3, stage = 1, sequence = 1))
+        assertNull(reports.report(2, stage = 4, sequence = 1))
+        assertNull(reports.stage(0, sequence = 0))
+        assertEquals(3, reports.report(3, stage = 4, sequence = 1))
+    }
+
+    private class Reports {
+        var now = 0L
+        val modes = IslandListeningMode(nowMillis = { now })
+        val socket = Any()
+        var current: ByteArray? = null
+
+        fun report(mode: Int, stage: Int = 0, explicitRequest: Boolean = false,
+                   sequence: Long = 0, requestedMode: ByteArray? = null): Int? {
+            val previous = current
+            current = byteArrayOf(mode.toByte())
+            return modes.observeReport(socket, previous, current, conversationStage = stage,
+                conversationSequence = sequence,
+                requestedMode = if (explicitRequest) byteArrayOf(mode.toByte()) else requestedMode)
+        }
+
+        fun stage(stage: Int, sequence: Long = 0, requestedMode: ByteArray? = null): Int? =
+            modes.observeReport(socket, current, current, conversationStage = stage,
+                conversationSequence = sequence, requestedMode = requestedMode)
+    }
 }

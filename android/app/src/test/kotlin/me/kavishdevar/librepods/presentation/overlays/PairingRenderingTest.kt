@@ -74,6 +74,7 @@ class PairingRenderingTest {
                     }
                     val actions: List<Pair<String, () -> Unit>> = if (busy) emptyList() else listOf(label to { clicked += 1 })
                     popup.showPairingActions(message, actions, busy, stage)
+                    shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(400))
                     layout(popup)
                     render(popup, 1f)
                     view.scrollTo(0, 0)
@@ -90,8 +91,8 @@ class PairingRenderingTest {
                         assertEquals("The actual pairing headline must remain complete", 0, headline.getEllipsisCount(line))
                     assertTrue("Body text contrast", 1.05 / (Color.luminance(body.currentTextColor) + 0.05) >= 4.5)
                     assertEquals(message, body.text.toString())
-                    assertEquals(if (stage == PopupWindow.Stage.COMPLETE) View.GONE else View.VISIBLE, body.visibility)
-                    assertEquals(if (stage == PopupWindow.Stage.COMPLETE) View.VISIBLE else View.GONE,
+                    assertEquals(if (stage == PopupWindow.Stage.COMPLETE) View.INVISIBLE else View.VISIBLE, body.visibility)
+                    assertEquals(if (stage == PopupWindow.Stage.COMPLETE) View.VISIBLE else View.INVISIBLE,
                         view.findViewById<View>(R.id.pairing_battery_row).visibility)
                     assertNotNull(view.findViewById<ImageView>(R.id.popup_artwork).drawable)
                     val close = view.findViewById<View>(R.id.close_button)
@@ -165,7 +166,7 @@ class PairingRenderingTest {
                     Battery(BatteryComponent.RIGHT, 85, BatteryStatus.OPTIMIZED_CHARGING, now),
                     Battery(BatteryComponent.CASE, 97, BatteryStatus.NOT_CHARGING, now))
                 popup.updatePairingBattery(balanced)
-                assertEquals(View.GONE, row.visibility)
+                assertEquals(View.INVISIBLE, row.visibility)
                 popup.showPairingActions(context.getString(R.string.pairing_complete),
                     listOf(context.getString(R.string.pairing_continue) to {}), busy = false, stage = PopupWindow.Stage.COMPLETE)
                 assertEquals(context.getString(R.string.pairing_battery_unknown), buds.text.toString())
@@ -230,7 +231,7 @@ class PairingRenderingTest {
                 assertEquals(2, (case.compoundDrawablesRelative[0] as LayerDrawable).numberOfLayers)
                 assertEquals(0, (case.compoundDrawablesRelative[0] as LayerDrawable).getDrawable(1).level)
                 popup.showPairingActions("Retry", listOf("Retry" to {}), stage = PopupWindow.Stage.RETRY)
-                assertEquals(View.GONE, row.visibility)
+                assertEquals(View.INVISIBLE, row.visibility)
             } finally { popup.forceClose() }
         }
     }
@@ -344,6 +345,120 @@ class PairingRenderingTest {
             assertFalse(field(popup, "attached") as Boolean)
             assertEquals(1, dismissed)
         } finally { popup.forceClose() }
+    }
+
+    @Test fun lidInvitationsWaitForTheCaseWhileGenericCardsKeepTheirExpiry() {
+        val context = context(Profile("invitation", 412, 900, 1f))
+        var lidDismissed = 0
+        var genericDismissed = 0
+        val lid = PopupWindow(context) { lidDismissed++ }
+        val generic = PopupWindow(context) { genericDismissed++ }
+        try {
+            lid.openPairing("AirPods Pro 3", 0x2720)
+            generic.openPairing("Headphones", 0xffff)
+            shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(20))
+            assertEquals("Preparing a nearby case must not lose its card", 0, lidDismissed)
+            assertEquals("Other popup callers retain their timeout", 1, genericDismissed)
+            lid.close()
+            assertEquals(1, lidDismissed)
+        } finally { lid.forceClose(); generic.forceClose() }
+    }
+
+    @Test fun stateChangesFadeWithoutDeferringControlsOrRestartingForBatteryReports() {
+        val profile = Profile("content-motion", 412, 900, 1f)
+        val context = context(profile)
+        val popup = PopupWindow(context)
+        try {
+            popup.openPairing("AirPods Pro 3", 0x2720)
+            popup.showPairingActions("Prepare the case, then Connect", listOf("Connect" to {}))
+            shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(500))
+            layout(popup)
+            render(popup, 1f)
+            val view = view(popup)
+            val beforeHeight = view.height
+            val button = view.findViewById<Button>(R.id.pairing_primary)
+            popup.showPairingActions("Connecting", emptyList(), stage = PopupWindow.Stage.CONNECTING)
+            val connecting = field(popup, "contentAnimation") as ValueAnimator
+            assertEquals(350L, connecting.duration)
+            assertFalse("Outgoing Connect must stop accepting input immediately", button.isEnabled)
+            assertEquals(View.IMPORTANT_FOR_ACCESSIBILITY_NO, button.importantForAccessibility)
+            assertEquals(View.GONE, button.visibility)
+            connecting.currentPlayTime = 175
+            assertTrue(view.findViewById<View>(R.id.pairing_content).alpha in .01f.. .99f)
+            save(view, "pairing-content-motion-connecting-middle")
+
+            var continued = 0
+            popup.showPairingActions("Paired", listOf("Continue" to { continued++ }), busy = false, stage = PopupWindow.Stage.COMPLETE)
+            val complete = field(popup, "contentAnimation") as ValueAnimator
+            assertNotSame("Interrupted motion must retire its old animator", connecting, complete)
+            assertEquals(View.IMPORTANT_FOR_ACCESSIBILITY_NO, view.findViewById<View>(R.id.pairing_message).importantForAccessibility)
+            assertTrue("The new live action is usable during the fade", button.isEnabled)
+            button.performClick()
+            assertEquals(1, continued)
+            val battery = setOf(Battery(BatteryComponent.LEFT, 82, BatteryStatus.NOT_CHARGING),
+                Battery(BatteryComponent.RIGHT, 82, BatteryStatus.NOT_CHARGING),
+                Battery(BatteryComponent.CASE, 76, BatteryStatus.CHARGING))
+            popup.updatePairingBattery(battery)
+            assertEquals("82%", view.findViewById<TextView>(R.id.pairing_buds_battery_text).text.toString())
+            assertSame("Routine batteries cannot restart content motion", complete, field(popup, "contentAnimation"))
+            popup.showPairingActions("Paired", listOf("Continue" to { continued++ }), busy = false, stage = PopupWindow.Stage.COMPLETE)
+            assertSame("An identical state cannot restart content motion", complete, field(popup, "contentAnimation"))
+            layout(popup)
+            assertEquals("The shared body viewport keeps the card height", beforeHeight, view.height)
+            complete.currentPlayTime = 175
+            save(view, "pairing-content-motion-paired-middle")
+            popup.close()
+            assertNull(field(popup, "contentAnimation"))
+            assertTrue((field(popup, "contentSnapshots") as List<*>).isEmpty())
+            button.performClick()
+            assertEquals("Closing retires the active callback", 1, continued)
+        } finally { popup.forceClose() }
+    }
+
+    @Test fun largeTextRetainsMeasuredSlotsAcrossSetupProgressAndSuccessBeforeAnotherLayout() {
+        for (profile in listOf(Profile("retained-portrait", 412, 900, 2f), Profile("retained-landscape", 800, 360, 2f))) {
+            val context = context(profile)
+            val popup = PopupWindow(context)
+            try {
+                popup.openPairing("AirPods Pro 3", 0x2720)
+                popup.showPairingActions(context.getString(R.string.pairing_double_tap) + "\n\n" +
+                    context.getString(R.string.pairing_nearby_hint), emptyList(), stage = PopupWindow.Stage.SETUP)
+                val view = view(popup)
+                val body = view.findViewById<View>(R.id.pairing_content)
+                val header = view.findViewById<View>(R.id.name).parent as View
+                val measuredBody = body.measuredHeight
+                val measuredHeader = header.measuredHeight
+                val measuredCard = (field(popup, "params") as WindowManager.LayoutParams).height
+                // Pairing callbacks may replace instructions before their first layout traversal.
+                popup.showPairingActions("Connecting…", emptyList(), stage = PopupWindow.Stage.CONNECTING)
+                assertEquals("Progress retains the measured instruction viewport", measuredBody, body.measuredHeight)
+                assertEquals("The shorter title cannot move the artwork", measuredHeader, header.measuredHeight)
+                assertEquals(measuredCard, (field(popup, "params") as WindowManager.LayoutParams).height)
+                layout(popup)
+                val geometry = listOf(R.id.popup_artwork_container, R.id.pairing_content, R.id.pairing_actions)
+                    .map { bounds(view, view.findViewById(it)) }
+                popup.showPairingActions("Paired", listOf("Continue" to {}), busy = false, stage = PopupWindow.Stage.COMPLETE)
+                popup.updatePairingBattery(setOf(Battery(BatteryComponent.LEFT, 82, BatteryStatus.NOT_CHARGING),
+                    Battery(BatteryComponent.RIGHT, 82, BatteryStatus.NOT_CHARGING), Battery(BatteryComponent.CASE, 76, BatteryStatus.CHARGING)))
+                shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(400))
+                layout(popup)
+                assertEquals("Success keeps the card geometry", measuredCard, view.height)
+                assertEquals(geometry, listOf(R.id.popup_artwork_container, R.id.pairing_content, R.id.pairing_actions)
+                    .map { bounds(view, view.findViewById(it)) })
+                save(view, "pairing-" + profile.label + "-success")
+                if (profile.height == 360) {
+                    assertTrue(view.getChildAt(0).height > view.height)
+                    view.scrollTo(0, view.getChildAt(0).height - view.height)
+                    assertContained(view, view.findViewById(R.id.pairing_primary))
+                }
+            } finally { popup.forceClose() }
+            val next = PopupWindow(context)
+            try {
+                next.openPairing("AirPods Pro 3", 0x2720)
+                assertEquals("A new invitation starts with its own content floor", (96 * context.resources.displayMetrics.density).toInt(),
+                    view(next).findViewById<View>(R.id.pairing_content).minimumHeight)
+            } finally { next.forceClose() }
+        }
     }
 
     private fun context(profile: Profile, motionScale: Float = 1f): Context {

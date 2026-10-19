@@ -44,7 +44,7 @@ import me.kavishdevar.librepods.core.devices.AppleDevice
 import me.kavishdevar.librepods.core.devices.BaseCapability
 import me.kavishdevar.librepods.core.devices.ConnectionState
 import me.kavishdevar.librepods.core.devices.NoiseControlMode
-import me.kavishdevar.librepods.core.devices.effectiveAllowOff
+import me.kavishdevar.librepods.presentation.overlays.ListeningModeDialog
 
 class AirPodsQSService : TileService() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -52,6 +52,11 @@ class AirPodsQSService : TileService() {
     private var bound = false
     private var observation: Job? = null
     private var selected: AppleDevice? = null
+    private var source: LibrePodsService? = null
+    private var picker: ListeningModeDialog? = null
+    private var pickerOwner: AppleDevice? = null
+    private var destroyed = false
+    private var pickerGeneration = 0L
 
     override fun onStartListening() {
         super.onStartListening()
@@ -60,6 +65,7 @@ class AirPodsQSService : TileService() {
             override fun onServiceConnected(name: ComponentName, binder: IBinder) {
                 if (connection !== this) return
                 val service = (binder as? LibrePodsService.LocalBinder)?.getService() ?: return
+                source = service
                 observation?.cancel()
                 observation = scope.launch {
                     service.devices.collectLatest { devices ->
@@ -86,6 +92,7 @@ class AirPodsQSService : TileService() {
                 observation?.cancel()
                 observation = null
                 selected = null
+                source = null
                 updateTile()
             }
 
@@ -105,9 +112,24 @@ class AirPodsQSService : TileService() {
     }
 
     override fun onDestroy() {
+        destroyed = true
+        dismissPicker()
         releaseBinding()
         scope.cancel()
         super.onDestroy()
+    }
+
+    override fun onTileRemoved() {
+        pickerGeneration++
+        dismissPicker()
+        super.onTileRemoved()
+    }
+
+    private fun dismissPicker() {
+        val previous = picker
+        picker = null
+        pickerOwner = null
+        previous?.dismiss()
     }
 
     private fun releaseBinding() {
@@ -116,6 +138,7 @@ class AirPodsQSService : TileService() {
         observation?.cancel()
         observation = null
         selected = null
+        source = null
         if (bound && old != null) runCatching { unbindService(old) }
         bound = false
         updateTile()
@@ -126,18 +149,34 @@ class AirPodsQSService : TileService() {
 
     override fun onClick() {
         super.onClick()
+        val generation = ++pickerGeneration
         val device = selected?.takeIf(::canControl) ?: return
-        val state = device.state.value
-        val metadata = device.metadata.value
-        val modes = buildList {
-            if (state.effectiveAllowOff(device.settings.value, metadata.modelNumber) == true) add(NoiseControlMode.OFF)
-            add(NoiseControlMode.TRANSPARENCY)
-            if (BaseCapability.ADAPTIVE_AUDIO in AirPodsSpecs.getSpec(metadata.model).baseCapabilities) add(NoiseControlMode.ADAPTIVE)
-            add(NoiseControlMode.NOISE_CANCELLATION)
+        val devices = source?.devices ?: return
+        val openPicker = Runnable {
+            // Unlocking/collapsing may stop tile listening; the clicked pair must still be current.
+            if (!destroyed && generation == pickerGeneration && !isLocked &&
+                devices.value[device.macAddress] === device && canControl(device)) {
+                val current = picker
+                val dialog = if (pickerOwner === device && current?.isShowing == true) current else {
+                    dismissPicker()
+                    ListeningModeDialog(this, device.macAddress).also { next ->
+                        picker = next
+                        pickerOwner = device
+                        next.setOnDismissListener {
+                            if (picker === next) {
+                                picker = null
+                                pickerOwner = null
+                            }
+                        }
+                    }
+                }
+                runCatching { showDialog(dialog) }.onFailure {
+                    dismissPicker()
+                    Log.w("AirPodsQSService", "Cannot show listening modes", it)
+                }
+            }
         }
-        val current = state.controlStates[ControlCommandIdentifier.LISTENING_MODE]?.firstOrNull()?.toInt()
-        val next = modes[(modes.indexOfFirst { it.ordinal + 1 == current } + 1) % modes.size]
-        device.setControlCommand(ControlCommandIdentifier.LISTENING_MODE, next.ordinal + 1)
+        if (isLocked) unlockAndRun(openPicker) else openPicker.run()
     }
 
     private fun updateTile() {

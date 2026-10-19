@@ -4,6 +4,7 @@ import android.app.Application
 import android.app.Notification
 import android.app.NotificationManager
 import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothSocket
 import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioDeviceInfo
@@ -48,6 +49,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import org.robolectric.shadow.api.Shadow
 import org.robolectric.shadows.ShadowContextImpl
+import org.robolectric.shadows.ShadowSettings
 import org.robolectric.util.ReflectionHelpers
 import kotlin.time.Instant
 
@@ -64,6 +66,7 @@ class AppleStateObserverTest {
     private val connections = MutableStateFlow(ConnectionState.CONNECTED)
     private val samples = mock(HeartRateRepository::class.java)
     private val apple = mock(AppleRepository::class.java)
+    private val island = mock(IslandWindow::class.java)
     private val notifications = mock(NotificationManager::class.java)
     private val audio = mock(AudioManager::class.java)
     private val jobs = mutableListOf<Job>()
@@ -88,7 +91,7 @@ class AppleStateObserverTest {
         `when`(device.bluetoothDevice).thenReturn(bluetooth)
         field("appleRepository\$delegate").set(service, lazyOf(apple))
         field("heartRateRepository\$delegate").set(service, lazyOf(samples))
-        field("islandWindow\$delegate").set(service, lazyOf(mock(IslandWindow::class.java)))
+        field("islandWindow\$delegate").set(service, lazyOf(island))
         val appSettings = mock(AppDataRepository::class.java)
         `when`(appSettings.settings).thenReturn(MutableStateFlow(AppSettingsEntity()))
         field("appDataRepository\$delegate").set(service, lazyOf(appSettings))
@@ -116,6 +119,7 @@ class AppleStateObserverTest {
         mediaAudio.set(null, previousAudio)
         MediaController.iPausedTheMedia = previousPaused
         MediaController.userPlayedTheMedia = previousPlayed
+        ShadowSettings.setCanDrawOverlays(false)
         Dispatchers.resetMain()
     }
 
@@ -185,6 +189,102 @@ class AppleStateObserverTest {
         assertEquals(1, alerts())
         verify(notifications, never()).cancel(999)
         assertSame(replacement, field("heartRateAlertOwner").get(service))
+    }
+
+    @Test fun allowOffChangesRefreshTheLiveIslandsControlsButAnOldPairCannotUpdateItsReplacement() = runBlocking {
+        settings.value = settings.value.copy(allowOffChoice = true)
+        jobs += service.observeAppleSettings(device)
+        await { calls(apple, "saveSettings") == 1 }
+        verify(island).updateAdaptiveStrength(device)
+        settings.value = settings.value.copy(allowOffChoice = false)
+        await { calls(apple, "saveSettings") == 2 }
+        verify(island, times(2)).updateAdaptiveStrength(device)
+
+        @Suppress("UNCHECKED_CAST")
+        val devices = field("_devices").get(service) as MutableStateFlow<Map<MacAddress, Device<*, *, *>>>
+        val replacement = mock(AppleDevice::class.java)
+        devices.value = mapOf(address to replacement)
+        settings.value = settings.value.copy(allowOffChoice = true)
+        await { calls(apple, "saveSettings") == 3 }
+        verify(island, times(2)).updateAdaptiveStrength(device)
+        verify(island, never()).updateAdaptiveStrength(replacement)
+    }
+
+    @Test fun conversationTransparencyBeforeSpeechAndItsRestoreStayQuietButManualChoicesAnnounce() = runBlocking {
+        val mode = ControlCommandIdentifier.LISTENING_MODE
+        val conversation = ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG
+        val socket = mock(BluetoothSocket::class.java)
+        `when`(device.aacp.captureAudioSocket()).thenReturn(socket)
+        `when`(device.aacp.ownsAudioSocket(socket)).thenReturn(true)
+        settings.value = settings.value.copy(showIslandPopup = true)
+        ShadowSettings.setCanDrawOverlays(true)
+        states.value = states.value.copy(controlStates = mapOf(conversation to byteArrayOf(1), mode to byteArrayOf(2)))
+        observe()
+
+        suspend fun report(value: Int, requested: Int? = null) {
+            val notificationsBefore = calls(notifications, "notify")
+            states.value = states.value.copy(controlStates = states.value.controlStates + (mode to byteArrayOf(value.toByte())),
+                requestedControls = requested?.let { mapOf(mode to byteArrayOf(it.toByte())) } ?: emptyMap(),
+                lastListeningModeRequest = requested?.let { byteArrayOf(it.toByte()) } ?: states.value.lastListeningModeRequest)
+            await { calls(notifications, "notify") == notificationsBefore + 1 }
+        }
+
+        // The first fresh report establishes a live baseline after the cached initial array.
+        report(2)
+        assertEquals(1, calls(apple, "saveCacheFromState"))
+        assertEquals(0, calls(island, "show"))
+
+        states.value = states.value.copy(controlStates = states.value.controlStates + (mode to byteArrayOf(3)))
+        await { calls(apple, "saveCacheFromState") == 2 }
+        // Persistence happens before the presentation grace period; speech arrives inside it.
+        states.value = states.value.copy(conversationAwarenessState = 1)
+        await { calls(notifications, "notify") == 2 }
+        assertEquals("Automatic Transparency must not announce before its speech event", 0, calls(island, "show"))
+        states.value = states.value.copy(conversationAwarenessState = 4)
+        report(2)
+        assertEquals("Returning to the mode from before the conversation must stay quiet", 0, calls(island, "show"))
+
+        report(4)
+        assertEquals("A manual mode outside the automatic cycle still announces", 1, calls(island, "show"))
+        states.value = states.value.copy(conversationAwarenessState = 1)
+        // A duplicate live report lets the pending request reach previousState before its echo clears it.
+        report(4, requested = 3)
+        assertEquals("A pending choice is not itself a mode report", 1, calls(island, "show"))
+        report(3)
+        assertEquals("An explicit Transparency echo must announce even while speech is active", 2, calls(island, "show"))
+    }
+
+    @Test fun coalescedSpeechAndLocalRequestsKeepAutomaticModesQuietAndExplicitChoicesVisible() = runBlocking {
+        val mode = ControlCommandIdentifier.LISTENING_MODE
+        val socket = mock(BluetoothSocket::class.java)
+        `when`(device.aacp.captureAudioSocket()).thenReturn(socket)
+        `when`(device.aacp.ownsAudioSocket(socket)).thenReturn(true)
+        settings.value = settings.value.copy(showIslandPopup = true)
+        ShadowSettings.setCanDrawOverlays(true)
+        states.value = states.value.copy(controlStates = mapOf(
+            ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG to byteArrayOf(1), mode to byteArrayOf(2)))
+        observe()
+        states.value = states.value.copy(controlStates = states.value.controlStates + (mode to byteArrayOf(2)))
+        await { calls(notifications, "notify") == 1 }
+
+        states.value = states.value.copy(controlStates = states.value.controlStates + (mode to byteArrayOf(3)))
+        await { calls(apple, "saveCacheFromState") == 2 }
+        // The entire speech cycle coalesces while presentation waits; only its terminal stage survives.
+        states.value = states.value.copy(conversationAwarenessState = 4, conversationAwarenessSequence = 1L)
+        await { calls(notifications, "notify") == 2 }
+        assertEquals("A completed speech cycle still identifies its automatic Transparency report", 0, calls(island, "show"))
+        states.value = states.value.copy(controlStates = states.value.controlStates + (mode to byteArrayOf(2)))
+        await { calls(notifications, "notify") == 3 }
+        assertEquals("The coalesced cycle's matching restore must stay quiet", 0, calls(island, "show"))
+
+        assertTrue(states.value.requestedControls.isEmpty())
+        // The successful write and echo coalesce, leaving no pending-map emission for the observer.
+        states.value = states.value.copy(controlStates = states.value.controlStates + (mode to byteArrayOf(3)),
+            conversationAwarenessState = 1, conversationAwarenessSequence = 2L,
+            lastListeningModeRequest = byteArrayOf(3))
+        await { calls(notifications, "notify") == 4 }
+        assertTrue(states.value.requestedControls.isEmpty())
+        assertEquals("A retained successful local request must announce despite active speech", 1, calls(island, "show"))
     }
 
     private suspend fun observe() {

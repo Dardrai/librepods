@@ -64,6 +64,7 @@ import me.kavishdevar.librepods.core.devices.cachedControlStates
 import me.kavishdevar.librepods.core.devices.withControlReport
 import me.kavishdevar.librepods.core.devices.withControlRequest
 import me.kavishdevar.librepods.core.devices.mergeBatteryReports
+import me.kavishdevar.librepods.core.devices.normalizedControl
 import me.kavishdevar.librepods.core.utils.HeadTracking
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -502,6 +503,7 @@ class AACPManager(private val device: AppleDevice,
             MessageOpcode.CONVERSATION_AWARENESS -> {
                 if (packet.size < 10) return
                 val payload = packet.copyOfRange(6, packet.size)
+                val stage = payload[3].toInt()
                 val packet = AACPPacket.createUnknownPacket(
                     opcode = MessageOpcode.CONVERSATION_AWARENESS,
                     payload = packet.copyOfRange(6, packet.size)
@@ -509,9 +511,13 @@ class AACPManager(private val device: AppleDevice,
                 publishForTransport(this, sourceSocket, ::captureAudioSocket) {
                     device.updateState {
                         it.copy(
-                            conversationAwarenessState = payload.getOrElse(3, {0}).toInt(),
+                            conversationAwarenessState = stage,
+                            conversationAwarenessSequence = it.conversationAwarenessSequence + if (stage in 1..3) 1L else 0L,
                             aacpPackets = it.aacpPackets + packet
                         )
+                    }
+                    connectionScope?.launch(start = CoroutineStart.UNDISPATCHED) {
+                        device.emitEvent(AppleEvent.ConversationAwareness(stage, sourceSocket))
                     }
                 }
             }
@@ -733,7 +739,11 @@ class AACPManager(private val device: AppleDevice,
         val previousReport = device.state.value.controlStates[controlCommand.identifier]
         if (!sendAudioPacket(originalSocket, packet.rawPacket)) return false
         return publishForTransport(this, originalSocket, ::captureAudioSocket) {
-            device.updateState { it.withControlRequest(controlCommand.identifier, value, previousReport) }
+            device.updateState {
+                val requested = it.withControlRequest(controlCommand.identifier, value, previousReport)
+                if (controlCommand.identifier == ControlCommandIdentifier.LISTENING_MODE)
+                    requested.copy(lastListeningModeRequest = normalizedControl(value)) else requested
+            }
             if (controlCommand.identifier == ControlCommandIdentifier.ALLOW_OFF_OPTION)
                 device.rememberAllowOffRequest(value, previousReport)
             controlTimeouts.remove(controlCommand.identifier)?.cancel()
@@ -745,7 +755,9 @@ class AACPManager(private val device: AppleDevice,
                     publishForTransport(this@AACPManager, originalSocket, ::captureAudioSocket) {
                         device.updateState { state ->
                             if (state.requestedControls[controlCommand.identifier] !== request) state
-                            else state.copy(requestedControls = state.requestedControls - controlCommand.identifier)
+                            else state.copy(requestedControls = state.requestedControls - controlCommand.identifier,
+                                lastListeningModeRequest = if (controlCommand.identifier == ControlCommandIdentifier.LISTENING_MODE)
+                                    null else state.lastListeningModeRequest)
                         }
                     }
                 }
@@ -1155,7 +1167,7 @@ class AACPManager(private val device: AppleDevice,
                     else -> emptySet()
                 }
                 it.copy(battery = retainedBatteries, connectedDevices = emptyList(), capabilities = emptySet(),
-                    conversationAwarenessState = 0,
+                    conversationAwarenessState = 0, conversationAwarenessSequence = 0, lastListeningModeRequest = null,
                     controlStates = if (preserveControlState)
                         it.cachedControlStates(device.settings.value, device.metadata.value.modelNumber) else emptyMap(),
                     requestedControls = emptyMap(), requestedCustomEq = null, aacpPackets = emptyList(),

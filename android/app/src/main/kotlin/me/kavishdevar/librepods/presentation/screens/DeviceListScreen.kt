@@ -493,7 +493,9 @@ fun DeviceListScreen(
                                                     NoiseControlSettings(
                                                         modifier = Modifier.padding(vertical = 8.dp).height(64.dp),
                                                         showOffListeningMode = deviceState.effectiveAllowOff(deviceSettings as AppleSettings, (deviceMetadata as AppleMetadata).modelNumber) == true,
-                                                        noiseControlModeValue = deviceState.controlStates[ControlCommandIdentifier.LISTENING_MODE]?.get(0)?.toInt() ?: 2,
+                                                        showAdaptiveMode = BaseCapability.ADAPTIVE_AUDIO in AirPodsSpecs.getSpec(deviceMetadata.model).baseCapabilities,
+                                                        noiseControlModeValue = (deviceState.requestedControls[ControlCommandIdentifier.LISTENING_MODE]
+                                                            ?: deviceState.controlStates[ControlCommandIdentifier.LISTENING_MODE])?.firstOrNull()?.toInt() ?: 2,
                                                         onNoiseControlModeChanged = { newMode ->
                                                             CoroutineScope(Dispatchers.IO).launch {
                                                                 (device as AppleDevice).setControlCommand(

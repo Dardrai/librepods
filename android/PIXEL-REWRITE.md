@@ -23,7 +23,35 @@ pair, local behavior choices and correctly owner-bound BLE keys once. Existing
 rewrite database rows are preserved. Unconfirmed device control values are not
 migrated as device reports. The Android Bluetooth bond stays with Android.
 
-The current fork version is `2.0.0-alpha.1-pixel41`, code `200000126`.
+The current fork version is `2.0.0-alpha.1-pixel51`, code `200000136`.
+
+Conversation Awareness's temporary Transparency switch and matching mode recovery
+do not announce themselves in the island. Live speech stages are correlated with
+confirmed mode reports; ordinary mode changes still announce themselves. Only an
+unrequested Transparency report while Conversation Awareness is enabled gets a
+150ms presentation grace for a speech event arriving immediately afterward.
+
+The expanded island header uses a content-sized height instead of stretching to
+fill the shell. Its title and artwork stay near the camera-safe top even with a
+tall custom island or hidden battery rows. The mode rail reserves its actual
+64dp height. Expanded artwork and text align at the top, 4dp below the physical
+camera; the same clearance controls the payload's folding and clipping.
+
+The listening-mode Quick Settings tile opens a native tile dialog rather than an
+app task, avoiding the full-screen activity launch transition. It shows only the
+shared glass slider near the top, with 16dp side margins on phones. Outside touch
+and Back dismiss it. The dialog owns its device binding and island suppression
+until dismissal, even after Quick Settings stops listening; device replacement,
+disconnection and lock checks still prevent stale commands.
+
+On Android 17, a service started in the background can keep Bluetooth connected
+while Android silently rejects its volume changes. With Shizuku authorized, the
+service grants the `CONTROL_AUDIO` app-op only to LibrePods' own package and UID,
+and verifies the result. Startup and Shizuku availability or permission changes
+retry this setup; global audio hardening, other applications and microphone
+permissions are unchanged. This allows Conversation Awareness ducking after an
+update or background restart without first opening the app. See Android's
+[background audio hardening guidance](https://developer.android.com/about/versions/17/changes/bg-audio).
 
 Bluetooth startup rechecks current Nearby devices permissions, including boot
 and upgrade entry points. Missing grants return to the existing permissions step.
@@ -34,8 +62,47 @@ owner retires. Heart-rate alerts respect the enabled setting and measurement sta
 Island customization restores its entry values; short displays retain a bounded,
 scrollable payload without changing the normal portrait animation.
 
+Pixel42 retains recognized lid invitations until the case closes or the user
+dismisses them. Pairing content transitions keep one shared viewport, and the
+matching poster covers video startup through the card entrance. Battery rings
+interpolate from their displayed level without delaying the numeric reading;
+another pair, missing readings and reduced motion never inherit that sweep.
+
 Protocol formats, hearing-mode safety and the current profile-reading limitation
 are documented in [PROTOCOL.md](PROTOCOL.md).
+
+## Behavior shared with NTPods
+
+The [NTPods pairing and island design](https://github.com/Ripthulhu/ntpods/blob/main/DESIGN.md)
+and this implementation share these interaction rules:
+
+- A nearby case opening displays presence and battery information immediately;
+  it never authorizes an audio connection. Connect explicitly requests that pair.
+  A control socket alone is not proof that this host owns the audio output.
+- Pairing instructions ask for the model's physical pairing gesture before
+  Connect. The same card stays visible through discovery, pairing and success.
+  Its spinning video and poster are the same assets on both platforms.
+- Success uses fresh readings belonging to that invitation and newly paired
+  identity, including eligible observations made before the bond completed.
+  Public model advertisements and readings from earlier attempts cannot supply
+  a success battery. Continue dismisses the card; only a subsequent verified
+  case close/open permits another automatic battery island for that pair.
+- The island reserves space for its status, connection action and battery ages.
+  Nearby, Connected, progress and cached readings must not shift its contents.
+  Fold motion reveals a laid-out payload, and dismissal retains the outgoing
+  values. Reduced motion displays the requested state directly.
+- Case display grace uses the original observation time and never preserves a
+  charging claim after presence is lost. It does not grant connection ownership.
+- A local automatic return may briefly hide Connect, without claiming success
+  or initiating a connection. Android completion requires a matching native
+  A2DP output to be available; automatic media actions also require the selected
+  media route. Retired requests and cleanup cannot affect a replacement session.
+
+When changing these paths, compare fresh pairing, lid closure during discovery,
+immediate success batteries, repeated lid cycles, failed takeover and takeover in
+both directions while media plays. Include missing readings, reduced motion and
+large text. Source and unit checks establish state handling; two-host playback
+and perceived animation smoothness still require physical-device checks.
 
 ## Connect from the nearby island
 
@@ -137,6 +204,35 @@ not expose a reliable peer-owner signal during that deliberate media transition,
 so switching to another host during microphone cleanup still needs a hardware
 check. No cross-host test was performed for this change.
 
+## Listening-mode controls
+
+Pixel44 refines the shared Apple listening-mode control with an inset glass
+thumb, restrained drag deformation and fixed label space. Adaptive retains its
+expanded strength track; pending mode and strength choices remain visible until
+a device report replaces them. Unsupported Adaptive modes are hidden, and mode
+options expose names, selection and disabled state to accessibility services.
+
+The Android ANC Quick Settings tile opens a compact listening-mode picker instead
+of cycling modes. Opening it never writes a command. The picker uses the same
+Apple control, preserves the selected pair, respects Allow Off and model
+capabilities, and closes if that device disconnects or is replaced. Locked phones
+require unlocking first. Outside touch and Back dismiss it and release its
+service binding. The 64dp rail stays the same size through loading, pending and
+error states; accessibility announces status, and failed writes show a brief
+message. The tile dialog needs no overlay permission and leaves the underlying
+screen undimmed, with a short animation confined to the slider window.
+
+Pixel45 coordinates this picker with the dynamic island. A visible picker owns
+presentation until it stops: an existing island is removed, new automatic island
+notices are suppressed, and dismissal never replays old notices. Reports and
+pending controls continue through the same device state. Mode changes in an
+already-visible island update its controls in place without restarting its fold
+or replacing a battery view. Allow Off, connection and model changes refresh the
+island's controls; disconnected or unsupported controls cannot issue commands.
+The paired island uses dark appearance against its black surface while retaining
+the app's selected design system and font preferences. Its compact control aligns
+with the header and batteries.
+
 ## Android audit fixes
 
 Pixel29 rejects reports from retired control connections and prevents an early
@@ -157,6 +253,12 @@ once. The commented-out predecessor service has been removed.
 
 ## Pairing and island latency
 
+- Unpaired lid invitations require readings of at least -55 dBm from the same
+  advertiser sustained for 350 ms, with no gap over 1.5 seconds. A passing strong
+  sample cannot qualify after a weak report. Only the admitted advertiser can
+  close its invitation; dropping signal does not cancel an active pairing.
+  Authenticated paired-device batteries and islands bypass this invitation gate.
+  RSSI is a proximity heuristic; the threshold is not a distance measurement.
 - Company-filtered BLE scanning delivers individual reports with no batching.
   While the screen is on, the service temporarily uses low-latency scanning;
   screen-off scanning uses the configured mode. The preference is not changed.
