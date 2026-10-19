@@ -1,8 +1,8 @@
 # LibrePods Android rewrite fork
 
-This is [Ripthulhu/librepods](https://github.com/Ripthulhu/librepods), an Android
-rewrite fork with Pixel/Shizuku support, nearby pairing and Dynamic Island
-overlays. Android builds are distributed through GitHub only.
+This is [Ripthulhu/librepods](https://github.com/Ripthulhu/librepods), based on the
+upstream Android rewrite, with Pixel/Shizuku support, nearby pairing and Dynamic Island
+overlays. Android builds are distributed through GitHub only, from `android/rewrite`.
 
 - [Download signed APKs](https://github.com/Ripthulhu/librepods/releases)
 - [Development builds and checks](https://github.com/Ripthulhu/librepods/actions/workflows/ci-android.yml)
@@ -52,19 +52,19 @@ LibrePods allows you to use AirPods features that are exclusive to Apple devices
 | Ear detection                                               | ✅     | ✅       |
 | Battery status                                              | ✅     | ✅       |
 | Renaming AirPods <details><summary>Note for Android</summary>On Android, you need to re-pair your AirPods after renaming them because Android might not use the latest name.</details>                                            | ✅     | ✅       |
-| Loud Sound Reduction                                        | 🔴     | ⚪       |
-| Head Gestures                                               | ⛔     | ✅       |
+| Loud Sound Reduction                                        | 🔴     | Unavailable¹ |
+| Head Gestures                                               | ⛔     | 🧪       |
 | Conversational Awareness                                    | ✅     | ✅       |
-| Automatically connect to AirPods                            | ✅     | ✅       |
-| Hearing Aid                                                 | 🔴     | ⚪       |
-| Transparency Mode customization                             | 🔴     | ⚪       |
-| Multi-device connectivity (Bluetooth Multipoint; 2 devices only) | ⚪     | ⚪       |
+| Automatically connect to AirPods <details><summary>Note for Android</summary>Android handles automatic reconnection. LibrePods requests a takeover only when you tap Connect.</details> | ✅     | ✅       |
+| Hearing Aid                                                 | 🔴     | Unavailable¹ |
+| Transparency Mode customization                             | 🔴     | Unavailable¹ |
+| Multi-device connectivity (Bluetooth Multipoint; 2 devices only) | ⚪     | ❓       |
 | <details><summary>Other accessibility configs (click to expand)</summary><ul><li>Press speed</li><li>Press and Hold duration</li><li>Noise Cancellation with single AirPod</li><li>Volume control on swipe</li><li>Volume swipe speed</li></ul></details>       | 🔴     | ✅       |
-| <details><summary>Other general configs</summary><ul><li>Press and Hold to cycle between listening modes/invoke digital assistant (invoking digital assistant needs a recent firmware)</li><li>Configure call controls</li><li>Personalized volume</li><li>Loud Sound Reduction (needs <a href="#vendorid-spoofing">VendorID spoofing</a>)</li><li>Microphone side</li><li>Pause media when falling asleep (needs a recent firmware)</li><li>Enable <code>Off listening mode</code> to switch to <code>Off</code></li></ul></details>                   | 🔴     | ✅       |
+| <details><summary>Other general configs</summary><ul><li>Press and Hold to cycle between listening modes/invoke digital assistant (invoking digital assistant needs a recent firmware)</li><li>Configure call controls</li><li>Personalized volume</li><li>Microphone side</li><li>Pause media when falling asleep (needs a recent firmware)</li><li>Enable <code>Off listening mode</code> to switch to <code>Off</code></li></ul></details>                   | 🔴     | ✅       |
 | [Head-tracked Spatial Audio](#spatial-audio)                | ❓     | ❓       |
-| [Heart Rate Monitoring](#heart-rate-monitoring)             | ⛔     | 🔴       |
+| [Heart Rate Monitoring](#heart-rate-monitoring-airpods-pro-3-and-later) | ⛔     | 🧪       |
 | [Find My](#find-my)                                         | ❓     | ❓       |
-| [High quality two-way audio](#high-quality-two-way-audio)   | 🔴     | 🔴       |
+| [High quality two-way audio](#high-quality-two-way-audio)   | 🔴     | 🧪       |
 
 | Symbol | Meaning                                                             |
 | ------ | ------------------------------------------------------------------- |
@@ -73,6 +73,15 @@ LibrePods allows you to use AirPods features that are exclusive to Apple devices
 | 🔴     | Not implemented yet; planned                                        |
 | ⛔     | Will not be implemented                                             |
 | ❓     | Unknown                                                             |
+| 🧪     | Experimental; not yet verified on hardware with this Android rewrite |
+
+¹ The Android rewrite's ATT reader and writer are unavailable. VendorID spoofing
+does not restore these settings. See [Android ATT access](android/PROTOCOL.md#android-att-access).
+
+Android features depend on the AirPods model and firmware. This fork has been
+tested on a Pixel 10 Pro XL; it is not restricted to Pixel devices. See the
+[Android instructions](android/README.md) for compatible Bluetooth stacks and
+the current rewrite's limitations.
 
 ## Find My
 
@@ -90,12 +99,19 @@ The app does not currently provide head tracking information to Android for the 
 Spatializing stereo sound is beyond this project's scope and will never be available. Many OEMs have an implementation of their own for this.
 
 ## Heart Rate Monitoring (AirPods Pro 3 and later)
-This is being worked upon, check the #⁠reverse-engineering channel on the LibrePods Discord server for more information. If it is ever implemented, it will most likely need root on Android.
+Heart rate reading, history, alerts and Health Connect export are implemented
+for supported AirPods. Sensors and head gestures have not been retested on
+hardware with this Android rewrite.
 
 ## High quality two-way audio
 On iOS/iPadOS, you can continue using A2DP while AirPods send the audio stream from its microphone over AACP. 
 
-Since this needs deeper integration with audio on Android, it will most likely need root.
+This Android fork includes experimental high-quality microphone recording and
+Shizuku microphone/cellular-call routing without root. Physical tests on the older
+fork do not validate this rewrite. Normal-quality media during cellular calls is
+still unresolved, and stereo AAC-ELD playback remains blocked because the encoder
+does not produce the required 480-sample configuration. See
+[experimental audio boundaries](android/PIXEL-REWRITE.md#experimental-audio-boundaries).
 
 # Installation
 
@@ -108,15 +124,27 @@ Turns out, if you change the VendorID in DID Profile to that of Apple, you get a
 
 You can do this on Linux by editing the DeviceID in `/etc/bluetooth/main.conf`. Add this line to the config file `DeviceID = bluetooth:004C:0000:0000`. For android you can enable the `act as Apple device` setting in the app's settings (shown only when Xposed is available and LibrePods module is enabled).
 
+On Android this hook still needs root/Xposed. Shizuku does not change the host's
+VendorID, and the rewrite's protected ATT settings remain unavailable.
+
 ## Multi-device Connectivity
 
 Upto two devices can be simultaneously connected to AirPods, for audio and control both. Seamless connection switching. The same notification shows up on Apple device when Android takes over the AirPods as if it were an Apple device ("Move to iPhone"). Android also shows a popup when the other device takes over.
 
+On this Android rewrite, Connect in the nearby island can request the selected
+pair's audio connection with authorized Shizuku. Opening the case alone does not
+take over audio. Simultaneous two-host playback has not been verified on the rewrite.
+
 ## Accessibility Settings and Hearing Aid
 
-Accessibility settings like customizing transparency mode (amplification, balance, tone, conversation boost, and ambient noise reduction), and loud sound reduction can be configured.
+On this Android rewrite, accessibility settings like press speed, press-and-hold
+duration and noise cancellation with a single AirPod can be configured.
 
-All hearing aid customizations can be done from Android (linux soon), including setting the audiogram result. The app doesn't provide a way to take a hearing test because it requires much more precision. It is much better to use an already available audiogram result. 
+The Android rewrite currently cannot read or write the protected ATT settings,
+so hearing aid fitting and enablement, custom transparency and loud sound
+reduction are unavailable. The app doesn't provide a way to take a hearing test
+because it requires much more precision. It is much better to use an already
+available audiogram result.
 
 # Protocol and Reverse Engineering
 
@@ -127,6 +155,9 @@ The dissector had not been used in LibrePods for most of the implementation; I h
 # Use of AI
 
 ## Android app
+
+The following describes the upstream Android app. This fork's rewrite changes
+also use AI assistance.
 
 These parts of the app were completely AI-generated: 
 - Head Gestures - all of it, including logic and the UI
@@ -231,7 +262,7 @@ A huge thank you to everyone supporting the project!
 - Of course, everyone who has contributed to the project in any way, including by testing, sharing feedback, or just showing interest!
 
 # Alternates for other platforms:
-- CAPod - A companion app for AirPods on Android. ([play store](https://play.google.com/store/apps/details?id=eu.darken.capod) | [source code](https://github.com/d4rken-org/capod)). Use this if you're using Android version 16 QPR3 or below and are not rooted.
+- CAPod - A companion app for AirPods on Android. ([play store](https://play.google.com/store/apps/details?id=eu.darken.capod) | [source code](https://github.com/d4rken-org/capod)). An alternative if your device's Bluetooth stack cannot run LibrePods without root.
 - MagicPods for Steam Deck ([website](https://magicpods.app/steamdeck/))
 - MagicPods - if you're looking for "LibrePods for Windows"  ([ms store](https://apps.microsoft.com/store/detail/9P6SKKFKSHKM) [installer](https://magicpods.app/installer/MagicPods.appinstaller) | [website](https://magicpods.app/))
 
