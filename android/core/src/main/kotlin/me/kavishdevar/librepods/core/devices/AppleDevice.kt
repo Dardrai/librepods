@@ -263,6 +263,10 @@ class AppleDevice(
     fun setControlCommand(identifier: ControlCommandIdentifier, value: Boolean): Boolean =
         aacp.sendControlCommand(identifier.value, value)
 
+    fun setListeningModeFromUi(mode: Int): Boolean = mode in 1..4 &&
+        aacp.sendControlCommand(ControlCommandIdentifier.LISTENING_MODE.value,
+            byteArrayOf(mode.toByte()), quietListeningMode = true)
+
     suspend fun setHearingAidEnabled(enabled: Boolean): Boolean = setHearingMode(HearingMode.HEARING_AID, enabled)
     suspend fun setMediaAssistEnabled(enabled: Boolean): Boolean = setHearingMode(HearingMode.MEDIA_ASSIST, enabled)
 

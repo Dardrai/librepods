@@ -109,7 +109,10 @@ fun AppleSettingsRoute(
         canRefreshSettings = connectionState == ConnectionState.CONNECTED &&
             !uiState.state.microphoneState.isActive && !uiState.state.recordingState.isRecording,
 
-        setControlCommandInt = { id, value -> viewModel.setControlCommand(id, value) },
+        setControlCommandInt = { id, value ->
+            if (id == ControlCommandIdentifier.LISTENING_MODE) viewModel.setListeningModeFromUi(value)
+            else viewModel.setControlCommand(id, value)
+        },
         setControlCommandBoolean = { id, value -> viewModel.setControlCommand(id, value) },
 //            setControlCommandByte = { id, value -> viewModel.setControlCommand(id, value) },
 //            setControlCommandValue = { id, value -> viewModel.setControlCommand(id, value) },

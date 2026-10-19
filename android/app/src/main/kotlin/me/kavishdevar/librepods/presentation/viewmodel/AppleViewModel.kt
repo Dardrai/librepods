@@ -207,6 +207,8 @@ class AppleViewModel(
     fun setControlCommand(identifier: ControlCommandIdentifier, value: Int): Boolean =
         device.setControlCommand(identifier, value)
 
+    fun setListeningModeFromUi(mode: Int): Boolean = device.setListeningModeFromUi(mode)
+
     fun setControlCommand(identifier: ControlCommandIdentifier, value: Boolean): Boolean =
         device.setControlCommand(identifier, value)
 

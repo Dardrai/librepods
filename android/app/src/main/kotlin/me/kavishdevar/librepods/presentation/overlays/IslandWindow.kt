@@ -328,7 +328,7 @@ class IslandWindow(
             showOffListeningMode = state.effectiveAllowOff(device.settings.value, device.metadata.value.modelNumber) == true,
             noiseControlModeValue = (state.requestedControls[ControlCommandIdentifier.LISTENING_MODE]
                 ?: state.controlStates[ControlCommandIdentifier.LISTENING_MODE])?.firstOrNull()?.toInt() ?: 3,
-            onNoiseControlModeChanged = { device.setControlCommand(ControlCommandIdentifier.LISTENING_MODE, it) },
+            onNoiseControlModeChanged = { device.setListeningModeFromUi(it) },
             adaptiveStrength = state.controlStates[ControlCommandIdentifier.AUTO_ANC_STRENGTH]?.firstOrNull()?.toInt() ?: 50,
             requestedAdaptiveStrength = state.requestedControls[ControlCommandIdentifier.AUTO_ANC_STRENGTH]?.firstOrNull()?.toInt(),
             onAdaptiveStrengthChanged = { device.setControlCommand(ControlCommandIdentifier.AUTO_ANC_STRENGTH, it) },

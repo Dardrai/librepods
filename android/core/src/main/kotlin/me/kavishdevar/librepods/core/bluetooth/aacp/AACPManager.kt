@@ -20,8 +20,10 @@ package me.kavishdevar.librepods.core.bluetooth.aacp
 
 import android.bluetooth.BluetoothSocket
 import android.os.ParcelUuid
+import android.os.SystemClock
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -60,6 +62,7 @@ import me.kavishdevar.librepods.core.devices.AirPodsSpecs
 import me.kavishdevar.librepods.core.devices.BaseCapability
 import me.kavishdevar.librepods.core.devices.BatteryStatus
 import me.kavishdevar.librepods.core.devices.HearingModes
+import me.kavishdevar.librepods.core.devices.QuietListeningModeReport
 import me.kavishdevar.librepods.core.devices.cachedControlStates
 import me.kavishdevar.librepods.core.devices.withControlReport
 import me.kavishdevar.librepods.core.devices.withControlRequest
@@ -89,6 +92,13 @@ class AACPManager(private val device: AppleDevice,
     private val connectionEpoch = AtomicLong()
     private var hostClockEpoch: Long? = null
     private val controlTimeouts = ConcurrentHashMap<ControlCommandIdentifier, Job>()
+    private class ListeningModeWrite(val value: ByteArray, val quiet: Boolean) {
+        val written = CompletableDeferred<Boolean>()
+        @Volatile var order = 0L
+        @Volatile var expiresAt = Long.MAX_VALUE
+    }
+    private val listeningModeWrites = mutableListOf<ListeningModeWrite>()
+    private val listeningModeWriteOrder = AtomicLong()
     private var eqTimeout: Job? = null
     @Volatile var microphonePacketCallback: ((BluetoothSocket, ByteArray) -> Unit)? = null
     private var microphoneRequested: BluetoothSocket? = null
@@ -99,9 +109,10 @@ class AACPManager(private val device: AppleDevice,
         socket === expected && pendingConnect?.socket !== expected && expected.isConnected
 
     /** Captured-transport writes never enter packet history or raw logs. */
-    fun sendAudioPacket(expected: BluetoothSocket, packet: ByteArray): Boolean = synchronized(expected) {
+    fun sendAudioPacket(expected: BluetoothSocket, packet: ByteArray, beforeWrite: (() -> Unit)? = null): Boolean = synchronized(expected) {
         if (!ownsAudioSocket(expected)) return@synchronized false
         try {
+            beforeWrite?.invoke()
             expected.outputStream.write(packet)
             expected.outputStream.flush()
             ownsAudioSocket(expected)
@@ -473,10 +484,27 @@ class AACPManager(private val device: AppleDevice,
                 Log.i(TAG, "Received control command: ${controlCommand.identifier}")
 
                 publishForTransport(this, sourceSocket, ::captureAudioSocket) {
+                    val modeWrite = if (controlCommand.identifier == ControlCommandIdentifier.LISTENING_MODE) {
+                        val value = normalizedControl(controlCommand.value)
+                        listeningModeWrites.removeAll { it.expiresAt <= SystemClock.elapsedRealtime() }
+                        val request = listeningModeWrites.filter { it.order > 0 && it.value.contentEquals(value) }
+                            .minByOrNull { it.order }
+                        // A fresh independent report retires old intentions; only this exact echo stays quiet.
+                        listeningModeWrites.removeAll { it.order > 0 && (request == null || it.order <= request.order) }
+                        request
+                    } else null
                     device.updateState {
                         it.withControlReport(controlCommand.identifier, controlCommand.value).let { state ->
-                            if (controlCommand.identifier == ControlCommandIdentifier.OWNS_CONNECTION)
-                                state.copy(owns = controlCommand.value[0] == 0x01.toByte()) else state
+                            when (controlCommand.identifier) {
+                                ControlCommandIdentifier.OWNS_CONNECTION -> state.copy(owns = controlCommand.value[0] == 0x01.toByte())
+                                ControlCommandIdentifier.LISTENING_MODE -> {
+                                    val value = state.controlStates[controlCommand.identifier]
+                                    state.copy(quietListeningModeReport = modeWrite?.takeIf { it.quiet }?.let {
+                                        QuietListeningModeReport(requireNotNull(value), it.written)
+                                    })
+                                }
+                                else -> state
+                            }
                         }.let { it.copy(aacpPackets = it.aacpPackets + controlCommandPacket,
                             hearingModes = it.hearingModes.withReport(packet)) }
                     }
@@ -726,7 +754,7 @@ class AACPManager(private val device: AppleDevice,
         }
     }
 
-    fun sendControlCommand(identifier: Byte, value: ByteArray): Boolean {
+    fun sendControlCommand(identifier: Byte, value: ByteArray, quietListeningMode: Boolean = false): Boolean {
         if (value.isEmpty() || value.size > 4) return false
         val controlCommand = ControlCommand(ControlCommandIdentifier.fromByte(identifier) ?: return false, value)
         // Hearing modes share a gate and need a current report/fitting transaction.
@@ -737,13 +765,36 @@ class AACPManager(private val device: AppleDevice,
 
         val originalSocket = captureAudioSocket() ?: return false
         val previousReport = device.state.value.controlStates[controlCommand.identifier]
-        if (!sendAudioPacket(originalSocket, packet.rawPacket)) return false
+        val modeWrite = if (controlCommand.identifier == ControlCommandIdentifier.LISTENING_MODE)
+            ListeningModeWrite(normalizedControl(value), quietListeningMode) else null
+        if (modeWrite != null && !publishForTransport(this, originalSocket, ::captureAudioSocket) {
+                listeningModeWrites += modeWrite
+                listeningModeWrites.removeAll { it.expiresAt <= SystemClock.elapsedRealtime() }
+                // shortcut: retain 16 unacknowledged crossings; raise only if real transports exceed this backlog.
+                if (listeningModeWrites.size > 16) listeningModeWrites.removeAt(0)
+            }) return false
+        val written = sendAudioPacket(originalSocket, packet.rawPacket) {
+            modeWrite?.apply {
+                expiresAt = SystemClock.elapsedRealtime() + 10_000
+                order = listeningModeWriteOrder.incrementAndGet()
+            }
+        }
+        modeWrite?.written?.complete(written)
+        if (!written) {
+            publishForTransport(this, originalSocket, ::captureAudioSocket) { listeningModeWrites.remove(modeWrite) }
+            return false
+        }
         return publishForTransport(this, originalSocket, ::captureAudioSocket) {
             device.updateState {
                 val requested = it.withControlRequest(controlCommand.identifier, value, previousReport)
                 if (controlCommand.identifier == ControlCommandIdentifier.LISTENING_MODE)
                     requested.copy(lastListeningModeRequest = normalizedControl(value)) else requested
             }
+            // A write of the already reported mode cannot quiet a later physical return to that mode.
+            if (modeWrite != null && device.state.value.controlStates[controlCommand.identifier] === previousReport &&
+                modeWrite.value.contentEquals(previousReport) &&
+                listeningModeWrites.none { it !== modeWrite && it.order in 1 until modeWrite.order })
+                listeningModeWrites.remove(modeWrite)
             if (controlCommand.identifier == ControlCommandIdentifier.ALLOW_OFF_OPTION)
                 device.rememberAllowOffRequest(value, previousReport)
             controlTimeouts.remove(controlCommand.identifier)?.cancel()
@@ -753,12 +804,15 @@ class AACPManager(private val device: AppleDevice,
                 controlTimeouts[controlCommand.identifier] = CoroutineScope(Dispatchers.Default).launch {
                     delay(10.seconds)
                     publishForTransport(this@AACPManager, originalSocket, ::captureAudioSocket) {
+                        val expires = device.state.value.requestedControls[controlCommand.identifier] === request
                         device.updateState { state ->
                             if (state.requestedControls[controlCommand.identifier] !== request) state
                             else state.copy(requestedControls = state.requestedControls - controlCommand.identifier,
                                 lastListeningModeRequest = if (controlCommand.identifier == ControlCommandIdentifier.LISTENING_MODE)
                                     null else state.lastListeningModeRequest)
                         }
+                        if (expires && controlCommand.identifier == ControlCommandIdentifier.LISTENING_MODE)
+                            listeningModeWrites.removeAll { it.order > 0 && it.order <= requireNotNull(modeWrite).order }
                     }
                 }
             }
@@ -1154,6 +1208,7 @@ class AACPManager(private val device: AppleDevice,
             connectionScope = null
             controlTimeouts.values.forEach { it.cancel() }
             controlTimeouts.clear()
+            listeningModeWrites.clear()
             eqTimeout?.cancel()
             eqTimeout = null
             device.updateState {
@@ -1171,6 +1226,7 @@ class AACPManager(private val device: AppleDevice,
                 }
                 it.copy(battery = retainedBatteries, connectedDevices = emptyList(), capabilities = emptySet(),
                     conversationAwarenessState = 0, conversationAwarenessSequence = 0, lastListeningModeRequest = null,
+                    quietListeningModeReport = null,
                     controlStates = if (preserveControlState)
                         it.cachedControlStates(device.settings.value, device.metadata.value.modelNumber) else emptyMap(),
                     requestedControls = emptyMap(), requestedCustomEq = null, aacpPackets = emptyList(),

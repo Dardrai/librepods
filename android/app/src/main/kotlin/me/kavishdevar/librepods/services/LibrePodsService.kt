@@ -1472,6 +1472,9 @@ class LibrePodsService: Service() {
             // Temporary Transparency can precede its speech event; only presentation waits for correlation.
             if (conversationEnabled && !requestedMode && modeReport?.singleOrNull() == 3.toByte() &&
                 previousModeReport?.singleOrNull() != 3.toByte()) delay(150)
+            val quietReport = device.state.value.quietListeningModeReport
+            val quietRequest = quietReport?.value === modeReport && quietReport != null &&
+                withTimeoutOrNull(150) { quietReport.written.await() } != false
             val currentModeState = device.state.value
             val conversationAllowed = (currentModeState.requestedControls[conversationId]
                 ?: currentModeState.controlStates[conversationId])?.singleOrNull() != 2.toByte()
@@ -1480,7 +1483,7 @@ class LibrePodsService: Service() {
                 currentReport = currentModeState.controlStates[modeId],
                 conversationStage = if (conversationAllowed) currentModeState.conversationAwarenessState else 0,
                 conversationSequence = if (conversationAllowed) currentModeState.conversationAwarenessSequence else 0,
-                requestedMode = currentModeState.lastListeningModeRequest)?.let { mode ->
+                requestedMode = currentModeState.lastListeningModeRequest, quietRequest = quietRequest)?.let { mode ->
                 val owner = modeTransport ?: return@let
                 withContext(Dispatchers.Main.immediate) {
                     if (!destroying && devices.value[device.macAddress] === device &&
@@ -1736,11 +1739,7 @@ class LibrePodsService: Service() {
                         showOffListeningMode = state.effectiveAllowOff(device.settings.value, metadata.modelNumber) == true,
                         noiseControlModeValue = (state.requestedControls[ControlCommandIdentifier.LISTENING_MODE]
                             ?: state.controlStates[ControlCommandIdentifier.LISTENING_MODE])?.firstOrNull()?.toInt() ?: 3,
-                        onNoiseControlModeChanged = {
-                            device.setControlCommand(
-                                ControlCommandIdentifier.LISTENING_MODE, it
-                            )
-                        },
+                        onNoiseControlModeChanged = { device.setListeningModeFromUi(it) },
                         adaptiveStrength = state.controlStates[ControlCommandIdentifier.AUTO_ANC_STRENGTH]?.getOrNull(0)?.toInt() ?: 50,
                         requestedAdaptiveStrength = state.requestedControls[ControlCommandIdentifier.AUTO_ANC_STRENGTH]?.firstOrNull()?.toInt(),
                         onAdaptiveStrengthChanged = {

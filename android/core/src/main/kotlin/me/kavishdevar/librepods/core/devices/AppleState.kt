@@ -1,5 +1,6 @@
 package me.kavishdevar.librepods.core.devices
 
+import kotlinx.coroutines.Deferred
 import me.kavishdevar.librepods.core.bluetooth.MacAddress
 import me.kavishdevar.librepods.core.bluetooth.aacp.packet.AACPPacket
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.AudioSource
@@ -27,6 +28,7 @@ data class AppleState(
     // Live transport markers survive StateFlow conflation without being cached as device settings.
     val conversationAwarenessSequence: Long = 0,
     val lastListeningModeRequest: ByteArray? = null,
+    val quietListeningModeReport: QuietListeningModeReport? = null,
 
     val capabilities: Set<CapabilityEntry> = emptySet(),
 
@@ -61,3 +63,6 @@ data class AppleState(
 
     val aacpPackets: List<AACPPacket> = emptyList(),
 ): DeviceState
+
+/** The exact received report and write result survive conflated UI request/echo emissions. */
+data class QuietListeningModeReport(val value: ByteArray, val written: Deferred<Boolean>)

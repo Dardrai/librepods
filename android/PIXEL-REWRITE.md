@@ -24,7 +24,7 @@ pair, local behavior choices and correctly owner-bound BLE keys once. Existing
 rewrite database rows are preserved. Unconfirmed device control values are not
 migrated as device reports. The Android Bluetooth bond stays with Android.
 
-The current fork version is `2.0.0-alpha.1-pixel68`, code `200000153`.
+The current fork version is `2.0.0-alpha.1-pixel69`, code `200000154`.
 
 Apple is the default design system for new or unset preferences, including the
 initial loading frame. Saved theme choices are preserved, and light/dark mode
@@ -32,6 +32,9 @@ continues to follow the existing night-theme preference.
 
 The listening-mode slider includes the first movement beyond Android's drag
 threshold, so short Adaptive-strength drags commit their changed position.
+Mode changes requested through the on-screen listening controls update those
+controls without opening another island notice. Independent changes made on
+the AirPods still announce their mode.
 Volume recovery receives route changes even while a check is running. A handoff
 clears the old fault timer and pending restoration, then requires a fresh stable
 fault after returning; healthy capability remains tied to the connected owner.
@@ -461,9 +464,10 @@ once. The commented-out predecessor service has been removed.
   The native window retains enough width for the outgoing content until the
   matching transition finishes. Cached battery ages use coarse units and share
   one last-seen label when all components match; their stored ages stay separate.
-- Confirmed listening-mode changes display their localized mode name. Cached
-  values, pending requests, first reports and duplicate reports stay silent;
-  each connection establishes a fresh notification baseline.
+- Confirmed listening-mode changes made on the AirPods display their localized
+  mode name. Confirmations of on-screen slider choices, cached values, pending
+  requests, first reports and duplicate reports stay silent; each connection
+  establishes a fresh notification baseline.
 - Adaptive strength keeps the requested slider position separate from reported
   controls because Pro 3 can accept the write without echoing it. A subsequent
   valid strength report remains authoritative, including rounded values. Merely

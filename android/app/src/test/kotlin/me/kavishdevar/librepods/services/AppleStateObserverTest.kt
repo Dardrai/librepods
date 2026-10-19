@@ -11,6 +11,7 @@ import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.view.KeyEvent
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
@@ -306,6 +307,56 @@ class AppleStateObserverTest {
         await { calls(notifications, "notify") == 4 }
         assertTrue(states.value.requestedControls.isEmpty())
         assertEquals("A retained successful local request must announce despite active speech", 1, calls(island, "show"))
+    }
+
+    @Test fun coalescedUiEchoesStayQuietAfterReleaseAndPhysicalChangesStillAnnounce() = runBlocking {
+        val mode = ControlCommandIdentifier.LISTENING_MODE
+        val socket = mock(BluetoothSocket::class.java)
+        `when`(device.aacp.captureAudioSocket()).thenReturn(socket)
+        `when`(device.aacp.ownsAudioSocket(socket)).thenReturn(true)
+        settings.value = settings.value.copy(showIslandPopup = true)
+        ShadowSettings.setCanDrawOverlays(true)
+        states.value = states.value.copy(controlStates = mapOf(mode to byteArrayOf(2)))
+        observe()
+        states.value = states.value.copy(controlStates = mapOf(mode to byteArrayOf(2)))
+        await { calls(notifications, "notify") == 1 }
+
+        val echo = byteArrayOf(4)
+        val quiet = QuietListeningModeReport(echo, CompletableDeferred(true))
+        // The successful UI request, release and ACK coalesce; no picker/gesture suppression remains.
+        states.value = states.value.copy(controlStates = mapOf(mode to echo),
+            requestedControls = emptyMap(), lastListeningModeRequest = byteArrayOf(4), quietListeningModeReport = quiet,
+            battery = setOf(Battery(BatteryComponent.LEFT, 81, BatteryStatus.NOT_CHARGING)))
+        await { calls(notifications, "notify") == 2 }
+        assertEquals(0, calls(island, "show"))
+        assertTrue("A visible island must still receive the updated controls", calls(island, "updateAdaptiveStrength") >= 2)
+        for ((index, physical) in listOf(2, 4).withIndex()) {
+            // Even a retained old marker cannot classify a fresh same-value physical report as quiet.
+            states.value = states.value.copy(controlStates = mapOf(mode to byteArrayOf(physical.toByte())))
+            await { calls(notifications, "notify") == index + 3 }
+            assertEquals(index + 1, calls(island, "show"))
+        }
+    }
+
+    @Test fun aSlowUiWriteStaysQuietWithoutBlockingObservationAndAFailedWriteCannotSilenceTheNextReport() = runBlocking {
+        val mode = ControlCommandIdentifier.LISTENING_MODE
+        val socket = mock(BluetoothSocket::class.java)
+        `when`(device.aacp.captureAudioSocket()).thenReturn(socket)
+        `when`(device.aacp.ownsAudioSocket(socket)).thenReturn(true)
+        settings.value = settings.value.copy(showIslandPopup = true)
+        ShadowSettings.setCanDrawOverlays(true)
+        states.value = states.value.copy(controlStates = mapOf(mode to byteArrayOf(2)))
+        observe()
+        states.value = states.value.copy(controlStates = mapOf(mode to byteArrayOf(2)))
+        await { calls(notifications, "notify") == 1 }
+        for ((index, completion) in listOf(CompletableDeferred<Boolean>(), CompletableDeferred(false)).withIndex()) {
+            val report = byteArrayOf(if (index == 0) 4 else 3)
+            states.value = states.value.copy(controlStates = mapOf(mode to report),
+                quietListeningModeReport = QuietListeningModeReport(report, completion))
+            await { calls(notifications, "notify") == index + 2 }
+            assertEquals("A slow tagged UI echo stays quiet, while a known failed write does not", index, calls(island, "show"))
+            completion.complete(false)
+        }
     }
 
     private suspend fun assertEarDetectionPause(initial: AppleState, saved: Boolean, pauses: Boolean) {

@@ -23,7 +23,7 @@ internal class IslandListeningMode(private val nowMillis: () -> Long = SystemClo
     fun observeReport(transport: Any?, previousReport: ByteArray?, report: ByteArray?,
                       currentReport: ByteArray? = report, conversationStage: Int = 0,
                       conversationSequence: Long = 0,
-                      requestedMode: ByteArray? = null): Int? {
+                      requestedMode: ByteArray? = null, quietRequest: Boolean = false): Int? {
         if (owner !== transport) { reset(); owner = transport }
         // Cached values and requested-only state changes do not constitute received reports.
         if (transport == null || report !== currentReport) return null
@@ -48,9 +48,11 @@ internal class IslandListeningMode(private val nowMillis: () -> Long = SystemClo
         val mode = report?.singleOrNull()?.toInt()?.and(255)?.takeIf { it in 1..4 } ?: return null
         val manualRequest = requestedMode != null && requestedMode !== consumedRequest &&
             requestedMode.singleOrNull()?.toInt()?.and(255) == mode
-        if (manualRequest) { consumedRequest = requestedMode; restoreMode = null }
+        if (manualRequest) consumedRequest = requestedMode
+        if (manualRequest || (quietRequest && report !== previousReport)) restoreMode = null
         if (report === previousReport) return null
         if (!observe(mode)) return null
+        if (quietRequest) return null
         if (!manualRequest) {
             if (mode == restoreMode) { restoreMode = null; return null }
             if ((speaking || restoreMode != null) && mode == 3) return null

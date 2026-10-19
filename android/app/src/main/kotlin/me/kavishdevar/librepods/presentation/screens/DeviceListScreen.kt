@@ -498,10 +498,7 @@ fun DeviceListScreen(
                                                             ?: deviceState.controlStates[ControlCommandIdentifier.LISTENING_MODE])?.firstOrNull()?.toInt() ?: 2,
                                                         onNoiseControlModeChanged = { newMode ->
                                                             CoroutineScope(Dispatchers.IO).launch {
-                                                                (device as AppleDevice).setControlCommand(
-                                                                    ControlCommandIdentifier.LISTENING_MODE,
-                                                                    newMode.toByte()
-                                                                )
+                                                                (device as AppleDevice).setListeningModeFromUi(newMode)
                                                             }
                                                         },
                                                         adaptiveStrength = deviceState.controlStates[ControlCommandIdentifier.AUTO_ANC_STRENGTH]?.get(0)?.toInt() ?: 50,

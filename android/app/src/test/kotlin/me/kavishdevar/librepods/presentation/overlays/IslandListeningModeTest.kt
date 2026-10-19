@@ -16,6 +16,32 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class IslandListeningModeTest {
+    @Test fun aQuietUiEchoAdvancesTheBaselineAndRetiresAutomaticRestorationWithoutAnnouncing() {
+        val modes = IslandListeningMode(nowMillis = { 0L }); val socket = Any()
+        val baseline = byteArrayOf(2); val quiet = byteArrayOf(3)
+        assertNull(modes.observeReport(socket, null, baseline))
+        assertNull(modes.observeReport(socket, baseline, quiet, conversationStage = 1,
+            conversationSequence = 1, requestedMode = quiet, quietRequest = true))
+        val physical = byteArrayOf(2)
+        assertEquals(2, modes.observeReport(socket, quiet, physical, conversationStage = 4,
+            conversationSequence = 1, requestedMode = quiet))
+        assertEquals(3, modes.observeReport(socket, physical, byteArrayOf(3), conversationStage = 4,
+            conversationSequence = 1, requestedMode = quiet))
+    }
+
+    @Test fun aRetainedQuietEchoCannotEraseTheRestorationFromALaterConversation() {
+        val modes = IslandListeningMode(nowMillis = { 0L }); val socket = Any()
+        val baseline = byteArrayOf(2); val quiet = byteArrayOf(4); val automatic = byteArrayOf(3)
+        assertNull(modes.observeReport(socket, null, baseline))
+        assertNull(modes.observeReport(socket, baseline, quiet, requestedMode = quiet, quietRequest = true))
+        assertNull(modes.observeReport(socket, quiet, quiet, conversationStage = 1,
+            conversationSequence = 1, requestedMode = quiet, quietRequest = true))
+        assertNull(modes.observeReport(socket, quiet, automatic, conversationStage = 2,
+            conversationSequence = 1, requestedMode = quiet))
+        assertNull(modes.observeReport(socket, automatic, byteArrayOf(4), conversationStage = 4,
+            conversationSequence = 1, requestedMode = quiet))
+    }
+
     @Test fun paddedWireReportsReachTheConfirmedModeBaseline() {
         val modes = IslandListeningMode(); val socket = Any()
         var previous: ByteArray? = null

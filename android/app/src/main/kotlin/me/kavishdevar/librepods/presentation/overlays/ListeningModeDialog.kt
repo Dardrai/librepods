@@ -186,7 +186,8 @@ class ListeningModeDialog(context: Context, private val address: MacAddress) :
                 ControlCommandIdentifier.AUTO_ANC_STRENGTH -> !state.adaptive || state.mode != 4 || value !in 0..100
                 else -> true
             }) return false
-        return device.setControlCommand(identifier, value).also {
+        return (if (identifier == ControlCommandIdentifier.LISTENING_MODE) device.setListeningModeFromUi(value)
+            else device.setControlCommand(identifier, value)).also {
             commandFailed = !it
             if (!it) Toast.makeText(context, R.string.listening_mode_failed, Toast.LENGTH_SHORT).show()
         }

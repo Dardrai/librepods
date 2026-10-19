@@ -31,6 +31,139 @@ import org.robolectric.shadow.api.Shadow
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [37], application = Application::class, shadows = [ProtocolReportSocketShadow::class])
 class AacpConversationEventsTest {
+    @Test fun delayedSliderCrossingEchoesStayQuietAndLaterPhysicalModesHaveFreshOrigins() = withTransport { device, socket ->
+        val id = ControlCommandIdentifier.LISTENING_MODE
+        device.aacp.processPacket(modeReport(2), socket)
+        assertTrue(device.setListeningModeFromUi(3))
+        assertTrue(device.setListeningModeFromUi(4))
+        for (mode in listOf(3, 4)) {
+            device.aacp.processPacket(modeReport(mode), socket)
+            val quiet = requireNotNull(device.state.value.quietListeningModeReport)
+            assertSame(device.state.value.controlStates[id], quiet.value)
+            assertTrue(runBlocking { quiet.written.await() })
+            device.aacp.processPacket(report(4), socket)
+            assertSame("Unrelated emissions cannot discard the coalesced echo's origin", quiet,
+                device.state.value.quietListeningModeReport)
+        }
+        assertFalse(id in device.state.value.requestedControls)
+        for (physical in listOf(2, 3, 4)) {
+            device.aacp.processPacket(modeReport(physical), socket)
+            assertNull("A later physical report must not inherit a completed slider's origin",
+                device.state.value.quietListeningModeReport)
+        }
+    }
+
+    @Test fun concurrentlyDispatchedUiWritesClassifyEchoesInActualWireOrder() = withTransport { device, socket ->
+        device.aacp.processPacket(modeReport(2), socket)
+        val results = java.util.Collections.synchronizedList(mutableListOf<Boolean>())
+        val writers = listOf(3, 4).map { mode -> Thread { results += device.setListeningModeFromUi(mode) } }
+        val pending = AACPManager::class.java.getDeclaredField("listeningModeWrites").apply { isAccessible = true }
+        // Both requests register before either reaches the occupied transport's write lock.
+        synchronized(socket) {
+            writers.forEach { it.start() }
+            val deadline = System.nanoTime() + 2_000_000_000L
+            while (synchronized(device.aacp) { (pending.get(device.aacp) as List<*>).size } < 2 &&
+                System.nanoTime() < deadline) Thread.yield()
+        }
+        writers.forEach { it.join(2_000); assertFalse("Each writer must finish", it.isAlive) }
+        assertEquals(listOf(true, true), results)
+        val bytes = Shadow.extract<ProtocolReportSocketShadow>(socket).output.bytes.toByteArray()
+        assertEquals(22, bytes.size)
+        for (packet in bytes.toList().chunked(11)) {
+            val mode = packet[7].toInt()
+            device.aacp.processPacket(modeReport(mode), socket)
+            assertTrue(runBlocking { requireNotNull(device.state.value.quietListeningModeReport).written.await() })
+        }
+    }
+
+    @Test fun aSameModeUiWriteDoesNotReserveSilenceForAFuturePhysicalReturn() = withTransport { device, socket ->
+        device.aacp.processPacket(modeReport(3), socket)
+        assertTrue(device.setListeningModeFromUi(3))
+        assertTrue(device.state.value.requestedControls.isEmpty())
+        device.aacp.processPacket(modeReport(2), socket)
+        device.aacp.processPacket(modeReport(3), socket)
+        assertNull(device.state.value.quietListeningModeReport)
+    }
+
+    @Test fun returningTheSliderToItsBaselineBeforeAnyEchoKeepsBothDelayedReportsQuiet() = withTransport { device, socket ->
+        device.aacp.processPacket(modeReport(2), socket)
+        assertTrue(device.setListeningModeFromUi(3))
+        assertTrue(device.setListeningModeFromUi(2))
+        for (mode in listOf(3, 2)) {
+            device.aacp.processPacket(modeReport(mode), socket)
+            assertTrue(runBlocking { requireNotNull(device.state.value.quietListeningModeReport).written.await() })
+        }
+        device.aacp.processPacket(modeReport(3), socket)
+        assertNull(device.state.value.quietListeningModeReport)
+    }
+
+    @Test fun aSliderReturnWithoutAPendingControlEntryStillExpiresItsUnacknowledgedOrigins() = withTransport { device, socket ->
+        device.aacp.processPacket(modeReport(2), socket)
+        assertTrue(device.setListeningModeFromUi(3))
+        assertTrue(device.setListeningModeFromUi(2))
+        assertTrue(device.state.value.requestedControls.isEmpty())
+        org.robolectric.shadows.ShadowSystemClock.advanceBy(java.time.Duration.ofSeconds(11))
+        device.aacp.processPacket(modeReport(3), socket)
+        assertNull(device.state.value.quietListeningModeReport)
+        device.aacp.processPacket(modeReport(2), socket)
+        assertNull(device.state.value.quietListeningModeReport)
+    }
+
+    @Test fun anIndependentReportOrExternalCommandRetiresUnacknowledgedUiOrigins() = withTransport { device, socket ->
+        device.aacp.processPacket(modeReport(2), socket)
+        assertTrue(device.setListeningModeFromUi(3))
+        device.aacp.processPacket(modeReport(4), socket)
+        device.aacp.processPacket(modeReport(3), socket)
+        assertNull(device.state.value.quietListeningModeReport)
+        assertTrue(device.setListeningModeFromUi(2))
+        assertTrue(device.setControlCommand(ControlCommandIdentifier.LISTENING_MODE, 4))
+        device.aacp.processPacket(modeReport(4), socket)
+        device.aacp.processPacket(modeReport(2), socket)
+        assertNull(device.state.value.quietListeningModeReport)
+    }
+
+    @Test fun anEchoDuringTheUiWriteRemembersItsEventualSuccessOrFailure() = withTransport { device, socket ->
+        val output = Shadow.extract<ProtocolReportSocketShadow>(socket).output
+        for (success in listOf(true, false)) {
+            device.aacp.processPacket(modeReport(2), socket)
+            output.beforeWrite = {
+                device.aacp.processPacket(modeReport(3), socket)
+                val quiet = requireNotNull(device.state.value.quietListeningModeReport)
+                assertFalse("Publication must not claim a still-running write succeeded", quiet.written.isCompleted)
+                if (!success) throw java.io.IOException("Write failed after receiving a separate report")
+            }
+            assertEquals(success, device.setListeningModeFromUi(3))
+            val quiet = requireNotNull(device.state.value.quietListeningModeReport)
+            assertEquals(success, runBlocking { quiet.written.await() })
+            device.aacp.processPacket(modeReport(2), socket)
+            device.aacp.processPacket(modeReport(3), socket)
+            assertNull("Neither completed nor failed writes may quiet a later independent report",
+                device.state.value.quietListeningModeReport)
+        }
+    }
+
+    @Test fun failedQuietWritesNeverTagLaterReports() = withTransport { device, socket ->
+        val output = Shadow.extract<ProtocolReportSocketShadow>(socket).output
+        output.failWrites = true
+        assertFalse(device.setListeningModeFromUi(3))
+        output.failWrites = false
+        device.aacp.processPacket(modeReport(3), socket)
+        assertNull(device.state.value.quietListeningModeReport)
+    }
+
+    @Test fun retiringTheTransportDiscardsQuietOriginsBeforeItsReplacementReports() = withTransport { device, original ->
+        assertTrue(device.setListeningModeFromUi(3))
+        val replacement = socket()
+        try {
+            assertTrue(device.aacp.disconnect(original))
+            bind(device.aacp, replacement)
+            device.aacp.processPacket(modeReport(3), original)
+            assertNull(device.state.value.quietListeningModeReport)
+            device.aacp.processPacket(modeReport(3), replacement)
+            assertNull(device.state.value.quietListeningModeReport)
+        } finally { device.aacp.disconnect(replacement); replacement.close() }
+    }
+
     @Test fun aBlockedSubscriberReceivesEveryBurstAndRepeatedStageInOrder() = withTransport { device, socket ->
         val subscriber = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
         val resume = CompletableDeferred<Unit>()
@@ -162,7 +295,7 @@ class AacpConversationEventsTest {
 
     @Test fun anUnacknowledgedModeWriteExpiresItsMarkerWithThePendingRequest() = withTransport { device, socket ->
         val id = ControlCommandIdentifier.LISTENING_MODE
-        assertTrue(device.aacp.sendControlCommand(id.value, byteArrayOf(3)))
+        assertTrue(device.setListeningModeFromUi(3))
         assertArrayEquals(byteArrayOf(3), device.state.value.requestedControls[id])
         assertArrayEquals(byteArrayOf(3), device.state.value.lastListeningModeRequest)
         @Suppress("UNCHECKED_CAST")
@@ -178,6 +311,8 @@ class AacpConversationEventsTest {
         assertArrayEquals(byteArrayOf(3), device.state.value.controlStates[id])
         assertFalse(id in device.state.value.requestedControls)
         assertNull("Later conversation activity cannot revive an expired request marker", device.state.value.lastListeningModeRequest)
+        assertNull("An expired quiet write cannot silence its mode when a later physical report arrives",
+            device.state.value.quietListeningModeReport)
     }
 
     @Test fun failedModeWritesCannotCreateOrReplaceASuccessfulRequestMarker() = withTransport { device, socket ->
