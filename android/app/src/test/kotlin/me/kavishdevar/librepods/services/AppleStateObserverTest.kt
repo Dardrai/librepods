@@ -139,6 +139,27 @@ class AppleStateObserverTest {
         verify(notifications, never()).notify(eq(999), any(Notification::class.java))
     }
 
+    @Test fun savedDisabledEarDetectionWithoutAReportDoesNotPauseWhenOneBudIsRemoved() = runBlocking {
+        assertEarDetectionPause(AppleState(componentState = full), saved = false, pauses = false)
+    }
+
+    @Test fun aDisabledEarDetectionReportOverridesAnEnabledSavedChoice() = runBlocking {
+        assertEarDetectionPause(AppleState(componentState = full, controlStates = mapOf(
+            ControlCommandIdentifier.EAR_DETECTION_CONFIG to byteArrayOf(2))), saved = true, pauses = false)
+    }
+
+    @Test fun aPendingDisabledChoiceStopsPausingBeforeItsEcho() = runBlocking {
+        val id = ControlCommandIdentifier.EAR_DETECTION_CONFIG
+        assertEarDetectionPause(AppleState(componentState = full, controlStates = mapOf(id to byteArrayOf(1)),
+            requestedControls = mapOf(id to byteArrayOf(2))), saved = true, pauses = false)
+    }
+
+    @Test fun aPendingEnabledChoiceCanPauseBeforeItsEcho() = runBlocking {
+        val id = ControlCommandIdentifier.EAR_DETECTION_CONFIG
+        assertEarDetectionPause(AppleState(componentState = full, controlStates = mapOf(id to byteArrayOf(2)),
+            requestedControls = mapOf(id to byteArrayOf(1))), saved = false, pauses = true)
+    }
+
     @Test fun disablingAlertsAndStoppingMeasurementCancelWithoutAnotherSample() = runBlocking {
         states.value = states.value.copy(currentHeartRate = sample, hrmState = BuddyState.ACTIVE)
         settings.value = settings.value.copy(hrmAlertEnabled = true)
@@ -285,6 +306,18 @@ class AppleStateObserverTest {
         await { calls(notifications, "notify") == 4 }
         assertTrue(states.value.requestedControls.isEmpty())
         assertEquals("A retained successful local request must announce despite active speech", 1, calls(island, "show"))
+    }
+
+    private suspend fun assertEarDetectionPause(initial: AppleState, saved: Boolean, pauses: Boolean) {
+        states.value = initial
+        settings.value = settings.value.copy(earDetectionEnabled = saved)
+        observe()
+        states.value = initial.copy(componentState = full.map {
+            if (it.component == DeviceComponent.RIGHT) it.copy(status = ComponentStatus.OUT_OF_EAR) else it
+        }.toSet())
+        await { calls(notifications, "notify") > 0 }
+        assertEquals(if (pauses) 2 else 0, calls(audio, "dispatchMediaKeyEvent"))
+        assertEquals(pauses, MediaController.iPausedTheMedia)
     }
 
     private suspend fun observe() {

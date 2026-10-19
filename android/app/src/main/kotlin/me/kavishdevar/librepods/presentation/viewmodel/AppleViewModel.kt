@@ -151,7 +151,9 @@ class AppleViewModel(
         heartRateSamples
     ) { (state, settings, metadata), (appState, appSettings), heartRateRange, heartRateSamples ->
         AppleUiState(
-            state = state.copy(controlStates = state.controlStates + state.requestedControls,
+            // Ear detection validates pending choices separately from the reported fallback.
+            state = state.copy(controlStates = state.controlStates +
+                (state.requestedControls - ControlCommandIdentifier.EAR_DETECTION_CONFIG),
                 customEq = state.requestedCustomEq ?: state.customEq),
             settings = settings,
             metadata = metadata,

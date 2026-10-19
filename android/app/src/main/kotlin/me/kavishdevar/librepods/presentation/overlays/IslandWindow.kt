@@ -100,6 +100,7 @@ class IslandWindow(
 ) {
     private var windowManager: WindowManager = context.getSystemService(WindowManager::class.java)
     private var composeView: ComposeView? = null
+    private val statusBarAppearance = IslandStatusBarAppearance(context)
     private var lifecycleOwner: OverlayLifecycleOwner? = null
     private var transitionGeneration by mutableLongStateOf(0L)
     private var retainedWindowWidth = 0
@@ -136,6 +137,8 @@ class IslandWindow(
     private var cameraPadding by mutableIntStateOf(0)
     private var maximumHeight by mutableIntStateOf(Int.MAX_VALUE)
     private var cameraCapsuleWidth by mutableFloatStateOf(0f)
+    private var minimumStatusBarWidth by mutableFloatStateOf(Float.POSITIVE_INFINITY)
+    private var statusBarIconCenterY by mutableFloatStateOf(-1f)
     private val ageHandler = Handler(Looper.getMainLooper())
     private val updateAge = object : Runnable {
         override fun run() {
@@ -205,6 +208,7 @@ class IslandWindow(
         val restore = isVisible
         val state = islandState
         cancelConnect()
+        statusBarAppearance.release()
         composeView?.let { if (it.parent != null) windowManager.removeView(it) }
         lifecycleOwner?.stop()
         composeView = null
@@ -222,6 +226,7 @@ class IslandWindow(
             val params = createLayoutParams(state)
             try {
                 lifecycleOwner?.start()
+                statusBarAppearance.prepare()
                 windowManager.addView(composeView, params)
                 composeView?.visibility = View.VISIBLE
             } catch (e: Exception) {
@@ -503,6 +508,7 @@ class IslandWindow(
             val params = createLayoutParams(islandState)
             try {
                 lifecycleOwner?.start()
+                statusBarAppearance.prepare()
                 windowManager.addView(composeView, params)
                 composeView?.visibility = View.VISIBLE
             } catch (e: Exception) {
@@ -532,9 +538,12 @@ class IslandWindow(
         val cutout = metrics.windowInsets.displayCutout
         val camera = cutout?.cutoutPath?.let { path -> RectF().also { path.computeBounds(it, true) } }
             ?.takeIf { !it.isEmpty } ?: cutout?.boundingRects?.firstOrNull()?.let(::RectF)
-        val placement = islandPlacement(metrics.bounds,
-            metrics.windowInsets.getInsetsIgnoringVisibility(WindowInsets.Type.systemBars()),
-            camera, context.resources.displayMetrics.density, appSettings.islandSettings)
+        val density = context.resources.displayMetrics.density
+        val systemInsets = metrics.windowInsets.getInsetsIgnoringVisibility(WindowInsets.Type.systemBars())
+        val placement = islandPlacement(metrics.bounds, systemInsets,
+            camera, density, appSettings.islandSettings)
+        minimumStatusBarWidth = metrics.bounds.width() - systemInsets.left - systemInsets.right - 32 * density
+        statusBarIconCenterY = metrics.windowInsets.getInsetsIgnoringVisibility(WindowInsets.Type.statusBars()).top / 2f - placement.y
         effectiveSettings = appSettings.islandSettings.copy(expandedWidth = placement.expandedWidth.toFloat(),
             expandedHeight = placement.expandedHeight.toFloat(), compactWidth = placement.compactWidth.toFloat(),
             compactHeight = placement.compactHeight.toFloat())
@@ -635,7 +644,13 @@ class IslandWindow(
                         onConnect = this@IslandWindow.onConnect
                             ?.takeUnless { connectState == IslandConnectState.IDLE && connectActionDeferred }
                             ?.let { { requestConnect() } },
-                        connectState = connectState
+                        connectState = connectState,
+                        minimumStatusBarWidthPx = minimumStatusBarWidth,
+                        statusBarIconCenterYpx = statusBarIconCenterY,
+                        onStatusBarCoverageChanged = { covered ->
+                            if (composeView === overlayView)
+                                statusBarAppearance.setEnabled(covered && overlayView.isAttachedToWindow)
+                        }
                     )
                 }
             }
@@ -720,6 +735,7 @@ class IslandWindow(
 
     private fun cleanupAndRemoveView(expected: ComposeView, immediately: Boolean) {
         if (composeView !== expected || islandState != IslandState.CLOSE) return
+        statusBarAppearance.release()
         try {
             composeView?.let { view ->
                 if (view.parent != null) {

@@ -104,6 +104,7 @@ import me.kavishdevar.librepods.core.devices.AppleDevice
 import me.kavishdevar.librepods.core.devices.AppleSettings
 import me.kavishdevar.librepods.core.devices.AppleState
 import me.kavishdevar.librepods.core.devices.effectiveAllowOff
+import me.kavishdevar.librepods.core.devices.effectiveEarDetection
 import me.kavishdevar.librepods.core.devices.Battery
 import me.kavishdevar.librepods.core.devices.BatteryComponent
 import me.kavishdevar.librepods.core.devices.BatteryStatus
@@ -379,30 +380,36 @@ class LibrePodsService: Service() {
             STOP_MICROPHONE -> audioControllers.values.forEach { it.stop() }
             // TODO: make this a sealed class or something, instead of stringly typed. also, make this different for widget so other apps can use it too
             "ACTION_SET_ANC_MODE" -> {
-                val appWidgetId = intent.getIntExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, -1)
-                val macAddress = intent.getStringExtra("MAC_ADDRESS")?.let { MacAddress(it) }
-
                 val ancMode = intent.getIntExtra("ANC_MODE", -1)
-                val device =
-                    widgetConfigRepository.widgetConfigs.value.find { it.appWidgetId == appWidgetId }
-                        ?.let { config ->
-                            devices.value[config.macAddress]
-                        } ?: devices.value[macAddress]
-                    ?: devices.value.values.firstOrNull { it.connectionState.value == ConnectionState.CONNECTED }
-
-                if (device != null && ancMode != -1) {
-                    Log.i(
-                        TAG,
-                        "Setting ANC mode to $ancMode for device ${device.macAddress.toRedactedString()}"
-                    )
-                    when (device) {
-                        is AppleDevice -> device.setControlCommand(
-                            ControlCommandIdentifier.LISTENING_MODE,
-                            ancMode
-                        )
+                if (ancMode in 1..4) serviceScope.launch {
+                    val device = try {
+                        when {
+                            intent.hasExtra(AppWidgetManager.EXTRA_APPWIDGET_ID) -> {
+                                val widgetId = intent.getIntExtra(AppWidgetManager.EXTRA_APPWIDGET_ID,
+                                    AppWidgetManager.INVALID_APPWIDGET_ID)
+                                if (widgetId <= AppWidgetManager.INVALID_APPWIDGET_ID) null
+                                else widgetConfigRepository.getWidgetConfig(widgetId)?.let { devices.value[it.macAddress] }
+                            }
+                            intent.hasExtra("MAC_ADDRESS") -> intent.getStringExtra("MAC_ADDRESS")
+                                ?.let { runCatching { MacAddress(it) }.getOrNull() }
+                                ?.let { devices.value[it] }
+                            else -> devices.value.values.filterIsInstance<AppleDevice>()
+                                .firstOrNull { it.connectionState.value == ConnectionState.CONNECTED }
+                        }
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (failure: Exception) {
+                        Log.w(TAG, "Could not resolve the requested ANC device", failure)
+                        return@launch
                     }
-                } else {
-                    Log.w(TAG, "No connected Apple device found or invalid ANC mode: $ancMode")
+                    if (!destroying && hasNearbyDevicesPermissions(this@LibrePodsService) &&
+                        device is AppleDevice && devices.value[device.macAddress] === device &&
+                        device.connectionState.value == ConnectionState.CONNECTED) {
+                        Log.i(TAG, "Setting ANC mode to $ancMode for device ${device.macAddress.toRedactedString()}")
+                        device.setControlCommand(ControlCommandIdentifier.LISTENING_MODE, ancMode)
+                    } else {
+                        Log.w(TAG, "Requested ANC device is unavailable")
+                    }
                 }
             }
         }
@@ -1500,14 +1507,7 @@ class LibrePodsService: Service() {
                 )
                 Log.d(TAG, "component state: ${state.componentState}")
 
-                val earDetectionCtrlCmdValue =
-                    state.controlStates[ControlCommandIdentifier.EAR_DETECTION_CONFIG]
-                        ?: byteArrayOf(0x01.toByte())
-                Log.d(
-                    TAG,
-                    "ear detection control command value: ${earDetectionCtrlCmdValue.toHexString()}"
-                )
-                val earDetectionEnabled = earDetectionCtrlCmdValue[0] == 0x01.toByte() || deviceSettings.earDetectionEnabled // temporary, cache broken (?)
+                val earDetectionEnabled = state.effectiveEarDetection(deviceSettings)
                 Log.d(TAG, "ear detection enabled: $earDetectionEnabled")
                 if (earDetectionEnabled) {
                     processComponentStateChange(

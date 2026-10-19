@@ -7,6 +7,8 @@ import android.content.Intent
 import android.content.ServiceConnection
 import android.os.Bundle
 import android.os.IBinder
+import android.util.Log
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
@@ -27,11 +29,16 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.launch
 import me.kavishdevar.librepods.LibrePodsApplication
 import me.kavishdevar.librepods.R
 import me.kavishdevar.librepods.core.bluetooth.MacAddress
@@ -119,23 +126,36 @@ class NoiseControlWidgetConfigurationActivity: ComponentActivity() {
                         val widgetConfigs by widgetConfigRepository.widgetConfigs.collectAsState()
 
                         val widgetConfig = widgetConfigs.find { config -> config.appWidgetId == appWidgetId }
+                        var selectedAddress by rememberSaveable { mutableStateOf<String?>(null) }
+                        var saving by remember { mutableStateOf(false) }
+                        val pickedDevice = selectedAddress?.let(::MacAddress) ?: widgetConfig?.macAddress
 
                         WidgetDevicePickerContent(
                             devices = devices,
-                            pickedDevice = widgetConfig?.macAddress,
+                            pickedDevice = pickedDevice,
+                            saving = saving,
                             onDevicePicked = { macAddress ->
-                                val config = widgetConfig?.copy(macAddress = macAddress) ?: WidgetConfigEntity(
-                                    appWidgetId = appWidgetId,
-                                    macAddress = macAddress
-                                )
-                                widgetConfigRepository.setWidgetConfig(config)
+                                if (!saving) selectedAddress = macAddress.value
                             },
                             onDoneClicked = {
-                                val resultValue = Intent().apply {
-                                    putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, appWidgetId)
+                                if (pickedDevice != null && !saving) {
+                                    saving = true
+                                    lifecycleScope.launch {
+                                        try {
+                                            widgetConfigRepository.setWidgetConfig(WidgetConfigEntity(appWidgetId, pickedDevice))
+                                            setResult(RESULT_OK, Intent().putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, appWidgetId))
+                                            finish()
+                                        } catch (cancelled: CancellationException) {
+                                            throw cancelled
+                                        } catch (failure: Exception) {
+                                            Log.w("WidgetConfiguration", "Could not save widget target", failure)
+                                            Toast.makeText(this@NoiseControlWidgetConfigurationActivity,
+                                                "Could not save the widget. Please try again.", Toast.LENGTH_LONG).show()
+                                        } finally {
+                                            saving = false
+                                        }
+                                    }
                                 }
-                                setResult(RESULT_OK, resultValue)
-                                finish()
                             },
                             onCancelClicked = {
                                 finish()
@@ -158,6 +178,7 @@ class NoiseControlWidgetConfigurationActivity: ComponentActivity() {
 private fun WidgetDevicePickerContent(
     devices: Map<MacAddress, Device<*, *, *>>,
     pickedDevice: MacAddress?,
+    saving: Boolean,
     onDevicePicked: (MacAddress) -> Unit,
     onDoneClicked: () -> Unit,
     onCancelClicked: () -> Unit
@@ -225,7 +246,7 @@ private fun WidgetDevicePickerContent(
                 StyledButton(
                     modifier = Modifier.fillMaxWidth(),
                     onClick = onDoneClicked,
-                    enabled = pickedDevice != null
+                    enabled = pickedDevice != null && devices.containsKey(pickedDevice) && !saving
                 ) {
                     Text(
                         text = "Done",

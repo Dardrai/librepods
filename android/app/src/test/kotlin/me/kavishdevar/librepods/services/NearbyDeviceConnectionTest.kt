@@ -65,6 +65,7 @@ import java.time.Duration
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import javax.crypto.Cipher
 import javax.crypto.spec.SecretKeySpec
@@ -85,6 +86,8 @@ class NearbyDeviceConnectionTest {
     private val bridge = mock(ShizukuAudioClient::class.java)
     private val bridgeState = MutableStateFlow(BridgeState(connected = true))
     private val audio = mock(AudioManager::class.java)
+    private val audioMode = AtomicInteger(AudioManager.MODE_NORMAL)
+    private val outputs = AtomicReference(emptyArray<AudioDeviceInfo>())
     private val bluetooth = mock(BluetoothDevice::class.java)
     private val aacpUuid = ParcelUuid.fromString(A2dpRecoveryGuard.AACP_UUID)
     @Suppress("UNCHECKED_CAST")
@@ -108,8 +111,8 @@ class NearbyDeviceConnectionTest {
         `when`(controller.bridge).thenReturn(bridge)
         `when`(controller.canRefreshSettings()).thenReturn(true)
         `when`(bridge.state).thenReturn(bridgeState)
-        `when`(audio.mode).thenReturn(AudioManager.MODE_NORMAL)
-        `when`(audio.getDevices(AudioManager.GET_DEVICES_OUTPUTS)).thenReturn(emptyArray())
+        `when`(audio.mode).thenAnswer { audioMode.get() }
+        `when`(audio.getDevices(AudioManager.GET_DEVICES_OUTPUTS)).thenAnswer { outputs.get() }
         Shadow.extract<ShadowContextImpl>(service.baseContext).setSystemService(Context.AUDIO_SERVICE, audio)
         app.experimentalAudioControllers[address] = controller
         @Suppress("UNCHECKED_CAST")
@@ -369,9 +372,9 @@ class NearbyDeviceConnectionTest {
     }
 
     @Test fun anActiveCallOrMicrophoneSetupCannotBeDisrupted() = runBlocking<Unit> {
-        `when`(audio.mode).thenReturn(AudioManager.MODE_IN_COMMUNICATION)
+        audioMode.set(AudioManager.MODE_IN_COMMUNICATION)
         assertFalse(service.connectNearbyDevice(device))
-        `when`(audio.mode).thenReturn(AudioManager.MODE_NORMAL)
+        audioMode.set(AudioManager.MODE_NORMAL)
         `when`(controller.canRefreshSettings()).thenReturn(false)
         assertFalse(service.connectNearbyDevice(device))
         verifyNoInteractions(bridge)
@@ -412,7 +415,7 @@ class NearbyDeviceConnectionTest {
 
     @Test fun theShellOwnerIsRetiredIfACallStartsDuringConnection() = runBlocking<Unit> {
         `when`(bridge.connectNativePlayback(anyString(), anyCurrent())).thenAnswer { invocation ->
-            `when`(audio.mode).thenReturn(AudioManager.MODE_IN_CALL)
+            audioMode.set(AudioManager.MODE_IN_CALL)
             assertFalse(invocation.getArgument<() -> Boolean>(1).invoke())
             true
         }
@@ -484,7 +487,7 @@ class NearbyDeviceConnectionTest {
         val speaker = mock(AudioDeviceInfo::class.java)
         `when`(speaker.type).thenReturn(AudioDeviceInfo.TYPE_BUILTIN_SPEAKER)
         `when`(speaker.address).thenReturn("")
-        `when`(audio.getDevices(AudioManager.GET_DEVICES_OUTPUTS)).thenReturn(arrayOf(speaker))
+        outputs.set(arrayOf(speaker))
         `when`(bridge.connectNativePlayback(anyString(), anyCurrent())).thenReturn(true)
         assertFalse(service.connectNearbyDevice(device))
         assertFalse(service.isNearbyDeviceAudioConnected(device))
@@ -755,13 +758,13 @@ class NearbyDeviceConnectionTest {
 
     private fun receive(intent: Intent) = (field("bluetoothReceiver").get(service) as BroadcastReceiver).onReceive(service, intent)
     private fun advance(millis: Long) = ShadowSystemClock.advanceBy(Duration.ofMillis(millis))
-    private fun clearOutput() { `when`(audio.getDevices(AudioManager.GET_DEVICES_OUTPUTS)).thenReturn(emptyArray()) }
+    private fun clearOutput() { outputs.set(emptyArray()) }
 
     private fun publishOutput() {
         val output = mock(AudioDeviceInfo::class.java)
         `when`(output.type).thenReturn(AudioDeviceInfo.TYPE_BLUETOOTH_A2DP)
         `when`(output.address).thenReturn(address.value)
-        `when`(audio.getDevices(AudioManager.GET_DEVICES_OUTPUTS)).thenReturn(arrayOf(output))
+        outputs.set(arrayOf(output))
     }
 
     private fun anyCurrent(): () -> Boolean = any<() -> Boolean>() ?: { true }

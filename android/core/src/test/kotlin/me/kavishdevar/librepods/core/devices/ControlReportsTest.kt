@@ -58,12 +58,34 @@ class ControlReportsTest {
         }
     }
 
-    @Test fun invalidAdaptiveStrengthReportsDoNotRetireARequest() {
+    @Test fun invalidAdaptiveStrengthReportsPreserveConfirmedAndPendingValues() {
         val strength = ControlCommandIdentifier.AUTO_ANC_STRENGTH
         val original = AppleState().withControlReport(strength, byteArrayOf(50))
         val requested = original.withControlRequest(strength, byteArrayOf(25), original.controlStates[strength])
-        for (invalid in listOf(byteArrayOf(), byteArrayOf(101), byteArrayOf(50, 1), byteArrayOf(0xff.toByte()))) {
-            assertArrayEquals(byteArrayOf(25), requested.withControlReport(strength, invalid).requestedControls[strength])
+        for (invalid in listOf(byteArrayOf(), byteArrayOf(101), byteArrayOf(50, 1), byteArrayOf(0xff.toByte()),
+            byteArrayOf(50, 0, 0, 0, 0))) {
+            assertSame(original, original.withControlReport(strength, invalid))
+            assertSame(requested, requested.withControlReport(strength, invalid))
+        }
+    }
+
+    @Test fun invalidBooleanReportsPreserveConfirmedValuesWithAndWithoutAPendingChoice() {
+        for (id in listOf(ControlCommandIdentifier.ALLOW_OFF_OPTION, ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG,
+            ControlCommandIdentifier.EAR_DETECTION_CONFIG)) {
+            val original = AppleState().withControlReport(id, byteArrayOf(1))
+            val requested = original.withControlRequest(id, byteArrayOf(2), original.controlStates[id])
+            for (invalid in listOf(byteArrayOf(), byteArrayOf(0), byteArrayOf(3), byteArrayOf(1, 1),
+                byteArrayOf(2, 0, 0, 0, 0), byteArrayOf(0xff.toByte()))) {
+                assertSame(original, original.withControlReport(id, invalid))
+                assertSame(requested, requested.withControlReport(id, invalid))
+            }
+            for (valid in listOf(1, 2)) {
+                val confirmed = requested.withControlReport(id, byteArrayOf(valid.toByte(), 0, 0, 0))
+                assertArrayEquals(byteArrayOf(valid.toByte()), confirmed.controlStates[id])
+                val retainsRequest = id == ControlCommandIdentifier.EAR_DETECTION_CONFIG && valid != 2
+                assertEquals(retainsRequest, id in confirmed.requestedControls)
+                if (retainsRequest) assertArrayEquals(byteArrayOf(2), confirmed.requestedControls[id])
+            }
         }
     }
 

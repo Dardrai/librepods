@@ -23,7 +23,33 @@ pair, local behavior choices and correctly owner-bound BLE keys once. Existing
 rewrite database rows are preserved. Unconfirmed device control values are not
 migrated as device reports. The Android Bluetooth bond stays with Android.
 
-The current fork version is `2.0.0-alpha.1-pixel51`, code `200000136`.
+The current fork version is `2.0.0-alpha.1-pixel56`, code `200000141`.
+
+The island requests white status-bar icons while its wide, dark shell covers the
+status bar. Its transparent, untouchable application-overlay companion is attached
+at alpha zero before the island starts drawing, so it cannot affect system-bar
+policy. Actual dark, rounded coverage switches the prepared window to alpha one
+in the same composition commit, avoiding a new attachment on the critical path.
+Folding returns it to alpha zero; disposal and context replacement remove it.
+The current foreground app's appearance resumes without changing the system theme.
+Narrow, light, translucent and displaced islands leave that appearance alone.
+This policy has been checked on the Pixel; other Android implementations may
+treat overlay appearance differently.
+The appearance companion is limited to a positively identified bottom gesture
+navigation bar. Button navigation and unknown layouts retain the foreground
+app's system-bar appearance, because Android's dimming-window policy otherwise
+also overrides navigation-button contrast.
+The full outline is retained. Its shoulders open over 64ms while the body keeps
+its 320ms unfold and closing keeps its 220ms fold. Camera clearance remains 4dp.
+Android owns the native icon fade; its duration and per-frame color are not
+controlled by this overlay or Shizuku.
+
+Automatic Ear Detection uses the same effective choice in the screen and media
+automation: a pending choice, then a valid device report, then the saved local
+setting. Unknown device state never overrides a saved disabled choice.
+Targeted noise-control widgets resolve their saved pair before acting and never
+fall back to another connected pair. Invalid Adaptive strength reports preserve
+the last confirmed value and any pending edit.
 
 Conversation Awareness's temporary Transparency switch and matching mode recovery
 do not announce themselves in the island. Live speech stages are correlated with

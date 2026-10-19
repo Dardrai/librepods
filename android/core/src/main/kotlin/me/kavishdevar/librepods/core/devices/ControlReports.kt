@@ -9,12 +9,19 @@ internal fun AppleState.withControlReport(id: ControlCommandIdentifier, rawValue
     val value = normalizedControl(rawValue)
     // Adaptive strength can apply silently and later report a rounded value.
     val confirmsRequest = when (id) {
-        ControlCommandIdentifier.AUTO_ANC_STRENGTH ->
-            rawValue.isNotEmpty() && value.size == 1 && (value[0].toInt() and 255) in 0..100
-        ControlCommandIdentifier.ALLOW_OFF_OPTION -> allowOffValue(rawValue) != null
+        ControlCommandIdentifier.AUTO_ANC_STRENGTH -> {
+            if (rawValue.size !in 1..4 || value.size != 1 || (value[0].toInt() and 255) !in 0..100) return this
+            true
+        }
+        ControlCommandIdentifier.ALLOW_OFF_OPTION -> {
+            if (allowOffValue(rawValue) == null) return this
+            true
+        }
         // Some firmware applies Conversation Awareness silently; any fresh boolean report wins.
-        ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG ->
-            rawValue.size in 1..4 && value.size == 1 && value[0].toInt() in 1..2
+        ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG, ControlCommandIdentifier.EAR_DETECTION_CONFIG -> {
+            if (rawValue.size !in 1..4 || value.size != 1 || value[0].toInt() !in 1..2) return this
+            id == ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG || requestedControls[id]?.contentEquals(value) == true
+        }
         else -> requestedControls[id]?.contentEquals(value) == true
     }
     return copy(controlStates = controlStates + (id to value), requestedControls =

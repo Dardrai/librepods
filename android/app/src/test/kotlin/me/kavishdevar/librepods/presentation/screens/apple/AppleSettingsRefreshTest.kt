@@ -25,6 +25,8 @@ import me.kavishdevar.librepods.R
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommandIdentifier
 import me.kavishdevar.librepods.core.devices.AirPodsModel
 import me.kavishdevar.librepods.core.devices.AppleMetadata
+import me.kavishdevar.librepods.core.devices.AppleSettings
+import me.kavishdevar.librepods.core.devices.AppleState
 import me.kavishdevar.librepods.database.app.AppStateEntity
 import me.kavishdevar.librepods.presentation.design.DesignSystem
 import me.kavishdevar.librepods.presentation.design.LibrePodsTheme
@@ -109,6 +111,41 @@ class AppleSettingsRefreshTest {
         compose.runOnIdle { assertEquals(ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG, requested) }
     }
 
+    @Test fun earDetectionSwitchUsesSavedReportAndPendingChoicesInTheSameOrderAsAutomation() {
+        val id = ControlCommandIdentifier.EAR_DETECTION_CONFIG
+        val disabled = AppleSettings(earDetectionEnabled = false)
+        val enabled = AppleSettings(earDetectionEnabled = true)
+        val cases = listOf(
+            Triple(AppleState(), disabled, true),
+            Triple(AppleState(controlStates = mapOf(id to byteArrayOf(2))), enabled, true),
+            Triple(AppleState(controlStates = mapOf(id to byteArrayOf(1)),
+                requestedControls = mapOf(id to byteArrayOf(2))), enabled, true),
+            Triple(AppleState(controlStates = mapOf(id to byteArrayOf(2)),
+                requestedControls = mapOf(id to byteArrayOf(1))), disabled, false),
+            Triple(AppleState(controlStates = mapOf(id to byteArrayOf(2)),
+                requestedControls = mapOf(id to byteArrayOf(0))), enabled, true),
+        )
+        val choice = mutableStateOf(cases.first())
+        val writes = mutableListOf<Pair<ControlCommandIdentifier, Boolean>>()
+        compose.setContent {
+            LibrePodsTheme(designSystem = DesignSystem.Material) {
+                SettingsScreen(busy = false, connected = true, refresh = {},
+                    setBoolean = { control, value -> writes += control to value },
+                    state = choice.value.first, settings = choice.value.second)
+            }
+        }
+        val label = text(R.string.ear_detection)
+        compose.onNode(hasScrollToIndexAction()).performScrollToNode(hasText(label))
+        assertTrue("Displaying a choice must not send it", writes.isEmpty())
+        for ((index, case) in cases.withIndex()) {
+            compose.runOnIdle { choice.value = case }
+            compose.waitForIdle()
+            compose.onNodeWithText(label).assertIsDisplayed().performTouchInput { click() }
+            compose.runOnIdle { assertEquals(id to case.third, writes[index]) }
+        }
+        assertEquals(cases.size, writes.size)
+    }
+
     private fun renderMaterial(dark: Boolean, fontScale: Float, name: String) {
         compose.setContent {
             CompositionLocalProvider(LocalDensity provides Density(1f, fontScale)) {
@@ -146,10 +183,12 @@ class AppleSettingsRefreshTest {
         busy: Boolean,
         connected: Boolean,
         refresh: () -> Unit,
-        setBoolean: (ControlCommandIdentifier, Boolean) -> Unit = { _, _ -> }
+        setBoolean: (ControlCommandIdentifier, Boolean) -> Unit = { _, _ -> },
+        state: AppleState = AppleState(),
+        settings: AppleSettings = AppleSettings(),
     ) {
         AppleSettingsScreen(
-            uiState = AppleUiState(metadata = AppleMetadata(name = "AirPods Pro 3",
+            uiState = AppleUiState(state = state, settings = settings, metadata = AppleMetadata(name = "AirPods Pro 3",
                 model = AirPodsModel.AIRPODS_PRO_3, modelName = "AirPods Pro 3", modelNumber = "A3063",
                 version1 = "9A348"),
                 appState = AppStateEntity(isPremium = false, timeUntilFOSSPremiumExpiry = 1)),

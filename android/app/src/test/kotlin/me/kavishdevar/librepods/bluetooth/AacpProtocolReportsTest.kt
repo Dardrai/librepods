@@ -142,6 +142,34 @@ class AacpProtocolReportsTest {
         assertArrayEquals(byteArrayOf(1), device.state.value.controlStates[id])
     }
 
+    @Test fun malformedKnownControlReportsCannotReplaceConfirmedOrPendingValues() = withTransport { device, socket ->
+        for ((id, baseline, pending) in listOf(
+            Triple(ControlCommandIdentifier.AUTO_ANC_STRENGTH, 50, 25),
+            Triple(ControlCommandIdentifier.ALLOW_OFF_OPTION, 1, 2),
+            Triple(ControlCommandIdentifier.EAR_DETECTION_CONFIG, 2, 1))) {
+            val header = byteArrayOf(4, 0, 4, 0, 9, 0, id.value)
+            for (request in listOf(null, pending)) {
+                device.loadInitialState(AppleState(controlStates = mapOf(id to byteArrayOf(baseline.toByte())),
+                    requestedControls = request?.let { mapOf(id to byteArrayOf(it.toByte())) }.orEmpty()),
+                    AppleSettings(), AppleMetadata())
+                val previous = device.state.value
+                for (invalid in listOf(byteArrayOf((if (baseline == 50) 101 else 3).toByte(), 0, 0, 0),
+                    byteArrayOf(0xff.toByte(), 0, 0, 0), byteArrayOf(baseline.toByte(), 1, 0, 0))) {
+                    device.aacp.processPacket(header + invalid, socket)
+                    assertSame(previous.controlStates, device.state.value.controlStates)
+                    assertSame(previous.requestedControls, device.state.value.requestedControls)
+                }
+                if (id == ControlCommandIdentifier.EAR_DETECTION_CONFIG && request != null) {
+                    device.aacp.processPacket(header + byteArrayOf(baseline.toByte(), 0, 0, 0), socket)
+                    assertArrayEquals(byteArrayOf(request.toByte()), device.state.value.requestedControls[id])
+                }
+                device.aacp.processPacket(header + byteArrayOf(pending.toByte(), 0, 0, 0), socket)
+                assertArrayEquals(byteArrayOf(pending.toByte()), device.state.value.controlStates[id])
+                assertFalse(id in device.state.value.requestedControls)
+            }
+        }
+    }
+
     @Test fun retiringConversationActivityLetsTheSameStageStartOnTheReplacementTransport() {
         val device = device()
         val first = socket()

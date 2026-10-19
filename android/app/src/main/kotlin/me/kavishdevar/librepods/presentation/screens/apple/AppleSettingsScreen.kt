@@ -55,6 +55,7 @@ import me.kavishdevar.librepods.core.data.apple.BuddyState
 import me.kavishdevar.librepods.core.devices.AirPodsSpecs
 import me.kavishdevar.librepods.core.devices.AppleSettings
 import me.kavishdevar.librepods.core.devices.effectiveAllowOff
+import me.kavishdevar.librepods.core.devices.effectiveEarDetection
 import me.kavishdevar.librepods.core.devices.BaseCapability
 import me.kavishdevar.librepods.presentation.components.apple.AboutCard
 import me.kavishdevar.librepods.presentation.components.apple.AdaptiveAudioStrengthSlider
@@ -403,7 +404,7 @@ fun AppleSettingsScreen(
             item(key = "spacer_connection") { Spacer(modifier = Modifier.height(16.dp)) }
             item(key = "connection") {
                 ConnectionSettings(
-                    automaticEarDetectionEnabled = state.controlStates[ControlCommandIdentifier.EAR_DETECTION_CONFIG]?.getOrNull(0) == 0x01.toByte() || settings.earDetectionEnabled,
+                    automaticEarDetectionEnabled = state.effectiveEarDetection(settings),
                     onAutomaticEarDetectionChanged = { enabled -> setControlCommandBoolean(ControlCommandIdentifier.EAR_DETECTION_CONFIG, enabled); updateSettings { it.copy(earDetectionEnabled = enabled) } },
                     automaticConnectionEnabled = state.controlStates[ControlCommandIdentifier.SMART_ROUTING_MODE]?.getOrNull(0) == 0x01.toByte(),
                     onAutomaticConnectionChanged = { setControlCommandBoolean(ControlCommandIdentifier.SMART_ROUTING_MODE, it) },

@@ -53,6 +53,8 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.contentColorFor
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -190,6 +192,9 @@ fun IslandContent(
     onConnect: (() -> Unit)? = null,
     connectState: IslandConnectState = IslandConnectState.IDLE,
     listeningControlsEnabled: Boolean = true,
+    minimumStatusBarWidthPx: Float = Float.POSITIVE_INFINITY,
+    statusBarIconCenterYpx: Float = -1f,
+    onStatusBarCoverageChanged: (Boolean) -> Unit = {},
 ) {
     val density = LocalDensity.current
     val cells = islandBatteryCells(model, batteries, batteryNow)
@@ -281,8 +286,10 @@ fun IslandContent(
         if (islandState == IslandState.EXPANDED) contentState = IslandState.EXPANDED
         val opening = targetW > animWidth.value || targetH > animHeight.value
         val motion = tween<Float>(if (opening) 320 else 220, easing = CubicBezierEasing(0.2f, 0f, 0f, 1f))
+        // Establish the dark status-bar backdrop before the native icon tint finishes fading.
+        val widthMotion = if (opening) tween<Float>(64, easing = CubicBezierEasing(0.2f, 0f, 0f, 1f)) else motion
         val motionEnabled = ValueAnimator.areAnimatorsEnabled()
-        val wJob = launch { if (motionEnabled) animWidth.animateTo(targetW, motion) else animWidth.snapTo(targetW) }
+        val wJob = launch { if (motionEnabled) animWidth.animateTo(targetW, widthMotion) else animWidth.snapTo(targetW) }
         val hJob = launch { if (motionEnabled) animHeight.animateTo(targetH, motion) else animHeight.snapTo(targetH) }
         val rJob = launch { if (motionEnabled) animRadius.animateTo(targetRadius, motion) else animRadius.snapTo(targetRadius) }
         val bJob = launch { if (motionEnabled) animBorderWidth.animateTo(targetBorderWidth, motion) else animBorderWidth.snapTo(targetBorderWidth) }
@@ -318,6 +325,19 @@ fun IslandContent(
         targetValue = if (expandedContent) backgroundColor.copy(alpha = islandSettings.expandedBackgroundAlpha) else Color.Black,
         animationSpec = tween(100)
     )
+
+    val reportStatusBarCoverage by rememberUpdatedState(onStatusBarCoverageChanged)
+    val coversStatusBar = expandedContent && islandCoversStatusBar(
+        animWidth.value, animHeight.value, minimumStatusBarWidthPx, statusBarIconCenterYpx,
+        density.density, backgroundColorWithAlpha.value, animRadius.value)
+    var reportedStatusBarCoverage by remember { mutableStateOf<Boolean?>(null) }
+    SideEffect {
+        if (reportedStatusBarCoverage != coversStatusBar) {
+            reportedStatusBarCoverage = coversStatusBar
+            reportStatusBarCoverage(coversStatusBar)
+        }
+    }
+    DisposableEffect(Unit) { onDispose { reportStatusBarCoverage(false) } }
 
     val textColor = if (!expandedContent || backgroundColor.luminance() < 0.5f) Color.White else contentColorFor(backgroundColor)
     val shape = RoundedCornerShape(with(density) { animRadius.value.toDp() } )
