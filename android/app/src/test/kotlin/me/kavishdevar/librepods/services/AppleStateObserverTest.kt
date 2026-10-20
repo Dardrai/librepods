@@ -129,7 +129,7 @@ class AppleStateObserverTest {
         Dispatchers.resetMain()
     }
 
-    @Test fun hostHoldEventsReachTheHandlerWithALocalAudioOutput() = runBlocking {
+    @Test fun hostHoldEventsReachTheHandlerWithALocalAudioOutput() = runBlocking<Unit> {
         val events = stemEvents()
         val socket = mock(BluetoothSocket::class.java)
         val event = AppleEvent.StemPress(StemPressType.LONG_PRESS, StemPressBud.RIGHT, socket)
@@ -141,7 +141,7 @@ class AppleStateObserverTest {
         verify(device).cycleHoldListeningMode(event)
     }
 
-    @Test fun retiredHoldEventsCannotLaunchAnAssistantOrChangeModes() = runBlocking {
+    @Test fun retiredHoldEventsCannotLaunchAnAssistantOrChangeModes() = runBlocking<Unit> {
         val events = stemEvents()
         val socket = mock(BluetoothSocket::class.java)
         val event = AppleEvent.StemPress(StemPressType.LONG_PRESS, StemPressBud.LEFT, socket)
