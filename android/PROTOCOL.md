@@ -51,7 +51,8 @@ The configuration is reapplied to each new control transport. Events carry their
 source socket; retired sessions and devices without local audio output cannot
 launch an assistant or cycle modes. A failed configuration write does not change
 the saved choice. Assistant launch targets Android's configured assistant package.
-Physical assistant invocation and background behavior still need a Pixel check.
+On Pixel72, the user confirmed that holding the left stem opens the assistant
+from the Home screen and holding the right still changes listening modes.
 
 ## Conversation Awareness
 
