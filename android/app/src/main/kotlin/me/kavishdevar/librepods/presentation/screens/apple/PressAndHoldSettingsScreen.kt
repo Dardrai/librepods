@@ -125,7 +125,7 @@ fun LongPress(
                     title = stringResource(R.string.noise_control),
                     description = stringResource(R.string.press_and_hold_noise_control_description)
                 ) {
-                    if (state.effectiveAllowOff(settings, uiState.metadata.modelNumber) == true) {
+                    if (state.effectiveAllowOff(uiState.settings, uiState.metadata.modelNumber) == true) {
                         styledListItem(
                             contentText = stringResource(R.string.off),
                             supportingText = stringResource(R.string.listening_mode_off_description),
