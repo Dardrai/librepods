@@ -18,7 +18,8 @@ fun AppleState.effectiveAllowOff(settings: AppleSettings, modelNumber: String): 
 
 internal fun AppleState.cachedControlStates(settings: AppleSettings, modelNumber: String): Map<ControlCommandIdentifier, ByteArray> {
     // A paired hold-action write must preserve the other bud's fresh setting, not an old host's cache.
-    val cached = controlStates - ControlCommandIdentifier.CLICK_HOLD_MODE
+    val cached = if (ControlCommandIdentifier.CLICK_HOLD_MODE in controlStates)
+        controlStates - ControlCommandIdentifier.CLICK_HOLD_MODE else controlStates
     return if (settings.allowOffChoice != null && supportsSilentAllowOff(modelNumber) &&
         ControlCommandIdentifier.ALLOW_OFF_OPTION in controlStates)
         cached - ControlCommandIdentifier.ALLOW_OFF_OPTION else cached

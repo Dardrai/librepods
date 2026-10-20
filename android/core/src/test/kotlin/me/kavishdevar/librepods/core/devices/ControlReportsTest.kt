@@ -51,6 +51,8 @@ class ControlReportsTest {
         val cached = state.cachedControlStates(AppleSettings(), "A3063")
         assertFalse(hold in cached)
         assertArrayEquals(byteArrayOf(4), cached[listening])
+        val unchanged = AppleState(controlStates = mapOf(listening to byteArrayOf(4)))
+        assertSame(unchanged.controlStates, unchanged.cachedControlStates(AppleSettings(), "A3063"))
     }
 
     @Test fun requestsRemainSeparateUntilAMatchingDeviceReportArrives() {
