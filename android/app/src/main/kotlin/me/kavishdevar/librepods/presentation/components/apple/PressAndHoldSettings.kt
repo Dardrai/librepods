@@ -27,21 +27,21 @@ import me.kavishdevar.librepods.presentation.components.primitives.styledListIte
 
 @Composable
 fun PressAndHoldSettings(
-    leftAction: StemAction,
-    rightAction: StemAction,
+    leftAction: StemAction?,
+    rightAction: StemAction?,
     navigateToLeftLongPress: () -> Unit,
     navigateToRightLongPress: () -> Unit
 ) {
     val leftActionText = when (leftAction) {
         StemAction.CYCLE_NOISE_CONTROL_MODES -> stringResource(R.string.noise_control)
-        StemAction.DIGITAL_ASSISTANT -> "Digital Assistant"
-        else -> "INVALID!!"
+        StemAction.DIGITAL_ASSISTANT -> stringResource(R.string.digital_assistant)
+        else -> stringResource(R.string.press_and_hold_unavailable)
     }
 
     val rightActionText = when (rightAction) {
         StemAction.CYCLE_NOISE_CONTROL_MODES -> stringResource(R.string.noise_control)
-        StemAction.DIGITAL_ASSISTANT -> "Digital Assistant"
-        else -> "INVALID!!"
+        StemAction.DIGITAL_ASSISTANT -> stringResource(R.string.digital_assistant)
+        else -> stringResource(R.string.press_and_hold_unavailable)
     }
 
     StyledList(

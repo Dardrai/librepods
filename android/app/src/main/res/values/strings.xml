@@ -19,6 +19,8 @@
     <string name="adaptive">Adaptive</string>
     <string name="noise_cancellation">Noise Cancellation</string>
     <string name="press_and_hold_airpods">Press and Hold AirPods</string>
+    <string name="press_and_hold_update_failed">Couldn’t change the press-and-hold action. Reconnect your AirPods and try again.</string>
+    <string name="press_and_hold_unavailable">Not available</string>
     <string name="press_and_hold_noise_control_description">Press and hold the stem to cycle between the selected listening modes.</string>
     <string name="head_gestures">Head Gestures</string>
     <string name="left">Left</string>

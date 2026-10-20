@@ -61,6 +61,7 @@ class AppleDevice(
 
     private val _settings = MutableStateFlow(AppleSettings())
     override val settings = _settings.asStateFlow()
+    private val holdActionLock = Any()
 
     private val _metadata = MutableStateFlow(AppleMetadata())
     override val metadata = _metadata.asStateFlow()
@@ -499,9 +500,19 @@ class AppleDevice(
         setControlCommand(ControlCommandIdentifier.LISTENING_MODE_CONFIGS, newValue)
     }
 
-    fun setLongPressAction(side: String, action: StemAction) {
-        _settings.update {
-            if (side.lowercase() == "left") it.copy(leftLongPressAction = action) else it.copy(rightLongPressAction = action)
+    fun setLongPressAction(side: String, action: StemAction): Boolean {
+        val index = when (side.lowercase(java.util.Locale.ROOT)) { "right" -> 0; "left" -> 1; else -> return false }
+        val value: Byte = when (action) {
+            StemAction.CYCLE_NOISE_CONTROL_MODES -> 1
+            StemAction.DIGITAL_ASSISTANT -> 5
+            else -> return false
+        }
+        return synchronized(holdActionLock) {
+            val id = ControlCommandIdentifier.CLICK_HOLD_MODE
+            val snapshot = state.value
+            val pair = holdActions(snapshot.requestedControls[id]) ?: holdActions(snapshot.controlStates[id]) ?: return@synchronized false
+            pair[index] = value
+            setControlCommand(id, pair)
         }
     }
 

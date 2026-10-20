@@ -38,6 +38,24 @@ Connected-host reports (`0x002E`) must contain exactly `9 + 8 * count` bytes.
 Duplicate or malformed entries and trailing data are rejected. Routing logs do
 not expose peer names or addresses.
 
+## Press and Hold
+
+Control `0x16` carries the current right action first, then the left action:
+`1` selects noise control and `5` selects the native assistant action. Outgoing
+commands zero the remaining two bytes. Incoming reports may carry previous
+actions in those bytes; only the current pair is retained. See the
+[NTPods control contract](https://github.com/Ripthulhu/ntpods/blob/5502e286ba941ad25e664224fa7f94a23363ad95/docs/WINDOWS-AIRPODS-CONTROL-PROTOCOL.md#setting-values-and-confirmation).
+
+Changing one bud preserves the other bud's pending or freshly reported action.
+Cached pairs are cleared when loading or retiring a control session, so an old
+host's setting cannot supply that other action. A failed write leaves the saved
+preferences unchanged. A silent successful write retains its pending pair until a
+matching report or transport retirement. Settings pages use that pair before
+the last report. App-only legacy preferences do not establish a device action.
+
+Assistant invocation uses the connected host's headset/assistant integration;
+the on-device action and Android invocation need a hardware check together.
+
 ## Conversation Awareness
 
 The enabled setting is control `0x28` in opcode `0x09`; accept only normalized

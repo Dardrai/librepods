@@ -35,6 +35,8 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.transformLatest
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import me.kavishdevar.librepods.bluetooth.DeviceSettingsRefreshResult
 import me.kavishdevar.librepods.audio.ExperimentalAudioController
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommandIdentifier
@@ -86,6 +88,7 @@ class AppleViewModel(
     private val _refreshingSettings = MutableStateFlow(false)
     val refreshingSettings = _refreshingSettings.asStateFlow()
     private var hearingModeJob: Job? = null
+    private val holdActionMutex = Mutex()
 
     fun refreshDeviceSettings(refresh: suspend (AppleDevice) -> DeviceSettingsRefreshResult) {
         if (device.state.value.hearingModes.pending != null) return
@@ -245,7 +248,12 @@ class AppleViewModel(
 
     fun toggleListeningMode(modeBit: Int) = device.toggleListeningMode(modeBit)
 
-    fun setLongPressAction(side: String, action: StemAction) = device.setLongPressAction(side, action)
+    fun setLongPressAction(side: String, action: StemAction) = viewModelScope.launch {
+        val sent = holdActionMutex.withLock {
+            withContext(Dispatchers.IO) { device.setLongPressAction(side, action) }
+        }
+        if (!sent) Toast.makeText(device.context, R.string.press_and_hold_update_failed, Toast.LENGTH_LONG).show()
+    }
 
     fun renameDevice(newName: String) = viewModelScope.launch {
         val sent = withContext(Dispatchers.IO) { device.renameDevice(newName) }
