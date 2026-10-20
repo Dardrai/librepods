@@ -18,6 +18,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -28,6 +29,10 @@ import me.kavishdevar.librepods.LibrePodsApplication
 import me.kavishdevar.librepods.core.bluetooth.MacAddress
 import me.kavishdevar.librepods.core.bluetooth.aacp.AACPManager
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommandIdentifier
+import me.kavishdevar.librepods.core.bluetooth.aacp.types.AppleEvent
+import me.kavishdevar.librepods.core.data.StemAction
+import me.kavishdevar.librepods.core.data.StemPressType
+import me.kavishdevar.librepods.core.data.StemPressBud
 import me.kavishdevar.librepods.core.data.apple.BuddyState
 import me.kavishdevar.librepods.core.data.heartrate.HeartRateSample
 import me.kavishdevar.librepods.core.devices.*
@@ -122,6 +127,41 @@ class AppleStateObserverTest {
         MediaController.userPlayedTheMedia = previousPlayed
         ShadowSettings.setCanDrawOverlays(false)
         Dispatchers.resetMain()
+    }
+
+    @Test fun hostHoldEventsReachTheHandlerWithALocalAudioOutput() = runBlocking {
+        val events = stemEvents()
+        val socket = mock(BluetoothSocket::class.java)
+        val event = AppleEvent.StemPress(StemPressType.LONG_PRESS, StemPressBud.RIGHT, socket)
+        `when`(device.aacp.ownsAudioSocket(socket)).thenReturn(true)
+        `when`(device.hostHoldAction(event)).thenReturn(StemAction.CYCLE_NOISE_CONTROL_MODES)
+        jobs += service.observeStemActions(device)
+        events.emit(event)
+        await { calls(device, "cycleHoldListeningMode") == 1 }
+        verify(device).cycleHoldListeningMode(event)
+    }
+
+    @Test fun retiredHoldEventsCannotLaunchAnAssistantOrChangeModes() = runBlocking {
+        val events = stemEvents()
+        val socket = mock(BluetoothSocket::class.java)
+        val event = AppleEvent.StemPress(StemPressType.LONG_PRESS, StemPressBud.LEFT, socket)
+        `when`(device.aacp.ownsAudioSocket(socket)).thenReturn(false)
+        jobs += service.observeStemActions(device)
+        events.emit(event)
+        await { calls(device.aacp, "ownsAudioSocket") == 1 }
+        verify(device, never()).hostHoldAction(any(AppleEvent.StemPress::class.java) ?: event)
+        verify(device, never()).cycleHoldListeningMode(any(AppleEvent.StemPress::class.java) ?: event)
+    }
+
+    private fun stemEvents(): MutableSharedFlow<AppleEvent> {
+        val events = MutableSharedFlow<AppleEvent>()
+        `when`(device.events).thenReturn(events)
+        val output = mock(AudioDeviceInfo::class.java)
+        `when`(output.type).thenReturn(AudioDeviceInfo.TYPE_BLUETOOTH_A2DP)
+        `when`(output.address).thenReturn(address.value)
+        `when`(audio.getDevices(AudioManager.GET_DEVICES_OUTPUTS)).thenReturn(arrayOf(output))
+        Shadow.extract<ShadowContextImpl>(service.baseContext).setSystemService(Context.AUDIO_SERVICE, audio)
+        return events
     }
 
     @Test fun oneCombinedEmissionProcessesBatteryWearControlsAndHeartRate() = runBlocking {

@@ -14,7 +14,8 @@ import me.kavishdevar.librepods.core.devices.AppleState
 import me.kavishdevar.librepods.core.devices.ConnectionState
 import me.kavishdevar.librepods.core.data.StemAction
 import me.kavishdevar.librepods.core.data.StemPressBud
-import me.kavishdevar.librepods.core.devices.effectiveLongPressAction
+import me.kavishdevar.librepods.core.data.StemPressType
+import me.kavishdevar.librepods.core.bluetooth.aacp.types.AppleEvent
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -218,15 +219,10 @@ class AacpProtocolReportsTest {
 
     @Test fun aSilentConversationChoiceSurvivesTheGenericTenSecondTimeoutUntilAFreshReportOrDisconnect() = withTransport { device, socket ->
         val id = ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG
-        val hold = ControlCommandIdentifier.CLICK_HOLD_MODE
         fun report(value: Int) = device.aacp.processPacket(byteArrayOf(4, 0, 4, 0, 9, 0, 0x28, value.toByte(), 0, 0, 0), socket)
         report(2)
-        device.aacp.processPacket(byteArrayOf(4, 0, 4, 0, 9, 0, 0x16, 1, 1, 0, 0), socket)
-        assertTrue(device.setLongPressAction("left", StemAction.DIGITAL_ASSISTANT))
         assertTrue(device.aacp.sendControlCommand(id.value, true))
         Thread.sleep(11_000)
-        assertArrayEquals("A silently applied hold action must not revert after ten seconds", byteArrayOf(1, 5),
-            device.state.value.requestedControls[hold])
         assertArrayEquals(byteArrayOf(2), device.state.value.controlStates[id])
         assertArrayEquals(byteArrayOf(1), device.state.value.requestedControls[id])
         report(2)
@@ -276,73 +272,65 @@ class AacpProtocolReportsTest {
         } finally { manager.disconnect(); first.close(); replacement.close() }
     }
 
-    @Test fun holdChoicesWriteRightThenLeftAndPreserveTheOtherBudsPendingChoice() = withTransport { device, socket ->
-        val id = ControlCommandIdentifier.CLICK_HOLD_MODE
-        val output = Shadow.extract<ProtocolReportSocketShadow>(socket).output
-        device.aacp.processPacket(byteArrayOf(4, 0, 4, 0, 9, 0, 0x16, 1, 1, 5, 5), socket)
+    @Test fun assistantChoiceDelegatesOnlyHoldsAndPreservesTheOtherBudWithoutANativeReport() = withTransport { device, socket ->
+        val bytes = Shadow.extract<ProtocolReportSocketShadow>(socket).output.bytes
         assertTrue(device.setLongPressAction("left", StemAction.DIGITAL_ASSISTANT))
-        assertArrayEquals(byteArrayOf(4, 0, 4, 0, 9, 0, 0x16, 1, 5, 0, 0), output.bytes.toByteArray())
-        assertArrayEquals(byteArrayOf(1, 1), device.state.value.controlStates[id])
-        assertEquals(StemAction.DIGITAL_ASSISTANT, device.state.value.effectiveLongPressAction(StemPressBud.LEFT))
+        assertArrayEquals(byteArrayOf(4, 0, 4, 0, 9, 0, 0x39, 8, 0, 0, 0), bytes.toByteArray())
+        assertEquals(StemAction.DIGITAL_ASSISTANT, device.settings.value.leftLongPressAction)
+        assertEquals(StemAction.CYCLE_NOISE_CONTROL_MODES, device.settings.value.rightLongPressAction)
+        assertEquals(StemAction.DIGITAL_ASSISTANT, device.hostHoldAction(AppleEvent.StemPress(StemPressType.LONG_PRESS, StemPressBud.LEFT, socket)))
+        assertEquals(StemAction.CYCLE_NOISE_CONTROL_MODES, device.hostHoldAction(AppleEvent.StemPress(StemPressType.LONG_PRESS, StemPressBud.RIGHT, socket)))
+        assertNull(device.hostHoldAction(AppleEvent.StemPress(StemPressType.SINGLE_PRESS, StemPressBud.LEFT, socket)))
         assertTrue(device.setLongPressAction("right", StemAction.DIGITAL_ASSISTANT))
-        assertArrayEquals(byteArrayOf(5, 5), device.state.value.requestedControls[id])
+        assertEquals(11, bytes.size())
         assertTrue(device.setLongPressAction("left", StemAction.CYCLE_NOISE_CONTROL_MODES))
-        assertArrayEquals(byteArrayOf(4, 0, 4, 0, 9, 0, 0x16, 5, 1, 0, 0), output.bytes.toByteArray().takeLast(11).toByteArray())
-        device.aacp.processPacket(byteArrayOf(4, 0, 4, 0, 9, 0, 0x16, 5, 1, 1, 5), socket)
-        assertFalse(id in device.state.value.requestedControls)
-        assertEquals(StemAction.CYCLE_NOISE_CONTROL_MODES, device.state.value.effectiveLongPressAction(StemPressBud.LEFT))
-        assertEquals(StemAction.DIGITAL_ASSISTANT, device.state.value.effectiveLongPressAction(StemPressBud.RIGHT))
+        assertEquals(11, bytes.size())
+        assertTrue(device.setLongPressAction("right", StemAction.CYCLE_NOISE_CONTROL_MODES))
+        assertArrayEquals(byteArrayOf(4, 0, 4, 0, 9, 0, 0x39, 0, 0, 0, 0), bytes.toByteArray().takeLast(11).toByteArray())
+        assertNull(device.hostHoldAction(AppleEvent.StemPress(StemPressType.LONG_PRESS, StemPressBud.RIGHT, socket)))
     }
 
-    @Test fun unknownDisconnectedAndInvalidHoldRequestsCannotPretendToChangeTheSetting() = withTransport { device, socket ->
-        val id = ControlCommandIdentifier.CLICK_HOLD_MODE
+    @Test fun failedDisconnectedAndInvalidHoldChangesCannotAlterTheSavedChoice() = withTransport { device, socket ->
         val output = Shadow.extract<ProtocolReportSocketShadow>(socket).output
-        device.loadInitialState(AppleState(controlStates = mapOf(id to byteArrayOf(5, 1))),
-            AppleSettings(leftLongPressAction = StemAction.DIGITAL_ASSISTANT), AppleMetadata())
-        assertNull("An old app-only preference cannot establish the device action", device.state.value.effectiveLongPressAction(StemPressBud.LEFT))
-        assertFalse("A stale cached pair cannot overwrite the unselected bud", device.setLongPressAction("left", StemAction.DIGITAL_ASSISTANT))
-        device.aacp.processPacket(byteArrayOf(4, 0, 4, 0, 9, 0, 0x16, 1, 1, 0, 0), socket)
+        val original = device.settings.value
+        output.failWrites = true
+        assertFalse(device.setLongPressAction("left", StemAction.DIGITAL_ASSISTANT))
+        assertEquals(original, device.settings.value)
+        output.failWrites = false
         assertFalse(device.setLongPressAction("unknown", StemAction.DIGITAL_ASSISTANT))
         assertFalse(device.setLongPressAction("left", StemAction.PLAY_PAUSE))
         assertEquals(0, output.bytes.size())
-        val saved = device.settings.value
         device.aacp.disconnect()
         assertFalse(device.setLongPressAction("left", StemAction.DIGITAL_ASSISTANT))
-        assertEquals(saved, device.settings.value)
+        assertEquals(original, device.settings.value)
     }
 
-    @Test fun failedHoldWritesKeepPreferencesAndReportsReceivedDuringTheWriteRemainAuthoritative() = withTransport { device, socket ->
-        val id = ControlCommandIdentifier.CLICK_HOLD_MODE
-        val output = Shadow.extract<ProtocolReportSocketShadow>(socket).output
-        device.aacp.processPacket(byteArrayOf(4, 0, 4, 0, 9, 0, 0x16, 1, 1, 0, 0), socket)
-        val saved = device.settings.value
-        output.failWrites = true
-        assertFalse(device.setLongPressAction("left", StemAction.DIGITAL_ASSISTANT))
-        assertEquals(saved, device.settings.value)
-        assertFalse(id in device.state.value.requestedControls)
-        output.failWrites = false
-        output.beforeWrite = { device.aacp.processPacket(byteArrayOf(4, 0, 4, 0, 9, 0, 0x16, 5, 1, 1, 5), socket) }
+    @Test fun reconnectReappliesSavedHoldChoicesAndRejectsRetiredGestures() = withTransport { device, socket ->
         assertTrue(device.setLongPressAction("left", StemAction.DIGITAL_ASSISTANT))
-        assertArrayEquals(byteArrayOf(5, 1), device.state.value.controlStates[id])
-        assertFalse(id in device.state.value.requestedControls)
-        assertEquals(StemAction.CYCLE_NOISE_CONTROL_MODES, device.state.value.effectiveLongPressAction(StemPressBud.LEFT))
-        assertEquals(StemAction.DIGITAL_ASSISTANT, device.state.value.effectiveLongPressAction(StemPressBud.RIGHT))
+        val oldEvent = AppleEvent.StemPress(StemPressType.LONG_PRESS, StemPressBud.LEFT, socket)
+        val replacement = socket()
+        try {
+            bind(device.aacp, replacement)
+            assertNull(device.hostHoldAction(oldEvent))
+            assertTrue(device.configureHoldActions(replacement))
+            assertArrayEquals(byteArrayOf(4, 0, 4, 0, 9, 0, 0x39, 8, 0, 0, 0),
+                Shadow.extract<ProtocolReportSocketShadow>(replacement).output.bytes.toByteArray())
+            assertEquals(StemAction.DIGITAL_ASSISTANT, device.hostHoldAction(oldEvent.copy(sourceSocket = replacement)))
+            device.aacp.disconnect()
+            assertNull(device.hostHoldAction(oldEvent.copy(sourceSocket = replacement)))
+        } finally { replacement.close() }
     }
 
-    @Test fun holdHistoryBytesAndMalformedValuesCannotBeReplayedAsCommands() = withTransport { device, socket ->
-        val id = ControlCommandIdentifier.CLICK_HOLD_MODE
-        device.aacp.processPacket(byteArrayOf(4, 0, 4, 0, 9, 0, 0x16, 1, 5, 0xff.toByte(), 7), socket)
-        val confirmed = device.state.value
-        val saved = device.settings.value
-        assertArrayEquals(byteArrayOf(1, 5), confirmed.controlStates[id])
-        for (pair in listOf(byteArrayOf(0, 5), byteArrayOf(1, 0), byteArrayOf(2, 5), byteArrayOf(1, 6))) {
-            device.aacp.processPacket(byteArrayOf(4, 0, 4, 0, 9, 0, 0x16) + pair + byteArrayOf(0, 0), socket)
-            assertSame(confirmed, device.state.value)
-            assertEquals(saved, device.settings.value)
-        }
-        for (invalid in listOf(byteArrayOf(5), byteArrayOf(1, 5, 5, 1), byteArrayOf(1, 0)))
-            assertFalse(device.setControlCommand(id, invalid))
-        assertEquals(0, Shadow.extract<ProtocolReportSocketShadow>(socket).output.bytes.size())
+    @Test fun otherBudsHoldCyclesNoiseControlOnTheCapturedTransport() = withTransport { device, socket ->
+        assertTrue(device.setLongPressAction("left", StemAction.DIGITAL_ASSISTANT))
+        device.aacp.processPacket(byteArrayOf(4, 0, 4, 0, 9, 0, 0x0d, 2, 0, 0, 0), socket)
+        val event = AppleEvent.StemPress(StemPressType.LONG_PRESS, StemPressBud.RIGHT, socket)
+        assertTrue(device.cycleHoldListeningMode(event))
+        val bytes = Shadow.extract<ProtocolReportSocketShadow>(socket).output.bytes
+        assertArrayEquals(byteArrayOf(4, 0, 4, 0, 9, 0, 0x0d, 3, 0, 0, 0), bytes.toByteArray().takeLast(11).toByteArray())
+        assertFalse(device.cycleHoldListeningMode(event.copy(bud = StemPressBud.LEFT)))
+        device.aacp.disconnect()
+        assertFalse(device.cycleHoldListeningMode(event))
     }
 
     private fun device(): AppleDevice {

@@ -25,7 +25,9 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import me.kavishdevar.librepods.core.bluetooth.MacAddress
 import me.kavishdevar.librepods.core.bluetooth.aacp.AACPManager
+import me.kavishdevar.librepods.core.bluetooth.aacp.packet.ControlCommandPacket
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.AppleEvent
+import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommand
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommandIdentifier
 import me.kavishdevar.librepods.core.bluetooth.att.ATTHandle
 import me.kavishdevar.librepods.core.bluetooth.att.ATTManager
@@ -35,6 +37,8 @@ import me.kavishdevar.librepods.core.bluetooth.att.types.parseTransparencySettin
 import me.kavishdevar.librepods.core.bluetooth.att.types.customTransparencyEnabled
 import me.kavishdevar.librepods.core.bluetooth.aacp.publishForTransport
 import me.kavishdevar.librepods.core.data.StemAction
+import me.kavishdevar.librepods.core.data.StemPressBud
+import me.kavishdevar.librepods.core.data.StemPressType
 import me.kavishdevar.librepods.core.data.apple.BuddyState
 import me.kavishdevar.librepods.core.data.audio.MicrophoneFrame
 import me.kavishdevar.librepods.core.data.audio.MicrophoneState
@@ -61,7 +65,6 @@ class AppleDevice(
 
     private val _settings = MutableStateFlow(AppleSettings())
     override val settings = _settings.asStateFlow()
-    private val holdActionLock = Any()
 
     private val _metadata = MutableStateFlow(AppleMetadata())
     override val metadata = _metadata.asStateFlow()
@@ -500,20 +503,50 @@ class AppleDevice(
         setControlCommand(ControlCommandIdentifier.LISTENING_MODE_CONFIGS, newValue)
     }
 
-    fun setLongPressAction(side: String, action: StemAction): Boolean {
-        val index = when (side.lowercase(java.util.Locale.ROOT)) { "right" -> 0; "left" -> 1; else -> return false }
-        val value: Byte = when (action) {
-            StemAction.CYCLE_NOISE_CONTROL_MODES -> 1
-            StemAction.DIGITAL_ASSISTANT -> 5
-            else -> return false
-        }
-        return synchronized(holdActionLock) {
-            val id = ControlCommandIdentifier.CLICK_HOLD_MODE
-            val snapshot = state.value
-            val pair = holdActions(snapshot.requestedControls[id]) ?: holdActions(snapshot.controlStates[id]) ?: return@synchronized false
-            pair[index] = value
-            setControlCommand(id, pair)
-        }
+    private val holdActionLock = Any()
+    private var holdActionSocket: BluetoothSocket? = null
+    private var rawHoldActions = false
+
+    /** 0x39 delegates only holds; normal single/double/triple presses stay native. */
+    fun configureHoldActions(expected: BluetoothSocket): Boolean = synchronized(holdActionLock) {
+        applyHoldActions(expected, settings.value)
+    }
+
+    private fun applyHoldActions(expected: BluetoothSocket, choice: AppleSettings): Boolean {
+        val customized = choice.leftLongPressAction == StemAction.DIGITAL_ASSISTANT ||
+            choice.rightLongPressAction == StemAction.DIGITAL_ASSISTANT
+        if (!aacp.ownsAudioSocket(expected)) return false
+        if (holdActionSocket === expected && rawHoldActions == customized) return true
+        val packet = ControlCommandPacket.create(
+            ControlCommand(
+                ControlCommandIdentifier.RAW_GESTURES_CONFIG, byteArrayOf(if (customized) 8 else 0)))
+        if (!aacp.sendPacket(packet, expected) || !aacp.ownsAudioSocket(expected)) return false
+        holdActionSocket = expected
+        rawHoldActions = customized
+        return true
+    }
+
+    fun setLongPressAction(side: String, action: StemAction): Boolean = synchronized(holdActionLock) {
+        val left = when (side.lowercase(java.util.Locale.ROOT)) { "left" -> true; "right" -> false; else -> return@synchronized false }
+        if (action !in setOf(StemAction.CYCLE_NOISE_CONTROL_MODES, StemAction.DIGITAL_ASSISTANT)) return@synchronized false
+        val expected = aacp.captureAudioSocket() ?: return@synchronized false
+        val choice = if (left) settings.value.copy(leftLongPressAction = action) else settings.value.copy(rightLongPressAction = action)
+        if (!applyHoldActions(expected, choice)) return@synchronized false
+        _settings.update { if (left) it.copy(leftLongPressAction = action) else it.copy(rightLongPressAction = action) }
+        true
+    }
+
+    fun hostHoldAction(event: AppleEvent.StemPress): StemAction? = synchronized(holdActionLock) {
+        if (event.pressType != StemPressType.LONG_PRESS || !rawHoldActions ||
+            holdActionSocket !== event.sourceSocket || !aacp.ownsAudioSocket(event.sourceSocket)) return@synchronized null
+        if (event.bud == StemPressBud.LEFT) settings.value.leftLongPressAction else settings.value.rightLongPressAction
+    }
+
+    fun cycleHoldListeningMode(event: AppleEvent.StemPress): Boolean = synchronized(holdActionLock) {
+        if (hostHoldAction(event) != StemAction.CYCLE_NOISE_CONTROL_MODES) return@synchronized false
+        val mode = state.value.nextHoldListeningMode(settings.value, metadata.value.modelNumber) ?: return@synchronized false
+        aacp.sendPacket(ControlCommandPacket.create(
+            ControlCommand(ControlCommandIdentifier.LISTENING_MODE, byteArrayOf(mode.toByte()))), event.sourceSocket)
     }
 
     fun renameDevice(newName: String): Boolean = aacp.sendRename(newName)

@@ -40,21 +40,18 @@ not expose peer names or addresses.
 
 ## Press and Hold
 
-Control `0x16` carries the current right action first, then the left action:
-`1` selects noise control and `5` selects the native assistant action. Outgoing
-commands zero the remaining two bytes. Incoming reports may carry previous
-actions in those bytes; only the current pair is retained. See the
-[NTPods control contract](https://github.com/Ripthulhu/ntpods/blob/5502e286ba941ad25e664224fa7f94a23363ad95/docs/WINDOWS-AIRPODS-CONTROL-PROTOCOL.md#setting-values-and-confirmation).
+On the Pixel, the AirPods do not report native hold control `0x16`. Android hold
+choices therefore use LibrePods' existing raw-gesture mechanism: control `0x39`,
+bit `0x08`, delegates holds from both buds while leaving other presses native.
+The service dispatches each hold using that bud's saved action. The other bud's
+Noise Control action cycles the reported mode choices, or ANC, Transparency and
+Adaptive when Android receives no cycle-mask report. Off remains opt-in.
 
-Changing one bud preserves the other bud's pending or freshly reported action.
-Cached pairs are cleared when loading or retiring a control session, so an old
-host's setting cannot supply that other action. A failed write leaves the saved
-preferences unchanged. A silent successful write retains its pending pair until a
-matching report or transport retirement. Settings pages use that pair before
-the last report. App-only legacy preferences do not establish a device action.
-
-Assistant invocation uses the connected host's headset/assistant integration;
-the on-device action and Android invocation need a hardware check together.
+The configuration is reapplied to each new control transport. Events carry their
+source socket; retired sessions and devices without local audio output cannot
+launch an assistant or cycle modes. A failed configuration write does not change
+the saved choice. Assistant launch targets Android's configured assistant package.
+Physical assistant invocation and background behavior still need a Pixel check.
 
 ## Conversation Awareness
 

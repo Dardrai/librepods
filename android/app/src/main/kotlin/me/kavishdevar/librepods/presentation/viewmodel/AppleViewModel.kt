@@ -88,7 +88,6 @@ class AppleViewModel(
     private val _refreshingSettings = MutableStateFlow(false)
     val refreshingSettings = _refreshingSettings.asStateFlow()
     private var hearingModeJob: Job? = null
-    private val holdActionMutex = Mutex()
 
     fun refreshDeviceSettings(refresh: suspend (AppleDevice) -> DeviceSettingsRefreshResult) {
         if (device.state.value.hearingModes.pending != null) return
@@ -248,6 +247,7 @@ class AppleViewModel(
 
     fun toggleListeningMode(modeBit: Int) = device.toggleListeningMode(modeBit)
 
+    private val holdActionMutex = Mutex()
     fun setLongPressAction(side: String, action: StemAction) = viewModelScope.launch {
         val sent = holdActionMutex.withLock {
             withContext(Dispatchers.IO) { device.setLongPressAction(side, action) }

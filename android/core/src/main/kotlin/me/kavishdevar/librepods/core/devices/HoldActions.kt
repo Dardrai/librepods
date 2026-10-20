@@ -1,19 +1,14 @@
 package me.kavishdevar.librepods.core.devices
 
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommandIdentifier
-import me.kavishdevar.librepods.core.data.StemAction
-import me.kavishdevar.librepods.core.data.StemPressBud
 
-internal fun holdActions(value: ByteArray?): ByteArray? {
-    if (value == null || value.size !in 2..4 || value.take(2).any { it != 1.toByte() && it != 5.toByte() }) return null
-    // Reports can include the previous actions in the upper bytes; writes use only the current pair.
-    return value.copyOfRange(0, 2)
-}
-
-fun AppleState.effectiveLongPressAction(side: StemPressBud): StemAction? {
-    val actions = holdActions(requestedControls[ControlCommandIdentifier.CLICK_HOLD_MODE])
-        ?: holdActions(controlStates[ControlCommandIdentifier.CLICK_HOLD_MODE])
-        ?: return null
-    return if (actions[if (side == StemPressBud.RIGHT) 0 else 1] == 5.toByte()) StemAction.DIGITAL_ASSISTANT
-        else StemAction.CYCLE_NOISE_CONTROL_MODES
+internal fun AppleState.nextHoldListeningMode(settings: AppleSettings, model: String): Int? {
+    val current = controlStates[ControlCommandIdentifier.LISTENING_MODE]?.firstOrNull()?.toInt() ?: return null
+    if (current !in 1..4) return null
+    val allowOff = effectiveAllowOff(settings, model) == true
+    val available = listOf(1, 2, 3, 4).filter { it != 1 || allowOff }
+    val mask = controlStates[ControlCommandIdentifier.LISTENING_MODE_CONFIGS]?.firstOrNull()?.toInt()
+    val configured = available.filter { mode -> mask != null && mask and (1 shl (mode - 1)) != 0 }
+    val modes = configured.takeIf { it.size >= 2 } ?: available
+    return modes[(modes.indexOf(current) + 1) % modes.size]
 }

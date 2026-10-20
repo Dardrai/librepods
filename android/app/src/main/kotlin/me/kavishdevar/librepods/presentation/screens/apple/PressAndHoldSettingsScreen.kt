@@ -41,8 +41,6 @@ import me.kavishdevar.librepods.R
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommandIdentifier
 import me.kavishdevar.librepods.core.devices.effectiveAllowOff
 import me.kavishdevar.librepods.core.data.StemAction
-import me.kavishdevar.librepods.core.data.StemPressBud
-import me.kavishdevar.librepods.core.devices.effectiveLongPressAction
 import me.kavishdevar.librepods.presentation.components.primitives.StyledList
 import me.kavishdevar.librepods.presentation.components.primitives.StyledListItemOrientation
 import me.kavishdevar.librepods.presentation.components.primitives.StyledScaffold
@@ -59,6 +57,8 @@ fun LongPress(
     val uiState by viewModel.uiState.collectAsState()
 
     val state = uiState.state
+    val settings = uiState.settings
+
     val modesByte = state.controlStates[ControlCommandIdentifier.LISTENING_MODE_CONFIGS]?.get(0) ?: 0
 
     Log.d("PressAndHoldSettingsScreen", "Current modes state: ${modesByte.toString(2)}")
@@ -67,8 +67,7 @@ fun LongPress(
     Log.d("PressAndHoldSettingsScreen", "Noise Cancellation mode: ${(modesByte and 0x02) != 0.toByte()}")
     Log.d("PressAndHoldSettingsScreen", "Adaptive mode: ${(modesByte and 0x08) != 0.toByte()}")
 
-    val bud = if (name == stringResource(R.string.left)) StemPressBud.LEFT else StemPressBud.RIGHT
-    val longPressAction = state.effectiveLongPressAction(bud)
+    val longPressAction = if (name == stringResource(R.string.left)) settings.leftLongPressAction else settings.rightLongPressAction
 
     val scrollState = rememberScrollState()
 
@@ -92,7 +91,6 @@ fun LongPress(
             StyledList {
                 styledListItem(
                     contentText = stringResource(R.string.noise_control),
-                    enabled = longPressAction != null,
                     selected = longPressAction == StemAction.CYCLE_NOISE_CONTROL_MODES,
                     onClick = {
                         viewModel.setLongPressAction(
@@ -104,7 +102,6 @@ fun LongPress(
 
                 styledListItem(
                     contentText = stringResource(R.string.digital_assistant),
-                    enabled = longPressAction != null,
                     selected = longPressAction == StemAction.DIGITAL_ASSISTANT,
                     onClick = {
                         viewModel.setLongPressAction(
@@ -125,7 +122,7 @@ fun LongPress(
                     title = stringResource(R.string.noise_control),
                     description = stringResource(R.string.press_and_hold_noise_control_description)
                 ) {
-                    if (state.effectiveAllowOff(uiState.settings, uiState.metadata.modelNumber) == true) {
+                    if (state.effectiveAllowOff(settings, uiState.metadata.modelNumber) == true) {
                         styledListItem(
                             contentText = stringResource(R.string.off),
                             supportingText = stringResource(R.string.listening_mode_off_description),

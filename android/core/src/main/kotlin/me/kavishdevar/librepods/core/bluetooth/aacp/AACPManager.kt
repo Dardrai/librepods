@@ -65,7 +65,6 @@ import me.kavishdevar.librepods.core.devices.HearingModes
 import me.kavishdevar.librepods.core.devices.QuietListeningModeReport
 import me.kavishdevar.librepods.core.devices.cachedControlStates
 import me.kavishdevar.librepods.core.devices.withControlReport
-import me.kavishdevar.librepods.core.devices.holdActions
 import me.kavishdevar.librepods.core.devices.withControlRequest
 import me.kavishdevar.librepods.core.devices.mergeBatteryReports
 import me.kavishdevar.librepods.core.devices.normalizedControl
@@ -161,6 +160,7 @@ class AACPManager(private val device: AppleDevice,
             delay(200.milliseconds)
             if (!sendNotificationRequest(expected)) return
             if (!sendCapabilitiesRequest(expected)) return
+            if (!device.configureHoldActions(expected)) return
             delay(200.milliseconds)
             if (!sendCountryCode(expected)) return
             delay(200.milliseconds)
@@ -476,10 +476,6 @@ class AACPManager(private val device: AppleDevice,
                 val controlCommandPacket = try { ControlCommandPacket.parse(packet) }
                     catch (_: IllegalArgumentException) { Log.w(TAG, "Ignoring malformed control report"); return }
                 val controlCommand = controlCommandPacket.controlCommand
-                if (controlCommand.identifier == ControlCommandIdentifier.CLICK_HOLD_MODE && holdActions(controlCommand.value) == null) {
-                    Log.w(TAG, "Ignoring invalid hold-action setting")
-                    return
-                }
                 if (controlCommand.identifier == ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG &&
                     controlCommand.value.singleOrNull() !in listOf(1.toByte(), 2.toByte())) {
                     Log.w(TAG, "Ignoring invalid conversation awareness setting")
@@ -573,7 +569,8 @@ class AACPManager(private val device: AppleDevice,
                         device.emitEvent(
                             AppleEvent.StemPress(
                                 pressType = packet.stemPressType,
-                                bud = packet.stemPressBud
+                                bud = packet.stemPressBud,
+                                sourceSocket = sourceSocket
                             )
                         )
                     }
@@ -762,8 +759,6 @@ class AACPManager(private val device: AppleDevice,
     fun sendControlCommand(identifier: Byte, value: ByteArray, quietListeningMode: Boolean = false): Boolean {
         if (value.isEmpty() || value.size > 4) return false
         val controlCommand = ControlCommand(ControlCommandIdentifier.fromByte(identifier) ?: return false, value)
-        if (controlCommand.identifier == ControlCommandIdentifier.CLICK_HOLD_MODE &&
-            (holdActions(value) == null || value.drop(2).any { it != 0.toByte() })) return false
         // Hearing modes share a gate and need a current report/fitting transaction.
         if (controlCommand.identifier in setOf(ControlCommandIdentifier.HEARING_AID,
                 ControlCommandIdentifier.HEARING_ASSIST_CONFIG)) return false
@@ -807,8 +802,7 @@ class AACPManager(private val device: AppleDevice,
             controlTimeouts.remove(controlCommand.identifier)?.cancel()
             val request = device.state.value.requestedControls[controlCommand.identifier]
             if (request != null && controlCommand.identifier !in setOf(ControlCommandIdentifier.ALLOW_OFF_OPTION,
-                    ControlCommandIdentifier.AUTO_ANC_STRENGTH, ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG,
-                    ControlCommandIdentifier.CLICK_HOLD_MODE)) {
+                    ControlCommandIdentifier.AUTO_ANC_STRENGTH, ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG)) {
                 controlTimeouts[controlCommand.identifier] = CoroutineScope(Dispatchers.Default).launch {
                     delay(10.seconds)
                     publishForTransport(this@AACPManager, originalSocket, ::captureAudioSocket) {

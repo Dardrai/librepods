@@ -13,7 +13,8 @@ sealed interface AppleEvent {
 
     data class StemPress(
         val pressType: StemPressType,
-        val bud: StemPressBud
+        val bud: StemPressBud,
+        val sourceSocket: BluetoothSocket
     ): AppleEvent
 
     data class ShowNearbyUi(

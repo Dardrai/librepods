@@ -101,6 +101,8 @@ import me.kavishdevar.librepods.shizuku.A2dpRecoveryGuard
 import me.kavishdevar.librepods.shizuku.BackgroundAudioAccess
 import me.kavishdevar.librepods.shizuku.BluetoothVolumeSync
 import me.kavishdevar.librepods.core.data.apple.BuddyState
+import me.kavishdevar.librepods.core.data.StemAction
+import me.kavishdevar.librepods.utils.AssistantLauncher
 import me.kavishdevar.librepods.core.data.heartrate.HeartRateSample
 import me.kavishdevar.librepods.core.devices.AppleDevice
 import me.kavishdevar.librepods.core.devices.AppleSettings
@@ -1355,7 +1357,7 @@ class LibrePodsService: Service() {
                     if (destroying || devices.value[address] !== device || bluetoothDevice.bondState != BluetoothDevice.BOND_BONDED) false
                     else {
                         attachExperimentalAudio(device)
-                        deviceJobs[address] = listOf(observeConversationAwareness(device), observeAppleState(device), observeAppleSettings(device), observeAppleMetadata(device),
+                        deviceJobs[address] = listOf(observeConversationAwareness(device), observeStemActions(device), observeAppleState(device), observeAppleSettings(device), observeAppleMetadata(device),
                             serviceScope.launch {
                                 device.connectionState.collect {
                                     retireIneligibleHeadGestures(device)
@@ -1392,6 +1394,24 @@ class LibrePodsService: Service() {
                 }
                 islandWindow.updateSettings(settings)
                 oldAppSettings = settings
+            }
+        }
+    }
+
+    fun observeStemActions(device: AppleDevice): Job = serviceScope.launch(Dispatchers.IO, start = CoroutineStart.UNDISPATCHED) {
+        device.events.collect { event ->
+            if (event !is AppleEvent.StemPress) return@collect
+            fun current() = !destroying && devices.value[device.macAddress] === device &&
+                isNearbyDeviceAudioConnected(device) && device.aacp.ownsAudioSocket(event.sourceSocket)
+            if (!current()) return@collect
+            when (device.hostHoldAction(event)) {
+                StemAction.DIGITAL_ASSISTANT -> withContext(Dispatchers.Main.immediate) {
+                    if (current() && device.hostHoldAction(event) == StemAction.DIGITAL_ASSISTANT &&
+                        !AssistantLauncher.launch(this@LibrePodsService))
+                        Toast.makeText(this@LibrePodsService, R.string.assistant_launch_failed, Toast.LENGTH_LONG).show()
+                }
+                StemAction.CYCLE_NOISE_CONTROL_MODES -> device.cycleHoldListeningMode(event)
+                else -> Unit
             }
         }
     }

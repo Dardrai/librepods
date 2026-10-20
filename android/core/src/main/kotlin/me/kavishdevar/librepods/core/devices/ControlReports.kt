@@ -6,8 +6,7 @@ internal fun normalizedControl(value: ByteArray): ByteArray =
     value.dropLastWhile { it == 0.toByte() }.toByteArray().takeIf { it.isNotEmpty() } ?: byteArrayOf(0)
 
 internal fun AppleState.withControlReport(id: ControlCommandIdentifier, rawValue: ByteArray): AppleState {
-    val value = if (id == ControlCommandIdentifier.CLICK_HOLD_MODE) holdActions(rawValue) ?: return this
-        else normalizedControl(rawValue)
+    val value = normalizedControl(rawValue)
     // Adaptive strength can apply silently and later report a rounded value.
     val confirmsRequest = when (id) {
         ControlCommandIdentifier.AUTO_ANC_STRENGTH -> {

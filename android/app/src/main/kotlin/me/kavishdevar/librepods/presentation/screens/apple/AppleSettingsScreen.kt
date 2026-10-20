@@ -66,8 +66,6 @@ import me.kavishdevar.librepods.presentation.components.apple.ConnectionSettings
 import me.kavishdevar.librepods.presentation.components.apple.HearingHealthSettings
 import me.kavishdevar.librepods.presentation.components.apple.NoiseControlSettings
 import me.kavishdevar.librepods.presentation.components.apple.PressAndHoldSettings
-import me.kavishdevar.librepods.core.data.StemPressBud
-import me.kavishdevar.librepods.core.devices.effectiveLongPressAction
 import me.kavishdevar.librepods.presentation.components.primitives.StyledButton
 import me.kavishdevar.librepods.presentation.components.primitives.StyledListItem
 import me.kavishdevar.librepods.presentation.components.primitives.StyledListItemOrientation
@@ -327,8 +325,8 @@ fun AppleSettingsScreen(
                 }
                 item(key = "press_hold") {
                     PressAndHoldSettings(
-                        leftAction = state.effectiveLongPressAction(StemPressBud.LEFT),
-                        rightAction = state.effectiveLongPressAction(StemPressBud.RIGHT),
+                        leftAction = settings.leftLongPressAction,
+                        rightAction = settings.rightLongPressAction,
                         navigateToLeftLongPress = navigateToLeftLongPress,
                         navigateToRightLongPress = navigateToRightLongPress
                     )

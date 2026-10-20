@@ -4,56 +4,11 @@ import me.kavishdevar.librepods.core.bluetooth.aacp.packet.CustomEqPacket
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommand
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommandIdentifier
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.CustomEq
-import me.kavishdevar.librepods.core.data.StemAction
-import me.kavishdevar.librepods.core.data.StemPressBud
 import org.junit.Assert.*
 import org.junit.Test
 
 class ControlReportsTest {
     private val id = ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG
-
-    @Test fun holdReportsKeepOnlyCurrentRightThenLeftActionsAndConfirmMatchingRequests() {
-        val hold = ControlCommandIdentifier.CLICK_HOLD_MODE
-        val reported = AppleState().withControlReport(hold, byteArrayOf(1, 5, 5, 1))
-        assertArrayEquals(byteArrayOf(1, 5), reported.controlStates[hold])
-        val pending = reported.withControlRequest(hold, byteArrayOf(5, 5), reported.controlStates[hold])
-        val confirmed = pending.withControlReport(hold, byteArrayOf(5, 5, 0xff.toByte(), 0))
-        assertArrayEquals(byteArrayOf(5, 5), confirmed.controlStates[hold])
-        assertFalse(hold in confirmed.requestedControls)
-    }
-
-    @Test fun invalidHoldReportsCannotReplaceEitherConfirmedOrRequestedActions() {
-        val hold = ControlCommandIdentifier.CLICK_HOLD_MODE
-        val state = AppleState().withControlReport(hold, byteArrayOf(1, 5))
-        val requested = state.withControlRequest(hold, byteArrayOf(5, 1), state.controlStates[hold])
-        for (invalid in listOf(byteArrayOf(), byteArrayOf(5), byteArrayOf(1, 0), byteArrayOf(2, 5),
-            byteArrayOf(5, 6), byteArrayOf(1, 5, 0, 0, 0))) {
-            assertSame(state, state.withControlReport(hold, invalid))
-            assertSame(requested, requested.withControlReport(hold, invalid))
-        }
-    }
-
-    @Test fun holdSelectionUsesThePendingPairThenTheDeviceReportWithoutInventingUnknownActions() {
-        val hold = ControlCommandIdentifier.CLICK_HOLD_MODE
-        val reported = AppleState().withControlReport(hold, byteArrayOf(1, 5))
-        assertEquals(StemAction.DIGITAL_ASSISTANT, reported.effectiveLongPressAction(StemPressBud.LEFT))
-        assertEquals(StemAction.CYCLE_NOISE_CONTROL_MODES, reported.effectiveLongPressAction(StemPressBud.RIGHT))
-        val pending = reported.withControlRequest(hold, byteArrayOf(5, 1), reported.controlStates[hold])
-        assertEquals(StemAction.CYCLE_NOISE_CONTROL_MODES, pending.effectiveLongPressAction(StemPressBud.LEFT))
-        assertEquals(StemAction.DIGITAL_ASSISTANT, pending.effectiveLongPressAction(StemPressBud.RIGHT))
-        assertNull(AppleState().effectiveLongPressAction(StemPressBud.RIGHT))
-    }
-
-    @Test fun cachedHoldReportsCannotSupplyTheOtherBudsSettingAfterReconnect() {
-        val hold = ControlCommandIdentifier.CLICK_HOLD_MODE
-        val listening = ControlCommandIdentifier.LISTENING_MODE
-        val state = AppleState(controlStates = mapOf(hold to byteArrayOf(1, 5), listening to byteArrayOf(4)))
-        val cached = state.cachedControlStates(AppleSettings(), "A3063")
-        assertFalse(hold in cached)
-        assertArrayEquals(byteArrayOf(4), cached[listening])
-        val unchanged = AppleState(controlStates = mapOf(listening to byteArrayOf(4)))
-        assertSame(unchanged.controlStates, unchanged.cachedControlStates(AppleSettings(), "A3063"))
-    }
 
     @Test fun requestsRemainSeparateUntilAMatchingDeviceReportArrives() {
         val id = ControlCommandIdentifier.ADAPTIVE_VOLUME_CONFIG
