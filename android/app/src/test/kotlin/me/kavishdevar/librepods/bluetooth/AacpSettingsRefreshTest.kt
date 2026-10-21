@@ -233,7 +233,8 @@ class AacpSettingsRefreshTest {
             this[6] = 0x84.toByte(); this[8] = 2; this[9] = 1; this[10] = 1; this[11] = 1
         }
         val reports = listOf(
-            packet(8, 2), packet(2, 1, 1, 1), packet(4, 1, 2, 1, 72, 2, 1),
+            packet(8, 2, 0, 0, 0), packet(2, 1, 1, 1), packet(4, 1, 2, 1, 72, 2, 1),
+            packet(0x23).copyOf(31).apply { this[6] = 3; this[18] = 1; this[19] = 'X'.code.toByte() },
             packet(9, 0x0d, 4, 0, 0, 0), packet(6, 0, 1), packet(0x4b, 0, 0, 0, 1),
             packet(0x19, 5, 1), packet(0x0e, 1, 2, 3, 4, 5, 6, 2),
             packet(0x2e, 0, 0, 1, 1, 2, 3, 4, 5, 6, 0, 0),

@@ -59,6 +59,8 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import me.kavishdevar.librepods.presentation.design.DesignSystem
@@ -771,6 +773,7 @@ private fun StyledListItemContent(
 
             Column (
                 modifier = Modifier
+                    .semantics { if (selected != null) this.selected = selected }
                     .background(
                         animatedBackgroundColor,
                         when {

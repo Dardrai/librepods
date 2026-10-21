@@ -43,6 +43,7 @@ import me.kavishdevar.librepods.presentation.screens.onboarding.OnboardingScreen
 import me.kavishdevar.librepods.presentation.screens.settings.AppAccessibilitySettingsRoute
 import me.kavishdevar.librepods.presentation.screens.settings.AppAppearanceSettingsRoute
 import me.kavishdevar.librepods.presentation.screens.settings.AppSettingsScreen
+import me.kavishdevar.librepods.presentation.screens.settings.CaseSoundScreen
 import me.kavishdevar.librepods.presentation.screens.settings.BLESettingsScreenRoute
 import me.kavishdevar.librepods.presentation.screens.settings.IslandSettingsRoute
 import me.kavishdevar.librepods.presentation.screens.settings.island.IslandCompactCustomizeRoute
@@ -188,9 +189,12 @@ fun RenderScreenContent(
                 navigateToBleSettingsScreen = { navigate(Screen.BLESettings) },
                 navigateToAppAppearanceScreen = { navigate(Screen.AppAppearance) },
                 navigateToAppAccessibilityScreen = { navigate(Screen.AppAccessibilitySettings) },
-                navigateToIslandSettingsScreen = { navigate(Screen.IslandSettings) }
+                navigateToIslandSettingsScreen = { navigate(Screen.IslandSettings) },
+                navigateToCaseSound = { navigate(Screen.CaseSound) }
             )
         }
+
+        Screen.CaseSound -> CaseSoundScreen(navigateBack)
 
         is Screen.HeadTracking -> {
             val device = devices[screen.macAddress] as? AppleDevice ?: return

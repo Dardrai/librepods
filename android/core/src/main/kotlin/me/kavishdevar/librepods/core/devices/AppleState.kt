@@ -2,6 +2,7 @@ package me.kavishdevar.librepods.core.devices
 
 import kotlinx.coroutines.Deferred
 import me.kavishdevar.librepods.core.bluetooth.MacAddress
+import me.kavishdevar.librepods.core.bluetooth.aacp.CaseInfoReport
 import me.kavishdevar.librepods.core.bluetooth.aacp.packet.AACPPacket
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.AudioSource
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.AudioSourceType
@@ -54,6 +55,8 @@ data class AppleState(
     var connectedDevices: List<ConnectedDevice> = emptyList(),
 
     val leftIsPrimary: Boolean = true,
+    val budRoleRaw: List<Int> = emptyList(),
+    val caseInfo: CaseInfoReport? = null,
 
     val hearingModes: HearingModes = HearingModes(),
 

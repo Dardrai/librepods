@@ -111,7 +111,9 @@ Mode changes are serialized and bound to their current transport. Enabling
 requires a supported, enrolled identity, complete current mode reports, a fresh
 valid saved-fitting read and inactive Custom Transparency. Hearing Aid selects
 Transparency; Media Assist preserves the listening mode. Success requires fresh
-complete mode reports and, for enables, byte-identical fitting readback. Partial
+reports for every field written and, for enables, byte-identical fitting readback.
+Unchanged complete current-session reports remain valid; an unchanged PME curve
+report is not required to be emitted again. Partial
 send failures and timeouts remain unconfirmed. An explicit same-session Off
 recovery preserves the other mode and sends no fitting or subscription writes.
 It does not restart a microphone session or force a control reconnect.
@@ -193,18 +195,78 @@ fallback remains suppressed until a new sensor/control session. Report IDs and
 firmware-specific activation service IDs are separate. Unknown services do not
 invent a supported sensor, and no unverified SPL scale or meter is exposed.
 
-## Diagnostics remain unavailable
+Bud Role `0x08` requires the complete four-byte body. Preserve unknown primary
+and flag bytes; an unrecognized primary selector cannot change ear-detection
+mapping. CaseInfo `0x23` decodes only the established v3/25-byte body, including
+the split uint64 case version, uint32 product and reserved value, and bounded
+strict UTF-8 name. Both snapshots belong to the current AACP socket and are
+cleared on retirement. Malformed or stale reports cannot replace them. CaseInfo
+does not authorize a nearby BLE connection and its case version is not a DULT
+firmware value. Routine handling does not log the case name.
 
-There is no diagnostic read or self-check trigger in this Android implementation.
-For future read support, `A4120002` version 8 is exactly 71 bytes: uint64 LE raw
+## Saved diagnostic decoding; live access remains unavailable
+
+There is no live diagnostic read or self-check trigger in this Android implementation.
+The offline parser accepts `A4120002` version 8 at exactly 71 bytes: uint64 LE raw
 measurement timestamps at 1/9, uint32 result words at 17/21, opaque ANC bytes
 25..32, uint32 first-use values at 33/37, and an opaque 30-byte tail at 41..70.
 Preserve unknown bits, tail and raw timestamps; never subtract a fixed timezone
 offset. These cached dates are not Hearing Test dates or a current diagnosis.
 Component interpretation requires product `2014/2024/2027`, a nonzero timestamp,
 and completed measurement status 0/1 (bits 3..5); general status uses bits 0..2.
+Full unsigned timestamp/result widths, unknown bits and the opaque tail are
+retained. ANC scores have the separate `201B` product gate; Pro 3 does not pass
+it. A self-check baseline requires both ears' timestamps to change independently
+and both resulting measurements to be completed; an unchanged ear is not fresh.
+
+Sensitivity (`82F6BC0A-1BCA-4873-AFC9-EC5890E3469A`) accepts one finite float32 LE;
+volume curve (`D5F96AFA-2F2C-41BB-A7E6-F54ABE6235B4`) requires exactly 17 finite
+float32 values. These decoders do not establish personal thresholds or absolute SPL.
 
 The discovered `A4120004` ASCII `31` Write Request and exact ATT `13` response
 prove submission only. Fresh per-ear results are needed to establish a measurement.
 No automatic or user-worn sweep is triggered, and no dosimetry value is presented
 as an absolute sound-pressure level without verified stimulus, weighting and scale.
+
+## Experimental charging-case sound
+
+Settings → Case sound experiment opens a separate, user-initiated BLE session.
+It is available without a connected AACP/audio transport. An eight-second scan
+must find exactly one connectable DULT/FD44 candidate; multiple candidates fail
+closed. A fresh standard PnP read must identify Apple vendor `004C`, source `1`,
+Pro 3 case product `2029`, version `1`. This identity does not prove ownership or
+bind the case to any saved Classic AirPods. The user must identify their own case
+and confirm both earbuds are inside and out of their ears. Audio/calls/recordings
+must be idle. No sound is requested on discovery, screen entry or installation.
+
+Routes stay separate:
+
+| Route | Service / characteristic | Start / Stop |
+| --- | --- | --- |
+| DULT | `15190001-12F4-C226-88ED-2AC5579F2A85` / `8E0C0001-1D68-FB92-BF61-48377421680E` | `00 03` / `01 03` |
+| Hawkeye configuration | `FD44` / `4F860002-943B-49EF-BED4-2F730304427A` | `01 00 02` / `01 01 02` |
+| Hawkeye non-owner | `FD44` / `4F860003-943B-49EF-BED4-2F730304427A` | `01 00 03` / `01 01 03` |
+
+DULT Command Response is exactly six bytes: `02 03`, request opcode uint16 LE,
+status uint16 LE. Its separate completion is exactly `03 03`, as specified in
+[DULT draft 03, section 3.13.4](https://datatracker.ietf.org/doc/html/draft-ledvina-apple-google-unwanted-trackers-03#section-3.13.4).
+Hawkeye configuration response is exactly seven bytes: `01 0B 02`, request opcode
+uint16 LE, status uint16 LE; `01 0D 02` is a separate completion event. Unknown
+non-owner reply framing is not interpreted using the configuration protocol.
+
+Start is never retried. Stop is attempted once after at most two seconds,
+including time waiting for the Start write, or sooner on cancellation or detected
+audio activity. Leaving the screen also cancels. The Stop request does not prove
+the case obeyed it. A cancelled/timed-out ATT operation poisons confirmation on
+that connection: best-effort Stop cannot inherit a late Start callback. The
+original CCCD is saved, restored and read back, with uncertainty recorded if
+restoration cannot be verified. Cleanup closes the owned connection.
+
+The experiment retains existing bonds; optional normal Android pairing is an
+explicit user action on the verified candidate. There is no automatic unpair,
+re-pair, separated-key latch, Find My registration or unexplained initialization.
+Bounded local results omit addresses, case names, keys and raw unknown payloads.
+ATT acceptance, typed responses, completion and the user's heard/silent/unsure
+outcome remain separate. Windows tests were silent. Android sound playback,
+authentication requirements and microphone coexistence still require hardware
+evidence; this is not a working-locator claim.

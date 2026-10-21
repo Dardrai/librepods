@@ -1,0 +1,17 @@
+<resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="MissingTranslation">
+    <string name="case_sound_title">Case sound experiment</string>
+    <string name="case_sound_experimental">Try a short sound request from your charging case.</string>
+    <string name="case_sound_limits">Experimental, AirPods Pro 3 case only. Windows tests were silent; Android playback is unverified. Pause media and recordings, put both earbuds in your case and keep them out of your ears. Keep other cases away. Finding a nearby case does not link it to your saved AirPods. Stop is requested automatically after two seconds; the case may ignore it.</string>
+    <string name="case_sound_route">Protocol</string>
+    <string name="case_sound_selected">Selected</string>
+    <string name="case_sound_find">Find nearby case</string>
+    <string name="case_sound_confirm">This is my case, with both earbuds inside and out of my ears.</string>
+    <string name="case_sound_start">Start two-second experiment</string>
+    <string name="case_sound_stop">Stop / cancel</string>
+    <string name="case_sound_pair">Pair case with Android</string>
+    <string name="case_sound_outcome">Did you hear your case?</string>
+    <string name="case_sound_heard">Yes, I heard the case</string>
+    <string name="case_sound_silent">No, it stayed silent</string>
+    <string name="case_sound_unsure">Not sure</string>
+    <string name="case_sound_results">Local results</string>
+</resources>

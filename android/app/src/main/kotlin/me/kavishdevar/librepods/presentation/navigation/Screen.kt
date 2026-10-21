@@ -31,6 +31,9 @@ sealed interface Screen: NavKey {
     data object AppSettings: Screen
 
     @Serializable
+    data object CaseSound: Screen
+
+    @Serializable
     data class HeadTracking(
         override val macAddress: MacAddress
     ): DeviceScreen

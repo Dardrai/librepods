@@ -73,8 +73,9 @@ data class HearingModes internal constructor(
     }
 
     internal fun confirms(plan: HearingModePlan): Boolean =
-        hearingRevision > plan.original.hearingRevision && assistRevision > plan.original.assistRevision &&
-            pmeRevision > plan.original.pmeRevision && matches(plan)
+        (!plan.packets.any { it[6] == 0x2c.toByte() } || hearingRevision > plan.original.hearingRevision) &&
+            (!plan.packets.any { it[6] == 0x33.toByte() } || assistRevision > plan.original.assistRevision) &&
+            (!plan.packets.any { it[4] == 0x53.toByte() } || pmeRevision > plan.original.pmeRevision) && matches(plan)
 
     internal fun sameConfiguration(other: HearingModes): Boolean =
         hearingReport.contentEquals(other.hearingReport) && assistReport.contentEquals(other.assistReport) &&

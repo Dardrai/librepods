@@ -325,7 +325,7 @@ class AACPManager(private val device: AppleDevice,
                     connectionScope = scope
                     pendingConnect = null
                     hostClockEpoch = null
-                    device.updateState { it.copy(capabilities = emptySet(), hearingModes = HearingModes(),
+                    device.updateState { it.copy(capabilities = emptySet(), hearingModes = HearingModes(), budRoleRaw = emptyList(), caseInfo = null,
                         hearingAidData = byteArrayOf(), transparencyData = byteArrayOf()) }
                     rtBuddyManager = createSensorSession(socket)
                     true
@@ -427,7 +427,7 @@ class AACPManager(private val device: AppleDevice,
         val opcode = packet[4]
         when (MessageOpcode.fromByte(opcode)) {
             MessageOpcode.BUD_ROLE -> {
-                if (packet.size < 7) return
+                if (packet.size != 10) return
                 val payload = packet.copyOfRange(6, packet.size)
                 val packet = AACPPacket.createUnknownPacket(
                     opcode = MessageOpcode.BUD_ROLE,
@@ -437,10 +437,17 @@ class AACPManager(private val device: AppleDevice,
                 publishForTransport(this, sourceSocket, ::captureAudioSocket) {
                     device.updateState {
                         it.copy(
-                            leftIsPrimary = payload[0] == 0x01.toByte(),
+                            leftIsPrimary = when (payload[0].toInt() and 255) { 1 -> true; 0 -> false; else -> it.leftIsPrimary },
+                            budRoleRaw = payload.map { byte -> byte.toInt() and 255 },
                             aacpPackets = it.aacpPackets + packet
                         )
                     }
+                }
+            }
+            MessageOpcode.CASE_INFO -> {
+                val report = parseCaseInfoReport(packet) ?: return
+                publishForTransport(this, sourceSocket, ::captureAudioSocket) {
+                    device.updateState { it.copy(caseInfo = report) }
                 }
             }
             MessageOpcode.CAPABILITIES -> {
@@ -1226,7 +1233,7 @@ class AACPManager(private val device: AppleDevice,
                     }.toSet()
                     else -> emptySet()
                 }
-                it.copy(battery = retainedBatteries, connectedDevices = emptyList(), capabilities = emptySet(),
+                it.copy(battery = retainedBatteries, connectedDevices = emptyList(), capabilities = emptySet(), budRoleRaw = emptyList(), caseInfo = null,
                     conversationAwarenessState = 0, conversationAwarenessSequence = 0, lastListeningModeRequest = null,
                     quietListeningModeReport = null,
                     controlStates = if (preserveControlState)

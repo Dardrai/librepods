@@ -103,13 +103,13 @@ class HearingModesTest {
         assertNull(modes.plan(HearingMode.MEDIA_ASSIST, true))
     }
 
-    @Test fun successRequiresFreshCompleteReportsAndUnchangedEnrollmentAndEveryCurveByte() {
+    @Test fun successRequiresFreshChangedReportsAndUnchangedEnrollmentAndEveryCurveByte() {
         val original = fixture()
         val plan = original.plan(HearingMode.MEDIA_ASSIST, true)!!
         assertFalse(original.confirms(plan))
         val fresh = freshReport(plan)
         assertTrue(fresh.confirms(plan))
-        assertFalse(fresh.copy(hearingRevision = original.hearingRevision).confirms(plan))
+        assertTrue(fresh.copy(hearingRevision = original.hearingRevision).confirms(plan))
         assertFalse(fresh.copy(assistRevision = original.assistRevision).confirms(plan))
         assertFalse(fresh.copy(pmeRevision = original.pmeRevision).confirms(plan))
         assertFalse(fresh.withReport(fresh.hearingReport!!.copyOf().also { it[7] = 2 }).confirms(plan))

@@ -83,7 +83,8 @@ fun AppSettingsScreen(
     navigateToBleSettingsScreen: () -> Unit,
     navigateToAppAppearanceScreen: () -> Unit,
     navigateToAppAccessibilityScreen: () -> Unit,
-    navigateToIslandSettingsScreen: () -> Unit
+    navigateToIslandSettingsScreen: () -> Unit,
+    navigateToCaseSound: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val scrollState = rememberScrollState()
@@ -112,6 +113,9 @@ fun AppSettingsScreen(
             Spacer(modifier = Modifier.height(topPadding))
 
             Spacer(modifier = Modifier.height(20.dp))
+
+            StyledListItem(contentText = stringResource(R.string.case_sound_title), onClick = navigateToCaseSound)
+            Spacer(modifier = Modifier.height(16.dp))
 
 
 
