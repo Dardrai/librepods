@@ -16,6 +16,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -61,6 +62,7 @@ internal class DongleController(context: Context) : Closeable {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val bridge by lazy { ShizukuAudioClient(this.context) }
     private val io = Mutex()
+    private val refreshRequested = Channel<Unit>(Channel.CONFLATED)
     private val lifecycle = DongleLifecycle()
     private val earClaim = DongleEarClaim()
     private val mutableState = MutableStateFlow(DongleState(selected = preferences.contains("address"),
@@ -78,6 +80,7 @@ internal class DongleController(context: Context) : Closeable {
     private var finderEpoch = 0L
     @Volatile private var pauseEpoch = 0L
     @Volatile private var callActive = false
+    @Volatile private var controlsVisible = false
     private var audioUpdated = 0L
 
     fun choices(): List<DongleChoice> = runCatching {
@@ -131,7 +134,7 @@ internal class DongleController(context: Context) : Closeable {
                 while (isActive && lifecycle.current() == mine) {
                     try { io.withLock { refresh(client) } }
                     catch (_: DongleBusyException) { publish(client) { mutableState.update { it.copy(error = CONTROL_BUSY) } } }
-                    delay(600)
+                    withTimeoutOrNull(pollInterval()) { refreshRequested.receive() }
                 }
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (_: Exception) {
@@ -166,6 +169,14 @@ internal class DongleController(context: Context) : Closeable {
         mutableState.update { it.copy(metadata = null, settings = emptyMap(), requested = emptyMap(), unconfirmed = emptySet(),
             hearingModes = HearingModes.empty(), hearingProfile = null, diagnostics = null, audio = null, performance = null) }
     }
+    private fun pollInterval(): Long = lifecycle.publish(lifecycle.current()) {
+        if (controlsVisible || mutableState.value.automaticPause || finderWanted ||
+            pending.values.any { SystemClock.elapsedRealtime() < it.expires }) 600L else 5_000L
+    }
+    fun controlsVisible(visible: Boolean) {
+        controlsVisible = visible
+        refreshRequested.trySend(Unit)
+    }
     private suspend fun refresh(client: DongleSession) {
         val status = client.refresh()
         publish(client) {
@@ -175,7 +186,8 @@ internal class DongleController(context: Context) : Closeable {
                 finderWanted = false; finderEpoch++
                 mutableState.update { it.copy(finderOpen = false, nearby = null) }
             }
-            mutableState.update { it.copy(status = status) }
+            mutableState.update { it.copy(status = status,
+                unconfirmed = pending.filterValues { entry -> SystemClock.elapsedRealtime() >= entry.expires }.keys) }
             if (status.microphoneActive) cancelEar()
             mutableState.update { if (it.error == CONTROL_BUSY) it.copy(error = null) else it }
         }
@@ -188,53 +200,74 @@ internal class DongleController(context: Context) : Closeable {
                 publish(client) { mutableState.update { it.copy(error = CONTROL_BUSY) } }
             }
         }
-        if (status.capabilities and 0x10 != 0 && SystemClock.elapsedRealtime() - audioUpdated >= 2_000) {
-            val profile = DongleProtocol.audio(client.transact(7, byteArrayOf(9)))
-            publish(client) {
-                audioUpdated = SystemClock.elapsedRealtime()
-                mutableState.update { it.copy(audio = profile) }
-            }
+        if (status.capabilities and 0x10 != 0 && (controlsVisible || mutableState.value.automaticPause) &&
+            SystemClock.elapsedRealtime() - audioUpdated >= 2_000) {
+            readAudio(client)
         }
         if (!status.controlsReady) { publish(client) { cancelEar() }; return }
-        val settings = client.settings()
-        publish(client) {
-            pending.entries.removeAll { (id, request) ->
-                settings[id]?.let { it.revision != request.revision && it.value == request.value } == true
+        val detailsWanted = publish(client) { controlsVisible || pending.values.any { SystemClock.elapsedRealtime() < it.expires } }
+        if (detailsWanted) {
+            val settings = client.settings()
+            publish(client) {
+                pending.entries.removeAll { (id, request) ->
+                    settings[id]?.let { it.revision != request.revision && it.value == request.value } == true
+                }
+                mutableState.update { it.copy(settings = settings, requested = pending.mapValues { e -> e.value.value },
+                    unconfirmed = pending.filterValues { entry -> SystemClock.elapsedRealtime() >= entry.expires }.keys) }
             }
-            mutableState.update { it.copy(settings = settings, requested = pending.mapValues { e -> e.value.value },
-                unconfirmed = pending.filterValues { entry -> SystemClock.elapsedRealtime() >= entry.expires }.keys) }
-        }
-        if (mutableState.value.metadata == null) client.cached(1)?.let { cached ->
-            runCatching { InformationPacket.parse(cached.packet).metadata }.getOrNull()?.let { metadata ->
-                publish(client) { mutableState.update { it.copy(metadata = metadata) } }
+            if (mutableState.value.metadata == null) client.cached(1)?.let { cached ->
+                runCatching { InformationPacket.parse(cached.packet).metadata }.getOrNull()?.let { metadata ->
+                    publish(client) { mutableState.update { it.copy(metadata = metadata) } }
+                }
             }
+            refreshHearing(client)
         }
-        refreshHearing(client)
+        if (!mutableState.value.automaticPause) return
         val ear = client.cached(5)
         val (action, pauseOwner) = publish(client) {
             val newEar = ear == null || cachedRevisions[5] != ear.revision
             if (ear != null) cachedRevisions[5] = ear.revision else cachedRevisions.remove(5)
             if (!newEar && mutableState.value.automaticPause && !status.microphoneActive) return@publish null
             val inEars = ear?.takeIf { it.ageMs <= 2_500 }?.let { DongleProtocol.ears(it.packet) }
-            earClaim.observe(status.generation, inEars, mutableState.value.automaticPause && !status.microphoneActive && !callActive) to pauseEpoch
+            earClaim.observe(status.generation, inEars, mutableState.value.automaticPause && !status.microphoneActive &&
+                !callActive && mutableState.value.audio?.input != 1) to pauseEpoch
         } ?: return
         when (action) {
             DongleEarClaim.Action.PAUSE -> {
                 bridge.connect()
                 if (withTimeoutOrNull(2_000) { bridge.state.first { it.connected } } != null) {
+                    if (!mediaOwnershipCurrent(client, status, pauseOwner)) return
                     val generation = status.generation
                     val acquired = bridge.pauseOwnedMedia(preferences.getString("address", null) ?: return) {
                         mutableState.value.connected && mutableState.value.automaticPause &&
-                            !callActive && pauseEpoch == pauseOwner && lifecycle.current() == client.controlEpoch &&
+                            !callActive && mutableState.value.audio?.input != 1 && pauseEpoch == pauseOwner && lifecycle.current() == client.controlEpoch &&
                             mutableState.value.status?.generation == generation
                     }
                     publish(client) { if (pauseEpoch == pauseOwner) earClaim.acquired(acquired) }
                 }
             }
-            DongleEarClaim.Action.RESUME -> bridge.finishOwnedMedia(true)
+            DongleEarClaim.Action.RESUME -> {
+                if (mediaOwnershipCurrent(client, status, pauseOwner)) bridge.finishOwnedMedia(true)
+            }
             DongleEarClaim.Action.CANCEL -> publish(client) { bridge.cancelOwnedMedia() }
             DongleEarClaim.Action.NONE -> Unit
         }
+    }
+    private fun recordAudio(profile: DongleProtocol.AudioProfile) {
+        audioUpdated = SystemClock.elapsedRealtime()
+        mutableState.update { it.copy(audio = profile) }
+        if (profile.input == 1) cancelEar()
+    }
+    private suspend fun readAudio(client: DongleSession): DongleProtocol.AudioProfile =
+        DongleProtocol.audio(client.transact(7, byteArrayOf(9))).also { profile -> publish(client) { recordAudio(profile) } }
+
+    private suspend fun mediaOwnershipCurrent(client: DongleSession, target: DongleProtocol.Status, owner: Long): Boolean {
+        try {
+            if (target.capabilities and 0x10 != 0) client.withTarget(target) { readAudio(client) }
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (_: Exception) { publish(client) { cancelEar() }; return false }
+        return publish(client) { pauseEpoch == owner && !callActive && mutableState.value.automaticPause &&
+            mutableState.value.audio?.input != 1 }
     }
     private suspend fun refreshHearing(client: DongleSession) {
         var modes = publish(client) { mutableState.value.hearingModes }
@@ -267,6 +300,7 @@ internal class DongleController(context: Context) : Closeable {
             mutableState.update { it.copy(automaticPause = enabled) }
             cancelEar()
         }
+        refreshRequested.trySend(Unit)
         if (enabled) bridge.requestPermission()
     }
     fun setSetting(id: Int, value: Long) = command { client ->
@@ -379,14 +413,15 @@ internal class DongleController(context: Context) : Closeable {
             val status = checkNotNull(client.status)
             publish(client) {
                 if (mutableState.value.status?.generation != status.generation) clearReports()
-                mutableState.update { it.copy(status = status, audio = profile) }
+                mutableState.update { it.copy(status = status) }
+                recordAudio(profile)
             }
         }
     }
     fun gameMode(enabled: Boolean) = command { client ->
         client.transact(7, byteArrayOf(4, if (enabled) 1 else 0))
         val profile = DongleProtocol.audio(client.transact(7, byteArrayOf(9)))
-        publish(client) { mutableState.update { it.copy(audio = profile) } }
+        publish(client) { recordAudio(profile) }
     }
     fun readPerformance() = command { client ->
         val snapshot = DongleProtocol.performance(client.transact(7, byteArrayOf(5)))
@@ -396,9 +431,20 @@ internal class DongleController(context: Context) : Closeable {
         if (mutableState.value.busy) return@publish
         val owner = ++finderEpoch
         finderWanted = true
+        refreshRequested.trySend(Unit)
         command { client ->
             if (!publish(client) { finderWanted && finderEpoch == owner }) return@command
             try {
+                val available = DongleProtocol.nearby(client.transact(7, byteArrayOf(7)))
+                val proceed = publish(client) {
+                    if (!finderWanted || finderEpoch != owner) false
+                    else if (!available.identityAvailable) {
+                        finderWanted = false
+                        mutableState.update { it.copy(finderOpen = false, nearby = available) }
+                        false
+                    } else true
+                }
+                if (!proceed) return@command
                 val nearby = DongleProtocol.nearby(client.transact(7, byteArrayOf(6)))
                 publish(client) {
                     if (finderWanted && finderEpoch == owner) mutableState.update { it.copy(finderOpen = true, nearby = nearby) }

@@ -15,6 +15,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
@@ -71,12 +72,12 @@ class DongleControllerLifecycleTest {
         val client = DongleSession(firmware::exchange)
         attach(client, client.refresh())
         controller.startFinder()
-        assertEquals(listOf(6), firmware.commands)
+        assertEquals(listOf(7, 6), firmware.commands)
         assertFalse(controller.state.value.finderOpen)
 
         controller.stopFinder()
         firmware.startReply.complete(Unit)
-        assertEquals("The accepted Start must be followed by one Stop", listOf(6, 8), firmware.commands)
+        assertEquals("The accepted Start must be followed by one Stop", listOf(7, 6, 8), firmware.commands)
         assertFalse(controller.state.value.finderOpen)
         assertNull(controller.state.value.nearby)
         assertFalse(field("finderWanted").getBoolean(controller))
@@ -84,7 +85,7 @@ class DongleControllerLifecycleTest {
         firmware.flags = 1
         field("audioUpdated").setLong(controller, Long.MAX_VALUE)
         repeat(3) { refresh(client) }
-        assertEquals("Leaving Finder must never renew the late lease", listOf(6, 8), firmware.commands)
+        assertEquals("Leaving Finder must never renew the late lease", listOf(7, 6, 8), firmware.commands)
     }
 
     @Test fun aQueuedStopCannotCancelANewerFinderStart() = runBlocking<Unit> {
@@ -100,7 +101,7 @@ class DongleControllerLifecycleTest {
         controller.startFinder()
         io.unlock()
 
-        assertEquals(listOf(6, 6), firmware.commands)
+        assertEquals(listOf(7, 6, 7, 6), firmware.commands)
         assertTrue(controller.state.value.finderOpen)
     }
 
@@ -115,7 +116,7 @@ class DongleControllerLifecycleTest {
         refresh(client)
         assertTrue(controller.state.value.finderOpen)
         assertTrue(field("finderWanted").getBoolean(controller))
-        assertEquals(listOf(6, 7), firmware.commands.filter { it != 9 })
+        assertEquals(listOf(7, 6, 7), firmware.commands.filter { it != 9 })
     }
 
     @Test fun aDifferentSelectedPairClosesFinderWithoutPollingThatPair() = runBlocking<Unit> {
@@ -131,7 +132,7 @@ class DongleControllerLifecycleTest {
         assertFalse(controller.state.value.finderOpen)
         assertNull(controller.state.value.nearby)
         assertFalse(field("finderWanted").getBoolean(controller))
-        assertEquals(listOf(6), firmware.commands.filter { it != 9 })
+        assertEquals(listOf(7, 6), firmware.commands.filter { it != 9 })
     }
 
     @Test fun aQueuedStopStillStopsItsOwnPairAfterAnAacpReconnect() = runBlocking<Unit> {
@@ -144,8 +145,129 @@ class DongleControllerLifecycleTest {
         controller.stopFinder()
         firmware.generation++
         io.unlock()
-        assertEquals(listOf(6, 8), firmware.commands)
+        assertEquals(listOf(7, 6, 8), firmware.commands)
         assertFalse(controller.state.value.finderOpen)
+    }
+
+    @Test fun missingFinderIdentityShowsTheRecoveryStateWithoutStartingALease() = runBlocking<Unit> {
+        val firmware = FinderFirmware().also { it.identityAvailable = false }
+        val client = DongleSession(firmware::exchange)
+        attach(client, client.refresh())
+        controller.startFinder()
+        assertEquals(listOf(7), firmware.commands)
+        assertFalse(controller.state.value.finderOpen)
+        assertEquals(false, controller.state.value.nearby?.identityAvailable)
+        assertNull(controller.state.value.error)
+        assertFalse(field("finderWanted").getBoolean(controller))
+
+        firmware.identityAvailable = true
+        firmware.startReply.complete(Unit)
+        controller.startFinder()
+        assertTrue(controller.state.value.finderOpen)
+        assertEquals(listOf(7, 7, 6), firmware.commands)
+    }
+
+    @Test fun anObservedUsbOwnerPermanentlyRetiresThePhonePauseEvenAfterReturningToIdle() = runBlocking<Unit> {
+        val firmware = FinderFirmware()
+        val client = ownPause(firmware)
+        assertTrue(checkNotNull(mediaOwner)())
+        firmware.input = 1
+        field("audioUpdated").setLong(controller, -2_000)
+        refresh(client)
+        assertFalse(checkNotNull(mediaOwner)())
+
+        firmware.input = 0
+        field("audioUpdated").setLong(controller, -2_000)
+        firmware.inEars = true; firmware.earRevision++
+        refresh(client)
+        assertFalse(checkNotNull(mediaOwner)())
+        verify(bridge, never()).finishOwnedMedia(true)
+    }
+
+    @Test fun resumeWaitsForFreshOwnershipAndDoesNotUseTheCachedPhoneOwner() = runBlocking<Unit> {
+        val firmware = FinderFirmware()
+        val client = ownPause(firmware)
+        val entered = CompletableDeferred<Unit>()
+        val finish = CompletableDeferred<Unit>()
+        firmware.beforeAudioReply = { entered.complete(Unit); finish.await() }
+        firmware.inEars = true; firmware.earRevision++
+        field("audioUpdated").setLong(controller, Long.MAX_VALUE)
+        val resuming = launch(Dispatchers.Unconfined) { refresh(client) }
+        entered.await()
+        assertEquals(2, controller.state.value.audio?.input)
+        verify(bridge, never()).finishOwnedMedia(true)
+        firmware.input = 1
+        finish.complete(Unit)
+        resuming.join()
+        assertFalse(checkNotNull(mediaOwner)())
+        verify(bridge, never()).finishOwnedMedia(true)
+    }
+
+    @Test fun idleInputPreservesAnOwnedPauseAndCanResumeItsPlayer() = runBlocking<Unit> {
+        val firmware = FinderFirmware().also { it.input = 0 }
+        val client = ownPause(firmware)
+        assertTrue(checkNotNull(mediaOwner)())
+        firmware.inEars = true; firmware.earRevision++
+        field("audioUpdated").setLong(controller, Long.MAX_VALUE)
+        refresh(client)
+        verify(bridge).finishOwnedMedia(true)
+        assertEquals("Pause and resume each check current ownership", listOf(9, 9), firmware.commands)
+    }
+
+    @Test fun idlePollingSkipsDetailedReportsAndTheViewOrEarPolicyRestoresTheirRequiredWork() = runBlocking<Unit> {
+        val firmware = FinderFirmware()
+        val client = DongleSession(firmware::exchange)
+        attach(client, client.refresh())
+        controller.automaticPause(false)
+        firmware.exchanges = 0
+        refresh(client)
+        assertEquals("Idle polling needs only the status exchange", 1, firmware.exchanges)
+        assertEquals(5_000L, pollInterval())
+
+        controller.controlsVisible(true)
+        firmware.exchanges = 0
+        refresh(client)
+        assertTrue("Opening settings restores its cached controls", firmware.exchanges > 1)
+        assertTrue(firmware.commands.contains(2))
+        assertEquals(600L, pollInterval())
+
+        controller.controlsVisible(false)
+        controller.automaticPause(true)
+        firmware.commands.clear()
+        refresh(client)
+        assertFalse("Background ear handling does not poll unrelated settings", firmware.commands.contains(2))
+        assertEquals(600L, pollInterval())
+        controller.automaticPause(false)
+        firmware.startReply.complete(Unit)
+        controller.startFinder()
+        assertEquals(600L, pollInterval())
+    }
+
+    @Test fun anExpiredUnconfirmedChoiceDoesNotKeepBackgroundDetailPollingAlive() = runBlocking<Unit> {
+        val firmware = FinderFirmware()
+        val client = DongleSession(firmware::exchange)
+        attach(client, client.refresh())
+        controller.automaticPause(false)
+        controller.setSetting(0x28, 1)
+        refresh(client)
+        assertTrue(firmware.commands.contains(2))
+        assertEquals(600L, pollInterval())
+
+        org.robolectric.shadows.ShadowSystemClock.advanceBy(java.time.Duration.ofSeconds(11))
+        firmware.commands.clear(); firmware.exchanges = 0
+        refresh(client)
+        assertEquals(1, firmware.exchanges)
+        assertTrue(firmware.commands.isEmpty())
+        assertEquals(1L, controller.state.value.requested[0x28])
+        assertTrue(controller.state.value.unconfirmed.contains(0x28))
+        assertEquals(5_000L, pollInterval())
+
+        firmware.settingValue = 1
+        controller.controlsVisible(true)
+        refresh(client)
+        assertTrue(firmware.commands.contains(2))
+        assertFalse(controller.state.value.requested.containsKey(0x28))
+        assertFalse(controller.state.value.unconfirmed.contains(0x28))
     }
 
     @Test fun theServiceRouteAwayAndBackRetiresBothThePauseAndItsRemoteOwner() = runBlocking<Unit> {
@@ -199,6 +321,19 @@ class DongleControllerLifecycleTest {
         state.value = state.value.copy(connected = true, status = status)
     }
 
+    private suspend fun ownPause(firmware: FinderFirmware): DongleSession {
+        val client = DongleSession(firmware::exchange)
+        attach(client, client.refresh())
+        field("audioUpdated").setLong(controller, Long.MAX_VALUE)
+        refresh(client)
+        firmware.inEars = false; firmware.earRevision++
+        refresh(client)
+        return client
+    }
+
+    private fun pollInterval() = DongleController::class.java.getDeclaredMethod("pollInterval")
+        .apply { isAccessible = true }.invoke(controller) as Long
+
     private suspend fun mediaClient(): DongleSession {
         val client = mock(DongleSession::class.java)
         val status = DongleProtocol.Status(3, listOf(1, 2, 3, 4, 5, 6), 3, 0, listOf(null, null, null), 0, 0)
@@ -247,10 +382,19 @@ class DongleControllerLifecycleTest {
         var flags = 3
         var generation = 3L
         var pair = 1
+        var input = 2
+        var identityAvailable = true
+        var earRevision = 1L
+        var inEars = true
+        var exchanges = 0
+        var settingValue: Long? = null
+        var beforeAudioReply: (suspend () -> Unit)? = null
+        private var operation = 0
         private val received = ByteArrayOutputStream()
         private var report = DongleProtocol.header(3)
 
         suspend fun exchange(operation: Int, id: Int, bytes: ByteArray): ByteArray {
+            exchanges++
             if (id == 2) return DongleProtocol.header(2).also {
                 it[7] = flags.toByte(); DongleProtocol.put32(it, 8, generation); it[12] = pair.toByte(); it[42] = 0x10
             }
@@ -259,19 +403,30 @@ class DongleControllerLifecycleTest {
                 DongleProtocol.put32(it, 8, generation); DongleProtocol.put32(it, 12, DongleProtocol.u32(bytes, 12))
             }
             when (bytes[7].toInt()) {
-                7 -> {
+                3, 7 -> {
+                    this.operation = bytes[7].toInt()
                     if (DongleProtocol.u16(bytes, 18) == 0) received.reset()
                     received.write(bytes, 22, bytes[20].toInt() and 255)
                     report[21] = 1; report[18] = received.size().toByte()
                 }
                 6 -> {
                     val command = received.toByteArray()[0].toInt()
-                    commands += command
-                    if (command == 6) startReply.await()
-                    val nearby = if (command == 8) byteArrayOf() else if (command == 9) ByteArray(20).also {
-                        it[0] = 1; it[18] = 100
+                    if (this.operation == 7) commands += command
+                    if (this.operation == 7 && command == 6) startReply.await()
+                    if (this.operation == 7 && command == 9) beforeAudioReply?.invoke()
+                    val nearby = if (this.operation == 3) {
+                        if (command != 5) byteArrayOf() else ByteArray(8).also { DongleProtocol.put32(it, 4, earRevision) } +
+                            byteArrayOf(4, 0, 4, 0, 6, 0, if (inEars) 0 else 1, if (inEars) 0 else 1)
+                    } else if (command == 2) settingValue?.let { value -> ByteArray(15).also {
+                        it[0] = 1; it[1] = 1; it[2] = 0x28
+                        DongleProtocol.put32(it, 7, 2); DongleProtocol.put32(it, 11, value)
+                    } } ?: byteArrayOf(1, 0)
+                    else if (command == 1 || command == 8) byteArrayOf()
+                    else if (command == 9) ByteArray(20).also {
+                        it[0] = 1; it[14] = input.toByte(); it[18] = 100
                     } else ByteArray(24).also {
-                        it[0] = 1; it[2] = 127; DongleProtocol.put32(it, 20, 0x8000_0000)
+                        it[0] = 1; it[1] = if (identityAvailable) 0x80.toByte() else 0; it[2] = 127
+                        DongleProtocol.put32(it, 20, 0x8000_0000)
                     }
                     report[21] = 3; report[16] = nearby.size.toByte(); report[20] = nearby.size.toByte()
                     nearby.copyInto(report, 22)

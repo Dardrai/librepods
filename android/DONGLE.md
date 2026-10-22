@@ -26,6 +26,8 @@ diagnose the current condition of the earbuds.
 Automatic pause uses LibrePods' existing Shizuku player ownership checks against
 the dongle's actual Android audio route. It resumes only the player LibrePods
 paused, while that claim remains valid. It never sends a global Play command.
+Observed USB playback revokes a phone pause, and reinsertion checks current
+input ownership before resuming. Idle input alone does not revoke the pause.
 Settings, battery reports and finding do not require Shizuku.
 
 Nearby finding uses only advertisements matched by the dongle to its selected
@@ -33,6 +35,12 @@ AirPods. No proximity keys leave the dongle. Signal strength is not distance or
 direction. Leaving the screen, disconnecting controls or changing the selected
 pair stops finding; a firmware lease also bounds an interrupted session. Finding
 pauses during microphone use and never acquires audio.
+If finding identity is missing, the screen explains that the selected AirPods
+must connect to the dongle once before finding can start.
+
+Idle background control checks run every five seconds. Opening settings wakes
+the faster refresh; automatic pause, active finding and pending setting
+confirmation retain the responsive polling cadence.
 
 The wire contract lives in `airpods-dongle/docs/CONTROL-EXTENSIONS.md`:
 RFCOMM UUID `c6c4f8a0-6d47-4bd1-9b6a-415044470001`, bounded APDG frames,

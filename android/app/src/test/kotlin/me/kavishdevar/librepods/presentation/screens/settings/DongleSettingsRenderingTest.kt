@@ -26,6 +26,7 @@ import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import java.io.File
+import me.kavishdevar.librepods.core.bluetooth.att.types.HearingAidSettings
 import me.kavishdevar.librepods.dongle.DongleController
 import me.kavishdevar.librepods.dongle.DongleProtocol
 import me.kavishdevar.librepods.dongle.DongleState
@@ -53,11 +54,14 @@ class DongleSettingsRenderingTest {
         val profiles = listOf(Profile(DesignSystem.Apple, false, 448, 1f), Profile(DesignSystem.Apple, true, 448, 1f),
             Profile(DesignSystem.Material, false, 320, 1.3f))
         val layout = mutableStateOf(profiles.first())
+        val nearby = DongleProtocol.Nearby(2, true, -51, 1, 200, 4, 0, 1, -52.5)
         val current = mutableStateOf(DongleState(connected = true,
             status = DongleProtocol.Status(3, listOf(1, 2, 3, 4, 5, 6), 3, 3, listOf(91, 92, 70), 3, 0x1f),
-            requested = mapOf(0x28 to 1), unconfirmed = setOf(0x28),
+            requested = mapOf(0x28 to 1, 0x40 to 50), unconfirmed = setOf(0x28),
             audio = DongleProtocol.AudioProfile(3, 3, 0, 256000, 256000, true, 2, 2, 8, null),
-            finderOpen = true, nearby = DongleProtocol.Nearby(2, true, -51, 1, 200, 4, 0, 1, -52.5)))
+            hearingProfile = HearingAidSettings(FloatArray(8) { 10f }, FloatArray(8) { 20f },
+                0f, 0f, 0f, 0f, false, false, 0f, 0f, 0f, 0f, 0f),
+            finderOpen = true, nearby = nearby))
         val controller = DongleController(RuntimeEnvironment.getApplication())
         compose.setContent {
             val profile = layout.value
@@ -71,7 +75,7 @@ class DongleSettingsRenderingTest {
             }
         }
         for (profile in profiles) {
-            compose.runOnIdle { layout.value = profile }
+            compose.runOnIdle { layout.value = profile; current.value = current.value.copy(finderOpen = true, nearby = nearby) }
             compose.onNodeWithText("Listening").performScrollTo().assertIsDisplayed()
             compose.onNodeWithText("On · Your choice · not confirmed by AirPods").assertIsDisplayed()
             capture("settings-${profile.theme}-${profile.dark}-${profile.width}")
@@ -80,13 +84,30 @@ class DongleSettingsRenderingTest {
             compose.onNodeWithText("Right").assertIsDisplayed()
             compose.onNodeWithText("Left").assertIsDisplayed()
             compose.onNodeWithText("Close").performClick()
+            compose.onNodeWithText("Charging case volume").performScrollTo().assertIsDisplayed()
+            compose.onNodeWithText("Your choice · waiting for AirPods").performScrollTo().assertIsDisplayed()
+            capture("ranges-${profile.theme}-${profile.dark}-${profile.width}")
+            for (label in listOf("Tone volume", "Adaptive strength", "Amplification", "Balance", "Tone"))
+                compose.onNodeWithText(label).performScrollTo().assertIsDisplayed()
+            capture("hearing-${profile.theme}-${profile.dark}-${profile.width}")
             compose.onNodeWithText("Request sent; AirPods confirmation pending").performScrollTo().assertIsDisplayed()
             compose.onNodeWithText("Confirmed by a fresh delay report").assertDoesNotExist()
             compose.onNodeWithText("Find nearby").performScrollTo()
             compose.onNodeWithText("Signal: -52.5 dBm · stronger").performScrollTo().assertIsDisplayed()
             capture("finder-${profile.theme}-${profile.dark}-${profile.width}")
+            compose.runOnIdle { current.value = current.value.copy(nearby = nearby.copy(smoothedRssi = -64.5, trend = 3, ageMs = 1_500)) }
+            compose.onNodeWithText("Signal: -64.5 dBm · weaker").performScrollTo().assertIsDisplayed()
+            compose.onNodeWithText("Signal: -52.5 dBm · stronger").assertDoesNotExist()
+            compose.onNodeWithText("Last heard 1 seconds ago").performScrollTo().assertIsDisplayed()
+            capture("finder-updated-${profile.theme}-${profile.dark}-${profile.width}")
             compose.onNodeWithText("Phone").assertDoesNotExist()
             compose.onNodeWithText("This PC").assertDoesNotExist()
+            compose.runOnIdle { current.value = current.value.copy(finderOpen = false,
+                nearby = DongleProtocol.Nearby(0, false, null, 0, null, 0, 0, 0, null)) }
+            capture("finder-setup-${profile.theme}-${profile.dark}-${profile.width}")
+            compose.onNodeWithText("Connect the selected AirPods once so the dongle can read their finding identity.")
+                .performScrollTo().assertIsDisplayed()
+            compose.onNodeWithText("Start finding").assertIsDisplayed()
         }
         compose.runOnIdle { current.value = current.value.copy(busy = true) }
         compose.onNodeWithText("Preferred microphone").performScrollTo().assertIsNotEnabled()

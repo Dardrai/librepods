@@ -122,9 +122,13 @@ internal fun DongleSettingsSection(onManage: (() -> Unit)? = null) {
 internal fun DongleControls(state: DongleState, controller: DongleController) {
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     DisposableEffect(controller, lifecycle) {
-        val observer = LifecycleEventObserver { _, event -> if (event == Lifecycle.Event.ON_STOP) controller.stopFinder() }
+        controller.controlsVisible(lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_START) controller.controlsVisible(true)
+            if (event == Lifecycle.Event.ON_STOP) { controller.controlsVisible(false); controller.stopFinder() }
+        }
         lifecycle.addObserver(observer)
-        onDispose { lifecycle.removeObserver(observer); controller.stopFinder() }
+        onDispose { lifecycle.removeObserver(observer); controller.controlsVisible(false); controller.stopFinder() }
     }
     val enabled = state.status?.controlsReady == true && !state.busy
     val onOff = listOf(1L to stringResource(R.string.dongle_on), 2L to stringResource(R.string.dongle_off))
@@ -207,9 +211,9 @@ internal fun DongleControls(state: DongleState, controller: DongleController) {
         var boost by remember(profile) { mutableStateOf<Boolean?>(null) }
         val currentGain = gain ?: profile.netAmplification
         val currentBalance = balance ?: profile.balance
-        StyledSlider(label = stringResource(R.string.dongle_gain), value = currentGain, valueRange = -1.5f..1.5f, enabled = enabled, onValueChange = { gain = it })
-        StyledSlider(label = stringResource(R.string.dongle_balance), value = currentBalance, valueRange = -3f..3f, enabled = enabled, onValueChange = { balance = it })
-        StyledSlider(label = stringResource(R.string.dongle_tone), value = tone ?: (profile.leftTone + profile.rightTone) / 2, valueRange = -1f..1f, enabled = enabled, onValueChange = { tone = it })
+        StyledSlider(label = stringResource(R.string.dongle_gain), value = currentGain, valueRange = -1.5f..1.5f, independent = true, enabled = enabled, onValueChange = { gain = it })
+        StyledSlider(label = stringResource(R.string.dongle_balance), value = currentBalance, valueRange = -3f..3f, independent = true, enabled = enabled, onValueChange = { balance = it })
+        StyledSlider(label = stringResource(R.string.dongle_tone), value = tone ?: (profile.leftTone + profile.rightTone) / 2, valueRange = -1f..1f, independent = true, enabled = enabled, onValueChange = { tone = it })
         StyledList { styledToggle(label = stringResource(R.string.dongle_boost), checked = boost ?: (profile.leftConversationBoost && profile.rightConversationBoost), enabled = enabled, onCheckedChange = { boost = it }) }
         StyledButton(enabled = enabled && currentGain - currentBalance / 2 in -1.5f..1.5f && currentGain + currentBalance / 2 in -1.5f..1.5f,
             onClick = { controller.updateHearing { original ->
@@ -242,7 +246,8 @@ internal fun DongleControls(state: DongleState, controller: DongleController) {
                     styledListItem(contentText = stringResource(R.string.dongle_heap, values[13], values[11]))
             }
         }
-        StyledList(title = stringResource(R.string.dongle_nearby), description = stringResource(R.string.dongle_finder_description)) {
+        StyledList(key = state.finderOpen to state.nearby?.identityAvailable,
+            title = stringResource(R.string.dongle_nearby), description = stringResource(R.string.dongle_finder_description)) {
             if (state.finderOpen) {
                 styledListItem(contentText = stringResource(R.string.dongle_finder_stop), onClick = controller::stopFinder)
                 state.nearby?.let { value ->
@@ -255,9 +260,10 @@ internal fun DongleControls(state: DongleState, controller: DongleController) {
                         }))) }
                     value.ageMs?.let { age -> styledListItem(contentText = stringResource(R.string.dongle_finder_last, age / 1000)) }
                 }
-            } else styledListItem(contentText = stringResource(R.string.dongle_finder_start), onClick = controller::startFinder,
-                enabled = !state.busy,
-                supportingContent = if (state.nearby?.identityAvailable == false) ({ Text(stringResource(R.string.dongle_finder_identity)) }) else null)
+            } else {
+                if (state.nearby?.identityAvailable == false) styledListItem(contentText = stringResource(R.string.dongle_finder_identity))
+                styledListItem(contentText = stringResource(R.string.dongle_finder_start), onClick = controller::startFinder, enabled = !state.busy)
+            }
         }
     }
 }
@@ -268,7 +274,7 @@ private fun ControlRange(label: String, id: Int, state: DongleState, enabled: Bo
     val value = reported?.let { if (id == 0x1f) it and 255 else it }?.takeIf { it <= 100 }
     var selected by remember(value) { mutableStateOf(value?.toFloat() ?: 50f) }
     Column(Modifier.padding(horizontal = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        StyledSlider(label = label, value = selected, valueRange = 0f..100f, enabled = enabled,
+        StyledSlider(label = label, value = selected, valueRange = 0f..100f, independent = true, enabled = enabled,
             onValueChange = { selected = it }, description = if (value == null) stringResource(R.string.dongle_choose_value)
                 else if (id in state.requested) stringResource(R.string.dongle_pending) else null)
         StyledButton(enabled = enabled, onClick = {
