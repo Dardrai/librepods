@@ -68,7 +68,8 @@ data class Battery(
 
 /** Omitted components keep their age; unavailable or unknown reports retain only their last known percentage. */
 fun mergeBatteryReports(previous: Set<Battery>, reported: Set<Battery>, retainUnavailable: Boolean = true): Set<Battery> {
-    val merged = previous.associateBy { it.component }.toMutableMap()
+    val merged = previous.filter { retainUnavailable || it.isLive() && it.status != BatteryStatus.DISCONNECTED }
+        .associateBy { it.component }.toMutableMap()
     for (battery in reported) {
         val old = merged[battery.component]
         merged[battery.component] = if ((!battery.present || battery.status == BatteryStatus.UNKNOWN) &&

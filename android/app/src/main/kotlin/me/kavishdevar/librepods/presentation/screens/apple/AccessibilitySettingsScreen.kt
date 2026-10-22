@@ -42,6 +42,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.flow.debounce
 import me.kavishdevar.librepods.R
+import me.kavishdevar.librepods.core.devices.effectiveControl
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommandIdentifier
 import me.kavishdevar.librepods.core.bluetooth.att.ATTHandle
 import me.kavishdevar.librepods.core.devices.AirPodsSpecs
@@ -132,7 +133,7 @@ fun AccessibilitySettingsScreen(
                 3.toByte() to stringResource(R.string.longest)
             )
             val selectedVolumeSwipeSpeedValue =
-                state.controlStates[ControlCommandIdentifier.VOLUME_SWIPE_INTERVAL]?.getOrNull(
+                state.effectiveControl(ControlCommandIdentifier.VOLUME_SWIPE_INTERVAL, uiState.settings)?.getOrNull(
                     0
                 )
             var selectedVolumeSwipeSpeed by remember {

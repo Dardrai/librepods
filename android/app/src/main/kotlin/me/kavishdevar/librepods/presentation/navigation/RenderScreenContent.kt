@@ -44,6 +44,7 @@ import me.kavishdevar.librepods.presentation.screens.settings.AppAccessibilitySe
 import me.kavishdevar.librepods.presentation.screens.settings.AppAppearanceSettingsRoute
 import me.kavishdevar.librepods.presentation.screens.settings.AppSettingsScreen
 import me.kavishdevar.librepods.presentation.screens.settings.CaseSoundScreen
+import me.kavishdevar.librepods.presentation.screens.settings.DongleSettingsScreen
 import me.kavishdevar.librepods.presentation.screens.settings.BLESettingsScreenRoute
 import me.kavishdevar.librepods.presentation.screens.settings.IslandSettingsRoute
 import me.kavishdevar.librepods.presentation.screens.settings.island.IslandCompactCustomizeRoute
@@ -115,6 +116,7 @@ fun RenderScreenContent(
             DeviceListScreen(
                 devices = devices,
                 navigateToAppSettings = { navigate(Screen.AppSettings) },
+                navigateToDongleSettings = { navigate(Screen.DongleSettings) },
                 navigateToDevice = { macAddress ->
                     when (devices[macAddress]) {
                         is AppleDevice -> navigate(Screen.AppleScreen(macAddress))
@@ -190,11 +192,14 @@ fun RenderScreenContent(
                 navigateToAppAppearanceScreen = { navigate(Screen.AppAppearance) },
                 navigateToAppAccessibilityScreen = { navigate(Screen.AppAccessibilitySettings) },
                 navigateToIslandSettingsScreen = { navigate(Screen.IslandSettings) },
-                navigateToCaseSound = { navigate(Screen.CaseSound) }
+                navigateToCaseSound = { navigate(Screen.CaseSound) },
+                navigateToDongleSettings = { navigate(Screen.DongleSettings) }
             )
         }
 
         Screen.CaseSound -> CaseSoundScreen(navigateBack)
+
+        Screen.DongleSettings -> DongleSettingsScreen(navigateBack)
 
         is Screen.HeadTracking -> {
             val device = devices[screen.macAddress] as? AppleDevice ?: return

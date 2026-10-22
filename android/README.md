@@ -53,6 +53,50 @@ nearby island's explicit Connect action, pairing consent, background volume
 access/recovery and optional experimental microphone routing. Opening the case
 alone does not take audio from another host.
 
+### Link NTPods on a PC
+
+The experimental **PC audio switching** section in app settings links an already
+paired PC over Bluetooth. Select the PC and the same AirPods used by NTPods, then
+paste NTPods' private linking code. The code is encrypted with Android Keystore
+and excluded from backups. Both apps must explicitly trust the other host.
+
+Keep **Act as an Apple device** off on Android and authorize the existing Shizuku
+shell backend. The PC keeps its existing Bluetooth identity. Pause source music,
+then choose **Move audio to this phone** or **Move audio to PC**. A transfer first
+confirms release of the source's media, headset and control connections, then
+confirms the destination's native audio route. Manual transfer does not start
+music, change pairings or connection policies, or run when the case opens.
+Calls, microphone work and unavailable platform access block manual transfer.
+A failed or cancelled transfer never blindly reconnects the source.
+
+The PC link is optional. With the PC offline, choose **Phone** or tap your
+AirPods' device card to connect locally. If phone audio already works, LibrePods
+reconnects its controls without restarting the audio connection.
+
+Companion v2 shares a fixed 15-key whitelist: host auto-pause, theme,
+conversation policy, popup and disconnected-battery preferences, call options,
+and supported saved, unconfirmed accessory choices. Synced choices do not become
+device readback or automatically write to the AirPods. Host-specific settings
+and permissions remain local.
+
+Incoming mobile-call takeover requires an explicit opt-in in each app and
+phone-state permission on Android. Only its matching incoming-call reservation
+gets a narrow call-acquire exception; other busy guards remain. Return defaults
+on but stays inactive until takeover is enabled. After verified return, the PC
+resumes only the same player NTPods paused, provided no newer choice revoked it.
+Update both apps together; v2 preference sync and calls are not yet validated on
+hardware.
+
+See [the companion protocol](COMPANION-PROTOCOL.md) for the implementation contract.
+End-to-end switching still requires physical validation on each host pair.
+
+Pilot limitation (`shortcut:`): app actions retire the pending transfer, but a
+manual route change in Android's Bluetooth settings has no separate user-intent
+generation. Use the app's transfer buttons and avoid changing the OS route during
+a transfer. Add profile-event intent arbitration before supporting that overlap.
+Bluetooth shutdown, unpairing, unrelated calls and microphone work retain their
+existing cleanup and busy guards.
+
 ### As a system app (root module)
 
 The upstream root module provides privileged Bluetooth permissions to
@@ -135,3 +179,49 @@ https://github.com/user-attachments/assets/43911243-0576-4093-8c55-89c1db5ea533
 - Due to recent AirPods' firmware upgrades, you must enable `Off listening mode` to switch to `Off`. This is because in this mode, loud sounds are not reduced.
 
 - When renaming your AirPods through the app, you'll need to re-pair them with your phone for the name change to take effect. This is a limitation of how Bluetooth device naming works on Android.
+### Companion settings and mobile calls
+
+The v2 companion link syncs a typed whitelist over the existing authenticated Bluetooth connection:
+host auto-pause, appearance theme, conversation volume policy (absolute or relative cap, two stages,
+optional media pause), automatic popup feedback, disconnected component-battery retention, and desired
+call takeover/return policies. Theme has one global revision; the other fields are scoped to the linked
+AirPods pair. Each field reconciles by a durable unsigned Lamport revision with PC winning equal counters.
+Reconnect reconciles values; it never replays a transfer or writes accessory settings.
+
+Supported saved microphone-side, ear-detection, noise-mode-cycle, swipe-duration, case-sound/volume and
+silent Allow Off choices are separate unconfirmed intent. They are used only when fresh accessory
+readback is absent and pass model/capability checks. Android's host-delegated hold actions are not
+hardware hold configuration, so that field remains unsupported. The shared swipe values are semantic
+Default/Longer/Longest; Android preserves its existing one-based raw setter, while Windows preserves
+its existing zero-based setter. These adapters do not claim a new hardware calibration.
+
+Incoming mobile-call takeover is off until explicitly enabled on this phone. Only that local action
+requests READ_PHONE_STATE; syncing a desired policy cannot grant permission or local consent.
+Return after call defaults on but is inert until takeover is enabled. All active subscriptions must
+have known state. Startup inside a call, outgoing calls, unknown coverage, and internet calling apps
+do not start automatic takeover. The new feature does not answer or end calls and does not use the
+experimental duplex-audio path. Existing head-gesture answering remains a separate permission feature.
+
+The phone reserves one fresh ringing episode using a PC-ready token received before ringing.
+Selected live HFP connection plus active-device proof is readiness, not proof of answered/SCO audio.
+The ordinary selected-SCO/microphone/call release guards stay in force for return. Natural end drains
+pending call work and waits up to eight seconds for all calls idle, normal audio mode, live selected
+SCO idle and no app operation owner. A newer action, call, policy, route change, lost permission/link
+or restart retires return/resume eligibility. Route changes are detected through the available profile
+and audio events; Android does not expose an omniscient record of every OS Settings user intent.
+There is no persisted call/resume lease. PC resumes only the exact player it paused, after verified
+return and unchanged player/track/user intent; a player that was already paused is never started.
+
+Host ear auto-pause is independent of accessory ear detection. Exact-player pause/resume needs the
+authorized Shizuku bridge, a single identifiable local player and its actual selected AirPods output.
+Unknown or ambiguous media identity refuses the operation; there is no generic Play fallback or new
+notification-listener permission. A newer playback/metadata/session or observed route change revokes
+the pause claim. Existing legacy global media-key behavior is replaced by this conservative policy.
+
+Android BLE scanning, microphone/codec/OS permissions, delegated gestures/calibration, heart-rate
+alerts, detailed Island layout, widgets, material/font/accessibility/navigation/debug choices and
+unused legacy takeover flags stay local. Language remains local without a common locale adapter.
+No credentials, device identity, permission grants, battery samples or diagnostic history sync.
+Percentages that cannot round-trip through Android's existing saved Float are unsupported rather
+than silently rounded. The native bridge's hidden HFP service signatures and actual cellular-call
+routing still require a separate hardware compatibility check; source tests do not establish hearing.

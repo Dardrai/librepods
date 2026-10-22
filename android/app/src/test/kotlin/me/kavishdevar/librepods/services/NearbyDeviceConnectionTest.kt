@@ -22,8 +22,10 @@ import android.os.VibrationAttributes
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import android.util.AtomicFile
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
@@ -31,8 +33,14 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.resetMain
+import kotlinx.coroutines.test.setMain
 import kotlinx.coroutines.withTimeout
 import me.kavishdevar.librepods.LibrePodsApplication
+import me.kavishdevar.librepods.companion.CompanionHoldStore
+import me.kavishdevar.librepods.companion.CompanionHandoffController
+import me.kavishdevar.librepods.companion.PosixAtomicFileShadow
 import me.kavishdevar.librepods.audio.ExperimentalAudioController
 import me.kavishdevar.librepods.core.bluetooth.MacAddress
 import me.kavishdevar.librepods.core.bluetooth.aacp.AACPManager
@@ -53,8 +61,10 @@ import me.kavishdevar.librepods.shizuku.A2dpRecoveryGuard
 import me.kavishdevar.librepods.shizuku.BluetoothVolumeSync
 import me.kavishdevar.librepods.presentation.overlays.IslandWindow
 import org.junit.After
+import org.junit.Rule
 import org.junit.Assert.*
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
 import org.mockito.ArgumentMatchers.anyString
 import org.mockito.Mockito.*
@@ -69,6 +79,8 @@ import org.robolectric.shadows.ShadowSystemClock
 import org.robolectric.shadows.ShadowLog
 import org.robolectric.util.ReflectionHelpers
 import java.time.Duration
+import java.io.File
+import java.io.IOException
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -80,13 +92,17 @@ import kotlin.coroutines.Continuation
 import kotlin.coroutines.intrinsics.suspendCoroutineUninterceptedOrReturn
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [37], application = Application::class)
+@Config(sdk = [37], application = Application::class, shadows = [PosixAtomicFileShadow::class])
 class NearbyDeviceConnectionTest {
+    @get:Rule val holdFiles = TemporaryFolder()
+    private val heldFile by lazy { AtomicFile(File(holdFiles.root, "holds")) }
+    private val holdStore by lazy { CompanionHoldStore(heldFile) }
     private val service = Robolectric.buildService(LibrePodsService::class.java).get()
     private val app = LibrePodsApplication()
     private val address = MacAddress("00:11:22:33:44:55")
     private val device = mock(AppleDevice::class.java)
     private val aacp = mock(AACPManager::class.java)
+    private val liveControl = mock(BluetoothSocket::class.java)
     private val socketMatcherFallback = mock(BluetoothSocket::class.java)
     private val connectionState = MutableStateFlow(ConnectionState.CONNECTED)
     private val controller = mock(ExperimentalAudioController::class.java)
@@ -104,6 +120,8 @@ class NearbyDeviceConnectionTest {
         shadowOf(RuntimeEnvironment.getApplication()).grantPermissions(
             Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_SCAN)
         ReflectionHelpers.setField(service, "mApplication", app)
+        field("companionHoldReady").set(service, true)
+        field("companionHoldStore\$delegate").set(service, lazy { holdStore })
         ReflectionHelpers.setField(app, "islandWindow", mock(IslandWindow::class.java))
         `when`(bluetooth.address).thenReturn(address.value)
         `when`(bluetooth.bondState).thenReturn(BluetoothDevice.BOND_BONDED)
@@ -115,6 +133,7 @@ class NearbyDeviceConnectionTest {
         // AACP can be connected while the media profile still belongs to another host.
         `when`(device.connectionState).thenReturn(connectionState)
         `when`(device.aacp).thenReturn(aacp)
+        `when`(aacp.captureAudioSocket()).thenAnswer { if (connectionState.value == ConnectionState.CONNECTED) liveControl else null }
         `when`(controller.bridge).thenReturn(bridge)
         `when`(controller.canRefreshSettings()).thenReturn(true)
         `when`(bridge.state).thenReturn(bridgeState)
@@ -194,6 +213,209 @@ class NearbyDeviceConnectionTest {
         attachNativeAudio()
         verify(device).connect(anyCurrent())
         verify(device, never()).connect()
+        verifyNoInteractions(bridge)
+    }
+
+    @Test fun aPassiveCallbackAdmittedBeforeHandoffCannotConnectAfterItsMainDispatch() = runBlocking<Unit> {
+        val main = StandardTestDispatcher()
+        Dispatchers.setMain(main)
+        try {
+            connectionState.value = ConnectionState.AVAILABLE
+            publishOutput()
+            @Suppress("UNCHECKED_CAST")
+            val held = field("companionReleased").get(service) as MutableSet<MacAddress>
+            @Suppress("UNCHECKED_CAST")
+            val operations = field("companionOperations").get(service) as MutableMap<MacAddress, Any>
+            for (releaseStarted in listOf(true, false)) {
+                val callback = launch(start = CoroutineStart.UNDISPATCHED) { attachNativeAudio() }
+                assertTrue("The admitted callback must wait for its Main dispatch", callback.isActive)
+                if (releaseStarted) held += address else operations[address] = Any()
+                main.scheduler.runCurrent()
+                callback.join()
+                verify(device, never()).connect(anyCurrent())
+                verifyNoInteractions(bridge)
+                held.clear(); operations.clear()
+            }
+        } finally { Dispatchers.resetMain() }
+    }
+
+    @Test fun aRestoredHoldBlocksPassiveControlUntilAnExplicitConnectClearsOnlyThatPair() = runBlocking<Unit> {
+        val other = "00:11:22:33:44:66"
+        holdStore.save(setOf(address.value, other))
+        LibrePodsService::class.java.getDeclaredMethod("restoreCompanionHolds").apply { isAccessible = true }.invoke(service)
+        connectionState.value = ConnectionState.AVAILABLE
+        publishOutput()
+        attachNativeAudio()
+        verify(device, never()).connect(anyCurrent())
+        `when`(device.connect(anyCurrent(), anyPending())).thenAnswer { connectionState.value = ConnectionState.CONNECTED; true }
+        assertTrue(service.connectNearbyDevice(device))
+        assertEquals(setOf(other), CompanionHoldStore(heldFile).load())
+        verify(device).connect(anyCurrent(), anyPending())
+        verifyNoInteractions(bridge)
+    }
+
+    @Test fun theSavedPhoneActionReconnectsControlWithoutAnOnlineCompanionOrNativeProfileMutation() = runBlocking<Unit> {
+        val companion = mock(CompanionHandoffController::class.java)
+        `when`(companion.linkedDevice()).thenReturn(address.value)
+        field("companion").set(service, companion)
+        val bluetoothManager = mock(BluetoothManager::class.java)
+        val adapter = mock(BluetoothAdapter::class.java)
+        `when`(bluetoothManager.adapter).thenReturn(adapter)
+        `when`(adapter.isEnabled).thenReturn(true)
+        Shadow.extract<ShadowContextImpl>(service.baseContext).setSystemService(Context.BLUETOOTH_SERVICE, bluetoothManager)
+        holdStore.save(setOf(address.value))
+        LibrePodsService::class.java.getDeclaredMethod("restoreCompanionHolds").apply { isAccessible = true }.invoke(service)
+        connectionState.value = ConnectionState.AVAILABLE
+        publishOutput()
+        `when`(device.connect(anyCurrent(), anyPending())).thenAnswer { invocation ->
+            assertTrue(invocation.getArgument<() -> Boolean>(0).invoke())
+            assertTrue("The explicit phone choice must be durable before control can reconnect", holdStore.load().isEmpty())
+            connectionState.value = ConnectionState.CONNECTED
+            true
+        }
+        assertTrue(service.connectCompanionPhone())
+        verify(companion).beginLocalIntent()
+        verify(device).connect(anyCurrent(), anyPending())
+        verifyNoInteractions(bridge)
+    }
+
+    @Test fun aFailedControlAttachmentCannotReportSuccessJustBecausePhoneAudioAlreadyWorks() = runBlocking<Unit> {
+        connectionState.value = ConnectionState.AVAILABLE
+        publishOutput()
+        `when`(device.connect(anyCurrent(), anyPending())).thenReturn(false)
+        assertFalse(service.connectNearbyDevice(device))
+        verify(device).connect(anyCurrent(), anyPending())
+        assertTrue(service.isNearbyDeviceAudioConnected(device))
+        verifyNoInteractions(bridge)
+    }
+
+    @Test fun aConnectedLabelWithoutAnActualControlSocketCannotReportSuccess() = runBlocking<Unit> {
+        publishOutput()
+        `when`(aacp.captureAudioSocket()).thenReturn(null)
+        assertFalse(service.connectNearbyDevice(device))
+        verify(device, never()).connect(anyCurrent(), anyPending())
+        verifyNoInteractions(bridge)
+    }
+
+    @Test fun anExistingControlOpeningMustProduceAnActualReceiptBeforeTheLocalActionSucceeds() = runBlocking<Unit> {
+        connectionState.value = ConnectionState.CONNECTING
+        publishOutput()
+        var result: Boolean? = null
+        val request = launch(start = CoroutineStart.UNDISPATCHED) { result = service.connectNearbyDevice(device) }
+        delay(100)
+        assertNull(result)
+        connectionState.value = ConnectionState.CONNECTED
+        withTimeout(1_000) { request.join() }
+        assertEquals(true, result)
+        verify(device, never()).connect(anyCurrent(), anyPending())
+        verifyNoInteractions(bridge)
+    }
+
+    @Test fun cancellingAnAlreadyLocalControlRequestClosesOnlyItsPendingSocketAndKeepsAudio() = runBlocking<Unit> {
+        connectionState.value = ConnectionState.AVAILABLE
+        publishOutput()
+        val pending = mock(BluetoothSocket::class.java)
+        val entered = CountDownLatch(1)
+        val released = CountDownLatch(1)
+        val completed = AtomicBoolean(false)
+        `when`(device.connect(anyCurrent(), anyPending())).thenAnswer { invocation ->
+            connectionState.value = ConnectionState.CONNECTING
+            invocation.getArgument<(BluetoothSocket) -> Unit>(1).invoke(pending)
+            entered.countDown()
+            try { released.await(5, TimeUnit.SECONDS); false }
+            finally { connectionState.value = ConnectionState.DISCONNECTED; completed.set(true) }
+        }
+        `when`(aacp.cancelPendingConnect(same(pending) ?: pending)).thenAnswer { released.countDown(); true }
+        try {
+            val request = launch(start = CoroutineStart.UNDISPATCHED) { service.connectNearbyDevice(device) }
+            assertTrue(entered.await(1, TimeUnit.SECONDS))
+            request.cancelAndJoin()
+            withTimeout(1_000) { while (!completed.get()) delay(10) }
+            verify(aacp, atLeastOnce()).cancelPendingConnect(same(pending) ?: pending)
+            verify(aacp, never()).cancelPendingConnect(same(liveControl) ?: liveControl)
+            assertTrue(service.isNearbyDeviceAudioConnected(device))
+            verifyNoInteractions(bridge)
+        } finally { released.countDown() }
+    }
+
+    @Test fun aNewerDisconnectRetiresTheAlreadyLocalControlWorkerWithoutChangingNativeAudio() = runBlocking<Unit> {
+        val companion = mock(CompanionHandoffController::class.java)
+        val intent = AtomicInteger()
+        doAnswer { intent.incrementAndGet(); null }.`when`(companion).invalidate()
+        `when`(companion.beginLocalIntent()).thenAnswer {
+            val captured = intent.incrementAndGet()
+            return@thenAnswer { intent.get() == captured }
+        }
+        field("companion").set(service, companion)
+        connectionState.value = ConnectionState.AVAILABLE
+        publishOutput()
+        val pending = mock(BluetoothSocket::class.java)
+        val entered = CountDownLatch(1)
+        val released = CountDownLatch(1)
+        val completed = AtomicBoolean(false)
+        `when`(device.connect(anyCurrent(), anyPending())).thenAnswer { invocation ->
+            val current = invocation.getArgument<() -> Boolean>(0)
+            connectionState.value = ConnectionState.CONNECTING
+            invocation.getArgument<(BluetoothSocket) -> Unit>(1).invoke(pending)
+            entered.countDown()
+            try {
+                released.await(5, TimeUnit.SECONDS)
+                assertFalse("A newer explicit choice must reject late control publication", current())
+                false
+            } finally { connectionState.value = ConnectionState.DISCONNECTED; completed.set(true) }
+        }
+        `when`(aacp.cancelPendingConnect(same(pending) ?: pending)).thenAnswer { released.countDown(); true }
+        try {
+            var result: Boolean? = null
+            val request = launch(start = CoroutineStart.UNDISPATCHED) { result = service.connectNearbyDevice(device) }
+            assertTrue(entered.await(1, TimeUnit.SECONDS))
+            companion.invalidate()
+            withTimeout(1_000) { request.join(); while (!completed.get()) delay(10) }
+            assertEquals(false, result)
+            verify(aacp, atLeastOnce()).cancelPendingConnect(same(pending) ?: pending)
+            assertTrue(service.isNearbyDeviceAudioConnected(device))
+            verifyNoInteractions(bridge)
+        } finally { released.countDown() }
+    }
+
+    @Test fun anAlreadyLocalOutputLostDuringExplicitControlAttachmentCannotBeReclaimed() = runBlocking<Unit> {
+        connectionState.value = ConnectionState.AVAILABLE
+        publishOutput()
+        val pending = mock(BluetoothSocket::class.java)
+        `when`(device.connect(anyCurrent(), anyPending())).thenAnswer { invocation ->
+            val current = invocation.getArgument<() -> Boolean>(0)
+            invocation.getArgument<(BluetoothSocket) -> Unit>(1).invoke(pending)
+            assertTrue(current())
+            clearOutput()
+            assertFalse(current())
+            false
+        }
+        assertFalse(service.connectNearbyDevice(device))
+        verify(aacp, atLeastOnce()).cancelPendingConnect(same(pending) ?: pending)
+        verifyNoInteractions(bridge)
+    }
+
+    @Test fun unreadableHoldStorageBlocksPassiveAndExplicitConnections() = runBlocking<Unit> {
+        heldFile.baseFile.writeText("not valid")
+        LibrePodsService::class.java.getDeclaredMethod("restoreCompanionHolds").apply { isAccessible = true }.invoke(service)
+        connectionState.value = ConnectionState.AVAILABLE
+        publishOutput()
+        attachNativeAudio()
+        assertFalse(service.connectNearbyDevice(device))
+        verify(device, never()).connect(anyCurrent())
+        verifyNoInteractions(bridge)
+    }
+
+    @Test fun aFailedDurableClearCannotAcquireOrEraseTheRuntimeHold() = runBlocking<Unit> {
+        holdStore.save(setOf(address.value))
+        LibrePodsService::class.java.getDeclaredMethod("restoreCompanionHolds").apply { isAccessible = true }.invoke(service)
+        val failing = spy(heldFile)
+        doThrow(IOException("Write unavailable")).`when`(failing).startWrite()
+        field("companionHoldStore\$delegate").set(service, lazyOf(CompanionHoldStore(failing)))
+        publishOutput()
+        assertFalse(service.connectNearbyDevice(device))
+        assertTrue((field("companionReleased").get(service) as Set<*>).contains(address))
+        assertEquals(setOf(address.value), CompanionHoldStore(heldFile).load())
         verifyNoInteractions(bridge)
     }
 
@@ -546,11 +768,28 @@ class NearbyDeviceConnectionTest {
         assertTrue(diagnostic.contains("type=2:selected=false:addressPresent=false"))
     }
 
-    @Test fun lateAudioPolicyPublicationCanFinishWithoutAnotherConnectionAttempt() = runBlocking<Unit> {
+    @Test fun audioOutputPublishedAfterFourSecondsCanFinishWithoutAnotherConnectionAttempt() = runBlocking<Unit> {
         `when`(bridge.connectNativePlayback(anyString(), anyCurrent())).thenReturn(true)
-        launch { delay(1_100); publishOutput() }
+        launch { delay(4_250); publishOutput() }
         assertTrue(service.connectNearbyDevice(device))
         verify(bridge).connectNativePlayback(selectedAddress(), anyCurrent())
+    }
+
+    @Test fun aNewIntentRetiresTheOutputWaitWithoutAcceptingALateRoute() = runBlocking<Unit> {
+        `when`(bridge.connectNativePlayback(anyString(), anyCurrent())).thenReturn(true)
+        var requested = true
+        var result: Boolean? = null
+        val request = launch(start = CoroutineStart.UNDISPATCHED) {
+            result = service.connectNearbyDevice(device, stillRequested = { requested })
+        }
+        assertTrue(request.isActive)
+        requested = false
+        withTimeout(1_000) { request.join() }
+        assertEquals(false, result)
+        publishOutput()
+        assertEquals(false, result)
+        verify(bridge).connectNativePlayback(selectedAddress(), anyCurrent())
+        assertTrue(ShadowLog.getLogsForTag("NearbyTakeover").any { it.msg.startsWith("Retired: reason=request retired") })
     }
 
     @Test fun cancellingTheOutputWaitRetiresTheRequestAndAllowsAFreshAttempt() = runBlocking<Unit> {

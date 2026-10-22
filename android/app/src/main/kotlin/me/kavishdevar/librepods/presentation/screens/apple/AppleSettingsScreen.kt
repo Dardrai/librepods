@@ -49,6 +49,8 @@ import me.kavishdevar.librepods.R
 import me.kavishdevar.librepods.bluetooth.DeviceSettingsRefreshResult
 import me.kavishdevar.librepods.core.devices.AppleDevice
 import me.kavishdevar.librepods.core.devices.ConnectionState
+import me.kavishdevar.librepods.core.devices.effectiveControl
+import me.kavishdevar.librepods.core.devices.hasSavedControlFallback
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommandIdentifier
 import me.kavishdevar.librepods.core.bluetooth.att.ATTHandle
 import me.kavishdevar.librepods.core.data.apple.BuddyState
@@ -210,6 +212,10 @@ fun AppleSettingsScreen(
             }
 
             item(key = "spacer_name") { Spacer(modifier = Modifier.height(16.dp)) }
+            if (state.hasSavedControlFallback(settings)) item(key = "saved_choices") {
+                StyledListItem(contentText = stringResource(R.string.companion_saved_choices),
+                    supportingText = stringResource(R.string.companion_saved_choices_description))
+            }
             item(key = "name") {
                 StyledListItem(
                     contentText = stringResource(R.string.name),
@@ -432,7 +438,7 @@ fun AppleSettingsScreen(
                 val id = ControlCommandIdentifier.MIC_MODE
 
                 val selectedModeText =
-                    when (state.controlStates[id]?.getOrNull(0) ?: 0x00.toByte()) {
+                    when (state.effectiveControl(id, settings)?.getOrNull(0) ?: 0x00.toByte()) {
                         0x00.toByte() -> stringResource(R.string.microphone_automatic)
                         0x01.toByte() -> stringResource(R.string.microphone_always_right)
                         0x02.toByte() -> stringResource(R.string.microphone_always_left)

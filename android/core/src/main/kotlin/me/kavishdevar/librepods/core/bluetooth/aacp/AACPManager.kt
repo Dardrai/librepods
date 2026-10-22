@@ -806,6 +806,7 @@ class AACPManager(private val device: AppleDevice,
                 listeningModeWrites.remove(modeWrite)
             if (controlCommand.identifier == ControlCommandIdentifier.ALLOW_OFF_OPTION)
                 device.rememberAllowOffRequest(value, previousReport)
+            device.rememberSavedControlRequest(controlCommand.identifier, value)
             controlTimeouts.remove(controlCommand.identifier)?.cancel()
             val request = device.state.value.requestedControls[controlCommand.identifier]
             if (request != null && controlCommand.identifier !in setOf(ControlCommandIdentifier.ALLOW_OFF_OPTION,
@@ -1238,7 +1239,7 @@ class AACPManager(private val device: AppleDevice,
                     quietListeningModeReport = null,
                     controlStates = if (preserveControlState)
                         it.cachedControlStates(device.settings.value, device.metadata.value.modelNumber) else emptyMap(),
-                    requestedControls = emptyMap(), requestedCustomEq = null, aacpPackets = emptyList(),
+                    requestedControls = emptyMap(), liveControlReports = emptySet(), requestedCustomEq = null, aacpPackets = emptyList(),
                     hearingModes = HearingModes(), hearingAidData = byteArrayOf(), transparencyData = byteArrayOf(),
                     headTrackingState = BuddyState.INACTIVE, hrmState = BuddyState.INACTIVE, currentHeartRate = null)
             }

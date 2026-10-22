@@ -24,7 +24,7 @@ internal fun AppleState.withControlReport(id: ControlCommandIdentifier, rawValue
         }
         else -> requestedControls[id]?.contentEquals(value) == true
     }
-    return copy(controlStates = controlStates + (id to value), requestedControls =
+    return copy(controlStates = controlStates + (id to value), liveControlReports = liveControlReports + id, requestedControls =
         if (confirmsRequest) requestedControls - id else requestedControls)
 }
 

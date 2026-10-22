@@ -175,8 +175,8 @@ class AppleStateObserverTest {
         await { calls(samples, "insert") == 1 }
         verify(samples).insert(sample)
         verify(apple).saveCacheFromState(address, combined)
-        verify(audio, times(2)).dispatchMediaKeyEvent(any(KeyEvent::class.java))
-        assertTrue(MediaController.iPausedTheMedia)
+        verify(audio, never()).dispatchMediaKeyEvent(any(KeyEvent::class.java))
+        assertFalse(MediaController.iPausedTheMedia)
         verify(notifications, never()).notify(eq(999), any(Notification::class.java))
     }
 
@@ -202,10 +202,10 @@ class AppleStateObserverTest {
             requestedControls = mapOf(id to byteArrayOf(1))), saved = true, pauses = false)
     }
 
-    @Test fun aPendingEnabledChoiceCanPauseBeforeItsEcho() = runBlocking {
+    @Test fun aPendingAccessoryChoiceCannotSendGenericMediaKeysWithoutAnOwnedPlayer() = runBlocking {
         val id = ControlCommandIdentifier.EAR_DETECTION_CONFIG
         assertEarDetectionPause(AppleState(componentState = full, controlStates = mapOf(id to byteArrayOf(1)),
-            requestedControls = mapOf(id to byteArrayOf(2))), saved = false, pauses = true)
+            requestedControls = mapOf(id to byteArrayOf(2))), saved = false, pauses = false)
     }
 
     @Test fun disablingAlertsAndStoppingMeasurementCancelWithoutAnotherSample() = runBlocking {

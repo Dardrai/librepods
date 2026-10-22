@@ -13,6 +13,8 @@ data class HearingModes internal constructor(
     val pending: HearingMode? = null,
     val uncertain: HearingMode? = null,
 ) {
+    companion object { fun empty(): HearingModes = HearingModes() }
+    fun withRequestState(pending: HearingMode?, uncertain: HearingMode?): HearingModes = copy(pending = pending, uncertain = uncertain)
     private val reportedHearing: Boolean? get() = hearingReport?.let {
         if (it[7] == 2.toByte() && it[8] == 0.toByte()) false
         else if (it[7] !in byteArrayOf(1, 2) || (it[7] == 2.toByte() && it[8] == 1.toByte())) null
@@ -33,7 +35,7 @@ data class HearingModes internal constructor(
 
     fun canChange(mode: HearingMode, enabled: Boolean): Boolean = pending == null && plan(mode, enabled) != null
 
-    internal fun withReport(packet: ByteArray): HearingModes {
+    fun withReport(packet: ByteArray): HearingModes {
         if (packet.size == 11 && packet.take(6) == listOf<Byte>(4, 0, 4, 0, 9, 0) &&
             packet.sliceArray(9..10).all { it == 0.toByte() }) {
             if (packet[6] == 0x2c.toByte() && (packet[7].toInt() and 255) in 0..2 &&
@@ -48,7 +50,7 @@ data class HearingModes internal constructor(
         return this
     }
 
-    internal fun plan(mode: HearingMode, enabled: Boolean): HearingModePlan? {
+    fun plan(mode: HearingMode, enabled: Boolean): HearingModePlan? {
         if (uncertain != null && (enabled || mode != uncertain)) return null
         val hearing = reportedHearing ?: return null
         val voice = reportedVoice ?: return null
@@ -72,7 +74,7 @@ data class HearingModes internal constructor(
         return HearingModePlan(this, desiredHearing, desiredVoice, desiredMedia, desiredGate, packets)
     }
 
-    internal fun confirms(plan: HearingModePlan): Boolean =
+    fun confirms(plan: HearingModePlan): Boolean =
         (!plan.packets.any { it[6] == 0x2c.toByte() } || hearingRevision > plan.original.hearingRevision) &&
             (!plan.packets.any { it[6] == 0x33.toByte() } || assistRevision > plan.original.assistRevision) &&
             (!plan.packets.any { it[4] == 0x53.toByte() } || pmeRevision > plan.original.pmeRevision) && matches(plan)
@@ -88,7 +90,7 @@ data class HearingModes internal constructor(
             pmeReport?.copyOfRange(12, 140).contentEquals(plan.original.pmeReport?.copyOfRange(12, 140))
 }
 
-internal data class HearingModePlan(val original: HearingModes, val hearing: Boolean, val voice: Boolean,
+data class HearingModePlan(val original: HearingModes, val hearing: Boolean, val voice: Boolean,
     val media: Boolean, val gate: Boolean, val packets: List<ByteArray>)
 
 private fun flag(value: Byte): Boolean? = when (value.toInt()) { 1 -> true; 2 -> false; else -> null }

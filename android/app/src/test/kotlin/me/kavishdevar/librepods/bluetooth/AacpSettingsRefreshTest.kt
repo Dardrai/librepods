@@ -50,6 +50,32 @@ import kotlin.concurrent.thread
 @Config(sdk = [37], application = Application::class,
     shadows = [RefreshSocketShadow::class, RefreshDeviceShadow::class])
 class AacpSettingsRefreshTest {
+    @Test fun aLegacyExplicitConnectRetainsItsGuardAfterApprovalBeforeAacpEpochCapture() {
+        val device = createDevice()
+        val replacement = socket()
+        val created = AtomicInteger()
+        val manager = AACPManager(device) { created.incrementAndGet(); replacement }
+        AppleDevice::class.java.getDeclaredField("aacp").apply { isAccessible = true }.set(device, manager)
+        val approved = CountDownLatch(1)
+        val resume = CountDownLatch(1)
+        val held = AtomicBoolean(false)
+        device.onExplicitConnect = {
+            approved.countDown()
+            check(resume.await(2, TimeUnit.SECONDS))
+            ({ !held.get() })
+        }
+        val result = AtomicReference<Boolean?>()
+        val worker = thread { result.set(device.connect()) }
+        try {
+            assertTrue(approved.await(2, TimeUnit.SECONDS))
+            held.set(true)
+            resume.countDown(); worker.join(2_000)
+            assertEquals(false, result.get())
+            assertEquals(0, created.get())
+            assertNull(manager.captureAudioSocket())
+        } finally { resume.countDown(); worker.join(2_000); manager.disconnect(); replacement.close() }
+    }
+
     @Test fun sensorWatchdogSeesTheAdoptedTransportAtConstructionForEveryConnectPath() {
         @Suppress("UNCHECKED_CAST")
         val sensorType = Class.forName("me.kavishdevar.librepods.core.bluetooth.aacp.RTBuddyManager") as Class<Any>

@@ -86,7 +86,9 @@ class AppleDevice(
     fun loadInitialState(state: AppleState, settings: AppleSettings, metadata: AppleMetadata) {
         _state.value = state.copy(aacpPackets = retainedPacketHistory(state.aacpPackets),
             controlStates = state.cachedControlStates(settings, metadata.modelNumber))
-        _settings.value = settings
+        _settings.value = if (settings.allowOffChoice != null && "desired_allow_off" !in settings.savedUnconfirmedChoices)
+            settings.copy(savedUnconfirmedChoices = settings.savedUnconfirmedChoices +
+                ("desired_allow_off" to if (settings.allowOffChoice) "on" else "off")) else settings
         _metadata.value = metadata
     }
 
@@ -149,17 +151,44 @@ class AppleDevice(
     fun updateSettings(
         transform: (AppleSettings) -> AppleSettings
     ) {
-        _settings.update(transform)
+        synchronized(_settings) {
+            val old = _settings.value
+            val next = transform(old)
+            if (!LocalPreferenceEdits.remember(context, macAddress.value, LocalPreferenceEdits.changed(old, next))) {
+                onSettingsSaveFailed?.invoke()
+                return
+            }
+            _settings.value = next
+        }
+        if (!settings.value.cacheDisconnectedComponentBattery)
+            _state.update { it.copy(battery = it.battery.filter { battery -> battery.isLive() && battery.status != BatteryStatus.DISCONNECTED }.toSet()) }
+    }
+
+    var onSettingsSaveFailed: (() -> Unit)? = null
+
+    /** The received stamp carries remote provenance; projecting it is never a new local edit. */
+    fun updateSettingsFromCompanion(transform: (AppleSettings) -> AppleSettings) = synchronized(_settings) {
+        _settings.value = transform(_settings.value)
     }
 
     /** Call only inside the successful write's current-transport publication. */
     internal fun rememberAllowOffRequest(value: ByteArray, previousReport: ByteArray?) {
-        _settings.update { it.withAllowOffRequest(metadata.value.modelNumber, state.value, value, previousReport) }
+        updateSettings { current ->
+            val next = current.withAllowOffRequest(metadata.value.modelNumber, state.value, value, previousReport)
+            if (next == current) current else next.copy(savedUnconfirmedChoices = next.savedUnconfirmedChoices +
+                ("desired_allow_off" to if (next.allowOffChoice == true) "on" else "off"))
+        }
+    }
+
+    internal fun rememberSavedControlRequest(id: ControlCommandIdentifier, value: ByteArray) {
+        val key = savedControlKey(id) ?: return
+        val choice = savedControlChoice(id, value) ?: return
+        updateSettings { it.copy(savedUnconfirmedChoices = it.savedUnconfirmedChoices + (key to choice)) }
     }
 
     /** A fresh report also replaces a silent choice for the next reconnect. */
     internal fun rememberAllowOffReport(value: ByteArray) {
-        _settings.update { it.withAllowOffReport(metadata.value.modelNumber, value) }
+        synchronized(_settings) { _settings.value = _settings.value.withAllowOffReport(metadata.value.modelNumber, value) }
     }
 
     internal suspend fun emitEvent(event: AppleEvent) {
@@ -190,7 +219,13 @@ class AppleDevice(
         }
     }
 
-    override fun connect(): Boolean = connect { true }
+    var onExplicitConnect: (() -> (() -> Boolean)?)? = null
+
+    override fun connect(): Boolean {
+        val authorize = onExplicitConnect
+        val current = if (authorize == null) ({ true }) else authorize() ?: return false
+        return connect(current)
+    }
 
     /** Native-route attachment retires if Android no longer has this pair's audio output. */
     fun connect(stillCurrent: () -> Boolean): Boolean {
@@ -230,7 +265,9 @@ class AppleDevice(
         return connected
     }
 
-    override fun disconnect() {
+    var onExplicitDisconnect: (() -> Unit)? = null
+
+    fun disconnectControl() {
         gestureDetector.stopDetection()
         _connectionState.update {
             ConnectionState.DISCONNECTING
@@ -239,6 +276,12 @@ class AppleDevice(
         aacp.disconnect()
 //        att.disconnect()
 
+        _connectionState.update { ConnectionState.DISCONNECTED }
+    }
+
+    override fun disconnect() {
+        onExplicitDisconnect?.invoke()
+        disconnectControl()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.CINNAMON_BUN) {
             try {
                 bluetoothDevice.disconnect()
@@ -247,9 +290,6 @@ class AppleDevice(
             }
         }
 
-        _connectionState.update {
-            ConnectionState.DISCONNECTED
-        }
     }
 
     internal fun onAacpDisconnected() {
@@ -493,7 +533,7 @@ class AppleDevice(
     }
 
     fun toggleListeningMode(modeBit: Int) {
-        val currentByte = state.value.controlStates[ControlCommandIdentifier.LISTENING_MODE_CONFIGS]?.get(0)?.toInt() ?: 0
+        val currentByte = state.value.effectiveControl(ControlCommandIdentifier.LISTENING_MODE_CONFIGS, settings.value)?.get(0)?.toInt() ?: 0
         val newValue = if ((currentByte and modeBit) != 0) {
             val temp = currentByte and modeBit.inv()
             if (countEnabledModes(temp) >= 2) temp else currentByte
@@ -532,7 +572,7 @@ class AppleDevice(
         val expected = aacp.captureAudioSocket() ?: return@synchronized false
         val choice = if (left) settings.value.copy(leftLongPressAction = action) else settings.value.copy(rightLongPressAction = action)
         if (!applyHoldActions(expected, choice)) return@synchronized false
-        _settings.update { if (left) it.copy(leftLongPressAction = action) else it.copy(rightLongPressAction = action) }
+        updateSettings { if (left) it.copy(leftLongPressAction = action) else it.copy(rightLongPressAction = action) }
         true
     }
 
@@ -576,25 +616,25 @@ class AppleDevice(
     }
 
     fun setHeadGesturesEnabled(enabled: Boolean) {
-        _settings.update {
+        updateSettings {
             it.copy(headGesturesEnabled = enabled)
         }
     }
 
     fun setHeadGesturesVerticalOffset(offset: Int) {
-        _settings.update {
+        updateSettings {
             it.copy(headGesturesVerticalOffset = offset)
         }
     }
 
     fun setHeadGesturesHorizontalOffset(offset: Int) {
-        _settings.update {
+        updateSettings {
             it.copy(headGesturesHorizontalOffset = offset)
         }
     }
 
     fun setHeadTrackingInterval(interval: Duration) {
-        _settings.update { it.copy(headTrackingInterval = interval) }
+        updateSettings { it.copy(headTrackingInterval = interval) }
         // Captured native service uses 20 ms; the recognized legacy layout uses 40 ms.
     }
 

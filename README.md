@@ -8,6 +8,7 @@ overlays. Android builds are distributed through GitHub only, from `android/rewr
 - [Development builds and checks](https://github.com/Ripthulhu/librepods/actions/workflows/ci-android.yml)
 - [Android installation and build instructions](android/README.md)
 - [Fork behavior and known limitations](android/PIXEL-REWRITE.md)
+- [Pico dongle controls and verification limits](android/DONGLE.md)
 
 The upstream project information and acknowledgments follow.
 

@@ -36,7 +36,9 @@ class LibrePodsApplication: Application(), XposedServiceHelper.OnServiceListener
         private set
 
     val appleRepository by lazy { AppleRepository(database.appleDao()) }
-    val appDataRepository by lazy { AppDataRepository(database.appSettingsDao(), database.appStateDao()) }
+    val appDataRepository by lazy { AppDataRepository(database.appSettingsDao(), database.appStateDao(),
+        { me.kavishdevar.librepods.core.devices.LocalPreferenceEdits.remember(this, "global", setOf("theme")) },
+        { android.os.Handler(mainLooper).post { android.widget.Toast.makeText(this, R.string.companion_setting_save_failed, android.widget.Toast.LENGTH_LONG).show() } }) }
     val widgetConfigRepository by lazy { WidgetConfigRepository(database.widgetConfigDao()) }
 
     val recordingRepository by lazy { RecordingRepository(applicationContext) }

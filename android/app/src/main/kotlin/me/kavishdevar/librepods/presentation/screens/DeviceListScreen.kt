@@ -39,6 +39,8 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
@@ -48,15 +50,21 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.graphics.shapes.Morph
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import me.kavishdevar.librepods.R
 import me.kavishdevar.librepods.core.bluetooth.MacAddress
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommandIdentifier
@@ -81,6 +89,8 @@ import me.kavishdevar.librepods.presentation.design.DesignSystem
 import me.kavishdevar.librepods.presentation.design.LocalDesignSystem
 import me.kavishdevar.librepods.presentation.icons.LocalIcons
 import me.kavishdevar.librepods.presentation.utils.createAirPodsBatteryRichText
+import me.kavishdevar.librepods.presentation.screens.settings.CompanionHomeSection
+import me.kavishdevar.librepods.presentation.screens.settings.rememberLibrePodsService
 import kotlin.math.min
 import kotlin.time.Duration.Companion.milliseconds
 
@@ -89,9 +99,14 @@ fun DeviceListScreen(
     devices: Map<MacAddress, Device<*, *, *>>,
     navigateToAppSettings: () -> Unit,
     navigateToDevice: (MacAddress) -> Unit,
-    navigateToHeartRateScreen: (MacAddress) -> Unit
+    navigateToHeartRateScreen: (MacAddress) -> Unit,
+    onConnectDevice: ((AppleDevice) -> Unit)? = null,
+    navigateToDongleSettings: () -> Unit = navigateToAppSettings
 ) {
     val scrollState = rememberScrollState()
+    val service = rememberLibrePodsService()
+    val connectionScope = rememberCoroutineScope()
+    val context = LocalContext.current
 
 
     StyledScaffold(
@@ -136,6 +151,10 @@ fun DeviceListScreen(
         ) {
             Spacer(modifier = Modifier.height(topPadding))
 
+            CompanionHomeSection(onOpenSettings = navigateToAppSettings, service = service)
+
+            me.kavishdevar.librepods.presentation.screens.settings.DongleSettingsSection(onManage = navigateToDongleSettings)
+
             Log.d("DeviceListScreen", "Rendering device list with ${devices.size} devices")
 
             devices.forEach { (macAddress, device) ->
@@ -143,6 +162,28 @@ fun DeviceListScreen(
                 val deviceState by device.state.collectAsState()
                 val deviceMetadata by device.metadata.collectAsState()
                 val deviceSettings by device.settings.collectAsState()
+                val canConnect = connectionState in setOf(ConnectionState.AVAILABLE, ConnectionState.DISCONNECTED) &&
+                    (device !is AppleDevice || service != null || onConnectDevice != null)
+                val connectionAction: () -> Unit = {
+                    if (connectionState == ConnectionState.CONNECTED) {
+                        connectionScope.launch(Dispatchers.IO) { device.disconnect() }
+                    } else if (canConnect) {
+                        if (device is AppleDevice && onConnectDevice != null) onConnectDevice(device)
+                        else connectionScope.launch {
+                            try {
+                                val connected = withContext(Dispatchers.IO) {
+                                    if (device is AppleDevice) service?.connectNearbyDevice(device) == true else device.connect()
+                                }
+                                if (!connected) android.widget.Toast.makeText(context, R.string.device_connect_failed, android.widget.Toast.LENGTH_LONG).show()
+                            } catch (cancelled: CancellationException) { throw cancelled }
+                            catch (_: Exception) { android.widget.Toast.makeText(context, R.string.device_connect_failed, android.widget.Toast.LENGTH_LONG).show() }
+                        }
+                    }
+                }
+                val connectionDescription = stringResource(
+                    if (connectionState == ConnectionState.CONNECTED) R.string.device_disconnect_description else R.string.device_connect_description,
+                    deviceMetadata.name)
+                val currentConnectionAction by rememberUpdatedState(connectionAction)
 
                 fun ConnectionState.shape() = when (this) {
                     ConnectionState.DISCONNECTED -> MaterialShapes.Circle.normalized()
@@ -325,14 +366,21 @@ fun DeviceListScreen(
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     StyledListItem(
-                        onClick = if (connectionState == ConnectionState.CONNECTED) {
-                            { navigateToDevice(macAddress) }
-                        } else null,
+                        onClick = when {
+                            connectionState == ConnectionState.CONNECTED -> { { navigateToDevice(macAddress) } }
+                            canConnect -> connectionAction
+                            else -> null
+                        },
                         contentText = deviceMetadata.name,
                         leadingContent = {
                             Box(
                                 modifier = Modifier
                                     .size(56.dp)
+                                    .semantics {
+                                        contentDescription = connectionDescription
+                                        if (canConnect || connectionState == ConnectionState.CONNECTED)
+                                            onClick { connectionAction(); true }
+                                    }
                                     .pointerInput(Unit) {
                                         detectTapGestures(
                                             onPress = {
@@ -340,15 +388,7 @@ fun DeviceListScreen(
                                                 tryAwaitRelease()
                                                 pressed = false
                                             },
-                                            onTap = {
-                                                CoroutineScope(Dispatchers.IO).launch {
-                                                    when (connectionState) {
-                                                        ConnectionState.CONNECTED -> device.disconnect()
-                                                        ConnectionState.DISCONNECTED -> device.connect()
-                                                        else -> {}
-                                                    }
-                                                }
-                                            }
+                                            onTap = { currentConnectionAction() }
                                         )
                                     }
                                     .drawBehind {

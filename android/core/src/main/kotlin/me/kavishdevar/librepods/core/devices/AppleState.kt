@@ -36,6 +36,7 @@ data class AppleState(
     val battery: Set<Battery> = emptySet(),
     val controlStates: Map<ControlCommandIdentifier, ByteArray> = emptyMap(),
     val requestedControls: Map<ControlCommandIdentifier, ByteArray> = emptyMap(),
+    val liveControlReports: Set<ControlCommandIdentifier> = emptySet(),
 
     val magicKeys: Map<MagicKeyType, ByteArray> = emptyMap(),
 

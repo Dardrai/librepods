@@ -17,6 +17,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import me.kavishdevar.librepods.R
 import me.kavishdevar.librepods.audio.ExperimentalAudioController
+import me.kavishdevar.librepods.core.devices.effectiveControl
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommandIdentifier
 import me.kavishdevar.librepods.presentation.components.primitives.StyledList
 import me.kavishdevar.librepods.presentation.components.primitives.styledListItem
@@ -37,7 +38,7 @@ fun MicrophoneSettingsRoute(
 
     MicrophoneSettingsScreen(
         navigateBack = navigateBack,
-        selectedMode = state.controlStates[id]?.getOrNull(0)?.toInt() ?: 0,
+        selectedMode = state.effectiveControl(id, uiState.settings)?.getOrNull(0)?.toInt() ?: 0,
         audioController = viewModel.audioController,
         onMicrophoneSettingsChanged = {
             viewModel.setControlCommand(id, it)

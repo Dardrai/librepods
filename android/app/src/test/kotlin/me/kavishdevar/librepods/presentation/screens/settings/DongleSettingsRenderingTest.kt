@@ -1,0 +1,103 @@
+package me.kavishdevar.librepods.presentation.screens.settings
+
+import android.app.Application
+import android.graphics.Bitmap
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredSize
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.asAndroidBitmap
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.captureToImage
+import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.dp
+import java.io.File
+import me.kavishdevar.librepods.dongle.DongleController
+import me.kavishdevar.librepods.dongle.DongleProtocol
+import me.kavishdevar.librepods.dongle.DongleState
+import me.kavishdevar.librepods.presentation.design.DesignSystem
+import me.kavishdevar.librepods.presentation.design.LibrePodsTheme
+import org.junit.Assert.assertTrue
+import org.junit.Rule
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.RuntimeEnvironment
+import org.robolectric.annotation.Config
+import org.robolectric.annotation.GraphicsMode
+import org.robolectric.annotation.LooperMode
+
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [35], application = Application::class, qualifiers = "w448dp-h998dp-mdpi")
+@GraphicsMode(GraphicsMode.Mode.NATIVE)
+@LooperMode(LooperMode.Mode.PAUSED)
+class DongleSettingsRenderingTest {
+    @get:Rule val compose = createComposeRule()
+
+    @Test fun settings_remain_readable_and_unconfirmed_states_do_not_claim_success() {
+        data class Profile(val theme: DesignSystem, val dark: Boolean, val width: Int, val scale: Float)
+        val profiles = listOf(Profile(DesignSystem.Apple, false, 448, 1f), Profile(DesignSystem.Apple, true, 448, 1f),
+            Profile(DesignSystem.Material, false, 320, 1.3f))
+        val layout = mutableStateOf(profiles.first())
+        val current = mutableStateOf(DongleState(connected = true,
+            status = DongleProtocol.Status(3, listOf(1, 2, 3, 4, 5, 6), 3, 3, listOf(91, 92, 70), 3, 0x1f),
+            requested = mapOf(0x28 to 1), unconfirmed = setOf(0x28),
+            audio = DongleProtocol.AudioProfile(3, 3, 0, 256000, 256000, true, 2, 2, 8, null),
+            finderOpen = true, nearby = DongleProtocol.Nearby(2, true, -51, 1, 200, 4, 0, 1, -52.5)))
+        val controller = DongleController(RuntimeEnvironment.getApplication())
+        compose.setContent {
+            val profile = layout.value
+            CompositionLocalProvider(LocalDensity provides Density(1f, profile.scale)) {
+                LibrePodsTheme(darkTheme = profile.dark, designSystem = profile.theme) {
+                    Column(Modifier.requiredSize(profile.width.dp, 998.dp).background(MaterialTheme.colorScheme.surfaceContainer)
+                        .padding(16.dp).testTag("dongle-controls").verticalScroll(rememberScrollState())) {
+                        DongleControls(current.value, controller)
+                    }
+                }
+            }
+        }
+        for (profile in profiles) {
+            compose.runOnIdle { layout.value = profile }
+            compose.onNodeWithText("Listening").performScrollTo().assertIsDisplayed()
+            compose.onNodeWithText("On · Your choice · not confirmed by AirPods").assertIsDisplayed()
+            capture("settings-${profile.theme}-${profile.dark}-${profile.width}")
+            compose.onNodeWithText("Preferred microphone").performScrollTo().performClick()
+            compose.onNodeWithText("Automatic").assertIsDisplayed()
+            compose.onNodeWithText("Right").assertIsDisplayed()
+            compose.onNodeWithText("Left").assertIsDisplayed()
+            compose.onNodeWithText("Close").performClick()
+            compose.onNodeWithText("Request sent; AirPods confirmation pending").performScrollTo().assertIsDisplayed()
+            compose.onNodeWithText("Confirmed by a fresh delay report").assertDoesNotExist()
+            compose.onNodeWithText("Find nearby").performScrollTo()
+            compose.onNodeWithText("Signal: -52.5 dBm · stronger").performScrollTo().assertIsDisplayed()
+            capture("finder-${profile.theme}-${profile.dark}-${profile.width}")
+            compose.onNodeWithText("Phone").assertDoesNotExist()
+            compose.onNodeWithText("This PC").assertDoesNotExist()
+        }
+        compose.runOnIdle { current.value = current.value.copy(busy = true) }
+        compose.onNodeWithText("Preferred microphone").performScrollTo().assertIsNotEnabled()
+    }
+
+    private fun capture(name: String) {
+        compose.mainClock.advanceTimeBy(1200); compose.waitForIdle()
+        val file = File("build/overlay-previews/dongle-$name.png")
+        checkNotNull(file.parentFile).mkdirs()
+        file.outputStream().use {
+            assertTrue(compose.onNodeWithTag("dongle-controls").captureToImage().asAndroidBitmap().compress(Bitmap.CompressFormat.PNG, 100, it))
+        }
+    }
+}

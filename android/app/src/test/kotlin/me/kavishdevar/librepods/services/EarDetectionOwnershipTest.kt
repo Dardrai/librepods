@@ -1,6 +1,17 @@
 package me.kavishdevar.librepods.services
 
+import android.bluetooth.BluetoothDevice
 import android.app.Application
+import android.content.Context
+import me.kavishdevar.librepods.shizuku.ShizukuAudioClient
+import me.kavishdevar.librepods.shizuku.BridgeState
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.setMain
+import kotlinx.coroutines.test.resetMain
+import org.robolectric.shadow.api.Shadow
+import org.robolectric.shadows.ShadowContextImpl
 import android.media.AudioAttributes
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
@@ -29,6 +40,8 @@ class EarDetectionOwnershipTest {
     private val service = Robolectric.buildService(LibrePodsService::class.java).get()
     private val device = mock(AppleDevice::class.java)
     private val audio = mock(AudioManager::class.java)
+    private val bridge = mock(ShizukuAudioClient::class.java)
+    private val state = MutableStateFlow(AppleState())
     private val address = MacAddress("00:11:22:33:44:55")
     private val mediaAudio = MediaController::class.java.getDeclaredField("audioManager").apply { isAccessible = true }
     private val previousAudio = mediaAudio.get(null)
@@ -38,20 +51,39 @@ class EarDetectionOwnershipTest {
         DeviceComponentState(DeviceComponent.RIGHT, ComponentStatus.IN_EAR))
 
     init {
+        Dispatchers.setMain(UnconfinedTestDispatcher())
         mediaAudio.set(null, audio)
         MediaController.iPausedTheMedia = false
         MediaController.userPlayedTheMedia = false
         `when`(device.macAddress).thenReturn(address)
-        `when`(device.state).thenReturn(MutableStateFlow(AppleState(componentState = full)))
+        val bluetooth = mock(BluetoothDevice::class.java)
+        `when`(bluetooth.address).thenReturn(address.value)
+        `when`(bluetooth.bondState).thenReturn(BluetoothDevice.BOND_BONDED)
+        `when`(device.bluetoothDevice).thenReturn(bluetooth)
+        `when`(device.state).thenReturn(state)
         `when`(device.settings).thenReturn(MutableStateFlow(AppleSettings(showIslandPopup = false)))
         `when`(device.metadata).thenReturn(MutableStateFlow(AppleMetadata()))
         val repository = mock(AppDataRepository::class.java)
         `when`(repository.settings).thenReturn(MutableStateFlow(AppSettingsEntity()))
         field("appDataRepository\$delegate").set(service, lazyOf(repository))
+        field("companionBridge\$delegate").set(service, lazyOf(bridge))
+        `when`(bridge.state).thenReturn(MutableStateFlow(BridgeState(connected = true)))
+        Shadow.extract<ShadowContextImpl>(service.baseContext).setSystemService(Context.AUDIO_SERVICE, audio)
+        @Suppress("UNCHECKED_CAST")
+        val devices = field("_devices").get(service) as MutableStateFlow<Map<MacAddress, Device<*, *, *>>>
+        devices.value = mapOf(address to device)
+        runBlocking {
+            `when`(bridge.pauseOwnedMedia(eq(address.value) ?: address.value, any<() -> Boolean>() ?: { false })).thenAnswer { invocation ->
+                @Suppress("UNCHECKED_CAST")
+                (invocation.arguments[1] as () -> Boolean)()
+            }
+            `when`(bridge.finishOwnedMedia(true)).thenReturn(true)
+        }
     }
 
     @After fun close() {
         (field("serviceScope").get(service) as CoroutineScope).cancel()
+        Dispatchers.resetMain()
         mediaAudio.set(null, previousAudio)
         MediaController.iPausedTheMedia = previousPaused
         MediaController.userPlayedTheMedia = previousPlayed
@@ -67,19 +99,14 @@ class EarDetectionOwnershipTest {
         assertFalse(MediaController.iPausedTheMedia)
     }
 
-    @Test fun localEarRemovalAndReinsertionPauseAndResumeWithoutTouchingProfilePolicies() {
+    @Test fun localEarRemovalAndReinsertionUseOnlyTheAuthorizedExactPlayerLease() = runBlocking<Unit> {
         route(address.value)
-        `when`(audio.isMusicActive).thenReturn(true)
         change(full, emptySet())
-        assertTrue(MediaController.iPausedTheMedia)
-        `when`(audio.isMusicActive).thenReturn(false)
+        verify(bridge).pauseOwnedMedia(eq(address.value) ?: address.value, any<() -> Boolean>() ?: { false })
         change(emptySet(), full)
-        val keys = ArgumentCaptor.forClass(KeyEvent::class.java)
-        verify(audio, times(4)).dispatchMediaKeyEvent(keys.capture())
-        assertEquals(listOf(KeyEvent.KEYCODE_MEDIA_PAUSE, KeyEvent.KEYCODE_MEDIA_PAUSE,
-            KeyEvent.KEYCODE_MEDIA_PLAY, KeyEvent.KEYCODE_MEDIA_PLAY), keys.allValues.map { it.keyCode })
+        verify(bridge).finishOwnedMedia(true)
+        verify(audio, never()).dispatchMediaKeyEvent(any(KeyEvent::class.java))
         noProfileChanges()
-        assertFalse(MediaController.iPausedTheMedia)
     }
 
     @Test fun aRemoteRouteAfterLocalPauseDoesNotResumeOrReclaimWhenBudsAreWornAgain() {
@@ -96,11 +123,14 @@ class EarDetectionOwnershipTest {
     private fun route(value: String) {
         val output = mock(AudioDeviceInfo::class.java)
         `when`(output.address).thenReturn(value)
+        `when`(output.type).thenReturn(AudioDeviceInfo.TYPE_BLUETOOTH_A2DP)
+        `when`(audio.getDevices(AudioManager.GET_DEVICES_OUTPUTS)).thenReturn(arrayOf(output))
         val attributes = AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).build()
         `when`(audio.getAudioDevicesForAttributes(any(AudioAttributes::class.java) ?: attributes)).thenReturn(listOf(output))
     }
 
     private fun change(previous: Set<DeviceComponentState>, current: Set<DeviceComponentState>) {
+        state.value = state.value.copy(componentState = current)
         LibrePodsService::class.java.getDeclaredMethod("processComponentStateChange", Device::class.java,
             Set::class.java, Set::class.java).apply { isAccessible = true }.invoke(service, device, previous, current)
     }

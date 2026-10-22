@@ -38,6 +38,7 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import me.kavishdevar.librepods.R
+import me.kavishdevar.librepods.core.devices.effectiveControl
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommandIdentifier
 import me.kavishdevar.librepods.core.devices.effectiveAllowOff
 import me.kavishdevar.librepods.core.data.StemAction
@@ -59,7 +60,7 @@ fun LongPress(
     val state = uiState.state
     val settings = uiState.settings
 
-    val modesByte = state.controlStates[ControlCommandIdentifier.LISTENING_MODE_CONFIGS]?.get(0) ?: 0
+    val modesByte = state.effectiveControl(ControlCommandIdentifier.LISTENING_MODE_CONFIGS, settings)?.get(0) ?: 0
 
     Log.d("PressAndHoldSettingsScreen", "Current modes state: ${modesByte.toString(2)}")
     Log.d("PressAndHoldSettingsScreen", "Off mode: ${(modesByte and 0x01) != 0.toByte()}")
@@ -116,7 +117,7 @@ fun LongPress(
             if (longPressAction == StemAction.CYCLE_NOISE_CONTROL_MODES) {
                 Spacer(modifier = Modifier.height(32.dp))
 
-                val currentByte = state.controlStates[ControlCommandIdentifier.LISTENING_MODE_CONFIGS]?.get(0)?.toInt() ?: 0
+                val currentByte = state.effectiveControl(ControlCommandIdentifier.LISTENING_MODE_CONFIGS, settings)?.get(0)?.toInt() ?: 0
 
                 StyledList(
                     title = stringResource(R.string.noise_control),

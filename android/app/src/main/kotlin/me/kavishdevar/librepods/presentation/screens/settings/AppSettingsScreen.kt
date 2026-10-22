@@ -85,6 +85,7 @@ fun AppSettingsScreen(
     navigateToAppAccessibilityScreen: () -> Unit,
     navigateToIslandSettingsScreen: () -> Unit,
     navigateToCaseSound: () -> Unit = {},
+    navigateToDongleSettings: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val scrollState = rememberScrollState()
@@ -113,6 +114,12 @@ fun AppSettingsScreen(
             Spacer(modifier = Modifier.height(topPadding))
 
             Spacer(modifier = Modifier.height(20.dp))
+
+            CompanionSettingsSection()
+            Spacer(modifier = Modifier.height(16.dp))
+
+            StyledListItem(contentText = stringResource(R.string.dongle_title), onClick = navigateToDongleSettings)
+            Spacer(modifier = Modifier.height(16.dp))
 
             StyledListItem(contentText = stringResource(R.string.case_sound_title), onClick = navigateToCaseSound)
             Spacer(modifier = Modifier.height(16.dp))

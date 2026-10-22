@@ -74,6 +74,7 @@ class ShizukuAudioClient(context: Context) : Closeable {
     private var current: InjectionRequest? = null
     private var playbackRequest: PlaybackRequest? = null
     private var pairingRequest: PlaybackRequest? = null
+    private var mediaRequest: PlaybackRequest? = null
     @Volatile private var bridge: IAudioBridge? = null
     @Volatile private var closed = false
     private var connecting = false
@@ -316,8 +317,67 @@ class ShizukuAudioClient(context: Context) : Closeable {
     suspend fun connectNativePlayback(address: String, stillCurrent: () -> Boolean): Boolean =
         nativePlayback(address, stillCurrent, connectOnly = true)
 
-    private suspend fun nativePlayback(address: String, stillCurrent: () -> Boolean, connectOnly: Boolean): Boolean = try {
-        withTimeoutOrNull(if (connectOnly) 19_000L else 6500L) {
+    suspend fun releaseNativePlayback(address: String, stillCurrent: () -> Boolean): Boolean =
+        nativePlayback(address, stillCurrent, connectOnly = false, releaseOnly = true)
+
+    suspend fun inspectNativePlayback(address: String, stillCurrent: () -> Boolean): Boolean =
+        nativePlayback(address, stillCurrent, connectOnly = false, inspectOnly = true)
+
+    /** Its owner outlives the pause IPC, and is retired synchronously on a newer local choice. */
+    suspend fun pauseOwnedMedia(address: String, stillCurrent: () -> Boolean): Boolean {
+        val request = synchronized(lock) {
+            check(!closed && current == null && playbackRequest == null && !settingsRefresh && !mutableState.value.probing)
+            mediaRequest?.active?.set(false)
+            PlaybackRequest(checkNotNull(bridge), A2dpRecoveryGuard(address).address, stillCurrent, null)
+                .also { mediaRequest = it }
+        }
+        return try { withContext(Dispatchers.IO) { ipc.withLock {
+            request.active.get() && request.remote.pauseOwnedMedia(request.address, request.owner)
+        } } } catch (cancelled: CancellationException) { request.active.set(false); throw cancelled }
+        catch (_: Exception) { request.active.set(false); false }
+    }
+
+    suspend fun finishOwnedMedia(resume: Boolean): Boolean {
+        val request = synchronized(lock) { mediaRequest.also { mediaRequest = null } } ?: return false
+        return try { withContext(Dispatchers.IO) { ipc.withLock {
+            request.remote.finishOwnedMedia(request.owner, resume && request.active.get())
+        } } } catch (_: Exception) { false } finally { request.active.set(false) }
+    }
+
+    fun cancelOwnedMedia() {
+        val request = synchronized(lock) { mediaRequest.also { it?.active?.set(false); mediaRequest = null } } ?: return
+        scope.launch { ipc.withLock { runCatching { request.remote.finishOwnedMedia(request.owner, false) } } }
+    }
+
+    /** A read-only receipt also drains a cancelled connect on this bridge before it can report quiet. */
+    suspend fun nativeCall(address: String, connect: Boolean, stillCurrent: () -> Boolean): Int = try {
+        withTimeoutOrNull(if (connect) 22_000L else 4_000L) {
+            val callerJob = currentCoroutineContext()[Job]
+            suspendCancellableCoroutine { continuation ->
+                val request = synchronized(lock) {
+                    check(!closed && !settingsRefresh && current == null && !mutableState.value.probing)
+                    cancelPlaybackRecoveryLocked()
+                    PlaybackRequest(checkNotNull(bridge), A2dpRecoveryGuard(address).address, stillCurrent, callerJob)
+                        .also { playbackRequest = it }
+                }
+                continuation.invokeOnCancellation { request.active.set(false) }
+                scope.launch {
+                    val value = try { ipc.withLock {
+                        drainStops()
+                        if (request.active.get()) request.remote.nativeCall(request.address, request.owner, connect) else 0
+                    } } catch (_: Exception) { 0 } finally {
+                        request.active.set(false)
+                        synchronized(lock) { if (playbackRequest === request) playbackRequest = null }
+                    }
+                    if (continuation.isActive) continuation.resume(value)
+                }
+            }
+        } ?: 0
+    } catch (cancelled: CancellationException) { throw cancelled } catch (_: Exception) { 0 }
+
+    private suspend fun nativePlayback(address: String, stillCurrent: () -> Boolean, connectOnly: Boolean,
+        releaseOnly: Boolean = false, inspectOnly: Boolean = false): Boolean = try {
+        withTimeoutOrNull(if (inspectOnly) 3_000L else if (releaseOnly) 9_500L else if (connectOnly) 19_000L else 6500L) {
             val callerJob = currentCoroutineContext()[Job]
             suspendCancellableCoroutine { continuation ->
                 val request = synchronized(lock) {
@@ -335,6 +395,8 @@ class ShizukuAudioClient(context: Context) : Closeable {
                         ipc.withLock {
                             drainStops()
                             if (!request.active.get()) false
+                            else if (inspectOnly) request.remote.inspectNativePlayback(request.address, request.owner)
+                            else if (releaseOnly) request.remote.releaseNativePlayback(request.address, request.owner)
                             else if (connectOnly) request.remote.connectNativePlayback(request.address, request.owner)
                             else request.remote.restoreNativePlayback(request.address, request.owner)
                         }
@@ -450,6 +512,8 @@ class ShizukuAudioClient(context: Context) : Closeable {
 
     private fun disconnected(reason: String) {
         synchronized(lock) {
+            mediaRequest?.active?.set(false)
+            mediaRequest = null
             pairingRequest?.active?.set(false)
             pairingRequest = null
             cancelPlaybackRecoveryLocked()
@@ -471,6 +535,8 @@ class ShizukuAudioClient(context: Context) : Closeable {
         synchronized(lock) {
             if (closed) return
             closed = true
+            mediaRequest?.active?.set(false)
+            mediaRequest = null
             pairingRequest?.active?.set(false)
             pairingRequest = null
             cancelPlaybackRecoveryLocked()
