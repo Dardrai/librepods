@@ -2,10 +2,8 @@ package me.kavishdevar.librepods.presentation.navigation
 
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
-import androidx.compose.animation.SharedTransitionLayout
 import androidx.compose.animation.togetherWith
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
 import androidx.compose.runtime.collectAsState
@@ -77,6 +75,7 @@ fun AppNavGraph(
 
     val sceneStrategy = remember(appSettings.swipeAnywhereForBack) {
         SwipeBackSceneStrategy<Screen>(
+            backStack = backStack,
             enabled = appSettings.swipeAnywhereForBack,
             backRequests = backRequests,
             onDismiss = {
@@ -87,40 +86,33 @@ fun AppNavGraph(
         )
     }
 
-    SharedTransitionLayout {
-        CompositionLocalProvider(
-            LocalSharedTransitionScope provides this,
-        ) {
-            NavDisplay(
-                sharedTransitionScope = this,
-                backStack = backStack,
-                sceneStrategies = listOf(sceneStrategy),
-                onBack = {
-                    if (backStack.size > 1) {
-                        backStack.removeAt(backStack.lastIndex)
-                    }
-                },
-                entryProvider = { screen ->
-                    NavEntry(screen) {
-                        RenderScreenContent(
-                            screen = screen,
-                            backStack = backStack,
-                            backRequests = backRequests,
-                            devices = devices,
-                            appDataRepository = appDataRepository,
-                            recordingRepository = recordingRepository,
-                            heartRateRepository = heartRateRepository,
-                            showReleaseNotes = showReleaseNotes,
-                            updatesShown = updatesShown,
-                            onboardingComplete = onboardingComplete,
-                            refreshDeviceSettings = refreshDeviceSettings
-                        )
-                    }
-                },
-                transitionSpec = { EnterTransition.None togetherWith ExitTransition.None },
-                popTransitionSpec = { EnterTransition.None togetherWith ExitTransition.None },
-                predictivePopTransitionSpec = { EnterTransition.None togetherWith ExitTransition.None }
-            )
-        }
-    }
+    NavDisplay(
+        backStack = backStack,
+        sceneStrategies = listOf(sceneStrategy),
+        onBack = {
+            if (backStack.size > 1) {
+                backStack.removeAt(backStack.lastIndex)
+            }
+        },
+        entryProvider = { screen ->
+            NavEntry(screen) {
+                RenderScreenContent(
+                    screen = screen,
+                    backStack = backStack,
+                    backRequests = backRequests,
+                    devices = devices,
+                    appDataRepository = appDataRepository,
+                    recordingRepository = recordingRepository,
+                    heartRateRepository = heartRateRepository,
+                    showReleaseNotes = showReleaseNotes,
+                    updatesShown = updatesShown,
+                    onboardingComplete = onboardingComplete,
+                    refreshDeviceSettings = refreshDeviceSettings
+                )
+            }
+        },
+        transitionSpec = { EnterTransition.None togetherWith ExitTransition.None },
+        popTransitionSpec = { EnterTransition.None togetherWith ExitTransition.None },
+        predictivePopTransitionSpec = { EnterTransition.None togetherWith ExitTransition.None }
+    )
 }

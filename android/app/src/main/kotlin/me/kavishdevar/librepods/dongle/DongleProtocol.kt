@@ -121,7 +121,9 @@ internal object DongleProtocol {
     fun ears(bytes: ByteArray): Boolean? {
         if (bytes.size != 8 || bytes.take(6) != listOf<Byte>(4, 0, 4, 0, 6, 0) ||
             bytes[6].toInt() !in 0..3 || bytes[7].toInt() !in 0..3) return null
-        return bytes[6] == 0.toByte() && bytes[7] == 0.toByte()
+        val first = bytes[6].toInt()
+        val second = bytes[7].toInt()
+        return (first == 0 || second == 0) && (first == 0 || first == 2) && (second == 0 || second == 2)
     }
     data class AudioProfile(val requestedCodec: Int, val actualCodec: Int, val rateMode: Int,
         val requestedBitrate: Long, val actualBitrate: Long, val gameRequested: Boolean,

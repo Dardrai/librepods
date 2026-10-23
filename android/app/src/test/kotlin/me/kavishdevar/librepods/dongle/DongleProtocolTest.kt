@@ -135,6 +135,37 @@ class DongleProtocolTest {
         assertEquals(DongleEarClaim.Action.CANCEL, claim.observe(2, true, true))
         assertEquals(DongleEarClaim.Action.NONE, claim.observe(2, true, true))
     }
+    @Test fun either_single_bud_is_ready_only_when_the_other_is_explicitly_in_its_case() {
+        for (first in 0..3) for (second in 0..3) {
+            val ready = listOf(first, second) in listOf(listOf(0, 0), listOf(0, 2), listOf(2, 0))
+            assertEquals("Ear report $first/$second", ready, DongleProtocol.ears(ears(first, second)))
+        }
+        assertNull(DongleProtocol.ears(byteArrayOf()))
+        assertNull(DongleProtocol.ears(ears(0, 4)))
+    }
+    @Test fun case_transitions_preserve_removal_pauses_and_resume_only_owned_current_claims() {
+        val claim = DongleEarClaim()
+        fun observe(first: Int, second: Int, generation: Long = 1) =
+            claim.observe(generation, DongleProtocol.ears(ears(first, second)), true)
+        assertEquals(DongleEarClaim.Action.NONE, observe(0, 0))
+        assertEquals(DongleEarClaim.Action.NONE, observe(0, 2))
+        assertEquals(DongleEarClaim.Action.NONE, observe(2, 0))
+        assertEquals(DongleEarClaim.Action.PAUSE, observe(1, 0))
+        claim.acquired(true)
+        assertEquals(DongleEarClaim.Action.RESUME, observe(2, 0))
+        assertEquals(DongleEarClaim.Action.PAUSE, observe(2, 2))
+        claim.acquired(false)
+        assertEquals(DongleEarClaim.Action.NONE, observe(0, 2))
+        assertEquals(DongleEarClaim.Action.PAUSE, observe(0, 3))
+        claim.acquired(true)
+        assertEquals(DongleEarClaim.Action.CANCEL, observe(0, 2, generation = 2))
+        assertEquals(DongleEarClaim.Action.NONE, observe(0, 2, generation = 2))
+        assertEquals(DongleEarClaim.Action.PAUSE, observe(2, 2, generation = 2))
+        claim.acquired(true)
+        assertEquals(DongleEarClaim.Action.CANCEL, claim.observe(2, null, true))
+        assertEquals(DongleEarClaim.Action.NONE, observe(2, 0, generation = 2))
+    }
+    private fun ears(first: Int, second: Int) = byteArrayOf(4, 0, 4, 0, 6, 0, first.toByte(), second.toByte())
     @Test fun malformed_ears_policy_change_and_radio_loss_cancel_claims() {
         for (kind in 0..2) {
             val claim = DongleEarClaim()

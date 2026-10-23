@@ -33,7 +33,7 @@ final class ShellAudioContext extends ContextWrapper {
     }
 
     void installProcessAttribution() throws ReflectiveOperationException {
-        // AudioPolicy creates streams internally; those constructors use ActivityThread attribution.
+        // Framework services also consult ActivityThread for this helper's shell attribution.
         Class<?> type = Class.forName("android.app.ActivityThread");
         Object thread = type.getMethod("currentActivityThread").invoke(null);
         if (thread == null) throw new IllegalStateException("Shizuku did not supply an ActivityThread");

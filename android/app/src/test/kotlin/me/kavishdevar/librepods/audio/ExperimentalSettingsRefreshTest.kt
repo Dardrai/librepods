@@ -21,7 +21,7 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [37], application = Application::class)
 class ExperimentalSettingsRefreshTest {
-    @Test fun refreshReservationExcludesRealMicrophoneStartsAndInjectionUntilReleased() {
+    @Test fun refreshReservationExcludesRealMicrophoneStartsUntilReleased() {
         val context = RuntimeEnvironment.getApplication()
         shadowOf(context).grantPermissions(Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.RECORD_AUDIO)
         val adapter = context.getSystemService(BluetoothManager::class.java).adapter
@@ -34,13 +34,7 @@ class ExperimentalSettingsRefreshTest {
             assertFalse(controller.tryBeginSettingsRefresh())
             assertFalse(controller.startRecording())
             assertTrue(controller.message.value.contains("refresh"))
-            val rejected = assertThrows(IllegalStateException::class.java) {
-                controller.bridge.prepareMicrophoneInjection(64000, 1, "example.recorder", false)
-            }
-            assertTrue(rejected.message.orEmpty().contains("refresh"))
             assertEquals(MicrophonePhase.IDLE, controller.microphone.state.value.phase)
-            assertEquals("stopped", controller.bridge.state.value.session)
-            assertFalse(controller.isOpening)
             assertNull(device.aacp.captureAudioSocket())
             controller.endSettingsRefresh()
             assertTrue(controller.tryBeginSettingsRefresh())

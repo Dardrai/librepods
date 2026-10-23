@@ -180,16 +180,14 @@ private fun RecorderControls(controller: ExperimentalAudioController?, recording
     val message by controller.message.collectAsState()
     var permissionError by remember(controller) { mutableStateOf("") }
     val permissionMessage = stringResource(R.string.experimental_audio_permission)
-    val checking = stringResource(R.string.experimental_audio_checking)
     val progress = when (microphone.phase) {
         MicrophonePhase.STARTING -> stringResource(R.string.recorder_starting)
         MicrophonePhase.STOPPING -> stringResource(R.string.recorder_stopping)
         MicrophonePhase.RECOVERING -> stringResource(R.string.recorder_recovering)
-        else -> if (controller.isOpening) stringResource(R.string.recorder_starting) else ""
+        else -> ""
     }
     val permission = rememberMicrophonePermission(controller) { permissionError = permissionMessage }
-    val busy = controller.isOpening || microphone.phase !in listOf(MicrophonePhase.IDLE, MicrophonePhase.ERROR) ||
-        bridge.session !in listOf("stopped", "failed")
+    val busy = microphone.phase !in listOf(MicrophonePhase.IDLE, MicrophonePhase.ERROR)
     if (!bridge.connected) {
         StyledList {
             styledListItem(contentText = stringResource(R.string.experimental_shizuku_connect),
@@ -202,7 +200,7 @@ private fun RecorderControls(controller: ExperimentalAudioController?, recording
         !controller.supportsMicrophone -> stringResource(R.string.recorder_microphone_unsupported)
         !bridge.connected -> bridge.detail.ifBlank { bridge.availability }
         else -> permissionError.ifBlank { message.ifBlank { microphone.message.ifBlank {
-            bridge.detail.ifBlank { if (bridge.probing) checking else progress }
+            bridge.detail.ifBlank { progress }
         } } }
     }
     if (status.isNotBlank()) {
@@ -211,7 +209,7 @@ private fun RecorderControls(controller: ExperimentalAudioController?, recording
                 .semantics { liveRegion = LiveRegionMode.Polite })
         Spacer(Modifier.height(12.dp))
     }
-    RecorderAction(recording, recording || controller.isConnected && controller.supportsMicrophone && bridge.connected && !bridge.probing && !busy) {
+    RecorderAction(recording, recording || controller.isConnected && controller.supportsMicrophone && bridge.connected && !busy) {
         if (recording) stopRecording()
         else { permissionError = ""; permission(startRecording) }
     }

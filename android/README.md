@@ -45,12 +45,12 @@ An APK signed with a different certificate cannot update an existing installatio
    instructions until the case light flashes white, then tap **Connect**.
    Authorized Shizuku can confirm the selected pair's consent request; Android's
    normal confirmation remains the fallback.
-4. In your AirPods' Microphone page or Recorder, tap **Connect Shizuku** and
+4. In Recorder, tap **Connect Shizuku** and
    authorize LibrePods. This also enables Shizuku for later pairing attempts.
 
 Ordinary Bluetooth music playback stays on Android. Shizuku is used for the
 nearby island's explicit Connect action, pairing consent, background volume
-access/recovery and optional experimental microphone routing. Opening the case
+access/recovery and Recorder playback recovery. Opening the case
 alone does not take audio from another host.
 
 ### Link NTPods on a PC
@@ -113,12 +113,13 @@ features are not required for the rootless Pixel/Shizuku setup above.
 - Listening modes, Adaptive strength, Allow Off, ear detection, battery status,
   Conversation Awareness, nearby pairing, the Dynamic Island, Quick Settings and
   widgets use the rewrite's per-device state. Features vary by model and firmware.
-- High-quality microphone recording and Shizuku app/cellular-call routing are
-  experimental. Older-fork hardware tests do not validate this rewrite. Sensors,
+- Recorder retains experimental high-quality microphone recording. The failed
+  app microphone injection and cellular-call relay experiments have been removed.
+  Microphone Mode contains only the native Automatic, Always Right and Always
+  Left choices. Older-fork hardware tests do not validate this rewrite. Sensors,
   head gestures and call audio have not been retested on hardware here.
-- Normal-quality media during cellular calls is still unresolved. Stereo AAC-ELD
-  playback is blocked because the encoder does not produce the required
-  480-sample configuration.
+- High-quality two-way call audio is unavailable; ordinary Android/HFP calls
+  continue to use the native Bluetooth route.
 - Hearing aid fitting and enablement, custom transparency and loud sound
   reduction are unavailable while the ATT transport is disabled, even with
   VendorID spoofing or an existing iPhone fitting.

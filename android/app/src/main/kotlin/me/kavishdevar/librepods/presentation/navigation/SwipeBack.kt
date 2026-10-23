@@ -9,15 +9,11 @@ import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalDensity
@@ -28,10 +24,10 @@ import androidx.navigation3.scene.SceneStrategy
 import androidx.navigation3.scene.SceneStrategyScope
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlin.coroutines.cancellation.CancellationException
-
-// mostly AI generated
 
 private enum class Direction {
     Forward,
@@ -40,12 +36,14 @@ private enum class Direction {
 }
 
 class SwipeBackSceneStrategy<T : Any>(
+    private val backStack: List<T>,
     private val enabled: Boolean,
     private val backRequests: Channel<CompletableDeferred<Unit>>,
     private val onDismiss: () -> Unit
 ) : SceneStrategy<T> {
 
-    private var previousEntries: List<NavEntry<T>> = emptyList()
+    private var previousBackStack = backStack.toList()
+    private var direction = Direction.None
 
     override fun SceneStrategyScope<T>.calculateScene(
         entries: List<NavEntry<T>>
@@ -55,33 +53,42 @@ class SwipeBackSceneStrategy<T : Any>(
         val currentEntry = entries.last()
         val previousEntry = entries.getOrNull(entries.lastIndex - 1)
 
-        val direction = when {
-            previousEntries.isEmpty() -> Direction.None
-            currentEntry in previousEntries -> Direction.Back
-            else -> Direction.Forward
+        // NavDisplay also calculates speculative prior scenes; only the real stack defines navigation.
+        val stack = backStack.toList()
+        if (stack != previousBackStack) {
+            direction = when {
+                previousBackStack.isEmpty() -> Direction.None
+                stack.lastOrNull() in previousBackStack -> Direction.Back
+                else -> Direction.Forward
+            }
+            previousBackStack = stack
         }
-
-        previousEntries = entries
+        val isCurrentScene = entries.size == stack.size
+        val sceneDirection = if (isCurrentScene) direction else Direction.None
+        val visibleEntries = listOfNotNull(previousEntry, currentEntry)
+        val priorEntries = entries.dropLast(1)
 
         return object : Scene<T> {
             override val key: Any
-                get() = "${currentEntry.contentKey}_${currentEntry.hashCode()}"
+                get() = currentEntry.contentKey
 
             override val entries: List<NavEntry<T>>
-                get() = entries
+                get() = visibleEntries
 
             override val previousEntries: List<NavEntry<T>>
-                get() = listOfNotNull(previousEntry)
+                get() = priorEntries
 
             override val content: @Composable () -> Unit
                 get() = {
                     SwipeBackSceneContent(
                         previousEntry = previousEntry,
                         currentEntry = currentEntry,
-                        direction = direction,
+                        direction = sceneDirection,
                         swipeEnabled = enabled,
                         backRequests = backRequests,
-                        onDismiss = onDismiss
+                        onDismiss = {
+                            if (isCurrentScene && backStack.toList() == stack) onDismiss()
+                        }
                     )
                 }
         }
@@ -100,11 +107,9 @@ private fun <T : Any> SwipeBackSceneContent(
     val density = LocalDensity.current
     val screenWidthPx = with(density) {
         LocalWindowInfo.current.containerDpSize.width.toPx()
-    }
+    }.coerceAtLeast(1f)
 
-    val animatedOffset = remember(
-        "${currentEntry.contentKey}_${currentEntry.hashCode()}"
-    ) {
+    val animatedOffset = remember(currentEntry.contentKey) {
         Animatable(
             if (direction == Direction.Forward) {
                 screenWidthPx
@@ -114,48 +119,32 @@ private fun <T : Any> SwipeBackSceneContent(
         )
     }
 
-    var transitionProgress by remember {
-        mutableFloatStateOf(
-            if (direction == Direction.Forward) 1f else 0f
-        )
-    }
-
-    var pushCompleted by remember {
-        mutableStateOf(direction != Direction.Forward)
-    }
-
     val scope = rememberCoroutineScope()
     val canNavigateBack by rememberUpdatedState(previousEntry != null)
+    val dismiss by rememberUpdatedState(onDismiss)
 
-    LaunchedEffect(
-        "${currentEntry.contentKey}_${currentEntry.hashCode()}",
-        direction
-    ) {
+    LaunchedEffect(currentEntry.contentKey) {
         if (direction == Direction.Forward) {
-            transitionProgress = 1f
-
             animatedOffset.animateTo(
                 0f,
                 tween(220)
             )
-
-            transitionProgress = 0f
-            pushCompleted = true
         }
     }
 
     LaunchedEffect(Unit) {
         for (completed in backRequests) {
-            if (canNavigateBack) {
-                animatedOffset.animateTo(
-                    screenWidthPx,
-                    tween(150)
-                )
-
-                transitionProgress = -1f
-                onDismiss()
+            try {
+                if (canNavigateBack) {
+                    animatedOffset.animateTo(screenWidthPx, tween(150))
+                    dismiss()
+                }
+            } catch (_: CancellationException) {
+                // A gesture may interrupt the animation without disposing this scene's receiver.
+                currentCoroutineContext().ensureActive()
+            } finally {
+                completed.complete(Unit)
             }
-            completed.complete(Unit)
         }
     }
 
@@ -163,8 +152,6 @@ private fun <T : Any> SwipeBackSceneContent(
         try {
             progressFlow.collect { backEvent ->
                 val progress = backEvent.progress
-
-                transitionProgress = -progress
 
                 animatedOffset.snapTo(
                     progress * screenWidthPx
@@ -176,15 +163,12 @@ private fun <T : Any> SwipeBackSceneContent(
                 tween(150)
             )
 
-            transitionProgress = -1f
-            onDismiss()
+            dismiss()
         } catch (_: CancellationException) {
             animatedOffset.animateTo(
                 0f,
                 tween(150)
             )
-
-            transitionProgress = 0f
         }
     }
 
@@ -192,84 +176,57 @@ private fun <T : Any> SwipeBackSceneContent(
         scope.launch {
             val offset =
                 (animatedOffset.value + delta)
-                    .coerceAtLeast(0f)
+                    .coerceIn(0f, screenWidthPx)
 
             animatedOffset.snapTo(offset)
-
-            transitionProgress =
-                -(offset / screenWidthPx)
-                    .coerceIn(0f, 1f)
         }
     }
 
-    CompositionLocalProvider(
-        LocalTransitionProgress provides transitionProgress
-    ) {
-        Box(Modifier.fillMaxSize()) {
-            CompositionLocalProvider(
-                LocalIsCurrentEntry provides false
-            ) {
-                Box(
-                    Modifier
-                        .fillMaxSize()
-                        .graphicsLayer {
-                            if (direction == Direction.Forward && !pushCompleted) {
-                                translationX = 0f
+    Box(Modifier.fillMaxSize()) {
+        Box(
+            Modifier
+                .fillMaxSize()
+                .graphicsLayer {
+                    val progress = (animatedOffset.value / screenWidthPx).coerceIn(0f, 1f)
+                    translationX = -(screenWidthPx / 3f) * (1f - progress)
+                }
+        ) {
+            previousEntry?.Content()
+        }
+        Box(
+            Modifier
+                .fillMaxSize()
+                .graphicsLayer {
+                    translationX = animatedOffset.value
+                }
+                .draggable(
+                    enabled = swipeEnabled && previousEntry != null,
+                    state = draggableState,
+                    orientation = Orientation.Horizontal,
+                    onDragStopped = { velocity ->
+                        val currentOffset = animatedOffset.value
+                        val shouldDismiss = currentOffset > screenWidthPx * 0.35f || velocity > 1000f
+
+                        scope.launch {
+                            if (shouldDismiss) {
+                                animatedOffset.animateTo(
+                                    targetValue = screenWidthPx,
+                                    animationSpec = tween(150),
+                                    initialVelocity = velocity
+                                )
+                                dismiss()
                             } else {
-                                val progress = (animatedOffset.value / screenWidthPx).coerceIn(0f, 1f)
-                                translationX = -(screenWidthPx / 3f) * (1f - progress)
+                                animatedOffset.animateTo(
+                                    targetValue = 0f,
+                                    animationSpec = tween(150),
+                                    initialVelocity = velocity
+                                )
                             }
                         }
-                ) {
-                    previousEntry?.Content()
-                }
-            }
-
-            CompositionLocalProvider(
-                LocalIsCurrentEntry provides true
-            ) {
-                Box(
-                    Modifier
-                        .fillMaxSize()
-                        .graphicsLayer {
-                            translationX = animatedOffset.value
-                        }
-                        .draggable(
-                            enabled = swipeEnabled && previousEntry != null,
-                            state = draggableState,
-                            orientation = Orientation.Horizontal,
-                            onDragStopped = { velocity ->
-                                val currentOffset = animatedOffset.value
-                                val shouldDismiss = currentOffset > screenWidthPx * 0.35f || velocity > 1000f
-
-                                scope.launch {
-                                    if (shouldDismiss) {
-                                        animatedOffset.animateTo(
-                                            targetValue = screenWidthPx,
-                                            animationSpec = tween(150),
-                                            initialVelocity = velocity
-                                        ) {
-                                            transitionProgress = -(value / screenWidthPx).coerceIn(0f, 1f)
-                                        }
-                                        transitionProgress = -1f
-                                        onDismiss()
-                                    } else {
-                                        animatedOffset.animateTo(
-                                            targetValue = 0f,
-                                            animationSpec = tween(150),
-                                            initialVelocity = velocity
-                                        ) {
-                                            transitionProgress = -(value / screenWidthPx).coerceIn(0f, 1f)
-                                        }
-                                        transitionProgress = 0f
-                                    }
-                                }
-                            }
-                        )
-                ) {
-                    currentEntry.Content()
-                }
-            }
+                    }
+                )
+        ) {
+            currentEntry.Content()
         }
     }
 }

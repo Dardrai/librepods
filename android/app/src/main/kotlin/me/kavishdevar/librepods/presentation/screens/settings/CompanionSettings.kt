@@ -141,6 +141,7 @@ private fun CompanionSection(onOpenSettings: (() -> Unit)? = null, service: Libr
         val pod = devices.values.filterIsInstance<AppleDevice>().firstOrNull { it.macAddress.value == controller?.linkedDevice() }
         val settings by (pod?.settings ?: remember { MutableStateFlow(AppleSettings()) }).collectAsState()
         val bridge by (service?.companionAudioAvailability ?: remember { MutableStateFlow(me.kavishdevar.librepods.shizuku.BridgeState()) }).collectAsState()
+        val hostAvailable = remember(bridge, service) { service?.companionMediaAvailable() == true }
         var phonePermissionDenied by remember { mutableStateOf(false) }
         val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             phonePermissionDenied = !granted
@@ -148,7 +149,7 @@ private fun CompanionSection(onOpenSettings: (() -> Unit)? = null, service: Libr
         }
         CompanionPoliciesContent(settings, enabled = controller != null && pod != null && !displayedState.busy,
             syncIssue = state.settingsIssue,
-            hostAvailable = service?.companionMediaAvailable() == true && !bridge.probing,
+            hostAvailable = hostAvailable,
             permissionGranted = context.checkSelfPermission(Manifest.permission.READ_PHONE_STATE) == PackageManager.PERMISSION_GRANTED,
             permissionDenied = phonePermissionDenied,
             onAutoPause = { pod?.updateSettings { current -> current.copy(hostAutoPause = it) } },

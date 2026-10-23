@@ -18,12 +18,8 @@
 
 package me.kavishdevar.librepods.presentation.components.primitives
 
-import android.annotation.SuppressLint
-import android.graphics.RenderEffect
-import android.graphics.Shader
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
-import androidx.compose.animation.SharedTransitionScope
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -69,14 +65,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asComposeRenderEffect
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
-import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -92,9 +85,6 @@ import dev.chrisbanes.haze.rememberHazeState
 import me.kavishdevar.librepods.presentation.design.DesignSystem
 import me.kavishdevar.librepods.presentation.design.LocalDesignSystem
 import me.kavishdevar.librepods.presentation.icons.LocalIcons
-import me.kavishdevar.librepods.presentation.navigation.LocalIsCurrentEntry
-import me.kavishdevar.librepods.presentation.navigation.LocalSharedTransitionScope
-import me.kavishdevar.librepods.presentation.navigation.LocalTransitionProgress
 
 @Composable
 fun StyledScaffold(
@@ -212,15 +202,7 @@ fun StyledScaffold(
                     val bgColor = MaterialTheme.colorScheme.surfaceContainer
 
                     val density = LocalDensity.current
-                    val screenWidthPx = with(density) {
-                        LocalWindowInfo.current.containerDpSize.width.toPx()
-                    }
-
-                    val isCurrentEntry = LocalIsCurrentEntry.current
-                    val transitionProgress = LocalTransitionProgress.current
-                    var sharedTransitionScope = LocalSharedTransitionScope.current
-
-                    val showBackButton = if (transitionProgress == 0f) navigateBack != null else !isCurrentEntry
+                    val showBackButton = navigateBack != null
                     var actionsWidth by remember(actionButtons.size) {
                         mutableStateOf(48.dp * actionButtons.size + 8.dp * (actionButtons.size - 1).coerceAtLeast(0))
                     }
@@ -229,80 +211,38 @@ fun StyledScaffold(
                         if (actionButtons.isNotEmpty()) actionsWidth + 24.dp else 16.dp
                     )
 
-                    @SuppressLint("UnusedSharedTransitionModifierParameter")
-                    if (sharedTransitionScope == null) {
-                        SharedTransitionScope {
-                            sharedTransitionScope = this
-                        }
-                    }
+                    if (visible && showBackButton) {
+                        Box(
+                            modifier = Modifier
+                                .zIndex(3f)
+                                .padding(top = topPadding + 8.dp, start = 16.dp)
+                                .align(Alignment.TopStart)
+                                .pointerInput(Unit) {
+                                    awaitPointerEventScope {
+                                        while (true) {
+                                            awaitFirstDown(requireUnconsumed = false)
 
-                    sharedTransitionScope = sharedTransitionScope!!
+                                            do {
+                                                val event = awaitPointerEvent()
 
-
-                    if (showBackButton) {
-                        with(sharedTransitionScope) {
-                            Box(
-                                modifier = Modifier
-                                    .zIndex(3f)
-                                    .padding(top = topPadding + 8.dp, start = 16.dp)
-                                    .align(Alignment.TopStart)
-                                    .pointerInput(Unit) {
-                                        awaitPointerEventScope {
-                                            while (true) {
-                                                awaitFirstDown(requireUnconsumed = false)
-
-                                                do {
-                                                    val event = awaitPointerEvent()
-
-                                                    event.changes.forEach { change ->
-                                                        change.consume()
-                                                    }
-                                                } while (event.changes.any { it.pressed })
-                                            }
+                                                event.changes.forEach { change ->
+                                                    change.consume()
+                                                }
+                                            } while (event.changes.any { it.pressed })
                                         }
                                     }
-                                    .renderInSharedTransitionScopeOverlay(
-                                        zIndexInOverlay = 3f,
-                                        renderInOverlay = {
-                                            !isCurrentEntry && transitionProgress != 0f
-                                        }
-                                    )
-                                    .graphicsLayer { // AI generated
-                                        if (!isCurrentEntry && transitionProgress < 0f) {
-                                            val progress = (-transitionProgress).coerceIn(0f, 1f)
-
-                                            translationX = (screenWidthPx / 3f) * (1f - progress)
-
-                                            if (navigateBack == null) {
-                                                val eased = progress * progress * (3f - 2f * progress)
-
-                                                val scale = 1f - 0.18f * eased
-                                                scaleX = scale
-                                                scaleY = scale
-
-                                                alpha = 1f - 0.28f * eased
-
-                                                val blur = 8f * progress
-                                                renderEffect = RenderEffect.createBlurEffect(
-                                                    blur,
-                                                    blur,
-                                                    Shader.TileMode.DECAL
-                                                ).asComposeRenderEffect()
-                                            }
-                                        }
-                                    }
-                            ) {
-                                StyledIconButton(
-                                    onClick = { navigateBack?.invoke() },
-                                    backdrop = backdrop
-                                ) {
-                                    Icon(
-                                        imageVector = LocalIcons.current.ArrowBack,
-                                        contentDescription = "Back",
-                                        modifier = Modifier.size(16.dp),
-                                        tint = MaterialTheme.colorScheme.onBackground
-                                    )
                                 }
+                        ) {
+                            StyledIconButton(
+                                onClick = { navigateBack?.invoke() },
+                                backdrop = backdrop
+                            ) {
+                                Icon(
+                                    imageVector = LocalIcons.current.ArrowBack,
+                                    contentDescription = "Back",
+                                    modifier = Modifier.size(16.dp),
+                                    tint = MaterialTheme.colorScheme.onBackground
+                                )
                             }
                         }
                     }

@@ -94,7 +94,7 @@ fun RenderScreenContent(
 ) {
     val navigate: (Screen) -> Unit = { target -> if (target !in backStack) backStack.add(target) } // prevents multiple clicks while transitioning
 
-    val navigateBack: (() -> Unit)? = if (backStack.size > 1) {
+    val navigateBack: (() -> Unit)? = if (backStack.indexOf(screen) > 0) {
         {
             val completed = CompletableDeferred<Unit>()
             backRequests.trySend(completed)

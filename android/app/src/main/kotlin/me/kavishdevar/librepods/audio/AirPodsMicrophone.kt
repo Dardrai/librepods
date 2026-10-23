@@ -30,14 +30,7 @@ data class MicrophoneState(
     val decodedFrames: Long = 0,
 )
 
-/** Callbacks run on the microphone worker; the sink must use bounded, cancellable writes. */
-interface PcmSink {
-    fun onFormat(format: PcmFormat)
-    fun onPcm(bytes: ByteArray, presentationTimeUs: Long)
-    fun onStopped()
-}
-
-/** AACP acquisition, session-owned decoding and optional private diagnostic recording. */
+/** AACP acquisition, session-owned decoding and private Recorder capture. */
 class AirPodsMicrophone(
     private val aacp: AACPManager,
     private val outputDirectory: File,
@@ -67,14 +60,13 @@ class AirPodsMicrophone(
     init { aacp.microphonePacketCallback = packetCallback }
 
     @Synchronized
-    fun start(recordToFile: Boolean = true, sink: PcmSink? = null, expectedSocket: BluetoothSocket? = null,
-        destination: File? = null): Boolean {
-        if (closed || session != null || (!recordToFile && sink == null)) {
-            Log.w("AirPodsMicrophone", "Start rejected: closed=$closed busy=${session != null} recording=$recordToFile sink=${sink != null}")
+    fun start(destination: File? = null): Boolean {
+        if (closed || session != null) {
+            Log.w("AirPodsMicrophone", "Start rejected: closed=$closed busy=${session != null}")
             return false
         }
         val socket = aacp.captureAudioSocket()
-        if (socket == null || !socket.isConnected || (expectedSocket != null && socket !== expectedSocket)) {
+        if (socket == null || !socket.isConnected) {
             Log.w("AirPodsMicrophone", "Start rejected: protocol transport disconnected")
             mutableState.value = MicrophoneState(MicrophonePhase.ERROR, message = "Connect your AirPods first.")
             return false
@@ -82,8 +74,8 @@ class AirPodsMicrophone(
         val next = Session(++generation, socket)
         session = next
         mutableState.value = MicrophoneState(MicrophonePhase.STARTING, next.generation)
-        Log.i("AirPodsMicrophone", "Session ${next.generation}: start accepted, recording=$recordToFile")
-        next.worker = Thread({ capture(next, recordToFile, sink, destination) }, "AirPods microphone").apply { start() }
+        Log.i("AirPodsMicrophone", "Session ${next.generation}: recording start accepted")
+        next.worker = Thread({ capture(next, destination) }, "AirPods microphone").apply { start() }
         return true
     }
 
@@ -135,7 +127,7 @@ class AirPodsMicrophone(
         active.stop.set(true)
     }
 
-    private fun capture(active: Session, record: Boolean, sink: PcmSink?, destination: File?) {
+    private fun capture(active: Session, destination: File?) {
         val startedNs = SystemClock.elapsedRealtimeNanos()
         val started = startedNs / 1_000_000
         val clock = MicrophoneClockStats(startedNs)
@@ -153,18 +145,14 @@ class AirPodsMicrophone(
                 if (outputFormat == null) {
                     outputFormat = format
                     Log.i("AirPodsMicrophone", "Session ${active.generation}: PCM16 format ${format.sampleRate} Hz, ${format.channels} channel")
-                    if (record) {
-                        check(outputDirectory.exists() || outputDirectory.mkdirs()) { "Cannot create recording directory" }
-                        outputFile = destination ?: File.createTempFile("airpods-mic-", ".wav", outputDirectory)
-                        if (destination == null) pruneMicrophoneRecordings(outputDirectory, checkNotNull(outputFile))
-                        writer = PcmWaveWriter(checkNotNull(outputFile), format)
-                    }
-                    sink?.onFormat(format)
+                    check(outputDirectory.exists() || outputDirectory.mkdirs()) { "Cannot create recording directory" }
+                    outputFile = destination ?: File.createTempFile("airpods-mic-", ".wav", outputDirectory)
+                    if (destination == null) pruneMicrophoneRecordings(outputDirectory, checkNotNull(outputFile))
+                    writer = PcmWaveWriter(checkNotNull(outputFile), format)
                 }
-            }, onPcm = pcm@{ bytes, timestamp ->
+            }, onPcm = pcm@{ bytes, _ ->
                 if (!active.accepting || active.stop.get()) return@pcm
                 writer?.write(bytes)
-                sink?.onPcm(bytes, timestamp)
                 if (bytesDecoded == 0L) Log.i("AirPodsMicrophone", "Session ${active.generation}: first decoded PCM")
                 bytesDecoded += bytes.size
                 lastPcm = SystemClock.elapsedRealtime()
@@ -196,7 +184,7 @@ class AirPodsMicrophone(
                 check(bytesDecoded == 0L || now - active.lastPacketMs.get() < 2_000) {
                     "Microphone stream was interrupted. Please retry."
                 }
-                if (record && now - started >= 60_000) stop()
+                if (now - started >= 60_000) stop()
             }
         } catch (e: Exception) {
             Log.w("AirPodsMicrophone", "Session ${active.generation}: capture ended (${e.javaClass.simpleName})")
@@ -210,7 +198,6 @@ class AirPodsMicrophone(
             active.accepting = false
             active.stop.set(true)
             active.packets.clear()
-            try { sink?.onStopped() } catch (_: Exception) { active.failure = "Microphone output did not close cleanly" }
             try { decoder?.close() } catch (_: Exception) { active.failure = "Microphone decoder did not close cleanly" }
             try { writer?.close() } catch (_: Exception) { active.failure = "Could not finish the microphone recording" }
             if (attemptedStart && active.connected.get()) {

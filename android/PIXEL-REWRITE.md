@@ -503,18 +503,19 @@ Reviewed against NTPods' control, audio and macOS case/sensor references on
 
 ## Experimental audio boundaries
 
-The port keeps the verified physical PCM clock (64 kHz), bounded microphone
-decoder and session recovery. Recording is explicit, has Stop/Play/Share and a
-foreground indicator, and fails closed if microphone access is revoked. Short
-diagnostic recordings remain private and are excluded from backups. The database
-and retained legacy preferences are also excluded because they contain keys.
+Microphone Mode contains only the native Automatic, Always Right and Always Left
+choices. The failed audio diagnostics, duplicate test recorder, app microphone
+injection and cellular-call relay experiments have been removed with their
+exclusive routing code. Native Android/HFP call audio remains on Android.
 
-Previous physical tests on the older fork established normal-pitch HQ microphone
-capture with good media quality and two-way cellular call relay. They do not
-validate this new rewrite build. Normal-quality media during a cellular call is
-still unresolved; Pixel Recorder's explicit microphone selection can bypass the
-UID injection route. AAC-ELD playback remains gated because the available encoder
-does not produce the verified 480-sample configuration.
+Recorder retains the physical PCM clock (64 kHz), bounded microphone decoder and
+session recovery. Recording is explicit, has Stop/Play/Share and a foreground
+indicator, and fails closed if microphone access is revoked. Short diagnostic
+recordings remain private and are excluded from backups. The database and
+retained legacy preferences are also excluded because they contain keys.
+
+Previous physical tests on the older fork do not validate Recorder in this
+rewrite. High-quality two-way call audio is unavailable.
 
 Upstream rewrite ATT transport is disabled. Safe hearing/transparency codecs and
 read-only handling of unsupported formats do not imply functioning rootless ATT

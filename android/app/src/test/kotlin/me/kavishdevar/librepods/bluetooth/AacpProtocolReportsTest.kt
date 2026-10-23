@@ -13,6 +13,9 @@ import me.kavishdevar.librepods.core.devices.AppleSettings
 import me.kavishdevar.librepods.core.devices.AppleState
 import me.kavishdevar.librepods.core.devices.AirPodsModel
 import me.kavishdevar.librepods.core.devices.ConnectionState
+import me.kavishdevar.librepods.core.devices.ComponentStatus
+import me.kavishdevar.librepods.core.devices.DeviceComponent
+import me.kavishdevar.librepods.core.devices.DeviceComponentState
 import me.kavishdevar.librepods.core.data.StemAction
 import me.kavishdevar.librepods.core.data.StemPressBud
 import me.kavishdevar.librepods.core.data.StemPressType
@@ -107,6 +110,24 @@ class AacpProtocolReportsTest {
         assertTrue(device.aacp.sendCapabilitiesRequest(socket))
         val shadow = Shadow.extract<ProtocolReportSocketShadow>(socket)
         assertArrayEquals(byteArrayOf(4, 0, 4, 0, 1, 0, 8), shadow.output.bytes.toByteArray())
+    }
+
+    @Test fun retiredEarReportsCannotReplaceTheCaseStateOnAReplacementConnection() = withTransport { device, socket ->
+        val leftOnly = byteArrayOf(4, 0, 4, 0, 6, 0, 0, 2)
+        val rightOnly = byteArrayOf(4, 0, 4, 0, 6, 0, 2, 0)
+        device.aacp.processPacket(leftOnly, socket)
+        assertEquals(setOf(DeviceComponentState(DeviceComponent.LEFT, ComponentStatus.IN_EAR),
+            DeviceComponentState(DeviceComponent.RIGHT, ComponentStatus.IN_CASE)), device.state.value.componentState)
+        val replacement = socket()
+        try {
+            bind(device.aacp, replacement)
+            val retained = device.state.value
+            device.aacp.processPacket(rightOnly, socket)
+            assertSame(retained, device.state.value)
+            device.aacp.processPacket(rightOnly, replacement)
+            assertEquals(setOf(DeviceComponentState(DeviceComponent.LEFT, ComponentStatus.IN_CASE),
+                DeviceComponentState(DeviceComponent.RIGHT, ComponentStatus.IN_EAR)), device.state.value.componentState)
+        } finally { replacement.close() }
     }
 
     @Test fun booleanSendPathsUseEarSpecificEncodingWithoutReversingOtherTogglesOrRawValues() = withTransport { device, socket ->

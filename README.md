@@ -65,7 +65,7 @@ LibrePods allows you to use AirPods features that are exclusive to Apple devices
 | [Head-tracked Spatial Audio](#spatial-audio)                | ❓     | ❓       |
 | [Heart Rate Monitoring](#heart-rate-monitoring-airpods-pro-3-and-later) | ⛔     | 🧪       |
 | [Find My](#find-my)                                         | ❓     | ❓       |
-| [High quality two-way audio](#high-quality-two-way-audio)   | 🔴     | 🧪       |
+| [High quality two-way audio](#high-quality-two-way-audio)   | 🔴     | Unavailable |
 
 | Symbol | Meaning                                                             |
 | ------ | ------------------------------------------------------------------- |
@@ -107,11 +107,10 @@ hardware with this Android rewrite.
 ## High quality two-way audio
 On iOS/iPadOS, you can continue using A2DP while AirPods send the audio stream from its microphone over AACP. 
 
-This Android fork includes experimental high-quality microphone recording and
-Shizuku microphone/cellular-call routing without root. Physical tests on the older
-fork do not validate this rewrite. Normal-quality media during cellular calls is
-still unresolved, and stereo AAC-ELD playback remains blocked because the encoder
-does not produce the required 480-sample configuration. See
+This Android fork retains experimental high-quality microphone recording in
+Recorder. The failed app microphone injection and cellular-call relay experiments
+have been removed. Physical tests on the older fork do not validate this rewrite.
+High-quality two-way call audio is unavailable. See
 [experimental audio boundaries](android/PIXEL-REWRITE.md#experimental-audio-boundaries).
 
 # Installation

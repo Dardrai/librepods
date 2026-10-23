@@ -301,7 +301,7 @@ class RecordingScreenTest {
         compose.runOnIdle { state.value = state.value.copy(recordingState = RecordingState(isRecording = true)) }
         val after = redPixels(compose.onNodeWithTag("recording-waveform").captureToImage().asAndroidBitmap())
         assertTrue("A new recording must not retain the previous louder waveform", before > after)
-        compose.runOnIdle { bridge(controller).value = BridgeState(connected = false, session = "failed", detail = "Shizuku disconnected") }
+        compose.runOnIdle { bridge(controller).value = BridgeState(connected = false, detail = "Shizuku disconnected") }
         compose.onNodeWithText(text(R.string.recorder_stop)).assertIsDisplayed().assertIsEnabled()
         capture("recorder-active-material-narrow-2x")
         compose.onNodeWithText(text(R.string.recorder_stop)).performClick()

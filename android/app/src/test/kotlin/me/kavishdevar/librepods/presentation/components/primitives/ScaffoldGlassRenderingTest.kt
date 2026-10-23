@@ -2,7 +2,6 @@ package me.kavishdevar.librepods.presentation.components.primitives
 
 import android.app.Application
 import android.graphics.Bitmap
-import androidx.compose.animation.SharedTransitionLayout
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -29,8 +28,6 @@ import androidx.compose.ui.unit.dp
 import me.kavishdevar.librepods.presentation.design.DesignSystem
 import me.kavishdevar.librepods.presentation.design.LibrePodsTheme
 import me.kavishdevar.librepods.presentation.icons.LocalIcons
-import me.kavishdevar.librepods.presentation.navigation.LocalIsCurrentEntry
-import me.kavishdevar.librepods.presentation.navigation.LocalSharedTransitionScope
 import org.junit.Assert.assertTrue
 import org.junit.Assert.assertEquals
 import org.junit.Rule
@@ -61,28 +58,23 @@ class ScaffoldGlassRenderingTest {
             CompositionLocalProvider(LocalDensity provides Density(1f, current.fontScale)) {
                 LibrePodsTheme(darkTheme = current.dark, designSystem = DesignSystem.Apple) {
                     Box(Modifier.requiredSize(current.width.dp, 400.dp).testTag("glass-scaffold")) {
-                        SharedTransitionLayout {
-                            CompositionLocalProvider(LocalSharedTransitionScope provides this,
-                                LocalIsCurrentEntry provides true) {
-                                StyledScaffold(title = title, navigateBack = {}, actionButtons = listOf(
-                                    { backdrop ->
-                                        StyledIconButton(Modifier.testTag("glass-action-one"), onClick = {}, backdrop = backdrop) {
-                                            Icon(LocalIcons.current.Settings, contentDescription = "Glass settings")
-                                        }
-                                    },
-                                    { backdrop ->
-                                        StyledIconButton(Modifier.testTag("glass-action-two"), onClick = {}, backdrop = backdrop) {
-                                            Icon(LocalIcons.current.Settings, contentDescription = "Other settings")
-                                        }
-                                    }
-                                )) { _, _ ->
-                                    // Contrasting content behind the floating controls makes their refraction visible.
-                                    Column(Modifier.fillMaxSize().background(Color(0xFF727C89))) {
-                                        repeat(8) { row ->
-                                            Box(Modifier.fillMaxWidth().height(50.dp).background(
-                                                if (row % 2 == 0) Color(0xFF526CA8) else Color(0xFFB68C72)))
-                                        }
-                                    }
+                        StyledScaffold(title = title, navigateBack = {}, actionButtons = listOf(
+                            { backdrop ->
+                                StyledIconButton(Modifier.testTag("glass-action-one"), onClick = {}, backdrop = backdrop) {
+                                    Icon(LocalIcons.current.Settings, contentDescription = "Glass settings")
+                                }
+                            },
+                            { backdrop ->
+                                StyledIconButton(Modifier.testTag("glass-action-two"), onClick = {}, backdrop = backdrop) {
+                                    Icon(LocalIcons.current.Settings, contentDescription = "Other settings")
+                                }
+                            }
+                        )) { _, _ ->
+                            // Contrasting content behind the floating controls makes their refraction visible.
+                            Column(Modifier.fillMaxSize().background(Color(0xFF727C89))) {
+                                repeat(8) { row ->
+                                    Box(Modifier.fillMaxWidth().height(50.dp).background(
+                                        if (row % 2 == 0) Color(0xFF526CA8) else Color(0xFFB68C72)))
                                 }
                             }
                         }

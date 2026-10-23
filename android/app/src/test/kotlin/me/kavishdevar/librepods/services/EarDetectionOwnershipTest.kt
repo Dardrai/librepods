@@ -1,6 +1,7 @@
 package me.kavishdevar.librepods.services
 
 import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothSocket
 import android.app.Application
 import android.content.Context
 import me.kavishdevar.librepods.shizuku.ShizukuAudioClient
@@ -20,6 +21,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import me.kavishdevar.librepods.core.bluetooth.MacAddress
+import me.kavishdevar.librepods.core.bluetooth.aacp.AACPManager
 import me.kavishdevar.librepods.core.devices.*
 import me.kavishdevar.librepods.database.app.AppSettingsEntity
 import me.kavishdevar.librepods.repository.AppDataRepository
@@ -33,6 +35,9 @@ import org.mockito.Mockito.*
 import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import kotlin.coroutines.Continuation
+import kotlin.coroutines.intrinsics.COROUTINE_SUSPENDED
+import kotlin.coroutines.resume
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [37], application = Application::class)
@@ -41,6 +46,9 @@ class EarDetectionOwnershipTest {
     private val device = mock(AppleDevice::class.java)
     private val audio = mock(AudioManager::class.java)
     private val bridge = mock(ShizukuAudioClient::class.java)
+    private val bridgeState = MutableStateFlow(BridgeState(connected = true))
+    private val aacp = mock(AACPManager::class.java)
+    private val transport = mock(BluetoothSocket::class.java)
     private val state = MutableStateFlow(AppleState())
     private val address = MacAddress("00:11:22:33:44:55")
     private val mediaAudio = MediaController::class.java.getDeclaredField("audioManager").apply { isAccessible = true }
@@ -61,13 +69,16 @@ class EarDetectionOwnershipTest {
         `when`(bluetooth.bondState).thenReturn(BluetoothDevice.BOND_BONDED)
         `when`(device.bluetoothDevice).thenReturn(bluetooth)
         `when`(device.state).thenReturn(state)
+        `when`(device.aacp).thenReturn(aacp)
+        `when`(aacp.captureAudioSocket()).thenReturn(transport)
+        `when`(aacp.ownsAudioSocket(transport)).thenReturn(true)
         `when`(device.settings).thenReturn(MutableStateFlow(AppleSettings(showIslandPopup = false)))
         `when`(device.metadata).thenReturn(MutableStateFlow(AppleMetadata()))
         val repository = mock(AppDataRepository::class.java)
         `when`(repository.settings).thenReturn(MutableStateFlow(AppSettingsEntity()))
         field("appDataRepository\$delegate").set(service, lazyOf(repository))
         field("companionBridge\$delegate").set(service, lazyOf(bridge))
-        `when`(bridge.state).thenReturn(MutableStateFlow(BridgeState(connected = true)))
+        `when`(bridge.state).thenReturn(bridgeState)
         Shadow.extract<ShadowContextImpl>(service.baseContext).setSystemService(Context.AUDIO_SERVICE, audio)
         @Suppress("UNCHECKED_CAST")
         val devices = field("_devices").get(service) as MutableStateFlow<Map<MacAddress, Device<*, *, *>>>
@@ -120,6 +131,126 @@ class EarDetectionOwnershipTest {
         noProfileChanges()
     }
 
+    @Test fun eitherBudCanStayInUseWhileTheOtherIsInItsCase() = runBlocking<Unit> {
+        route(address.value)
+        for (worn in listOf(DeviceComponent.LEFT, DeviceComponent.RIGHT)) {
+            val solo = wear(worn, ComponentStatus.IN_CASE)
+            change(full, solo)
+            change(solo, full)
+        }
+        verify(bridge, never()).pauseOwnedMedia(anyString(), any<() -> Boolean>() ?: { false })
+        verify(bridge, never()).finishOwnedMedia(true)
+        noProfileChanges()
+    }
+
+    @Test fun returningTheRemovedBudToItsCaseResumesOnlyTheOwnedPause() = runBlocking<Unit> {
+        route(address.value)
+        for (worn in listOf(DeviceComponent.LEFT, DeviceComponent.RIGHT)) {
+            val removed = wear(worn, ComponentStatus.OUT_OF_EAR)
+            change(full, removed)
+            change(removed, wear(worn, ComponentStatus.IN_CASE))
+        }
+        verify(bridge, times(2)).pauseOwnedMedia(eq(address.value) ?: address.value, any<() -> Boolean>() ?: { false })
+        verify(bridge, times(2)).finishOwnedMedia(true)
+        noProfileChanges()
+    }
+
+    @Test fun bothBudsInTheCasePauseAndEitherBudCanResumeTheOwnedPlayer() = runBlocking<Unit> {
+        route(address.value)
+        val cased = full.map { it.copy(status = ComponentStatus.IN_CASE) }.toSet()
+        for (worn in listOf(DeviceComponent.LEFT, DeviceComponent.RIGHT)) {
+            val solo = wear(worn, ComponentStatus.IN_CASE)
+            change(solo, cased)
+            change(cased, solo)
+        }
+        verify(bridge, times(2)).pauseOwnedMedia(eq(address.value) ?: address.value, any<() -> Boolean>() ?: { false })
+        verify(bridge, times(2)).finishOwnedMedia(true)
+    }
+
+    @Test fun outOfEarDisconnectedAndMissingBudsAreNotAssumedToBeInTheCase() = runBlocking<Unit> {
+        route(address.value)
+        for (worn in listOf(DeviceComponent.LEFT, DeviceComponent.RIGHT)) {
+            for (status in listOf(ComponentStatus.OUT_OF_EAR, ComponentStatus.DISCONNECTED)) {
+                change(full, wear(worn, status))
+            }
+            change(full, setOf(DeviceComponentState(worn, ComponentStatus.IN_EAR)))
+        }
+        verify(bridge, times(6)).pauseOwnedMedia(eq(address.value) ?: address.value, any<() -> Boolean>() ?: { false })
+        verify(bridge, never()).finishOwnedMedia(true)
+    }
+
+    @Test fun aSoloBudCannotResumeAnUnownedOrFailedPause() = runBlocking<Unit> {
+        route(address.value)
+        val removed = wear(DeviceComponent.LEFT, ComponentStatus.OUT_OF_EAR)
+        val solo = wear(DeviceComponent.LEFT, ComponentStatus.IN_CASE)
+        change(removed, solo)
+        `when`(bridge.pauseOwnedMedia(eq(address.value) ?: address.value, any<() -> Boolean>() ?: { false })).thenReturn(false)
+        change(full, removed)
+        change(removed, solo)
+        verify(bridge, never()).finishOwnedMedia(true)
+    }
+
+    @Test fun aQueuedRemovalCannotPauseOnceTheOtherBudIsConfirmedInItsCase() = runBlocking<Unit> {
+        route(address.value)
+        bridgeState.value = BridgeState(connected = false)
+        val removed = wear(DeviceComponent.LEFT, ComponentStatus.OUT_OF_EAR)
+        change(full, removed)
+        state.value = state.value.copy(componentState = wear(DeviceComponent.LEFT, ComponentStatus.IN_CASE))
+        bridgeState.value = BridgeState(connected = true)
+        verify(bridge, never()).pauseOwnedMedia(anyString(), any<() -> Boolean>() ?: { false })
+        verify(bridge, never()).finishOwnedMedia(true)
+    }
+
+    @Test fun aSoloReadyReportWaitsForItsInFlightOwnedPauseBeforeResuming() = runBlocking<Unit> {
+        route(address.value)
+        var result: Continuation<Boolean>? = null
+        doAnswer { invocation ->
+            @Suppress("UNCHECKED_CAST")
+            assertTrue((invocation.arguments[1] as () -> Boolean)())
+            @Suppress("UNCHECKED_CAST")
+            val continuation = invocation.rawArguments.last() as Continuation<Boolean>
+            result = continuation
+            COROUTINE_SUSPENDED
+        }.`when`(bridge).pauseOwnedMedia(eq(address.value) ?: address.value, any<() -> Boolean>() ?: { false })
+        for (succeeded in listOf(true, false)) {
+            clearInvocations(bridge)
+            result = null
+            val removed = wear(DeviceComponent.LEFT, ComponentStatus.OUT_OF_EAR)
+            change(full, removed)
+            assertNotNull(result)
+            change(removed, wear(DeviceComponent.LEFT, ComponentStatus.IN_CASE))
+            verify(bridge, never()).finishOwnedMedia(true)
+            checkNotNull(result).resume(succeeded)
+            verify(bridge, times(if (succeeded) 1 else 0)).finishOwnedMedia(true)
+        }
+    }
+
+    @Test fun aReplacementConnectionCannotResumeThePreviousConnectionsPause() = runBlocking<Unit> {
+        route(address.value)
+        change(full, emptySet())
+        val replacement = mock(BluetoothSocket::class.java)
+        `when`(aacp.ownsAudioSocket(transport)).thenReturn(false)
+        `when`(aacp.ownsAudioSocket(replacement)).thenReturn(true)
+        `when`(aacp.captureAudioSocket()).thenReturn(replacement)
+        val solo = wear(DeviceComponent.LEFT, ComponentStatus.IN_CASE)
+        change(emptySet(), solo, transport)
+        change(emptySet(), solo, replacement)
+        verify(bridge, never()).finishOwnedMedia(true)
+    }
+
+    @Test fun aSupersededWearReportCannotResumePlayback() = runBlocking<Unit> {
+        route(address.value)
+        change(full, emptySet())
+        val solo = wear(DeviceComponent.LEFT, ComponentStatus.IN_CASE)
+        state.value = state.value.copy(componentState = wear(DeviceComponent.LEFT, ComponentStatus.OUT_OF_EAR))
+        dispatchChange(emptySet(), solo, transport)
+        verify(bridge, never()).finishOwnedMedia(true)
+    }
+
+    private fun wear(worn: DeviceComponent, other: ComponentStatus) = full.map {
+        if (it.component == worn) it else it.copy(status = other)
+    }.toSet()
+
     private fun route(value: String) {
         val output = mock(AudioDeviceInfo::class.java)
         `when`(output.address).thenReturn(value)
@@ -129,10 +260,15 @@ class EarDetectionOwnershipTest {
         `when`(audio.getAudioDevicesForAttributes(any(AudioAttributes::class.java) ?: attributes)).thenReturn(listOf(output))
     }
 
-    private fun change(previous: Set<DeviceComponentState>, current: Set<DeviceComponentState>) {
+    private fun change(previous: Set<DeviceComponentState>, current: Set<DeviceComponentState>, source: BluetoothSocket = transport) {
         state.value = state.value.copy(componentState = current)
+        dispatchChange(previous, current, source)
+    }
+
+    private fun dispatchChange(previous: Set<DeviceComponentState>, current: Set<DeviceComponentState>, source: BluetoothSocket) {
         LibrePodsService::class.java.getDeclaredMethod("processComponentStateChange", Device::class.java,
-            Set::class.java, Set::class.java).apply { isAccessible = true }.invoke(service, device, previous, current)
+            Set::class.java, Set::class.java, BluetoothSocket::class.java).apply { isAccessible = true }
+            .invoke(service, device, previous, current, source)
     }
 
     private fun noProfileChanges() {
