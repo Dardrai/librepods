@@ -42,6 +42,40 @@ class DongleProtocolTest {
         for ((at, value) in listOf(19 to 101, 23 to 4, 40 to 7, 41 to 5, 63 to 1))
             assertThrows(IllegalArgumentException::class.java) { DongleProtocol.status(status().also { it[at] = value.toByte() }) }
     }
+    @Test fun case_batteries_retain_independent_ages_and_absence_without_becoming_a_connection() {
+        val bytes = status().also {
+            it[7] = 0; it[21] = 61; it[22] = 2; it[42] = 0x5f
+            it[44] = 6; it[45] = 7
+            DongleProtocol.put32(it, 24, 12_000)
+            DongleProtocol.put32(it, 28, 100)
+            DongleProtocol.put32(it, 32, 89_999)
+        }
+        val parsed = DongleProtocol.status(bytes)
+        assertEquals(listOf(91, 92, 61), parsed.batteries)
+        assertEquals(listOf(12_000L, 100L, 89_999L), parsed.batteryAgeMs)
+        assertEquals(7, parsed.batteryCaseSource)
+        assertFalse(parsed.connected); assertFalse(parsed.controlsReady)
+        assertFalse(parsed.batteryLive(0)); assertFalse(parsed.batteryCharging(0))
+        assertTrue(parsed.batteryLive(1)); assertTrue(parsed.batteryCharging(1))
+        assertTrue(parsed.batteryLive(2)); assertFalse(parsed.batteryLive(2, 1))
+        assertFalse(parsed.batteryCharging(1, 90_000)); assertFalse(parsed.batteryLive(1, Long.MAX_VALUE))
+        assertTrue(parsed.sameConnection(DongleProtocol.status(status())))
+        assertEquals(parsed.batteryAgeMs, DongleProtocol.status(bytes).batteryAgeMs)
+    }
+    @Test fun battery_observation_extension_is_capability_gated_and_validated() {
+        val good = status().also { it[42] = 0x5f; it[44] = 3; it[45] = 7 }
+        DongleProtocol.status(good)
+        for ((at, value) in listOf(42 to 0x1f, 44 to 8, 45 to 8, 46 to 1, 22 to 4, 44 to 7))
+            assertThrows(IllegalArgumentException::class.java) {
+                DongleProtocol.status(good.copyOf().also { it[at] = value.toByte() })
+            }
+        assertThrows(IllegalArgumentException::class.java) {
+            DongleProtocol.status(good.copyOf().also { DongleProtocol.put32(it, 24, 0xffff_ffffL) })
+        }
+        val legacy = DongleProtocol.status(status())
+        assertEquals(3, legacy.batteryPresent); assertEquals(0, legacy.batteryCaseSource)
+        assertTrue(legacy.batteryLive(0))
+    }
     @Test fun busy_transport_error_is_complete_and_distinct_from_a_broken_stream() {
         val response = byteArrayOf(65, 80, 68, 71, 1, -1, 3, 1, 2)
         assertThrows(DongleBusyException::class.java) {

@@ -84,7 +84,6 @@ fun AppSettingsScreen(
     navigateToAppAppearanceScreen: () -> Unit,
     navigateToAppAccessibilityScreen: () -> Unit,
     navigateToIslandSettingsScreen: () -> Unit,
-    navigateToCaseSound: () -> Unit = {},
     navigateToDongleSettings: () -> Unit = {},
 ) {
     val context = LocalContext.current
@@ -115,16 +114,13 @@ fun AppSettingsScreen(
 
             Spacer(modifier = Modifier.height(20.dp))
 
+            PcControlsVisibilitySetting()
+            Spacer(modifier = Modifier.height(16.dp))
             CompanionSettingsSection()
             Spacer(modifier = Modifier.height(16.dp))
 
             StyledListItem(contentText = stringResource(R.string.dongle_title), onClick = navigateToDongleSettings)
             Spacer(modifier = Modifier.height(16.dp))
-
-            StyledListItem(contentText = stringResource(R.string.case_sound_title), onClick = navigateToCaseSound)
-            Spacer(modifier = Modifier.height(16.dp))
-
-
 
             if (state.state.hasConnectedToAACP) {
                 StyledListItem(

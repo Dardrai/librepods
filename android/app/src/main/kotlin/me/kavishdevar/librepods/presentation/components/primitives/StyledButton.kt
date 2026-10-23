@@ -27,7 +27,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.defaultMinSize
-import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -82,7 +82,7 @@ fun StyledButton(
             when (materialButtonStyle) {
                 MaterialButtonStyle.Filled -> {
                     Button(
-                        modifier = modifier.height(48.dp),
+                        modifier = modifier.heightIn(min = 48.dp),
                         onClick = onUserClick,
                         content = content,
                         enabled = enabled,
@@ -90,7 +90,7 @@ fun StyledButton(
                 }
                 MaterialButtonStyle.Tonal -> {
                     FilledTonalButton(
-                        modifier = modifier.height(48.dp),
+                        modifier = modifier.heightIn(min = 48.dp),
                         onClick = onUserClick,
                         content = content,
                         enabled = enabled,
@@ -100,7 +100,7 @@ fun StyledButton(
 
                 MaterialButtonStyle.Outlined -> {
                     OutlinedButton(
-                        modifier = modifier.height(48.dp),
+                        modifier = modifier.heightIn(min = 48.dp),
                         onClick = onUserClick,
                         content = content,
                         enabled = enabled,
@@ -109,7 +109,7 @@ fun StyledButton(
 
                 MaterialButtonStyle.Normal -> {
                     TextButton(
-                        modifier = modifier.height(48.dp),
+                        modifier = modifier.heightIn(min = 48.dp),
                         onClick = onUserClick,
                         content = content,
                         enabled = enabled,
@@ -143,7 +143,7 @@ fun StyledButton(
                         onClick = onUserClick,
                     )
                     .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
-                    .height(48.dp)
+                    .heightIn(min = 48.dp)
                     .padding(horizontal = 16.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
                 verticalAlignment = Alignment.CenterVertically,

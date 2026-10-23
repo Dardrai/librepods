@@ -50,7 +50,8 @@ import me.kavishdevar.librepods.bluetooth.DeviceSettingsRefreshResult
 import me.kavishdevar.librepods.core.devices.AppleDevice
 import me.kavishdevar.librepods.core.devices.ConnectionState
 import me.kavishdevar.librepods.core.devices.effectiveControl
-import me.kavishdevar.librepods.core.devices.hasSavedControlFallback
+import me.kavishdevar.librepods.core.devices.legacyEndCallSinglePress
+import me.kavishdevar.librepods.core.devices.supportsCallControls
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommandIdentifier
 import me.kavishdevar.librepods.core.bluetooth.att.ATTHandle
 import me.kavishdevar.librepods.core.data.apple.BuddyState
@@ -212,10 +213,6 @@ fun AppleSettingsScreen(
             }
 
             item(key = "spacer_name") { Spacer(modifier = Modifier.height(16.dp)) }
-            if (state.hasSavedControlFallback(settings)) item(key = "saved_choices") {
-                StyledListItem(contentText = stringResource(R.string.companion_saved_choices),
-                    supportingText = stringResource(R.string.companion_saved_choices_description))
-            }
             item(key = "name") {
                 StyledListItem(
                     contentText = stringResource(R.string.name),
@@ -339,21 +336,16 @@ fun AppleSettingsScreen(
                 }
             }
 
-            item(key = "spacer_call") {
-                Spacer(modifier = Modifier.height(16.dp))
-            }
-            item(key = "call_control") {
-                val bytes =
-                    state.controlStates[ControlCommandIdentifier.CALL_MANAGEMENT_CONFIG]?.take(2)?.toByteArray() ?: byteArrayOf(0x00, 0x00)
-                val flipped = try {
-                    bytes[1] == 0x02.toByte()
-                } catch (_: Exception) {
-                    false
+            if (uiState.metadata.supportsCallControls()) {
+                item(key = "spacer_call") {
+                    Spacer(modifier = Modifier.height(16.dp))
                 }
-                CallControlSettings(
-                    flipped = flipped,
-                    navigateToCallControlScreen = navigateToCallControlScreen
-                )
+                item(key = "call_control") {
+                    CallControlSettings(
+                        endCallSinglePress = state.legacyEndCallSinglePress(),
+                        navigateToCallControlScreen = navigateToCallControlScreen
+                    )
+                }
             }
 
 //                if (baseCapabilities.contains(BaseCapability.RAW_GESTURES_CONFIG)) {

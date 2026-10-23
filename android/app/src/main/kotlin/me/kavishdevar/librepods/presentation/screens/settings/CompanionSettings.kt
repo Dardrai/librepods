@@ -84,8 +84,9 @@ import me.kavishdevar.librepods.services.LibrePodsService
 internal fun CompanionSettingsSection() = CompanionSection()
 
 @Composable
-internal fun CompanionHomeSection(onOpenSettings: () -> Unit, service: LibrePodsService? = rememberLibrePodsService()) =
-    CompanionSection(onOpenSettings, service)
+internal fun CompanionHomeSection(onOpenSettings: () -> Unit, service: LibrePodsService? = rememberLibrePodsService()) {
+    if (PcControlsVisibility.current()) CompanionSection(onOpenSettings, service)
+}
 
 @Composable
 internal fun rememberLibrePodsService(): LibrePodsService? {
@@ -281,9 +282,10 @@ internal fun CompanionSettingsContent(state: CompanionState, enabled: Boolean,
                             modifier = Modifier.weight(1f))
                         if (state.busy) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
                     }
-                    Text(companionDetail(state), style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+                    if (state.busy || !state.connected || state.detail != "PC linked. Choose where to listen.")
+                        Text(companionDetail(state), style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         val phoneDescription = stringResource(R.string.companion_to_phone_description)
                         val pcDescription = stringResource(R.string.companion_to_pc_description)

@@ -43,7 +43,6 @@ import me.kavishdevar.librepods.presentation.screens.onboarding.OnboardingScreen
 import me.kavishdevar.librepods.presentation.screens.settings.AppAccessibilitySettingsRoute
 import me.kavishdevar.librepods.presentation.screens.settings.AppAppearanceSettingsRoute
 import me.kavishdevar.librepods.presentation.screens.settings.AppSettingsScreen
-import me.kavishdevar.librepods.presentation.screens.settings.CaseSoundScreen
 import me.kavishdevar.librepods.presentation.screens.settings.DongleSettingsScreen
 import me.kavishdevar.librepods.presentation.screens.settings.BLESettingsScreenRoute
 import me.kavishdevar.librepods.presentation.screens.settings.IslandSettingsRoute
@@ -140,9 +139,6 @@ fun RenderScreenContent(
                 factory = factory
             )
 
-            val left = stringResource(R.string.left)
-            val right = stringResource(R.string.right)
-
             AppleSettingsRoute(
                 viewModel = appleViewModel,
                 refreshDeviceSettings = refreshDeviceSettings,
@@ -150,8 +146,8 @@ fun RenderScreenContent(
                 navigateToRename = { navigate(Screen.Rename(screen.macAddress)) },
                 navigateToHearingProtection = { navigate(Screen.HearingProtection(screen.macAddress)) },
                 navigateToHearingAid = { navigate(Screen.HearingAid(screen.macAddress)) },
-                navigateToLeftLongPress = { navigate(Screen.LongPress(screen.macAddress, left)) },
-                navigateToRightLongPress = { navigate(Screen.LongPress(screen.macAddress, right)) },
+                navigateToLeftLongPress = { navigate(Screen.LongPress(screen.macAddress, "left")) },
+                navigateToRightLongPress = { navigate(Screen.LongPress(screen.macAddress, "right")) },
                 navigateToEqualizer = { navigate(Screen.Equalizer(screen.macAddress)) },
                 navigateToHeadTracking = { navigate(Screen.HeadTracking(screen.macAddress)) },
                 navigateToAccessibility = { navigate(Screen.Accessibility(screen.macAddress)) },
@@ -192,12 +188,16 @@ fun RenderScreenContent(
                 navigateToAppAppearanceScreen = { navigate(Screen.AppAppearance) },
                 navigateToAppAccessibilityScreen = { navigate(Screen.AppAccessibilitySettings) },
                 navigateToIslandSettingsScreen = { navigate(Screen.IslandSettings) },
-                navigateToCaseSound = { navigate(Screen.CaseSound) },
                 navigateToDongleSettings = { navigate(Screen.DongleSettings) }
             )
         }
 
-        Screen.CaseSound -> CaseSoundScreen(navigateBack)
+        Screen.CaseSound -> {
+            LaunchedEffect(Unit) {
+                backStack.remove(Screen.CaseSound)
+                navigate(Screen.AppSettings)
+            }
+        }
 
         Screen.DongleSettings -> DongleSettingsScreen(navigateBack)
 
@@ -359,12 +359,6 @@ fun RenderScreenContent(
                 viewModel = appleViewModel,
                 action = screen.action,
                 navigateBack = navigateBack,
-                onCallControlValueChanged = { flipped ->
-                    device.setControlCommand(
-                        ControlCommandIdentifier.CALL_MANAGEMENT_CONFIG,
-                        if (flipped) byteArrayOf(0x00, 0x02) else byteArrayOf(0x00, 0x03)
-                    )
-                }
             )
         }
 

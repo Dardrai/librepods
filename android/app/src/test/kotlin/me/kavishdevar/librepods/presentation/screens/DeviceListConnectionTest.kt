@@ -10,12 +10,15 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.unit.dp
 import androidx.test.core.app.ApplicationProvider
 import me.kavishdevar.librepods.core.devices.AppleDevice
 import me.kavishdevar.librepods.core.devices.ConnectionState
 import me.kavishdevar.librepods.presentation.design.DesignSystem
 import me.kavishdevar.librepods.presentation.design.LibrePodsTheme
+import me.kavishdevar.librepods.presentation.screens.settings.PcControlsVisibility
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
@@ -54,12 +57,17 @@ class DeviceListConnectionTest {
                 }
             }
         }
-        compose.onNodeWithText("Nearby AirPods").performClick()
-        compose.onNodeWithContentDescription("Connect Nearby AirPods", useUnmergedTree = true).performClick()
-        compose.onNodeWithText("Saved AirPods").performClick()
-        compose.onNodeWithContentDescription("Connect Saved AirPods", useUnmergedTree = true).performClick()
+        for (showPc in listOf(false, true, false)) {
+            compose.runOnIdle { PcControlsVisibility.set(ApplicationProvider.getApplicationContext(), showPc) }
+            if (showPc) compose.onNodeWithText("Link PC").performScrollTo().assertIsDisplayed()
+            else compose.onNodeWithText("Link PC").assertDoesNotExist()
+            compose.onNodeWithText("Nearby AirPods").performScrollTo().performClick()
+            compose.onNodeWithContentDescription("Connect Nearby AirPods", useUnmergedTree = true).performClick()
+            compose.onNodeWithText("Saved AirPods").performScrollTo().performClick()
+            compose.onNodeWithContentDescription("Connect Saved AirPods", useUnmergedTree = true).performClick()
+        }
         compose.runOnIdle {
-            assertEquals(listOf(nearby, nearby, disconnected, disconnected), connections)
+            assertEquals(List(3) { listOf(nearby, nearby, disconnected, disconnected) }.flatten(), connections)
             assertEquals(0, navigation)
         }
     }

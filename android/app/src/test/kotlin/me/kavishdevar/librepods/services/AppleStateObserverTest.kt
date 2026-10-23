@@ -147,8 +147,13 @@ class AppleStateObserverTest {
         val event = AppleEvent.StemPress(StemPressType.LONG_PRESS, StemPressBud.LEFT, socket)
         `when`(device.aacp.ownsAudioSocket(socket)).thenReturn(false)
         jobs += service.observeStemActions(device)
-        events.emit(event)
-        await { calls(device.aacp, "ownsAudioSocket") == 1 }
+        withTimeout(2_000) {
+            events.subscriptionCount.first { it > 0 }
+            events.emit(event)
+            // This unbuffered second emission waits until the first complete handler finishes.
+            events.emit(event)
+        }
+        verify(device.aacp, atLeastOnce()).ownsAudioSocket(socket)
         verify(device, never()).hostHoldAction(any(AppleEvent.StemPress::class.java) ?: event)
         verify(device, never()).cycleHoldListeningMode(any(AppleEvent.StemPress::class.java) ?: event)
     }

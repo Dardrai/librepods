@@ -381,7 +381,7 @@
     <string name="reset_app_settings">Reset application settings</string>
     <string name="reset_app_settings_description">All application settings (appearance, interaction, accessibility, island, etc.) will be reset.</string>
     <string name="reset_island_settings">Reset Island settings</string>
-    <string name="mute_unmute_notice">You may not be able to mute or unmute the microphone in a call by using the controls on AirPods. This is a known issue on Android, and there is nothing LibrePods can do to fix this issue.</string>
+    <string name="mute_unmute_notice">Use your phone’s call controls to mute or unmute.</string>
     <string name="press_and_hold_update_failed">Couldn’t change the press-and-hold action. Reconnect your AirPods and try again.</string>
     <string name="assistant_launch_failed">Couldn’t open your assistant. Check Android’s default assistant setting.</string>
     <string name="companion_title">Listen on</string>
@@ -431,9 +431,7 @@
     <string name="companion_pause_media_conversation">Pause media while speaking</string>
     <string name="companion_setting_save_failed">Could not save this setting. Try again.</string>
     <string name="companion_settings_sync_failed">Some settings could not sync. Reconnect to retry. Audio switching is still available.</string>
-    <string name="companion_saved_choices">Saved choices</string>
-    <string name="companion_saved_choices_description">Some settings use saved choices that AirPods have not confirmed. Fresh device reports take priority.</string>
-    <string name="companion_shared_settings_description">Playback preferences, appearance and saved AirPods choices sync with NTPods when connected. Device reports take priority over saved choices.</string>
+    <string name="companion_shared_settings_description">Sync playback, appearance and saved settings with NTPods.</string>
     <string name="companion_host_auto_pause">Pause when removed</string>
     <string name="companion_host_auto_pause_unavailable">Exact-player pause and resume need Shizuku running with LibrePods access. Your saved preference still syncs with the PC.</string>
     <string name="companion_host_auto_pause_description">Pause this player when you remove an earbud. Resume it when you put the earbuds back in, if you have not chosen something else. Separate from AirPods ear detection.</string>

@@ -74,6 +74,7 @@ class CompanionSettingsRenderingTest {
             compose.onNodeWithText("Phone").assertDoesNotExist()
             capture("unlinked-${current.theme}-${current.dark}-${current.width}")
             compose.runOnIdle { state.value = CompanionState(true, true, false, "PC linked. Choose where to listen.") }
+            compose.onNodeWithText("Choose where to listen.").assertDoesNotExist()
             capture("linked-${current.theme}-${current.dark}-${current.width}")
             compose.onNodeWithText("Phone").assertIsDisplayed().assertIsEnabled().performClick()
             compose.onNodeWithText("PC").assertIsDisplayed().assertIsEnabled().performClick()

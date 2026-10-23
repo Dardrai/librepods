@@ -42,6 +42,14 @@ Idle background control checks run every five seconds. Opening settings wakes
 the faster refresh; automatic pause, active finding and pending setting
 confirmation retain the responsive polling cadence.
 
+Firmware capability 64 adds component-presence and case-source masks to status
+bytes 44 and 45. Each battery keeps its own age. An absent or expired component
+retains its last percentage as cached and loses its charging indicator. Older
+firmware without that capability retains the original status layout. The case
+source is a key-associated battery observation, not a verified nearby-bud signal;
+it cannot establish audio ownership, ear state or a connection. Firmware using
+the extension requires an updated app.
+
 The wire contract lives in `airpods-dongle/docs/CONTROL-EXTENSIONS.md`:
 RFCOMM UUID `c6c4f8a0-6d47-4bd1-9b6a-415044470001`, bounded APDG frames,
 reports 2/3, transactions of at most 512 bytes and typed feature operation 7.

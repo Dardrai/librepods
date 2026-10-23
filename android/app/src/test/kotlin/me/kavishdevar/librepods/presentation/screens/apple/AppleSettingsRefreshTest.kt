@@ -10,12 +10,14 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.click
 import androidx.compose.ui.test.hasScrollToIndexAction
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performTouchInput
@@ -109,6 +111,42 @@ class AppleSettingsRefreshTest {
         compose.onNodeWithText(label).assertIsDisplayed().assertIsEnabled()
             .performTouchInput { click() }
         compose.runOnIdle { assertEquals(ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG, requested) }
+    }
+
+    @Config(qualifiers = "w320dp-h900dp-mdpi")
+    @GraphicsMode(GraphicsMode.Mode.LEGACY)
+    @Test fun savedChoicesDoNotAddABannerOnNarrowAppleScreen() = savedChoicesWithoutBanner(DesignSystem.Apple, "narrow")
+
+    @Config(qualifiers = "w320dp-h900dp-mdpi")
+    @Test fun savedChoicesDoNotAddABannerOnNarrowMaterialScreen() = savedChoicesWithoutBanner(DesignSystem.Material, "narrow")
+
+    @GraphicsMode(GraphicsMode.Mode.LEGACY)
+    @Test fun savedChoicesDoNotAddABannerOnWideAppleScreen() = savedChoicesWithoutBanner(DesignSystem.Apple, "wide")
+
+    @Test fun savedChoicesDoNotAddABannerOnWideMaterialScreen() = savedChoicesWithoutBanner(DesignSystem.Material, "wide")
+
+    private fun savedChoicesWithoutBanner(theme: DesignSystem, width: String) {
+        val writes = mutableListOf<Pair<ControlCommandIdentifier, Boolean>>()
+        compose.setContent {
+            CompositionLocalProvider(LocalDensity provides Density(1f, 1.3f)) {
+                LibrePodsTheme(designSystem = theme) {
+                    SettingsScreen(busy = false, connected = true, refresh = {},
+                        setBoolean = { id, value -> writes += id to value },
+                        settings = AppleSettings(savedUnconfirmedChoices = mapOf("desired_noise_modes_cycle" to "0b")))
+                }
+            }
+        }
+        compose.onNodeWithText("Saved choices").assertDoesNotExist()
+        compose.onAllNodesWithText("not confirmed", substring = true).assertCountEquals(0)
+        val name = text(R.string.name)
+        compose.onNode(hasScrollToIndexAction()).performScrollToNode(hasText(name))
+        compose.onNodeWithText(name).assertIsDisplayed().assertIsEnabled()
+        compose.onNodeWithText("Saved choices").assertDoesNotExist()
+        assertTrue("Displaying saved state must not issue an accessory command", writes.isEmpty())
+        if (theme == DesignSystem.Apple) return // Robolectric legacy rendering cannot capture the Apple RuntimeShader.
+        val output = File("build/overlay-previews/device-settings-${theme.name.lowercase()}-$width-clean.png")
+        output.parentFile.mkdirs()
+        output.outputStream().use { assertTrue(compose.onRoot().captureToImage().asAndroidBitmap().compress(Bitmap.CompressFormat.PNG, 100, it)) }
     }
 
     @Test fun earDetectionSwitchUsesSavedReportAndPendingChoicesInTheSameOrderAsAutomation() {

@@ -1,5 +1,5 @@
 /*
-    LibrePods - AirPods liberated from Appleâ€™s ecosystem
+    LibrePods - AirPods liberated from Apple’s ecosystem
     Copyright (C) 2025 LibrePods contributors
 
     This program is free software: you can redistribute it and/or modify
@@ -18,195 +18,107 @@
 
 package me.kavishdevar.librepods.presentation.screens.apple
 
-import androidx.compose.runtime.getValue
-import android.util.Log
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.wrapContentWidth
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
+import androidx.compose.material3.Text
+import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import me.kavishdevar.librepods.R
-import me.kavishdevar.librepods.core.devices.effectiveControl
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommandIdentifier
-import me.kavishdevar.librepods.core.devices.effectiveAllowOff
 import me.kavishdevar.librepods.core.data.StemAction
-import me.kavishdevar.librepods.presentation.components.primitives.StyledList
-import me.kavishdevar.librepods.presentation.components.primitives.StyledListItemOrientation
-import me.kavishdevar.librepods.presentation.components.primitives.StyledScaffold
-import me.kavishdevar.librepods.presentation.components.primitives.styledListItem
+import me.kavishdevar.librepods.core.devices.*
+import me.kavishdevar.librepods.presentation.components.primitives.*
+import me.kavishdevar.librepods.presentation.viewmodel.AppleUiState
 import me.kavishdevar.librepods.presentation.viewmodel.AppleViewModel
-import kotlin.experimental.and
 
 @Composable
-fun LongPress(
-    viewModel: AppleViewModel,
-    name: String,
-    navigateBack: (() -> Unit)?,
-) {
+fun LongPress(viewModel: AppleViewModel, name: String, navigateBack: (() -> Unit)?) {
     val uiState by viewModel.uiState.collectAsState()
+    val connection by viewModel.connectionState.collectAsState()
+    val writing by viewModel.writingNoiseModeCycle.collectAsState()
+    LongPressSettings(uiState, name, connection == ConnectionState.CONNECTED, writing, navigateBack,
+        { side, action -> viewModel.setLongPressAction(side, action) }, viewModel::setListeningModeCycle)
+}
 
-    val state = uiState.state
-    val settings = uiState.settings
+internal fun resolveLongPressSide(route: String, leftLabel: String, rightLabel: String): String? = when (route) {
+    "left", leftLabel -> "left"
+    "right", rightLabel -> "right"
+    else -> null
+}
 
-    val modesByte = state.effectiveControl(ControlCommandIdentifier.LISTENING_MODE_CONFIGS, settings)?.get(0) ?: 0
-
-    Log.d("PressAndHoldSettingsScreen", "Current modes state: ${modesByte.toString(2)}")
-    Log.d("PressAndHoldSettingsScreen", "Off mode: ${(modesByte and 0x01) != 0.toByte()}")
-    Log.d("PressAndHoldSettingsScreen", "Transparency mode: ${(modesByte and 0x04) != 0.toByte()}")
-    Log.d("PressAndHoldSettingsScreen", "Noise Cancellation mode: ${(modesByte and 0x02) != 0.toByte()}")
-    Log.d("PressAndHoldSettingsScreen", "Adaptive mode: ${(modesByte and 0x08) != 0.toByte()}")
-
-    val longPressAction = if (name == stringResource(R.string.left)) settings.leftLongPressAction else settings.rightLongPressAction
-
-    val scrollState = rememberScrollState()
-
-    // ik enum would take like 1 minute to implement, idc
-    val side = if (name == stringResource(R.string.left)) "left" else "right"
-
-    StyledScaffold(
-        title = name,
-        navigateBack = navigateBack
-    ) { topPadding, bottomPadding ->
-        Column (
-            modifier = Modifier
-                .fillMaxSize()
-                .background(MaterialTheme.colorScheme.surfaceContainer)
-                .verticalScroll(scrollState)
-                .padding(top = 8.dp)
-                .padding(horizontal = 16.dp)
-        ) {
-            Spacer(modifier = Modifier.height(topPadding))
-
-            StyledList {
-                styledListItem(
-                    contentText = stringResource(R.string.noise_control),
-                    selected = longPressAction == StemAction.CYCLE_NOISE_CONTROL_MODES,
-                    onClick = {
-                        viewModel.setLongPressAction(
-                            side,
-                            StemAction.CYCLE_NOISE_CONTROL_MODES
-                        )
-                    }
-                )
-
-                styledListItem(
-                    contentText = stringResource(R.string.digital_assistant),
-                    selected = longPressAction == StemAction.DIGITAL_ASSISTANT,
-                    onClick = {
-                        viewModel.setLongPressAction(
-                            side,
-                            StemAction.DIGITAL_ASSISTANT
-                        )
-                    },
-                )
-            }
-
-
-            if (longPressAction == StemAction.CYCLE_NOISE_CONTROL_MODES) {
-                Spacer(modifier = Modifier.height(32.dp))
-
-                val currentByte = state.effectiveControl(ControlCommandIdentifier.LISTENING_MODE_CONFIGS, settings)?.get(0)?.toInt() ?: 0
-
-                StyledList(
-                    title = stringResource(R.string.noise_control),
-                    description = stringResource(R.string.press_and_hold_noise_control_description)
-                ) {
-                    if (state.effectiveAllowOff(settings, uiState.metadata.modelNumber) == true) {
-                        styledListItem(
-                            contentText = stringResource(R.string.off),
-                            supportingText = stringResource(R.string.listening_mode_off_description),
-                            selected = (currentByte and 0x01) != 0,
-                            onClick = {
-                                viewModel.toggleListeningMode(0x01)
-                            },
-                            orientation = StyledListItemOrientation.Vertical,
-                            leadingContent = {
-                                Icon(
-                                    painter = painterResource(R.drawable.ic_noise_cancellation),
-                                    contentDescription = "Icon",
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier
-                                        .height(42.dp)
-                                        .wrapContentWidth()
-                                )
-                            }
-                        )
-                    }
-
-                    styledListItem(
-                        contentText = stringResource(R.string.transparency),
-                        supportingText = stringResource(R.string.listening_mode_transparency_description),
-                        selected = (currentByte and 0x04) != 0,
-                        onClick = {
-                            viewModel.toggleListeningMode(0x04)
-                        },
-                        orientation = StyledListItemOrientation.Vertical,
-                        leadingContent = {
-                            Icon(
-                                painter = painterResource(R.drawable.ic_transparency),
-                                contentDescription = "Icon",
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier
-                                    .height(42.dp)
-                                    .wrapContentWidth()
-                            )
-                        }
-                    )
-
-                    styledListItem(
-                        contentText = stringResource(R.string.adaptive),
-                        supportingText = stringResource(R.string.listening_mode_adaptive_description),
-                        selected = (currentByte and 0x08) != 0,
-                        onClick = {
-                            viewModel.toggleListeningMode(0x08)
-                        },
-                        orientation = StyledListItemOrientation.Vertical,
-                        leadingContent = {
-                            Icon(
-                                painter = painterResource(R.drawable.ic_adaptive),
-                                contentDescription = "Icon",
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier
-                                    .height(42.dp)
-                                    .wrapContentWidth()
-                            )
-                        }
-                    )
-
-                    styledListItem(
-                        contentText = stringResource(R.string.noise_cancellation),
-                        supportingText = stringResource(R.string.listening_mode_noise_cancellation_description),
-                        selected = (currentByte and 0x02) != 0,
-                        onClick = {
-                            viewModel.toggleListeningMode(0x02)
-                        },
-                        orientation = StyledListItemOrientation.Vertical,
-                        leadingContent = {
-                            Icon(
-                                painter = painterResource(R.drawable.ic_noise_cancellation),
-                                contentDescription = "Icon",
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier
-                                    .height(42.dp)
-                                    .wrapContentWidth()
-                            )
-                        }
-                    )
+@Composable
+internal fun LongPressSettings(uiState: AppleUiState, name: String, connected: Boolean, writing: Boolean,
+    navigateBack: (() -> Unit)?, setAction: (String, StemAction) -> Unit, applyCycle: (Int, AppleMetadata) -> Unit) {
+    val leftLabel = stringResource(R.string.left)
+    val rightLabel = stringResource(R.string.right)
+    val side = resolveLongPressSide(name, leftLabel, rightLabel)
+    val action = when (side) {
+        "left" -> uiState.settings.leftLongPressAction
+        "right" -> uiState.settings.rightLongPressAction
+        else -> null
+    }
+    val title = when (side) { "left" -> leftLabel; "right" -> rightLabel; else -> stringResource(R.string.press_and_hold) }
+    StyledScaffold(title = title, navigateBack = navigateBack) { top, bottom ->
+        Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceContainer)
+            .verticalScroll(rememberScrollState()).padding(horizontal = 16.dp)
+            .padding(top = top + 8.dp, bottom = bottom), verticalArrangement = Arrangement.spacedBy(24.dp)) {
+            StyledList(key = side to action) {
+                for ((choice, label) in listOf(StemAction.CYCLE_NOISE_CONTROL_MODES to R.string.noise_control,
+                    StemAction.DIGITAL_ASSISTANT to R.string.digital_assistant)) {
+                    styledListItem(contentText = stringResource(label), selected = action == choice,
+                        enabled = connected && side != null, onClick = { side?.let { setAction(it, choice) } })
                 }
             }
-            Spacer(modifier = Modifier.height(bottomPadding))
+            if (action == StemAction.CYCLE_NOISE_CONTROL_MODES)
+                NoiseModeCycleSettings(uiState.state, uiState.settings, uiState.metadata, connected, writing) {
+                    applyCycle(it, uiState.metadata)
+                }
+        }
+    }
+}
+
+@Composable
+internal fun NoiseModeCycleSettings(state: AppleState, settings: AppleSettings, metadata: AppleMetadata,
+    enabled: Boolean, writing: Boolean, onApply: (Int) -> Unit) {
+    val id = ControlCommandIdentifier.LISTENING_MODE_CONFIGS
+    val allowOff = state.effectiveAllowOff(settings, metadata.modelNumber)
+    val supported = metadata.supportedNoiseModeCycleMask(allowOff)
+    val current = noiseModeCycleValue(state.effectiveControl(id, settings))?.takeIf { validNoiseModeCycle(it, supported) }
+    val confirmed = id in state.liveControlReports && state.requestedControls[id] == null &&
+        current != null && noiseModeCycleValue(state.controlStates[id]) == current
+    var draft by remember(metadata, supported) { mutableStateOf<Int?>(null) }
+    val chosen = draft ?: current ?: 0
+    LaunchedEffect(confirmed, current) { if (confirmed && draft == current) draft = null }
+    val modes = listOf(
+        Triple(1, R.string.off, R.drawable.ic_noise_cancellation),
+        Triple(4, R.string.transparency, R.drawable.ic_transparency),
+        Triple(8, R.string.adaptive, R.drawable.ic_adaptive),
+        Triple(2, R.string.noise_cancellation, R.drawable.ic_noise_cancellation))
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text(stringResource(R.string.noise_cycle_shared_description), style = MaterialTheme.typography.bodyMedium)
+        StyledList(title = stringResource(R.string.noise_control), key = chosen to supported) {
+            modes.filter { it.first != 8 || supported and 8 != 0 }.forEach { (bit, label, icon) ->
+                styledListItem(contentText = stringResource(label), selected = chosen and bit != 0,
+                    enabled = enabled && !writing && supported and bit != 0,
+                    onClick = { draft = chosen xor bit },
+                    orientation = StyledListItemOrientation.Vertical,
+                    leadingContent = { Icon(painterResource(icon), contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary, modifier = Modifier.height(42.dp).wrapContentWidth()) })
+            }
+        }
+        if (supported and 1 == 0 && metadata.noiseCycleRequiresAllowOff())
+            Text(stringResource(R.string.noise_cycle_off_prerequisite), style = MaterialTheme.typography.bodySmall)
+        StyledButton(modifier = Modifier.fillMaxWidth(), enabled = enabled && !writing &&
+            draft != null && validNoiseModeCycle(chosen, supported) && (chosen != current || !confirmed),
+            onClick = { onApply(chosen) }) {
+            Text(stringResource(if (writing) R.string.noise_cycle_applying else R.string.noise_cycle_apply))
         }
     }
 }

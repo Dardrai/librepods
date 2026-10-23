@@ -10,6 +10,7 @@ import me.kavishdevar.librepods.utils.XposedState
 
 @Composable
 fun DeviceInfoCard() {
+    val sdk = if (Build.VERSION.SDK_INT >= 36) Build.VERSION.SDK_INT_FULL else Build.VERSION.SDK_INT
     StyledList(title = stringResource(R.string.device_info)) {
         styledListItem(
             contentText = stringResource(R.string.manufacturer),
@@ -31,7 +32,7 @@ fun DeviceInfoCard() {
 
         styledListItem(
             contentText = stringResource(R.string.version),
-            supportingText = "${Build.ID} (${Build.VERSION.SDK_INT_FULL})",
+            supportingText = "${Build.ID} ($sdk)",
             enabled = false
         )
 

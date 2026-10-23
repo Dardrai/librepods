@@ -12,9 +12,6 @@
     <string name="dongle_working">Working…</string>
     <string name="dongle_batteries">Left %1$s · Right %2$s · Case %3$s</string>
     <string name="dongle_unknown">Not reported</string>
-    <string name="dongle_pending">Your choice · waiting for AirPods</string>
-    <string name="dongle_unconfirmed">Your choice · not confirmed by AirPods</string>
-    <string name="dongle_reported">Reported by AirPods</string>
     <string name="dongle_autopause">Automatic pause</string>
     <string name="dongle_autopause_description">Pause and resume the same player when a bud is removed. Uses existing Shizuku media access.</string>
     <string name="dongle_listening">Listening</string>
@@ -41,9 +38,9 @@
     <string name="dongle_chime_volume">Tone volume</string>
     <string name="dongle_adaptive_strength">Adaptive strength</string>
     <string name="dongle_call_controls">AirPods call controls</string>
-    <string name="dongle_call_once">Press once to mute, twice to end</string>
-    <string name="dongle_call_twice">Press twice to mute, once to end</string>
-    <string name="dongle_choose_value">Choose a value; the current setting is not reported.</string>
+    <string name="dongle_call_once">Press once to end the call</string>
+    <string name="dongle_call_twice">Press twice to end the call</string>
+    <string name="dongle_choose_value">Choose a value.</string>
     <string name="dongle_hold">Press and hold</string>
     <string name="dongle_hold_noise">Noise control on both</string>
     <string name="dongle_hold_assistant_left">Assistant left, noise control right</string>
@@ -83,8 +80,6 @@
     <string name="dongle_active_codec">Active output: %1$s · negotiated limit %2$d kbps</string>
     <string name="dongle_game_mode">Game Mode</string>
     <string name="dongle_game_pending">Waiting for the audio transport</string>
-    <string name="dongle_game_unconfirmed">Request sent; AirPods confirmation pending</string>
-    <string name="dongle_game_confirmed">Confirmed by a fresh delay report</string>
     <string name="dongle_game_failed">Request failed</string>
     <string name="dongle_game_unsupported">Unavailable on this model</string>
     <string name="dongle_game_restoring">Restoring normal playback</string>

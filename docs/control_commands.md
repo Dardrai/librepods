@@ -136,7 +136,18 @@ Format: Single value (1 byte)
 Values: 0x00 = Default, `0x01` = Longer, `0x02` = Longest.  
 
 ### 0x24 - Call Management Config
-Format: Single value (1 byte)
+Format: Versioned packed little-endian value, up to four bytes; low nibble is the version.
+Reviewed legacy values: `00 03` = double press to end the call; `00 02` = single press to end.
+Version 1 has separate end-call and mute status/configuration fields. The legacy
+values do not establish mute/unmute behavior. LibrePods writes only after fresh
+supported legacy readback and preserves unsupported values. See
+[the current protocol reference](../android/PROTOCOL.md#native-call-controls) for evidence and limits.
+
+In the 2026-10-23 stock Phone test on Pixel89/Android 17 (SDK 37), Pro 3 A3063
+firmware 9A348 reported `00 03` and ended calls, but stem presses did not mute
+speech according to the other party or toggle Phone's mute state after manual
+phone muting. This verifies mute failure only for that tested configuration;
+the legacy value does not identify its cause.
 
 ### 0x25 - VolumeSwipeMode
 Format: Single value (1 byte)
@@ -147,7 +158,15 @@ Format: Single value (1 byte)
 Values: `0x01` = enabled, `0x02` = disabled
 
 ### 0x27 - Software Mute config
-Format: Single value (1 byte)
+Format: Control-value bytes; complete semantics remain unverified.
+Cached iOS code stores incoming reports and posts a host mute-state notification.
+The notification and generic Enabled/Disabled formatting do not by themselves
+establish whether a payload means muted, unmuted or feature enabled. No live
+Android call-mute handler is implemented from this evidence.
+
+A bounded 120-second selected application-log window during the Phone tests
+contained a Call Management report and no Software Mute report. It was not a
+complete Bluetooth/HFP capture, so it does not establish absence on the wire.
 
 ### 0x28 - Conversation Detect config
 Format: Single value (1 byte)

@@ -52,12 +52,83 @@ not expose peer names or addresses.
 
 ## Press and Hold
 
-On the Pixel, the AirPods do not report native hold control `0x16`. Android hold
+### Native call controls
+
+Control `0x24` is a versioned packed Call Management setting. The reviewed legacy
+values are `00 03` (double press to end) and `00 02` (single press to end), optionally
+zero-padded to four bytes. They do not establish a complementary mute gesture.
+Cached iOS 26.1 code decodes the low nibble as version: version 0 describes end-call
+fields; version 1 also has independent mute status/configuration fields. The Apple
+sender updates end-call bits 8–11 and mute bits 16–19 separately. These static
+sources do not justify sending a guessed version-1 payload or explain all native
+mute prerequisites. Sources: `bluetoothd_49-26.1.mm` functions `sub_1003388B8` and
+`sub_100338AC0`, and `CBStackControllerBTStack-26.1.mm` `modifyDevice:btDevice:settings:error:`.
+
+LibrePods offers only the reviewed end-call choice. Mute/Unmute directs the user
+to the phone's call controls, including restored legacy mute-detail routes; it
+does not send an end-call value under a mute label. A fresh supported legacy
+report from the current transport is required before writing. Missing, cached-only,
+unknown-status or newer-version reports cannot be flattened into legacy values.
+Writes capture the current model metadata and control socket, reject retired
+sessions and publish intent only after a successful write. Pending intent stays
+separate from reports. Opening a screen, receiving an echo and reconnecting never
+automatically write `0x24`. Stable action route tags survive locale changes;
+unrecognized saved translated labels are disabled.
+
+On 2026-10-23, Pro 3 A3063 firmware 9A348 with installed Pixel89 on Android 17
+(SDK 37) and stock Phone reported legacy `00 03` freshly. The user confirmed that
+ending a short call worked. A single press produced three lower-pitched tones
+without changing the Phone mute icon. In a second call, muting manually in Phone
+and then pressing the stem still did not toggle Phone's mute state. The other
+party also confirmed that pressing the stem did not silence the user's voice:
+uplink mute failed in this tested configuration, rather than merely failing to
+update the icon. This does not establish behavior in other calling apps or
+identify the cause.
+
+A bounded 120-second metadata monitor observed another Call Management report
+and no Software Mute report among the selected application log events. It was
+not a complete Bluetooth/HFP packet trace; absence from that log window does not
+prove that the accessory never transmits a mute request or identify its transport.
+
+Apple's [WWDC23 session 10233](https://developer.apple.com/videos/play/wwdc2023/10233/)
+describes host handling of the mute gesture: iOS mutes uplink and notifies the app;
+macOS requires the application to mute its input. Cached iOS code separately
+handles received control `0x27` (Software Mute), stores its value and posts
+`com.apple.audioaccessoryd.MuteState`. That notification's constant state `1` is a
+change signal, not a decoded microphone-mute value. No verified Android host-mute
+handler, native mute capture or complete version-1 configuration is implemented.
+HQ microphone recording and ordinary AVRCP controls are separate paths.
+
+Call configuration never writes raw-gesture control `0x39`. Hold customization
+continues to write exactly `08` (holds only) or `00` (fully native); bits for
+single/double/triple presses remain clear. Host handling ignores those ordinary
+press events. Packet regressions cover both legacy end-call values, unsupported
+payload preservation, failed/retired writes
+and the existing left Assistant/right Noise Control arrangement with cycle `0B`.
+Those tests establish software contracts, not physical call behavior.
+
+### Hold delegation
+
+No native hold control `0x16` report has been observed on the Pixel. Android hold
 choices therefore use LibrePods' existing raw-gesture mechanism: control `0x39`,
 bit `0x08`, delegates holds from both buds while leaving other presses native.
 The service dispatches each hold using that bud's saved action. The other bud's
-Noise Control action cycles the reported mode choices, or ANC, Transparency and
-Adaptive when Android receives no cycle-mask report. Off remains opt-in.
+Noise Control action uses the same validated native cycle selection as the editor,
+including pending or saved choices when a mask echo is unavailable. Its fallback
+uses only the model/firmware-supported modes. Off remains opt-in where the
+accessory requires Allow Off.
+
+Cycle selection writes native control `0x1A` once, only after explicit Apply.
+Its shared mask is Off `01`, ANC `02`, Transparency `04` and Adaptive `08`;
+any supported subset of at least two modes is accepted (for example `0B` omits
+Transparency). The subset applies to either stem assigned Noise Control; per-ear
+action assignments stay separate. Unknown or malformed current masks are not a
+read-modify-write baseline: the user must choose a complete subset. Opening the
+screen or receiving a report never writes a mask. Apply rechecks the captured
+model and control socket; unsupported Adaptive or an unmet Allow Off prerequisite
+cannot be submitted. A successful send remains unconfirmed intent until a fresh
+matching device report. Companion-saved choices retain that same unconfirmed
+status and are not applied automatically on synchronization or reconnect.
 
 The configuration is reapplied to each new control transport. Events carry their
 source socket; retired sessions and devices without local audio output cannot
@@ -65,6 +136,24 @@ launch an assistant or cycle modes. A failed configuration write does not change
 the saved choice. Assistant launch targets Android's configured assistant package.
 On Pixel72, the user confirmed that holding the left stem opens the assistant
 from the Home screen and holding the right still changes listening modes.
+
+On Pixel83 with A3063 firmware 9A348, the user enabled Allow Off, applied only
+Off + Adaptive + ANC to the right stem's shared cycle, and confirmed repeated
+holds cycle those three modes while skipping Transparency. The left Assistant
+assignment remained selected. Android received no cycle-mask echo; the requested
+selection remains separate from confirmed device state. This result is
+user-observed behavior, not fresh `0x1A` wire readback.
+
+The 45 saved Tahoe captures contain 16 hold-action and 32 cycle-mask writes,
+all Mac to AirPods; none is a device report or a per-setting read request.
+In `20261015T184734Z-91b4ace1`, initialization frames 4158 (`0x16`) and
+4169/4488 (`0x1A`) are outgoing, while neighboring controls arrive from the
+Pro 3 pair. No marked configuration change was recorded. Tahoe build `25G241`
+understands the incoming `0x16` layout (current right/left, then previous
+right/left), but its receive dispatcher sends `0x1A` to Unsupported control type.
+The cycle getter reads a host cache. These observations do not establish a
+device readback method; a marked native configuration change with fresh incoming
+reports is still needed. Never use send success or a host getter as confirmation.
 
 ## Conversation Awareness
 
@@ -216,6 +305,44 @@ cleared on retirement. Malformed or stale reports cannot replace them. CaseInfo
 does not authorize a nearby BLE connection and its case version is not a DULT
 firmware value. Routine handling does not log the case name.
 
+## Charging-case BLE battery fallback
+
+The separate case advertisement is accepted only for a saved, bonded AirPods
+Pro 3 with a current, nonzero 16-byte advertising key. Exactly one Apple type
+`07`, length `11` record must occur in a complete manufacturer-data TLV stream;
+its total size is 19 bytes and byte 2 must be `06`. AES-128-ECB decrypts bytes
+3..18. The plaintext must begin `29 20`, have zeros at 8/10/11, and have zero
+upper four bits in lid byte 2. Slots 3/4/5 are case/left/right: `FF` means absent;
+otherwise bit 7 is charging and the remaining percentage must be 0..100.
+`7F` is invalid here. Variant bytes 6/7, transient byte 9 and counter bytes 12..15
+stay opaque; neither a fixed variant nor a monotonic counter is required.
+
+The advertising key plus layout associates a case report with one saved pair;
+it does not authenticate a sender or establish an IRK-resolved earbud identity.
+Ambiguous matches are rejected. Saved disconnected pairs can receive battery
+updates without an AACP socket or IRK. Case packets cannot trigger pairing,
+connection, lid invitations, finder ownership, ear state or media ownership.
+Live connected component readings keep priority. Missing readings may be filled,
+but case-sourced presence and charging expire after the existing 90-second
+battery lifetime, including while the earbuds remain connected. An absent slot
+keeps only its previous percentage and original timestamp when caching is on.
+
+An identical encrypted block never renews freshness for that pair/key, even
+after address rotation, scanner restart or battery expiry. Any changed block,
+including a counter decrease or reset, can be a fresh observation if the scan
+timestamp is current and newer than the preceding accepted case report. This
+duplicate rule is not replay protection. Key changes, unbonding and service
+retirement discard the association history.
+
+The layout and changing variant/counter behavior follow the source and synthetic
+regressions in [Stuffz AirPods at `8bd0354`](https://github.com/stuffz/airpods/tree/8bd035451668388860e62fcc0a4a624a608d9d3a).
+The strict checks above are this client's acceptance policy. Live short-format
+acceptance remains unconfirmed; the local closed-case check received only the
+existing bud format. A public synthetic regression uses key
+`000102030405060708090a0b0c0d0e0f`, plaintext
+`29200a3ddedd510b00000000f7821600`, and manufacturer record
+`071106aea248933e2159872f2c5ae5c8bf0f31`.
+
 ## Saved diagnostic decoding; live access remains unavailable
 
 There is no live diagnostic read or self-check trigger in this Android implementation.
@@ -240,16 +367,17 @@ prove submission only. Fresh per-ear results are needed to establish a measureme
 No automatic or user-worn sweep is triggered, and no dosimetry value is presented
 as an absolute sound-pressure level without verified stimulus, weighting and scale.
 
-## Experimental charging-case sound
+## Charging-case sound research
 
-Settings → Case sound experiment opens a separate, user-initiated BLE session.
-It is available without a connected AACP/audio transport. An eight-second scan
-must find exactly one connectable DULT/FD44 candidate; multiple candidates fail
-closed. A fresh standard PnP read must identify Apple vendor `004C`, source `1`,
-Pro 3 case product `2029`, version `1`. This identity does not prove ownership or
-bind the case to any saved Classic AirPods. The user must identify their own case
-and confirm both earbuds are inside and out of their ears. Audio/calls/recordings
-must be idle. No sound is requested on discovery, screen entry or installation.
+The unsuccessful case-sound experiment has been removed from App Settings,
+including its discovery, pairing and playback actions. A restored legacy screen
+returns to App Settings. The normal charging-case sound preference, battery
+observations and read-only case metadata remain separate.
+
+Protocol parsers and guarded GATT/window helpers remain for research tests; no
+production screen invokes them. The PnP fixture identifies Apple vendor `004C`,
+source `1`, Pro 3 case product `2029`, version `1`. That identity does not prove
+ownership or bind the case to saved Classic AirPods.
 
 Routes stay separate:
 
@@ -266,19 +394,13 @@ Hawkeye configuration response is exactly seven bytes: `01 0B 02`, request opcod
 uint16 LE, status uint16 LE; `01 0D 02` is a separate completion event. Unknown
 non-owner reply framing is not interpreted using the configuration protocol.
 
-Start is never retried. Stop is attempted once after at most two seconds,
+The retained window helper attempts Stop once after at most two seconds,
 including time waiting for the Start write, or sooner on cancellation or detected
-audio activity. Leaving the screen also cancels. The Stop request does not prove
-the case obeyed it. A cancelled/timed-out ATT operation poisons confirmation on
-that connection: best-effort Stop cannot inherit a late Start callback. The
-original CCCD is saved, restored and read back, with uncertainty recorded if
-restoration cannot be verified. Cleanup closes the owned connection.
+audio activity. Stop does not prove the case obeyed it. A cancelled/timed-out ATT
+operation poisons confirmation on that connection: best-effort Stop cannot
+inherit a late Start callback. The GATT helper saves, restores and reads back the
+original CCCD before closing its owned connection, without changing bonds.
 
-The experiment retains existing bonds; optional normal Android pairing is an
-explicit user action on the verified candidate. There is no automatic unpair,
-re-pair, separated-key latch, Find My registration or unexplained initialization.
-Bounded local results omit addresses, case names, keys and raw unknown payloads.
-ATT acceptance, typed responses, completion and the user's heard/silent/unsure
-outcome remain separate. Windows tests were silent. Android sound playback,
-authentication requirements and microphone coexistence still require hardware
-evidence; this is not a working-locator claim.
+ATT acceptance, typed responses, completion and audible playback remain distinct.
+Windows tests were silent; these research fixtures do not establish a working
+locator.

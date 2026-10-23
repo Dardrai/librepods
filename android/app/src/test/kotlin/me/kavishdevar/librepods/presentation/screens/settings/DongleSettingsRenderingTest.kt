@@ -16,11 +16,14 @@ import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.unit.Density
@@ -49,7 +52,7 @@ import org.robolectric.annotation.LooperMode
 class DongleSettingsRenderingTest {
     @get:Rule val compose = createComposeRule()
 
-    @Test fun settings_remain_readable_and_unconfirmed_states_do_not_claim_success() {
+    @Test fun settings_remain_readable_without_routine_confirmation_commentary() {
         data class Profile(val theme: DesignSystem, val dark: Boolean, val width: Int, val scale: Float)
         val profiles = listOf(Profile(DesignSystem.Apple, false, 448, 1f), Profile(DesignSystem.Apple, true, 448, 1f),
             Profile(DesignSystem.Material, false, 320, 1.3f))
@@ -77,21 +80,27 @@ class DongleSettingsRenderingTest {
         for (profile in profiles) {
             compose.runOnIdle { layout.value = profile; current.value = current.value.copy(finderOpen = true, nearby = nearby) }
             compose.onNodeWithText("Listening").performScrollTo().assertIsDisplayed()
-            compose.onNodeWithText("On · Your choice · not confirmed by AirPods").assertIsDisplayed()
+            compose.onNodeWithText("On").assertIsDisplayed()
+            compose.onAllNodesWithText("Your choice", substring = true).assertCountEquals(0)
             capture("settings-${profile.theme}-${profile.dark}-${profile.width}")
             compose.onNodeWithText("Preferred microphone").performScrollTo().performClick()
             compose.onNodeWithText("Automatic").assertIsDisplayed()
             compose.onNodeWithText("Right").assertIsDisplayed()
             compose.onNodeWithText("Left").assertIsDisplayed()
             compose.onNodeWithText("Close").performClick()
+            compose.onNodeWithText("Charging case sounds").performScrollTo().assertIsDisplayed().assertIsEnabled()
             compose.onNodeWithText("Charging case volume").performScrollTo().assertIsDisplayed()
-            compose.onNodeWithText("Your choice · waiting for AirPods").performScrollTo().assertIsDisplayed()
+            compose.onAllNodesWithText("Your choice", substring = true).assertCountEquals(0)
             capture("ranges-${profile.theme}-${profile.dark}-${profile.width}")
             for (label in listOf("Tone volume", "Adaptive strength", "Amplification", "Balance", "Tone"))
                 compose.onNodeWithText(label).performScrollTo().assertIsDisplayed()
             capture("hearing-${profile.theme}-${profile.dark}-${profile.width}")
-            compose.onNodeWithText("Request sent; AirPods confirmation pending").performScrollTo().assertIsDisplayed()
+            compose.onNodeWithText("Game Mode").performScrollTo().assertIsDisplayed()
+            compose.onNodeWithText("Request sent; AirPods confirmation pending").assertDoesNotExist()
             compose.onNodeWithText("Confirmed by a fresh delay report").assertDoesNotExist()
+            compose.runOnIdle { current.value = current.value.copy(audio = current.value.audio!!.copy(gameState = 4)) }
+            compose.onNodeWithText("Request failed").performScrollTo().assertIsDisplayed()
+            compose.runOnIdle { current.value = current.value.copy(audio = current.value.audio!!.copy(gameState = 2)) }
             compose.onNodeWithText("Find nearby").performScrollTo()
             compose.onNodeWithText("Signal: -52.5 dBm · stronger").performScrollTo().assertIsDisplayed()
             capture("finder-${profile.theme}-${profile.dark}-${profile.width}")

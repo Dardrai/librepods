@@ -31,6 +31,7 @@ sealed interface Screen: NavKey {
     data object AppSettings: Screen
 
     @Serializable
+    // Retained only to restore navigation saved before the experiment was removed.
     data object CaseSound: Screen
 
     @Serializable

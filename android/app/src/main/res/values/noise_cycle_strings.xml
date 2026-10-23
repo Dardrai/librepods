@@ -1,0 +1,7 @@
+<resources>
+    <string name="noise_cycle_shared_description">Select two or more modes.</string>
+    <string name="noise_cycle_apply">Apply</string>
+    <string name="noise_cycle_applying">Applying…</string>
+    <string name="noise_cycle_off_prerequisite">Turn on Off Listening Mode in AirPods settings.</string>
+    <string name="noise_cycle_update_failed">Couldn’t apply listening modes. Try again.</string>
+</resources>

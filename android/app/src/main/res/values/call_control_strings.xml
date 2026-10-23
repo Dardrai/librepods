@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="call_control_update_failed">Couldn’t update call controls. Reconnect your AirPods and try again.</string>
+    <string name="call_control_unsupported_layout">Call settings aren’t available for this AirPods configuration.</string>
+</resources>

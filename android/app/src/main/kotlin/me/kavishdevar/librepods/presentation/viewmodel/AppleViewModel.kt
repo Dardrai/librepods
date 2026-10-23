@@ -88,6 +88,10 @@ class AppleViewModel(
     private val _refreshingSettings = MutableStateFlow(false)
     val refreshingSettings = _refreshingSettings.asStateFlow()
     private var hearingModeJob: Job? = null
+    private val _writingNoiseModeCycle = MutableStateFlow(false)
+    val writingNoiseModeCycle = _writingNoiseModeCycle.asStateFlow()
+    private val _writingCallControls = MutableStateFlow(false)
+    val writingCallControls = _writingCallControls.asStateFlow()
 
     fun refreshDeviceSettings(refresh: suspend (AppleDevice) -> DeviceSettingsRefreshResult) {
         if (device.state.value.hearingModes.pending != null) return
@@ -245,7 +249,27 @@ class AppleViewModel(
     fun startRecording() = device.startRecording(recordingRepository.createRecording())
     fun stopRecording() = device.stopRecording()
 
-    fun toggleListeningMode(modeBit: Int) = device.toggleListeningMode(modeBit)
+    fun setListeningModeCycle(mask: Int, metadata: AppleMetadata) {
+        if (!_writingNoiseModeCycle.compareAndSet(false, true)) return
+        val socket = device.aacp.captureAudioSocket()
+        viewModelScope.launch {
+            try {
+                val sent = withContext(Dispatchers.IO) { device.setListeningModeCycle(mask, metadata, socket) }
+                if (!sent) Toast.makeText(device.context, R.string.noise_cycle_update_failed, Toast.LENGTH_LONG).show()
+            } finally { _writingNoiseModeCycle.value = false }
+        }
+    }
+
+    fun setCallControls(singlePress: Boolean, metadata: AppleMetadata) {
+        if (!_writingCallControls.compareAndSet(false, true)) return
+        val socket = device.aacp.captureAudioSocket()
+        viewModelScope.launch {
+            try {
+                val sent = withContext(Dispatchers.IO) { device.setCallControls(singlePress, metadata, socket) }
+                if (!sent) Toast.makeText(device.context, R.string.call_control_update_failed, Toast.LENGTH_LONG).show()
+            } finally { _writingCallControls.value = false }
+        }
+    }
 
     private val holdActionMutex = Mutex()
     fun setLongPressAction(side: String, action: StemAction) = viewModelScope.launch {

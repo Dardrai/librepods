@@ -91,6 +91,7 @@ import me.kavishdevar.librepods.core.bluetooth.aacp.types.MagicKeyType
 import me.kavishdevar.librepods.core.bluetooth.verifyRPA
 import me.kavishdevar.librepods.core.bluetooth.ble.NearbyAirPods
 import me.kavishdevar.librepods.core.bluetooth.ble.ProximityReport
+import me.kavishdevar.librepods.core.bluetooth.ble.CaseBatteryReport
 import me.kavishdevar.librepods.core.bluetooth.ble.RecentProximityReports
 import me.kavishdevar.librepods.bluetooth.NearbyPairingController
 import me.kavishdevar.librepods.bluetooth.DeviceSettingsRefreshResult
@@ -105,6 +106,7 @@ import me.kavishdevar.librepods.core.data.StemAction
 import me.kavishdevar.librepods.utils.AssistantLauncher
 import me.kavishdevar.librepods.core.data.heartrate.HeartRateSample
 import me.kavishdevar.librepods.core.devices.AppleDevice
+import me.kavishdevar.librepods.core.devices.AirPodsModel
 import me.kavishdevar.librepods.core.devices.AppleSettings
 import me.kavishdevar.librepods.core.devices.AppleState
 import me.kavishdevar.librepods.core.devices.effectiveAllowOff
@@ -223,6 +225,8 @@ class LibrePodsService: Service() {
     private val nearbyVisits = NearbyAirPods.Visits()
     private val nearbyInvitationProximity = NearbyAirPods.InvitationProximity()
     private val recentProximityReports = RecentProximityReports()
+    private data class CaseBatteryObservation(val key: ByteArray, val block: ByteArray, val observedNanos: Long)
+    private val caseBatteryObservations = ConcurrentHashMap<MacAddress, CaseBatteryObservation>()
     private var pairingModel: Int? = null
     private var nearbyPairing: NearbyPairingController? = null
     private var bleGeneration = 0L
@@ -541,6 +545,7 @@ class LibrePodsService: Service() {
         unregisterBluetoothReceivers()
         stopBleScanner()
         recentProximityReports.clear()
+        caseBatteryObservations.clear()
         nearbyMedia.clear()
         connectionHaptics.clear()
         nearbyCases.clear()
@@ -1380,6 +1385,7 @@ class LibrePodsService: Service() {
                             deviceJobs.remove(address)?.forEach { it.cancel() }
                             _devices.update { it - address }
                             pairedObservations.remove(address)
+                            caseBatteryObservations.remove(address)
                             recentProximityReports.clear()
                             pairedLids.remove(address)
                             nearbyMedia.remove(address)
@@ -1455,6 +1461,10 @@ class LibrePodsService: Service() {
         val observed = result.timestampNanos
         if (observed < 0 || observed > nowNanos || nowNanos - observed >= 15_000_000_000L) return
         val manufacturer = result.scanRecord?.getManufacturerSpecificData(0x004c) ?: return
+        if (CaseBatteryReport.encryptedBlock(manufacturer) != null) {
+            handleCaseBattery(manufacturer, observed, System.currentTimeMillis() - (nowNanos - observed) / 1_000_000)
+            return
+        }
         val proximity = NearbyAirPods.proximityRecord(manufacturer) ?: return
         val address = result.device.address
         val observedAt = System.currentTimeMillis() - (nowNanos - observed) / 1_000_000
@@ -1510,6 +1520,41 @@ class LibrePodsService: Service() {
                 deferConnectAction = { shouldDeferNearbyConnect(device) })
             Log.d(TAG, "Lid advertisement to paired overlay: ${(SystemClock.elapsedRealtimeNanos() - observed) / 1_000_000}ms")
         }
+    }
+
+    private fun handleCaseBattery(manufacturer: ByteArray, observed: Long, observedAt: Long) {
+        if (destroying || bleCaptureBlocked) return
+        val block = CaseBatteryReport.encryptedBlock(manufacturer) ?: return
+        val matches = devices.value.values.filterIsInstance<AppleDevice>().mapNotNull { device ->
+            retireCaseBatteryObservation(device)
+            if (device.bluetoothDevice.bondState != BluetoothDevice.BOND_BONDED) return@mapNotNull null
+            val key = device.state.value.magicKeys[MagicKeyType.ENC_KEY]?.copyOf() ?: return@mapNotNull null
+            val report = CaseBatteryReport.decode(manufacturer, key, device.metadata.value.model, observedAt)
+                ?: return@mapNotNull null
+            Triple(device, key, report)
+        }
+        // A case has no IRK-resolved identity. Ambiguous key/layout matches cannot select a pair.
+        val (device, key, report) = matches.singleOrNull() ?: return
+        synchronized(device.aacp) {
+            if (destroying || bleCaptureBlocked || devices.value[device.macAddress] !== device ||
+                device.bluetoothDevice.bondState != BluetoothDevice.BOND_BONDED ||
+                device.metadata.value.model != AirPodsModel.AIRPODS_PRO_3 ||
+                device.state.value.magicKeys[MagicKeyType.ENC_KEY]?.contentEquals(key) != true) return
+            val previous = caseBatteryObservations[device.macAddress]
+            if (previous?.key?.contentEquals(key) == true &&
+                (previous.block.contentEquals(block) || observed <= previous.observedNanos)) return
+            caseBatteryObservations[device.macAddress] = CaseBatteryObservation(key, block, observed)
+            device.receiveCaseBattery(report.batteries, observedAt)
+            islandWindow.updatePairedBattery(device)
+        }
+    }
+
+    private fun retireCaseBatteryObservation(device: AppleDevice) {
+        val previous = caseBatteryObservations[device.macAddress] ?: return
+        if (devices.value[device.macAddress] !== device || device.bluetoothDevice.bondState != BluetoothDevice.BOND_BONDED ||
+            device.metadata.value.model != AirPodsModel.AIRPODS_PRO_3 ||
+            device.state.value.magicKeys[MagicKeyType.ENC_KEY]?.contentEquals(previous.key) != true)
+            caseBatteryObservations.remove(device.macAddress, previous)
     }
 
     private fun replayRecentBattery(device: AppleDevice, socket: android.bluetooth.BluetoothSocket?,
@@ -1725,10 +1770,12 @@ class LibrePodsService: Service() {
     }
 
     fun observeStemActions(device: AppleDevice): Job = serviceScope.launch(Dispatchers.IO, start = CoroutineStart.UNDISPATCHED) {
+        Log.i("StemActions", "Observer started")
         device.events.collect { event ->
             if (event !is AppleEvent.StemPress) return@collect
             fun current() = !destroying && devices.value[device.macAddress] === device &&
                 isNearbyDeviceAudioConnected(device) && device.aacp.ownsAudioSocket(event.sourceSocket)
+            Log.i("StemActions", "hold=${event.pressType}/${event.bud} current=${!destroying && devices.value[device.macAddress] === device} audio=${isNearbyDeviceAudioConnected(device)} socket=${device.aacp.ownsAudioSocket(event.sourceSocket)} action=${if (current()) device.hostHoldAction(event) else null}")
             if (!current()) return@collect
             when (device.hostHoldAction(event)) {
                 StemAction.DIGITAL_ASSISTANT -> withContext(Dispatchers.Main.immediate) {
@@ -1796,6 +1843,7 @@ class LibrePodsService: Service() {
 
         try {
         device.state.collect { state ->
+            retireCaseBatteryObservation(device)
             // Capture before any repository suspension; an old emission cannot belong to a later socket.
             val modeTransport = device.aacp.captureAudioSocket()
             val deviceSettings = device.settings.value
@@ -2031,6 +2079,7 @@ class LibrePodsService: Service() {
         var previousMetadata = device.metadata.value
 
         device.metadata.collect { metadata ->
+            retireCaseBatteryObservation(device)
             withContext(Dispatchers.Main.immediate) {
                 if (!destroying && devices.value[device.macAddress] === device && device.metadata.value == metadata) {
                     islandWindow.updatePairedBattery(device)

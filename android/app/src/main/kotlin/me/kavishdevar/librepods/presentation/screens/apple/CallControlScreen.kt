@@ -1,26 +1,19 @@
 package me.kavishdevar.librepods.presentation.screens.apple
 
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.derivedStateOf
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import me.kavishdevar.librepods.R
-import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommandIdentifier
+import me.kavishdevar.librepods.core.devices.*
 import me.kavishdevar.librepods.presentation.components.primitives.StyledList
 import me.kavishdevar.librepods.presentation.components.primitives.StyledScaffold
+import me.kavishdevar.librepods.presentation.components.primitives.StyledListItemOrientation
 import me.kavishdevar.librepods.presentation.components.primitives.styledListItem
 import me.kavishdevar.librepods.presentation.viewmodel.AppleViewModel
 
@@ -28,67 +21,46 @@ import me.kavishdevar.librepods.presentation.viewmodel.AppleViewModel
 fun CallControlScreen(
     viewModel: AppleViewModel,
     action: String,
-    navigateBack: (() -> Unit)?,
-    onCallControlValueChanged: (Boolean) -> Unit
+    navigateBack: (() -> Unit)?
 ) {
     val uiState by viewModel.uiState.collectAsState()
+    val connection by viewModel.connectionState.collectAsState()
+    val writing by viewModel.writingCallControls.collectAsState()
+    CallControlOptions(action, uiState.state.legacyEndCallSinglePress(),
+        connection == ConnectionState.CONNECTED && uiState.metadata.supportsCallControls() && !writing,
+        navigateBack, supportedLayout = uiState.state.canSetLegacyEndCall()) { viewModel.setCallControls(it, uiState.metadata) }
+}
 
-    val state = uiState.state
-
-    val scrollState = rememberScrollState()
-
-    val bytes = state.controlStates[ControlCommandIdentifier.CALL_MANAGEMENT_CONFIG]?.take(2)?.toByteArray() ?: byteArrayOf(0x00, 0x00)
-    val flipped = try {
-        bytes[1] == 0x02.toByte()
-    } catch (e: Exception) {
-        false
+@Composable
+internal fun CallControlOptions(action: String, endCallSinglePress: Boolean?, enabled: Boolean,
+    navigateBack: (() -> Unit)?, supportedLayout: Boolean = false, onChange: (Boolean) -> Unit) {
+    val muteLabel = stringResource(R.string.mute_unmute)
+    val hangUpLabel = stringResource(R.string.hang_up)
+    val kind = resolveCallControlAction(action, muteLabel, hangUpLabel)
+    val title = when (kind) {
+        CallControlAction.MUTE_UNMUTE -> muteLabel
+        CallControlAction.HANG_UP -> hangUpLabel
+        null -> stringResource(R.string.call_controls)
     }
-
-    val pressOnceText = stringResource(R.string.press_once)
-    val pressTwiceText = stringResource(R.string.press_twice)
-    val muteUnmuteText = stringResource(R.string.mute_unmute)
-
-    var singlePressAction by remember { mutableStateOf(if ((action == muteUnmuteText) == !flipped) pressOnceText else pressTwiceText) }
-
-    val pressOnceIsAction by remember { derivedStateOf { singlePressAction == pressOnceText } }
-    val flippedValue = action != muteUnmuteText
-
-    StyledScaffold(
-        title = action,
-        navigateBack = navigateBack
-    ) { topPadding, bottomPadding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(scrollState)
-                .padding(top = 8.dp)
-                .padding(horizontal = 16.dp)
-        ) {
-            Spacer(modifier = Modifier.height(topPadding))
-
-            StyledList(
-                description = if (action == muteUnmuteText) stringResource(R.string.mute_unmute_notice) else null
-            ) {
-                styledListItem(
-                    contentText = pressOnceText,
-                    selected = pressOnceIsAction,
-                    onClick = {
-                        singlePressAction = pressOnceText
-                        onCallControlValueChanged(flippedValue)
-                    }
-                )
-
-                styledListItem(
-                    contentText = pressTwiceText,
-                    selected = !pressOnceIsAction,
-                    onClick = {
-                        singlePressAction = pressTwiceText
-                        onCallControlValueChanged(!flippedValue)
-                    }
-                )
+    StyledScaffold(title = title, navigateBack = navigateBack) { top, bottom ->
+        Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceContainer)
+            .verticalScroll(rememberScrollState()).padding(horizontal = 16.dp)
+            .padding(top = top + 8.dp, bottom = bottom)) {
+            StyledList(key = kind to endCallSinglePress,
+                description = if (!supportedLayout && kind == CallControlAction.HANG_UP)
+                    stringResource(R.string.call_control_unsupported_layout) else null) {
+                if (kind == CallControlAction.MUTE_UNMUTE) {
+                    styledListItem(contentText = muteLabel, supportingText = stringResource(R.string.mute_unmute_notice),
+                        orientation = StyledListItemOrientation.Vertical, onClick = null)
+                } else {
+                    styledListItem(contentText = stringResource(R.string.press_once),
+                        selected = kind == CallControlAction.HANG_UP && endCallSinglePress == true,
+                        enabled = enabled && supportedLayout && kind == CallControlAction.HANG_UP, onClick = { onChange(true) })
+                    styledListItem(contentText = stringResource(R.string.press_twice),
+                        selected = kind == CallControlAction.HANG_UP && endCallSinglePress == false,
+                        enabled = enabled && supportedLayout && kind == CallControlAction.HANG_UP, onClick = { onChange(false) })
+                }
             }
-
-            Spacer(modifier = Modifier.height(bottomPadding))
         }
     }
 }

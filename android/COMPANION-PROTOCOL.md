@@ -310,6 +310,11 @@ authoritative for the displayed effective device setting. Android delegated
 host hold actions are not equivalent to hardware hold configuration and must
 not be mapped without a deliberate adapter.
 
+Android's local **Show PC controls** setting defaults to off. It shows or hides
+the Home PC panel and its settings shortcut; PC management remains available in
+App Settings. Visibility does not change the configured link, transfer state,
+call routing or shared preferences, and this flag is not synchronized with NTPods.
+
 Disconnected battery presentation hides cached readings while retaining their
 original observations and age for re-enabling. It does not erase samples or
 model metadata, and live nearby readings remain visible.

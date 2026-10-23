@@ -92,34 +92,61 @@ class AppleDevice(
         _metadata.value = metadata
     }
 
-    fun receiveNearbyBattery(batteries: Set<Battery>) {
+    private val caseBatteryComponents = mutableMapOf<BatteryComponent, Battery>()
+
+    fun receiveNearbyBattery(batteries: Set<Battery>) = receiveNearbyBattery(batteries, allowNewerCase = true)
+
+    fun receiveCaseBattery(batteries: Set<Battery>, observedAt: Long) =
+        receiveNearbyBattery(batteries, allowNewerCase = false, caseObservedAt = observedAt)
+
+    private fun receiveNearbyBattery(batteries: Set<Battery>, allowNewerCase: Boolean, caseObservedAt: Long? = null) {
         synchronized(aacp) {
             val keepLive = connectionState.value == ConnectionState.CONNECTED && aacp.captureAudioSocket() != null
             val now = System.currentTimeMillis()
+            var caseComponents = emptySet<BatteryComponent>()
             _state.update { state ->
-                val reported = if (!keepLive) batteries else batteries.filter { incoming ->
-                    incoming.isLive(now) && incoming.status != BatteryStatus.UNKNOWN &&
-                        incoming.level in 0..100 && state.battery.none { old ->
+                val fresh = if (caseObservedAt == null) batteries else batteries.filter { incoming ->
+                    state.battery.none { it.component == incoming.component && it.observedAt != null && it.observedAt > caseObservedAt }
+                }.toSet()
+                val reported = if (!keepLive) fresh else fresh.filter { incoming ->
+                    ((incoming.isLive(now) && incoming.status != BatteryStatus.UNKNOWN && incoming.level in 0..100) ||
+                        (!allowNewerCase && !incoming.present && incoming.status == BatteryStatus.DISCONNECTED)) &&
+                        state.battery.none { old ->
                             old.component == incoming.component && old.level in 0..100 &&
                                 old.status != BatteryStatus.UNKNOWN && old.isLive(now) &&
+                                (allowNewerCase || caseBatteryComponents[old.component] !== old) &&
                                 // The case reports independently of the connected earbuds over BLE.
-                                (incoming.component != BatteryComponent.CASE || incoming.observedAt!! <= old.observedAt!!)
+                                (!allowNewerCase || incoming.component != BatteryComponent.CASE || incoming.observedAt!! <= old.observedAt!!)
                         }
                 }.toSet()
-                state.copy(battery = mergeBatteryReports(state.battery, reported,
-                    settings.value.cacheDisconnectedComponentBattery))
+                val merged = mergeBatteryReports(state.battery, reported, settings.value.cacheDisconnectedComponentBattery)
+                if (!allowNewerCase) caseComponents = reported.map { it.component }.toSet()
+                state.copy(battery = merged)
             }
-            _connectionState.update { if (it == ConnectionState.DISCONNECTED) ConnectionState.AVAILABLE else it }
+            // StateFlow retains the old object on an equal update; track the published instances.
+            caseComponents.forEach { component ->
+                _state.value.battery.firstOrNull { it.component == component && it.present }?.let {
+                    caseBatteryComponents[component] = it
+                }
+            }
+            _connectionState.update {
+                if (it == ConnectionState.DISCONNECTED && (allowNewerCase || _state.value.battery.any { battery -> battery.isLive(now) }))
+                    ConnectionState.AVAILABLE else it
+            }
         }
     }
 
     fun expireNearbyBattery(now: Long) {
-        if (connectionState.value == ConnectionState.CONNECTED) return
-        _state.update { state -> state.copy(battery = state.battery.map {
-            if (it.present && !it.isLive(now)) it.copy(status = BatteryStatus.DISCONNECTED, present = false) else it
-        }.toSet()) }
-        if (_state.value.battery.none { it.isLive(now) })
-            _connectionState.update { if (it == ConnectionState.AVAILABLE) ConnectionState.DISCONNECTED else it }
+        synchronized(aacp) {
+            val connected = connectionState.value == ConnectionState.CONNECTED
+            _state.update { state -> state.copy(battery = state.battery.map {
+                if (it.present && !it.isLive(now) && (!connected || caseBatteryComponents[it.component] === it))
+                    it.copy(status = BatteryStatus.DISCONNECTED, present = false) else it
+            }.toSet()) }
+            caseBatteryComponents.entries.removeAll { entry -> _state.value.battery.none { it === entry.value } }
+            if (!connected && _state.value.battery.none { it.isLive(now) })
+                _connectionState.update { if (it == ConnectionState.AVAILABLE) ConnectionState.DISCONNECTED else it }
+        }
     }
 
     // exists because audio processing is done by Service and other parts use Device as source of truth for microphone state and I didn't want to make whole updateState public
@@ -532,16 +559,20 @@ class AppleDevice(
         updateState { it.copy(recordingState = transform(it.recordingState)) }
     }
 
-    fun toggleListeningMode(modeBit: Int) {
-        val currentByte = state.value.effectiveControl(ControlCommandIdentifier.LISTENING_MODE_CONFIGS, settings.value)?.get(0)?.toInt() ?: 0
-        val newValue = if ((currentByte and modeBit) != 0) {
-            val temp = currentByte and modeBit.inv()
-            if (countEnabledModes(temp) >= 2) temp else currentByte
-        } else {
-            currentByte or modeBit
+    fun setListeningModeCycle(mask: Int, expectedMetadata: AppleMetadata,
+                              expectedSocket: BluetoothSocket?): Boolean =
+        aacp.sendControlCommand(ControlCommandIdentifier.LISTENING_MODE_CONFIGS.value,
+            byteArrayOf(mask.toByte()), expectedSocket = expectedSocket) {
+            metadata.value === expectedMetadata && validNoiseModeCycle(mask,
+                expectedMetadata.supportedNoiseModeCycleMask(state.value.effectiveAllowOff(settings.value, expectedMetadata.modelNumber)))
         }
-        setControlCommand(ControlCommandIdentifier.LISTENING_MODE_CONFIGS, newValue)
-    }
+
+    fun setCallControls(singlePress: Boolean, expectedMetadata: AppleMetadata,
+                        expectedSocket: BluetoothSocket?): Boolean =
+        aacp.sendControlCommand(ControlCommandIdentifier.CALL_MANAGEMENT_CONFIG.value,
+            legacyEndCallValue(singlePress), expectedSocket = expectedSocket) {
+            metadata.value === expectedMetadata && expectedMetadata.supportsCallControls() && state.value.canSetLegacyEndCall()
+        }
 
     private val holdActionLock = Any()
     private var holdActionSocket: BluetoothSocket? = null
@@ -584,7 +615,7 @@ class AppleDevice(
 
     fun cycleHoldListeningMode(event: AppleEvent.StemPress): Boolean = synchronized(holdActionLock) {
         if (hostHoldAction(event) != StemAction.CYCLE_NOISE_CONTROL_MODES) return@synchronized false
-        val mode = state.value.nextHoldListeningMode(settings.value, metadata.value.modelNumber) ?: return@synchronized false
+        val mode = state.value.nextHoldListeningMode(settings.value, metadata.value) ?: return@synchronized false
         aacp.sendPacket(ControlCommandPacket.create(
             ControlCommand(ControlCommandIdentifier.LISTENING_MODE, byteArrayOf(mode.toByte()))), event.sourceSocket)
     }
@@ -669,13 +700,4 @@ class AppleDevice(
 ////        _cameraAction.value = action
 ////    }
 
-}
-
-private fun countEnabledModes(byteValue: Int): Int {
-    var count = 0
-    if ((byteValue and 0x01) != 0) count++
-    if ((byteValue and 0x02) != 0) count++
-    if ((byteValue and 0x04) != 0) count++
-    if ((byteValue and 0x08) != 0) count++
-    return count
 }

@@ -1,0 +1,4 @@
+<resources>
+    <string name="show_pc_controls">Show PC controls</string>
+    <string name="show_pc_controls_description">Show your linked PC on Home.</string>
+</resources>

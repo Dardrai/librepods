@@ -61,22 +61,42 @@ internal object DongleProtocol {
     }
 
     data class Status(val generation: Long, val address: List<Int>, val flags: Int, val anc: Int,
-        val batteries: List<Int?>, val codec: Int, val capabilities: Int) {
+        val batteries: List<Int?>, val codec: Int, val capabilities: Int,
+        val batteryAgeMs: List<Long?> = List(3) { null }, val batteryPresent: Int = 0,
+        val batteryCaseSource: Int = 0, val charging: Int = 0) {
         fun sameConnection(other: Status) = generation == other.generation && address == other.address
         val connected get() = flags and 1 != 0
         val controlsReady get() = flags and 2 != 0
         val microphoneActive get() = flags and 16 != 0
+        fun batteryLive(index: Int, elapsedMs: Long = 0): Boolean {
+            val age = batteryAgeMs.getOrNull(index) ?: return false
+            return index in 0..2 && batteries.getOrNull(index) != null &&
+                batteryPresent and (1 shl index) != 0 && age < 90_000 &&
+                elapsedMs >= 0 && elapsedMs < 90_000 - age
+        }
+        fun batteryCharging(index: Int, elapsedMs: Long = 0) =
+            batteryLive(index, elapsedMs) && charging and (1 shl index) != 0
     }
     fun status(bytes: ByteArray): Status {
         checkReport(bytes, 2)
         require(bytes[7].toInt() and 0x80 == 0 && bytes[18].toInt() in 0..4 &&
             bytes[22].toInt() and 0xf8 == 0 && bytes[23].toInt() in 0..3 &&
-            bytes[40].toInt() in 0..6 && bytes[41].toInt() in 0..4 && bytes.drop(44).all { it == 0.toByte() })
+            bytes[40].toInt() in 0..6 && bytes[41].toInt() in 0..4 && bytes.drop(46).all { it == 0.toByte() })
         val levels = bytes.sliceArray(19..21).map { it.toInt() and 255 }
         require(levels.all { it <= 100 || it == 255 })
+        val ages = listOf(24, 28, 32).map { u32(bytes, it).takeUnless { age -> age == 0xffff_ffffL } }
+        val capabilities = u16(bytes, 42)
+        val observations = capabilities and 64 != 0
+        val present = if (observations) bytes[44].toInt() and 255 else
+            levels.indices.fold(0) { mask, index -> if (levels[index] <= 100 && ages[index] != null) mask or (1 shl index) else mask }
+        val caseSource = bytes[45].toInt() and 255
+        require(if (observations) present and 0xf8 == 0 && caseSource and 0xf8 == 0 &&
+            bytes[22].toInt() and present.inv() == 0 &&
+            levels.indices.all { present and (1 shl it) == 0 || levels[it] <= 100 && ages[it] != null }
+            else bytes[44] == 0.toByte() && bytes[45] == 0.toByte())
         return Status(u32(bytes, 8), bytes.sliceArray(12..17).map { it.toInt() and 255 },
             bytes[7].toInt() and 255, bytes[18].toInt(), levels.map { it.takeIf { it <= 100 } },
-            bytes[23].toInt(), u16(bytes, 42))
+            bytes[23].toInt(), capabilities, ages, present, caseSource, bytes[22].toInt())
     }
     data class Setting(val value: Long, val ageMs: Long, val revision: Long)
     fun settings(bytes: ByteArray): Map<Int, Setting> {

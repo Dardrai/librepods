@@ -92,8 +92,16 @@ internal fun DongleSettingsSection(onManage: (() -> Unit)? = null) {
                     else -> R.string.dongle_waiting
                 }), modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
             }, onClick = onManage)
-            if (state.connected && state.status != null) styledListItem(contentText = stringResource(R.string.dongle_batteries,
-                *state.status!!.batteries.map { it?.let { value -> "$value%" } ?: "—" }.toTypedArray()))
+            if (state.connected && state.status != null) {
+                val status = state.status!!
+                val cached = stringResource(R.string.island_battery_cached)
+                val readings = status.batteries.mapIndexed { index, value -> when {
+                    value == null -> "—"
+                    status.batteryLive(index) -> "$value%"
+                    else -> stringResource(R.string.island_battery_description, "$value%", cached)
+                } }
+                styledListItem(contentText = stringResource(R.string.dongle_batteries, *readings.toTypedArray()))
+            }
             if (onManage != null) styledListItem(contentText = stringResource(R.string.dongle_manage), onClick = onManage)
             else {
                 styledListItem(contentText = stringResource(R.string.dongle_choose), onClick = choose, enabled = controller != null && !state.busy)
@@ -190,11 +198,13 @@ internal fun DongleControls(state: DongleState, controller: DongleController) {
             styledListItem(contentText = stringResource(R.string.dongle_active_codec,
                 codecs.firstOrNull { it.first == profile.actualCodec.toLong() && it.first != 0L }?.second ?: "—", profile.actualBitrate / 1000))
             styledToggle(label = stringResource(R.string.dongle_game_mode), checked = profile.gameRequested,
-                enabled = enabled && profile.flags and 8 != 0, description = stringResource(when (profile.gameState) {
-                    1 -> R.string.dongle_game_pending; 2 -> R.string.dongle_game_unconfirmed; 3 -> R.string.dongle_game_confirmed
-                    4 -> R.string.dongle_game_failed; 5 -> R.string.dongle_game_unsupported; 6 -> R.string.dongle_game_restoring
-                    else -> R.string.dongle_off
-                }), onCheckedChange = controller::gameMode)
+                enabled = enabled && profile.flags and 8 != 0, description = when (profile.gameState) {
+                    1 -> stringResource(R.string.dongle_game_pending)
+                    4 -> stringResource(R.string.dongle_game_failed)
+                    5 -> stringResource(R.string.dongle_game_unsupported)
+                    6 -> stringResource(R.string.dongle_game_restoring)
+                    else -> null
+                }, onCheckedChange = controller::gameMode)
         }
     }
     StyledList(title = stringResource(R.string.dongle_hearing), description = stringResource(R.string.dongle_hearing_description)) {
@@ -275,8 +285,7 @@ private fun ControlRange(label: String, id: Int, state: DongleState, enabled: Bo
     var selected by remember(value) { mutableStateOf(value?.toFloat() ?: 50f) }
     Column(Modifier.padding(horizontal = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         StyledSlider(label = label, value = selected, valueRange = 0f..100f, independent = true, enabled = enabled,
-            onValueChange = { selected = it }, description = if (value == null) stringResource(R.string.dongle_choose_value)
-                else if (id in state.requested) stringResource(R.string.dongle_pending) else null)
+            onValueChange = { selected = it }, description = if (value == null) stringResource(R.string.dongle_choose_value) else null)
         StyledButton(enabled = enabled, onClick = {
             controller.setSetting(id, selected.roundToInt().toLong() or if (id == 0x1f) 0x5000L else 0L)
         }) { Text("${stringResource(R.string.dongle_apply)} · ${selected.roundToInt()}%", color = MaterialTheme.colorScheme.onSurface) }
@@ -315,19 +324,17 @@ private fun CycleModes(state: DongleState, enabled: Boolean, controller: DongleC
 private fun SettingChoice(label: String, id: Int, state: DongleState, enabled: Boolean,
     choices: List<Pair<Long, String>>, onChoose: (Int, Long) -> Unit) {
     val value = state.requested[id] ?: state.settings[id]?.value
-    OptionPicker(label, value, enabled, choices, id in state.requested,
-        unconfirmed = id in state.unconfirmed) { onChoose(id, it) }
+    OptionPicker(label, value, enabled, choices) { onChoose(id, it) }
 }
 
 @Composable
 private fun OptionPicker(label: String, value: Long?, enabled: Boolean, choices: List<Pair<Long, String>>,
-    pending: Boolean = false, unconfirmed: Boolean = false, onChoose: (Long) -> Unit) {
+    onChoose: (Long) -> Unit) {
     var open by remember { mutableStateOf(false) }
     val current = choices.firstOrNull { it.first == value }?.second ?: stringResource(R.string.dongle_unknown)
     StyledListItem(onClick = { open = true }, contentText = label, enabled = enabled,
         orientation = StyledListItemOrientation.Vertical,
-        supportingText = when { unconfirmed -> "$current · ${stringResource(R.string.dongle_unconfirmed)}"
-            pending -> "$current · ${stringResource(R.string.dongle_pending)}"; else -> current })
+        supportingText = current)
     if (open) AlertDialog(onDismissRequest = { open = false }, title = { Text(label) }, text = {
         Column { choices.forEach { (value, name) ->
             TextButton(modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp), enabled = enabled,

@@ -763,7 +763,8 @@ class AACPManager(private val device: AppleDevice,
         }
     }
 
-    fun sendControlCommand(identifier: Byte, value: ByteArray, quietListeningMode: Boolean = false): Boolean {
+    fun sendControlCommand(identifier: Byte, value: ByteArray, quietListeningMode: Boolean = false,
+                           expectedSocket: BluetoothSocket? = captureAudioSocket(), isValid: () -> Boolean = { true }): Boolean {
         if (value.isEmpty() || value.size > 4) return false
         val controlCommand = ControlCommand(ControlCommandIdentifier.fromByte(identifier) ?: return false, value)
         // Hearing modes share a gate and need a current report/fitting transaction.
@@ -772,20 +773,31 @@ class AACPManager(private val device: AppleDevice,
 
         val packet = ControlCommandPacket.create(controlCommand)
 
-        val originalSocket = captureAudioSocket() ?: return false
-        val previousReport = device.state.value.controlStates[controlCommand.identifier]
+        val originalSocket = expectedSocket ?: return false
+        var previousReport: ByteArray? = null
         val modeWrite = if (controlCommand.identifier == ControlCommandIdentifier.LISTENING_MODE)
             ListeningModeWrite(normalizedControl(value), quietListeningMode) else null
-        if (modeWrite != null && !publishForTransport(this, originalSocket, ::captureAudioSocket) {
-                listeningModeWrites += modeWrite
-                listeningModeWrites.removeAll { it.expiresAt <= SystemClock.elapsedRealtime() }
-                // shortcut: retain 16 unacknowledged crossings; raise only if real transports exceed this backlog.
-                if (listeningModeWrites.size > 16) listeningModeWrites.removeAt(0)
-            }) return false
-        val written = sendAudioPacket(originalSocket, packet.rawPacket) {
-            modeWrite?.apply {
-                expiresAt = SystemClock.elapsedRealtime() + 10_000
-                order = listeningModeWriteOrder.incrementAndGet()
+        val admitted = synchronized(this) {
+            if (!ownsAudioSocket(originalSocket) || !isValid()) false else {
+                previousReport = device.state.value.controlStates[controlCommand.identifier]
+                if (modeWrite != null) {
+                    listeningModeWrites += modeWrite
+                    listeningModeWrites.removeAll { it.expiresAt <= SystemClock.elapsedRealtime() }
+                    // shortcut: retain 16 unacknowledged crossings; raise only if real transports exceed this backlog.
+                    if (listeningModeWrites.size > 16) listeningModeWrites.removeAt(0)
+                }
+                true
+            }
+        }
+        if (!admitted) return false
+        // Disconnect must remain able to close a socket whose write is blocked.
+        val written = synchronized(originalSocket) {
+            val current = synchronized(this) { ownsAudioSocket(originalSocket) && isValid() }
+            current && sendAudioPacket(originalSocket, packet.rawPacket) {
+                modeWrite?.apply {
+                    expiresAt = SystemClock.elapsedRealtime() + 10_000
+                    order = listeningModeWriteOrder.incrementAndGet()
+                }
             }
         }
         modeWrite?.written?.complete(written)
@@ -794,6 +806,7 @@ class AACPManager(private val device: AppleDevice,
             return false
         }
         return publishForTransport(this, originalSocket, ::captureAudioSocket) {
+            if (!isValid()) return false
             device.updateState {
                 val requested = it.withControlRequest(controlCommand.identifier, value, previousReport)
                 if (controlCommand.identifier == ControlCommandIdentifier.LISTENING_MODE)

@@ -11,6 +11,7 @@ import me.kavishdevar.librepods.core.devices.AppleDevice
 import me.kavishdevar.librepods.core.devices.AppleMetadata
 import me.kavishdevar.librepods.core.devices.AppleSettings
 import me.kavishdevar.librepods.core.devices.AppleState
+import me.kavishdevar.librepods.core.devices.AirPodsModel
 import me.kavishdevar.librepods.core.devices.ConnectionState
 import me.kavishdevar.librepods.core.data.StemAction
 import me.kavishdevar.librepods.core.data.StemPressBud
@@ -28,6 +29,10 @@ import org.robolectric.shadow.api.Shadow
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.PipedOutputStream
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.concurrent.thread
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [37], application = Application::class, shadows = [ProtocolReportSocketShadow::class])
@@ -322,6 +327,8 @@ class AacpProtocolReportsTest {
     }
 
     @Test fun otherBudsHoldCyclesNoiseControlOnTheCapturedTransport() = withTransport { device, socket ->
+        device.loadInitialState(AppleState(), AppleSettings(), AppleMetadata(model = AirPodsModel.AIRPODS_PRO_3,
+            modelNumber = "A3063", version1 = "9A348"))
         assertTrue(device.setLongPressAction("left", StemAction.DIGITAL_ASSISTANT))
         device.aacp.processPacket(byteArrayOf(4, 0, 4, 0, 9, 0, 0x0d, 2, 0, 0, 0), socket)
         val event = AppleEvent.StemPress(StemPressType.LONG_PRESS, StemPressBud.RIGHT, socket)
@@ -332,6 +339,283 @@ class AacpProtocolReportsTest {
         device.aacp.disconnect()
         assertFalse(device.cycleHoldListeningMode(event))
     }
+
+    @Test fun completeCycleChoiceWritesOnlyNativeMaskPreservesActionsAndWaitsForFreshReadback() = withTransport { device, socket ->
+        val metadata = AppleMetadata(model = AirPodsModel.AIRPODS_PRO_3, modelNumber = "A3063", version1 = "9A348")
+        val settings = AppleSettings(leftLongPressAction = StemAction.DIGITAL_ASSISTANT,
+            rightLongPressAction = StemAction.CYCLE_NOISE_CONTROL_MODES)
+        device.loadInitialState(AppleState(controlStates = mapOf(ControlCommandIdentifier.ALLOW_OFF_OPTION to byteArrayOf(1))), settings, metadata)
+        val output = Shadow.extract<ProtocolReportSocketShadow>(socket).output.bytes
+        assertEquals(0, output.size())
+        assertTrue(device.setListeningModeCycle(0x0b, metadata, socket))
+        assertArrayEquals(byteArrayOf(4, 0, 4, 0, 9, 0, 0x1a, 0x0b, 0, 0, 0), output.toByteArray())
+        assertEquals(settings.leftLongPressAction, device.settings.value.leftLongPressAction)
+        assertEquals(settings.rightLongPressAction, device.settings.value.rightLongPressAction)
+        assertNull(device.state.value.controlStates[ControlCommandIdentifier.LISTENING_MODE_CONFIGS])
+        assertArrayEquals(byteArrayOf(11), device.state.value.requestedControls[ControlCommandIdentifier.LISTENING_MODE_CONFIGS])
+        assertEquals("0b", device.settings.value.savedUnconfirmedChoices["desired_noise_modes_cycle"])
+        device.aacp.processPacket(byteArrayOf(4, 0, 4, 0, 9, 0, 0x1a, 11, 0, 0, 0), socket)
+        assertNull(device.state.value.requestedControls[ControlCommandIdentifier.LISTENING_MODE_CONFIGS])
+        assertTrue(ControlCommandIdentifier.LISTENING_MODE_CONFIGS in device.state.value.liveControlReports)
+        assertEquals("A device echo must not issue another write", 11, output.size())
+    }
+
+    @Test fun assistantAndCycleSetupUsesTheAppliedMaskBeforeAnyNativeMaskEcho() = withTransport { device, socket ->
+        val metadata = AppleMetadata(model = AirPodsModel.AIRPODS_PRO_3, modelNumber = "A3063", version1 = "9A348")
+        device.loadInitialState(AppleState(controlStates = mapOf(ControlCommandIdentifier.ALLOW_OFF_OPTION to byteArrayOf(1),
+            ControlCommandIdentifier.LISTENING_MODE to byteArrayOf(2))),
+            AppleSettings(leftLongPressAction = StemAction.DIGITAL_ASSISTANT), metadata)
+        assertTrue(device.configureHoldActions(socket))
+        val output = Shadow.extract<ProtocolReportSocketShadow>(socket).output.bytes
+        output.reset()
+        assertTrue(device.setListeningModeCycle(11, metadata, socket))
+        assertNull(device.state.value.controlStates[ControlCommandIdentifier.LISTENING_MODE_CONFIGS])
+        assertTrue(device.cycleHoldListeningMode(AppleEvent.StemPress(StemPressType.LONG_PRESS, StemPressBud.RIGHT, socket)))
+        assertArrayEquals(byteArrayOf(4, 0, 4, 0, 9, 0, 0x1a, 11, 0, 0, 0,
+            4, 0, 4, 0, 9, 0, 0x0d, 4, 0, 0, 0), output.toByteArray())
+        assertEquals(StemAction.DIGITAL_ASSISTANT, device.settings.value.leftLongPressAction)
+        assertEquals(StemAction.CYCLE_NOISE_CONTROL_MODES, device.settings.value.rightLongPressAction)
+    }
+
+    @Test fun invalidCyclesOffPrerequisiteAndStaleModelOrSocketCannotWrite() = withTransport { device, socket ->
+        val metadata = AppleMetadata(model = AirPodsModel.AIRPODS_PRO_3, modelNumber = "A3063", version1 = "9A348")
+        device.loadInitialState(AppleState(), AppleSettings(), metadata)
+        val output = Shadow.extract<ProtocolReportSocketShadow>(socket).output.bytes
+        for (mask in listOf(0, 1, 2, 4, 8, 11, 16, 31)) assertFalse(device.setListeningModeCycle(mask, metadata, socket))
+        val replacementMetadata = metadata.copy(model = AirPodsModel.AIRPODS_PRO_1, modelNumber = "A2084")
+        device.loadInitialState(AppleState(), AppleSettings(), replacementMetadata)
+        assertFalse(device.setListeningModeCycle(6, metadata, socket))
+        assertFalse(device.setListeningModeCycle(10, replacementMetadata, socket))
+        assertEquals(0, output.size())
+        val replacement = socket()
+        try {
+            bind(device.aacp, replacement)
+            assertFalse(device.setListeningModeCycle(6, replacementMetadata, socket))
+            assertEquals(0, Shadow.extract<ProtocolReportSocketShadow>(replacement).output.bytes.size())
+            assertTrue(device.setListeningModeCycle(6, replacementMetadata, replacement))
+        } finally { replacement.close() }
+    }
+
+    @Test fun nativeEndCallMappingPreservesRawHoldDelegationAndSharedCycle() = withTransport { device, socket ->
+        val metadata = AppleMetadata(model = AirPodsModel.AIRPODS_PRO_3, modelNumber = "A3063", version1 = "9A348")
+        val settings = AppleSettings(leftLongPressAction = StemAction.DIGITAL_ASSISTANT,
+            rightLongPressAction = StemAction.CYCLE_NOISE_CONTROL_MODES)
+        device.loadInitialState(AppleState(controlStates = mapOf(ControlCommandIdentifier.LISTENING_MODE_CONFIGS to byteArrayOf(11))), settings, metadata)
+        assertTrue(device.configureHoldActions(socket))
+        device.aacp.processPacket(byteArrayOf(4, 0, 4, 0, 9, 0, 0x24, 0, 3, 0, 0), socket)
+        val output = Shadow.extract<ProtocolReportSocketShadow>(socket).output.bytes
+        assertArrayEquals(byteArrayOf(4, 0, 4, 0, 9, 0, 0x39, 8, 0, 0, 0), output.toByteArray())
+        output.reset()
+        assertTrue(device.setCallControls(true, metadata, socket))
+        assertArrayEquals(byteArrayOf(4, 0, 4, 0, 9, 0, 0x24, 0, 2, 0, 0), output.toByteArray())
+        assertArrayEquals(byteArrayOf(0, 3), device.state.value.controlStates[ControlCommandIdentifier.CALL_MANAGEMENT_CONFIG])
+        assertArrayEquals(byteArrayOf(0, 2), device.state.value.requestedControls[ControlCommandIdentifier.CALL_MANAGEMENT_CONFIG])
+        device.aacp.processPacket(byteArrayOf(4, 0, 4, 0, 9, 0, 0x24, 0, 2, 0, 0), socket)
+        assertNull(device.state.value.requestedControls[ControlCommandIdentifier.CALL_MANAGEMENT_CONFIG])
+        assertTrue(device.setCallControls(false, metadata, socket))
+        assertArrayEquals(byteArrayOf(4, 0, 4, 0, 9, 0, 0x24, 0, 2, 0, 0,
+            4, 0, 4, 0, 9, 0, 0x24, 0, 3, 0, 0), output.toByteArray())
+        assertTrue(device.configureHoldActions(socket))
+        assertEquals("Call preferences never reconfigure raw hold delegation", 22, output.size())
+        assertEquals(StemAction.DIGITAL_ASSISTANT, device.hostHoldAction(AppleEvent.StemPress(StemPressType.LONG_PRESS, StemPressBud.LEFT, socket)))
+        assertEquals(StemAction.CYCLE_NOISE_CONTROL_MODES, device.hostHoldAction(AppleEvent.StemPress(StemPressType.LONG_PRESS, StemPressBud.RIGHT, socket)))
+        for (press in listOf(StemPressType.SINGLE_PRESS, StemPressType.DOUBLE_PRESS, StemPressType.TRIPLE_PRESS))
+            assertNull(device.hostHoldAction(AppleEvent.StemPress(press, StemPressBud.LEFT, socket)))
+        assertArrayEquals(byteArrayOf(11), device.state.value.controlStates[ControlCommandIdentifier.LISTENING_MODE_CONFIGS])
+        assertEquals(settings, device.settings.value)
+    }
+
+    @Test fun failedOrRetiredNativeCallRequestCannotPublishChoiceOrUseReplacementSocket() = withTransport { device, socket ->
+        val metadata = AppleMetadata(model = AirPodsModel.AIRPODS_PRO_3, modelNumber = "A3063", version1 = "9A348")
+        device.loadInitialState(AppleState(), AppleSettings(), metadata)
+        device.aacp.processPacket(byteArrayOf(4, 0, 4, 0, 9, 0, 0x24, 0, 3, 0, 0), socket)
+        val original = Shadow.extract<ProtocolReportSocketShadow>(socket).output
+        original.failWrites = true
+        assertFalse(device.setCallControls(true, metadata, socket))
+        assertTrue(device.state.value.requestedControls.isEmpty())
+        assertTrue(device.settings.value.savedUnconfirmedChoices.isEmpty())
+        original.failWrites = false
+        val replacement = socket()
+        try {
+            bind(device.aacp, replacement)
+            assertFalse(device.setCallControls(true, metadata, socket))
+            assertFalse(device.setCallControls(true, metadata.copy(), replacement))
+            assertEquals(0, Shadow.extract<ProtocolReportSocketShadow>(replacement).output.bytes.size())
+            device.loadInitialState(AppleState(), AppleSettings(), AppleMetadata())
+            assertFalse(device.setCallControls(true, device.metadata.value, replacement))
+            device.loadInitialState(AppleState(), AppleSettings(), metadata)
+            device.aacp.processPacket(byteArrayOf(4, 0, 4, 0, 9, 0, 0x24, 0, 3, 0, 0), replacement)
+            assertTrue(device.setCallControls(true, metadata, replacement))
+        } finally { replacement.close() }
+    }
+
+    @Test fun socketRetiredDuringNativeCallWriteCannotPublishAnAppliedChoice() = withTransport { device, socket ->
+        val metadata = AppleMetadata(model = AirPodsModel.AIRPODS_PRO_3, modelNumber = "A3063", version1 = "9A348")
+        device.loadInitialState(AppleState(), AppleSettings(), metadata)
+        device.aacp.processPacket(byteArrayOf(4, 0, 4, 0, 9, 0, 0x24, 0, 3, 0, 0), socket)
+        val replacement = socket()
+        try {
+            Shadow.extract<ProtocolReportSocketShadow>(socket).output.beforeWrite = { bind(device.aacp, replacement) }
+            assertFalse(device.setCallControls(true, metadata, socket))
+            assertTrue(device.state.value.requestedControls.isEmpty())
+            assertEquals(0, Shadow.extract<ProtocolReportSocketShadow>(replacement).output.bytes.size())
+        } finally { replacement.close() }
+    }
+
+    @Test fun disconnectClosesBlockedCycleAndCallWritesWithoutWaitingForTheWriter() {
+        for (callControls in listOf(false, true)) withTransport { device, socket ->
+            val metadata = prepareGuardedSetting(device)
+            val shadow = Shadow.extract<ProtocolReportSocketShadow>(socket)
+            val entered = CountDownLatch(1)
+            val closed = CountDownLatch(1)
+            shadow.onClose = { closed.countDown() }
+            shadow.output.beforeWrite = {
+                entered.countDown()
+                closed.await(10, TimeUnit.SECONDS)
+                throw IOException("Socket closed during blocked write")
+            }
+            val result = AtomicReference<Boolean?>()
+            val writer = thread { result.set(writeGuardedSetting(device, socket, metadata, callControls)) }
+            var disconnect: Thread? = null
+            try {
+                assertTrue(entered.await(2, TimeUnit.SECONDS))
+                val retired = CountDownLatch(1)
+                disconnect = thread { device.aacp.disconnect(); retired.countDown() }
+                assertTrue("Disconnect must close a blocked setting write", retired.await(2, TimeUnit.SECONDS))
+                writer.join(2_000)
+                assertFalse(writer.isAlive)
+                assertEquals(false, result.get())
+                assertNull(device.aacp.captureAudioSocket())
+                assertTrue(device.state.value.requestedControls.isEmpty())
+                assertTrue(device.settings.value.savedUnconfirmedChoices.isEmpty())
+            } finally {
+                closed.countDown()
+                writer.join(2_000)
+                disconnect?.join(2_000)
+            }
+        }
+    }
+
+    @Test fun guardedSettingsRejectSocketOrMetadataReplacedWhileWaitingForAdmission() {
+        for (callControls in listOf(false, true)) for (replaceSocket in listOf(false, true)) withTransport { device, socket ->
+            val metadata = prepareGuardedSetting(device)
+            val replacement = socket()
+            val result = AtomicReference<Boolean?>()
+            val writer = thread(start = false) { result.set(writeGuardedSetting(device, socket, metadata, callControls)) }
+            try {
+                synchronized(device.aacp) {
+                    writer.start()
+                    val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+                    while (writer.state != Thread.State.BLOCKED && System.nanoTime() < deadline) Thread.yield()
+                    assertEquals("The setting must wait for admission", Thread.State.BLOCKED, writer.state)
+                    if (replaceSocket) bind(device.aacp, replacement)
+                    else device.loadInitialState(device.state.value, device.settings.value, metadata.copy(name = "Changed"))
+                }
+                writer.join(2_000)
+                assertFalse(writer.isAlive)
+                assertEquals(false, result.get())
+                assertEquals(0, Shadow.extract<ProtocolReportSocketShadow>(socket).output.bytes.size())
+                assertEquals(0, Shadow.extract<ProtocolReportSocketShadow>(replacement).output.bytes.size())
+                assertTrue(device.state.value.requestedControls.isEmpty())
+            } finally {
+                writer.join(2_000)
+                replacement.close()
+            }
+        }
+    }
+
+    @Test fun guardedSettingsCannotPublishIntoMetadataChangedDuringTheWrite() {
+        for (callControls in listOf(false, true)) withTransport { device, socket ->
+            val metadata = prepareGuardedSetting(device)
+            val output = Shadow.extract<ProtocolReportSocketShadow>(socket).output
+            output.beforeWrite = {
+                device.loadInitialState(device.state.value, device.settings.value, metadata.copy(name = "Changed"))
+            }
+            assertFalse(writeGuardedSetting(device, socket, metadata, callControls))
+            assertTrue(device.state.value.requestedControls.isEmpty())
+            assertTrue(device.settings.value.savedUnconfirmedChoices.isEmpty())
+        }
+    }
+
+    @Test fun queuedSettingsRecheckMetadataAfterAcquiringTheSocket() {
+        for (callControls in listOf(false, true)) rejectQueuedSetting(callControls) { device, metadata, _ ->
+            device.loadInitialState(device.state.value, device.settings.value, metadata.copy(name = "Changed"))
+        }
+    }
+
+    @Test fun queuedCallSettingCannotFlattenANewerPackedCallReport() = rejectQueuedSetting(true) { device, _, socket ->
+        device.aacp.processPacket(byteArrayOf(4, 0, 4, 0, 9, 0, 0x24, 1, 0x23, 2, 0), socket)
+    }
+
+    @Test fun queuedCycleCannotWriteOffAfterItsPrerequisiteIsDisabled() = rejectQueuedSetting(false) { device, _, socket ->
+        device.aacp.processPacket(byteArrayOf(4, 0, 4, 0, 9, 0, 0x34, 2, 0, 0, 0), socket)
+    }
+
+    @Test fun retiredCycleWriteCannotPublishOrSendToAReplacementSocket() = withTransport { device, socket ->
+        val metadata = prepareGuardedSetting(device)
+        val replacement = socket()
+        try {
+            Shadow.extract<ProtocolReportSocketShadow>(socket).output.beforeWrite = { bind(device.aacp, replacement) }
+            assertFalse(device.setListeningModeCycle(11, metadata, socket))
+            assertTrue(device.state.value.requestedControls.isEmpty())
+            assertTrue(device.settings.value.savedUnconfirmedChoices.isEmpty())
+            assertEquals(0, Shadow.extract<ProtocolReportSocketShadow>(replacement).output.bytes.size())
+        } finally { replacement.close() }
+    }
+
+    @Test fun legacyEndCallWriteRequiresFreshReadbackAndCannotOverwriteOtherCallPayloads() = withTransport { device, socket ->
+        val id = ControlCommandIdentifier.CALL_MANAGEMENT_CONFIG
+        val metadata = AppleMetadata(model = AirPodsModel.AIRPODS_PRO_3, modelNumber = "A3063", version1 = "9A348")
+        val output = Shadow.extract<ProtocolReportSocketShadow>(socket).output.bytes
+        for (state in listOf(AppleState(), AppleState(controlStates = mapOf(id to byteArrayOf(0, 3))),
+            AppleState(requestedControls = mapOf(id to byteArrayOf(0, 2))))) {
+            device.loadInitialState(state, AppleSettings(), metadata)
+            assertFalse(device.setCallControls(true, metadata, socket))
+        }
+        for (unsupported in listOf(byteArrayOf(1, 0x23, 2, 0), byteArrayOf(0x10, 3, 0, 0),
+            byteArrayOf(0, 2, 1, 0), byteArrayOf(0, 3, 0, 1))) {
+            device.loadInitialState(AppleState(), AppleSettings(), metadata)
+            device.aacp.processPacket(byteArrayOf(4, 0, 4, 0, 9, 0, 0x24) + unsupported, socket)
+            val received = device.state.value.controlStates[id]
+            assertFalse(device.setCallControls(true, metadata, socket))
+            assertSame("Unsupported complete control value must remain untouched", received, device.state.value.controlStates[id])
+            assertTrue(device.state.value.requestedControls.isEmpty())
+        }
+        assertEquals(0, output.size())
+    }
+
+    private fun rejectQueuedSetting(callControls: Boolean, invalidate: (AppleDevice, AppleMetadata, BluetoothSocket) -> Unit) =
+        withTransport { device, socket ->
+            val metadata = prepareGuardedSetting(device)
+            val result = AtomicReference<Boolean?>()
+            val writer = thread(start = false) { result.set(writeGuardedSetting(device, socket, metadata, callControls)) }
+            try {
+                synchronized(socket) {
+                    writer.start()
+                    val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+                    while (writer.state != Thread.State.BLOCKED && System.nanoTime() < deadline) Thread.yield()
+                    assertEquals("The admitted setting must wait for the socket", Thread.State.BLOCKED, writer.state)
+                    invalidate(device, metadata, socket)
+                }
+                writer.join(2_000)
+                assertFalse(writer.isAlive)
+                assertEquals(false, result.get())
+                assertEquals(0, Shadow.extract<ProtocolReportSocketShadow>(socket).output.bytes.size())
+                assertTrue(device.state.value.requestedControls.isEmpty())
+                assertTrue(device.settings.value.savedUnconfirmedChoices.isEmpty())
+            } finally { writer.join(2_000) }
+        }
+
+    private fun prepareGuardedSetting(device: AppleDevice) =
+        AppleMetadata(model = AirPodsModel.AIRPODS_PRO_3, modelNumber = "A3063", version1 = "9A348").also { metadata ->
+            val call = ControlCommandIdentifier.CALL_MANAGEMENT_CONFIG
+            device.loadInitialState(AppleState(controlStates = mapOf(call to byteArrayOf(0, 3),
+                ControlCommandIdentifier.ALLOW_OFF_OPTION to byteArrayOf(1)), liveControlReports = setOf(call)),
+                AppleSettings(), metadata)
+        }
+
+    private fun writeGuardedSetting(device: AppleDevice, socket: BluetoothSocket, metadata: AppleMetadata, callControls: Boolean) =
+        if (callControls) device.setCallControls(true, metadata, socket) else device.setListeningModeCycle(11, metadata, socket)
 
     private fun device(): AppleDevice {
         val context = RuntimeEnvironment.getApplication()
@@ -358,7 +642,9 @@ class AacpProtocolReportsTest {
 @Implements(BluetoothSocket::class)
 class ProtocolReportSocketShadow : ClosingBluetoothSocketShadow() {
     val output = ProtocolReportOutput()
+    var onClose: (() -> Unit)? = null
     init { setOutputStream(output) }
+    protected override fun onClosing() { onClose?.invoke() }
 }
 
 class ProtocolReportOutput : PipedOutputStream() {

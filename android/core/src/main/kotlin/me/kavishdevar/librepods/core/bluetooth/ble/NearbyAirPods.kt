@@ -15,7 +15,9 @@ object NearbyAirPods {
         0x3020 to "AirPods 5 (Wireless Charging)", 0x3620 to "AirPods 5"
     )
 
-    fun proximityRecord(manufacturer: ByteArray): ByteArray? {
+    fun proximityRecord(manufacturer: ByteArray): ByteArray? = proximityRecord(manufacturer, 27)
+
+    internal fun proximityRecord(manufacturer: ByteArray, expectedLength: Int): ByteArray? {
         if (manufacturer.size > 254) return null
         var offset = 0
         var record: ByteArray? = null
@@ -24,7 +26,7 @@ object NearbyAirPods {
             val length = (manufacturer[offset + 1].toInt() and 0xff) + 2
             if (length > manufacturer.size - offset) return null
             if (manufacturer[offset].toInt() == 7) {
-                if (length != 27 || record != null) return null
+                if (length != expectedLength || record != null) return null
                 record = manufacturer.copyOfRange(offset, offset + length)
             }
             offset += length

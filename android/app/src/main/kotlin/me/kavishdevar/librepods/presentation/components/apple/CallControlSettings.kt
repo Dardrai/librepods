@@ -16,33 +16,24 @@
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-@file:OptIn(ExperimentalEncodingApi::class)
-
 package me.kavishdevar.librepods.presentation.components.apple
 
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.res.stringResource
-import dev.chrisbanes.haze.materials.ExperimentalHazeMaterialsApi
 import me.kavishdevar.librepods.R
+import me.kavishdevar.librepods.core.devices.CallControlAction
 import me.kavishdevar.librepods.presentation.components.primitives.StyledList
 import me.kavishdevar.librepods.presentation.components.primitives.styledListItem
-import kotlin.io.encoding.ExperimentalEncodingApi
-
-@ExperimentalHazeMaterialsApi
+import me.kavishdevar.librepods.presentation.components.primitives.StyledListItemOrientation
 @Composable
 fun CallControlSettings(
-    flipped: Boolean,
+    endCallSinglePress: Boolean?,
     navigateToCallControlScreen: (action: String) -> Unit,
 ) {
     val pressOnceText = stringResource(R.string.press_once)
     val pressTwiceText = stringResource(R.string.press_twice)
 
-    var singlePressAction by remember { mutableStateOf(if (flipped) pressTwiceText else pressOnceText) }
-    var doublePressAction by remember { mutableStateOf(if (flipped) pressOnceText else pressTwiceText) }
+    val endCallAction = endCallSinglePress?.let { if (it) pressOnceText else pressTwiceText }
 
     val muteUnmuteText = stringResource(R.string.mute_unmute)
     val hangUpText = stringResource(R.string.hang_up)
@@ -56,36 +47,16 @@ fun CallControlSettings(
 
         styledListItem(
             contentText = muteUnmuteText,
-            supportingText = singlePressAction,
-            onClick = { navigateToCallControlScreen(muteUnmuteText) },
+            supportingText = stringResource(R.string.mute_unmute_notice),
+            orientation = StyledListItemOrientation.Vertical,
+            onClick = null,
         )
 
         styledListItem(
             contentText = hangUpText,
-            supportingText = doublePressAction,
-            onClick = { navigateToCallControlScreen(hangUpText) }
+            supportingText = endCallAction,
+            onClick = { navigateToCallControlScreen(CallControlAction.HANG_UP.route) }
         )
 
-//        StyledListItem(
-//            contentText =  pressOnceText,
-//            selected = doublePressAction == pressOnceText,
-//            onClick = {
-//                doublePressAction = pressOnceText
-//                singlePressAction = pressTwiceText
-//
-//                onCallControlValueChanged(true)
-//            }
-//        )
-//
-//        StyledListItem(
-//            contentText =  pressTwiceText,
-//            selected = doublePressAction == pressTwiceText,
-//            onClick = {
-//                doublePressAction = pressTwiceText
-//                singlePressAction = pressOnceText
-//
-//                onCallControlValueChanged(false)
-//            }
-//        )
     }
 }
