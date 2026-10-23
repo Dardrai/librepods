@@ -1,5 +1,4 @@
 <resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="MissingTranslation">
-    <string name="app_name" translatable="false">LibrePods</string>
     <string name="app_description">Звільніть ваші AirPods від екосистеми Apple</string>
     <string name="app_widget_description">Перегляньте статус батареї ваших AirPods прямо з головного екрана!</string>
     <string name="accessibility">Доступність</string>

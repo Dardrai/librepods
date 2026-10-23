@@ -1,0 +1,4 @@
+<resources>
+    <string name="show_pc_controls">顯示電腦控制</string>
+    <string name="show_pc_controls_description">在首頁顯示已連結的電腦。</string>
+</resources>

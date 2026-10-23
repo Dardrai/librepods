@@ -30,6 +30,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLocale
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
@@ -128,6 +130,7 @@ internal fun DongleSettingsSection(onManage: (() -> Unit)? = null) {
 
 @Composable
 internal fun DongleControls(state: DongleState, controller: DongleController) {
+    val locale = LocalLocale.current.platformLocale
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     DisposableEffect(controller, lifecycle) {
         controller.controlsVisible(lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
@@ -265,10 +268,13 @@ internal fun DongleControls(state: DongleState, controller: DongleController) {
                         3 -> R.string.dongle_finder_old; 4 -> R.string.dongle_finder_paused; else -> R.string.dongle_finder_wait
                     }))
                     value.smoothedRssi?.let { rssi -> styledListItem(contentText = stringResource(R.string.dongle_finder_signal,
-                        String.format(java.util.Locale.getDefault(), "%.1f", rssi), stringResource(when (value.trend) {
+                        String.format(locale, "%.1f", rssi), stringResource(when (value.trend) {
                             1 -> R.string.dongle_stronger; 2 -> R.string.dongle_steady; 3 -> R.string.dongle_weaker; else -> R.string.dongle_trend_unknown
                         }))) }
-                    value.ageMs?.let { age -> styledListItem(contentText = stringResource(R.string.dongle_finder_last, age / 1000)) }
+                    value.ageMs?.let { age ->
+                        val seconds = (age / 1000).toInt()
+                        styledListItem(contentText = pluralStringResource(R.plurals.dongle_finder_last, seconds, seconds))
+                    }
                 }
             } else {
                 if (state.nearby?.identityAvailable == false) styledListItem(contentText = stringResource(R.string.dongle_finder_identity))

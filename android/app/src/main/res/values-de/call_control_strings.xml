@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="call_control_update_failed">Anrufsteuerung konnte nicht aktualisiert werden. Verbinde deine AirPods erneut und versuche es noch einmal.</string>
+    <string name="call_control_unsupported_layout">Die Anrufeinstellungen sind für diese AirPods-Konfiguration nicht verfügbar.</string>
+</resources>

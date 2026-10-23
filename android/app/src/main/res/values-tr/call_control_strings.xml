@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="call_control_update_failed">Arama kontrolleri güncellenemedi. AirPods cihazınızı yeniden bağlayıp tekrar deneyin.</string>
+    <string name="call_control_unsupported_layout">Bu AirPods yapılandırmasında arama ayarları kullanılamıyor.</string>
+</resources>

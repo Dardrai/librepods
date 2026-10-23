@@ -1,0 +1,4 @@
+<resources>
+    <string name="call_control_update_failed">Не вдалося змінити керування дзвінками. Перепідключіть AirPods і спробуйте ще раз.</string>
+    <string name="call_control_unsupported_layout">Для цієї конфігурації AirPods налаштування дзвінків недоступні.</string>
+</resources>

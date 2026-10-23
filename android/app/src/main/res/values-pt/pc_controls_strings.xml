@@ -1,0 +1,4 @@
+<resources>
+    <string name="show_pc_controls">Mostrar controles do PC</string>
+    <string name="show_pc_controls_description">Mostre o PC vinculado na tela inicial.</string>
+</resources>

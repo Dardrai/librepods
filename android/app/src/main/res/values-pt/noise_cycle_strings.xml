@@ -1,0 +1,7 @@
+<resources>
+    <string name="noise_cycle_shared_description">Selecione dois ou mais modos.</string>
+    <string name="noise_cycle_apply">Aplicar</string>
+    <string name="noise_cycle_applying">Aplicando…</string>
+    <string name="noise_cycle_off_prerequisite">Ative o modo de escuta Desligado nas configurações dos AirPods.</string>
+    <string name="noise_cycle_update_failed">Não foi possível aplicar os modos de escuta. Tente novamente.</string>
+</resources>

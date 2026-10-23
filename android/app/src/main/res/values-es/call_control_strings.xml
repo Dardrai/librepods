@@ -1,0 +1,4 @@
+<resources>
+    <string name="call_control_update_failed">No se han podido actualizar los controles de llamada. Vuelve a conectar tus AirPods e inténtalo de nuevo.</string>
+    <string name="call_control_unsupported_layout">Los ajustes de llamada no están disponibles para esta configuración de los AirPods.</string>
+</resources>

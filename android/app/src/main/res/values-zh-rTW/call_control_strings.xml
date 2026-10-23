@@ -1,0 +1,4 @@
+<resources>
+    <string name="call_control_update_failed">無法更新通話控制。請重新連接 AirPods 後再試一次。</string>
+    <string name="call_control_unsupported_layout">此 AirPods 設定不支援通話設定。</string>
+</resources>

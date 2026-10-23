@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="noise_cycle_shared_description">Wähle mindestens zwei Modi aus.</string>
+    <string name="noise_cycle_apply">Anwenden</string>
+    <string name="noise_cycle_applying">Wird angewendet…</string>
+    <string name="noise_cycle_off_prerequisite">Aktiviere den Hörmodus „Aus“ in den AirPods-Einstellungen.</string>
+    <string name="noise_cycle_update_failed">Hörmodi konnten nicht übernommen werden. Versuche es erneut.</string>
+</resources>

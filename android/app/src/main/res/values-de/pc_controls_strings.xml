@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="show_pc_controls">PC-Steuerung anzeigen</string>
+    <string name="show_pc_controls_description">Zeige deinen verknüpften PC auf der Startseite an.</string>
+</resources>

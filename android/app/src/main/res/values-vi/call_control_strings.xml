@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="call_control_update_failed">Không thể cập nhật điều khiển cuộc gọi. Hãy kết nối lại AirPods rồi thử lại.</string>
+    <string name="call_control_unsupported_layout">Cài đặt cuộc gọi không khả dụng với cấu hình AirPods này.</string>
+</resources>

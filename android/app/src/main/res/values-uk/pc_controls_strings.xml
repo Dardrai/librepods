@@ -1,0 +1,4 @@
+<resources>
+    <string name="show_pc_controls">Показувати керування ПК</string>
+    <string name="show_pc_controls_description">Показувати пов’язаний ПК на головному екрані.</string>
+</resources>

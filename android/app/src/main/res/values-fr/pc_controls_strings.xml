@@ -1,0 +1,4 @@
+<resources>
+    <string name="show_pc_controls">Afficher les commandes du PC</string>
+    <string name="show_pc_controls_description">Afficher le PC associé sur l’écran d’accueil.</string>
+</resources>

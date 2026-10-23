@@ -1,0 +1,7 @@
+<resources>
+    <string name="noise_cycle_shared_description">請選擇兩種以上的模式。</string>
+    <string name="noise_cycle_apply">套用</string>
+    <string name="noise_cycle_applying">正在套用…</string>
+    <string name="noise_cycle_off_prerequisite">請在 AirPods 設定中開啟「關閉聽覺模式」。</string>
+    <string name="noise_cycle_update_failed">無法套用聽覺模式，請再試一次。</string>
+</resources>

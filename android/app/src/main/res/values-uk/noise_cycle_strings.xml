@@ -1,0 +1,7 @@
+<resources>
+    <string name="noise_cycle_shared_description">Виберіть два або більше режимів.</string>
+    <string name="noise_cycle_apply">Застосувати</string>
+    <string name="noise_cycle_applying">Застосування…</string>
+    <string name="noise_cycle_off_prerequisite">Дозвольте режим «Вимкнено» в налаштуваннях AirPods.</string>
+    <string name="noise_cycle_update_failed">Не вдалося застосувати режими прослуховування. Спробуйте ще раз.</string>
+</resources>

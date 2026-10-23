@@ -1,5 +1,4 @@
    <resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="MissingTranslation">
-        <string name="app_name" translatable="false">LibrePods</string>
         <string name="app_description">Libera i tuoi AirPods dall'ecosistema Apple.</string>
         <string name="app_widget_description">Visualizza lo stato della batteria dei tuoi AirPods direttamente dalla schermata principale!</string>
         <string name="accessibility">Accessibilità</string>

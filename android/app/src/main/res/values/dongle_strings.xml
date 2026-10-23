@@ -86,10 +86,10 @@
     <string name="dongle_priming">Startup priming is always 100 ms. Reported transport delay does not measure acoustic latency.</string>
     <string name="dongle_performance">Performance</string>
     <string name="dongle_performance_read">Read performance</string>
-    <string name="dongle_queue">PCM queue: %1$d / %2$d frames · peak %3$d</string>
+    <string name="dongle_queue">PCM queue (frames): %1$d / %2$d · peak %3$d</string>
     <string name="dongle_drops">Underflow frames: %1$d · dropped frames: %2$d</string>
     <string name="dongle_encode">Encode time: %1$d µs · maximum %2$d µs</string>
-    <string name="dongle_heap">Heap remaining: %1$d / %2$d bytes</string>
+    <string name="dongle_heap">Heap remaining (bytes): %1$d / %2$d</string>
     <string name="dongle_nearby">Find nearby</string>
     <string name="dongle_finder_start">Start finding</string>
     <string name="dongle_finder_stop">Stop finding</string>
@@ -98,7 +98,10 @@
     <string name="dongle_finder_old">Old reading — still listening</string>
     <string name="dongle_finder_paused">Finding is paused during microphone use or Bluetooth setup</string>
     <string name="dongle_finder_signal">Signal: %1$s dBm · %2$s</string>
-    <string name="dongle_finder_last">Last heard %1$d seconds ago</string>
+    <plurals name="dongle_finder_last">
+        <item quantity="one">Last heard %1$d second ago</item>
+        <item quantity="other">Last heard %1$d seconds ago</item>
+    </plurals>
     <string name="dongle_stronger">stronger</string>
     <string name="dongle_steady">steady</string>
     <string name="dongle_weaker">weaker</string>

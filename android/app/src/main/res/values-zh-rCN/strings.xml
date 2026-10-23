@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_description" translatable="false">让你的 AirPods 摆脱苹果的生态系统。</string>
+    <string name="app_description">让你的 AirPods 摆脱苹果的生态系统。</string>
     <string name="app_widget_description">在主屏幕上即可查看 AirPods 的电池状态！</string>
     <string name="accessibility">辅助功能</string>
     <string name="tone_volume">提示音音量</string>

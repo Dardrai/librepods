@@ -15,6 +15,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.test.DeviceConfigurationOverride
+import androidx.compose.ui.test.Locales
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
@@ -28,6 +30,7 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.text.intl.LocaleList
 import java.io.File
 import me.kavishdevar.librepods.core.bluetooth.att.types.HearingAidSettings
 import me.kavishdevar.librepods.dongle.DongleController
@@ -107,7 +110,7 @@ class DongleSettingsRenderingTest {
             compose.runOnIdle { current.value = current.value.copy(nearby = nearby.copy(smoothedRssi = -64.5, trend = 3, ageMs = 1_500)) }
             compose.onNodeWithText("Signal: -64.5 dBm · weaker").performScrollTo().assertIsDisplayed()
             compose.onNodeWithText("Signal: -52.5 dBm · stronger").assertDoesNotExist()
-            compose.onNodeWithText("Last heard 1 seconds ago").performScrollTo().assertIsDisplayed()
+            compose.onNodeWithText("Last heard 1 second ago").performScrollTo().assertIsDisplayed()
             capture("finder-updated-${profile.theme}-${profile.dark}-${profile.width}")
             compose.onNodeWithText("Phone").assertDoesNotExist()
             compose.onNodeWithText("This PC").assertDoesNotExist()
@@ -120,6 +123,34 @@ class DongleSettingsRenderingTest {
         }
         compose.runOnIdle { current.value = current.value.copy(busy = true) }
         compose.onNodeWithText("Preferred microphone").performScrollTo().assertIsNotEnabled()
+    }
+
+    @Test fun finderNumbersFollowTheAppLocaleAndElapsedTimeUsesPlurals() {
+        val context = RuntimeEnvironment.getApplication()
+        val locales = mutableStateOf(LocaleList("en-US"))
+        val nearby = DongleProtocol.Nearby(2, true, -51, 1, 1_000, 4, 0, 1, -52.5)
+        val current = mutableStateOf(DongleState(connected = true,
+            status = DongleProtocol.Status(3, listOf(1, 2, 3, 4, 5, 6), 3, 3, listOf(91, 92, 70), 3, 0x1f),
+            finderOpen = true, nearby = nearby))
+        val controller = DongleController(context)
+        compose.setContent {
+            DeviceConfigurationOverride(DeviceConfigurationOverride.Locales(locales.value)) {
+                LibrePodsTheme(designSystem = DesignSystem.Material) {
+                    Column(Modifier.requiredSize(448.dp, 998.dp).verticalScroll(rememberScrollState())) {
+                        DongleControls(current.value, controller)
+                    }
+                }
+            }
+        }
+        compose.onNodeWithText("-52.5 dBm", substring = true).performScrollTo().assertIsDisplayed()
+        for ((age, expected) in listOf(0L to "Last heard 0 seconds ago", 1_000L to "Last heard 1 second ago",
+            2_000L to "Last heard 2 seconds ago")) {
+            compose.runOnIdle { current.value = current.value.copy(nearby = nearby.copy(ageMs = age)) }
+            compose.onNodeWithText(expected).performScrollTo().assertIsDisplayed()
+        }
+        compose.runOnIdle { locales.value = LocaleList("fr-FR") }
+        compose.onNodeWithText("-52,5 dBm", substring = true).performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("-52.5 dBm", substring = true).assertDoesNotExist()
     }
 
     private fun capture(name: String) {
