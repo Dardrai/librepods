@@ -5,6 +5,12 @@ import java.io.InputStream
 import java.io.OutputStream
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 
 internal class DongleBusyException : IOException("Dongle controls are busy")
 internal class DongleRequestException(message: String) : IOException(message)
@@ -138,26 +144,93 @@ internal object DongleProtocol {
 internal class DongleSession(private val io: suspend (Int, Int, ByteArray) -> ByteArray,
     private val now: () -> Long = { System.nanoTime() / 1_000_000 },
     private val wait: suspend () -> Unit = { delay(40) },
-    val controlEpoch: Long = 0L) {
+    val controlEpoch: Long = 0L,
+    private val closeTransport: () -> Unit = {}) {
     private var sequence = 0L
     private var actionTarget: DongleProtocol.Status? = null
+    private var leaseAttempted = false
+    private var leaseFailed = false
+    private var leaseToken: Long? = null
+    private var transportBroken = false
     var status: DongleProtocol.Status? = null
         private set
-    suspend fun refresh() = DongleProtocol.status(io(1, 2, byteArrayOf())).also { current ->
-        check(actionTarget?.sameConnection(current) != false) { "AirPods connection changed; read the settings again" }
-        status = current
+    suspend fun refresh(): DongleProtocol.Status {
+        check(!transportBroken) { "Reconnect the dongle before another request" }
+        return DongleProtocol.status(io(1, 2, byteArrayOf())).also { current ->
+            check(actionTarget?.sameConnection(current) != false) { "AirPods connection changed; read the settings again" }
+            status = current
+        }
     }
 
     suspend fun <T> withTarget(target: DongleProtocol.Status, block: suspend () -> T): T {
         check(actionTarget == null)
         actionTarget = target
-        return try { refresh(); block() } finally { actionTarget = null }
+        return try { refresh(); block() } finally {
+            try {
+                leaseToken?.takeUnless { transportBroken }?.let { token -> cleanup {
+                    val current = DongleProtocol.status(io(1, 2, byteArrayOf()))
+                    if (current.sameConnection(target))
+                        check(transactRpc(7, leaseRequest(2, token), current).isEmpty())
+                } }
+            } finally {
+                actionTarget = null
+                leaseToken = null
+                leaseAttempted = false
+                leaseFailed = false
+            }
+        }
+    }
+
+    private fun leaseRequest(action: Int, token: Long) = ByteArray(6).also {
+        it[0] = 10; it[1] = action.toByte(); DongleProtocol.put32(it, 2, token)
+    }
+
+    /** Cached mode baselines also need exclusion before constructing a multi-packet edit. */
+    suspend fun acquireSettingsLease() {
+        check(actionTarget != null) { "Settings require a target-bound action" }
+        val target = refresh()
+        check(target.capabilities and 0x20 != 0) { "Update the dongle firmware before editing hearing settings" }
+        check(!leaseFailed) { "The settings lease was lost; read the settings again" }
+        val acquiring = !leaseAttempted
+        leaseAttempted = true
+        try {
+            val response = transactRpc(7, leaseRequest(if (acquiring) 0 else 1, leaseToken ?: 0), target)
+            if (acquiring) {
+                require(response.size == 5 && response[0] == 1.toByte() && DongleProtocol.u32(response, 1) != 0L)
+                leaseToken = DongleProtocol.u32(response, 1)
+            } else require(response.isEmpty())
+        } catch (error: Exception) {
+            leaseFailed = true
+            // An acquire may have succeeded even when its receipt was lost.
+            if (acquiring && error !is DongleBusyException) {
+                transportBroken = true
+                runCatching { closeTransport() }
+            }
+            throw error
+        }
+    }
+
+    private suspend fun cleanup(block: suspend () -> Unit) = withContext(NonCancellable) {
+        coroutineScope {
+            // Coroutine cancellation alone cannot interrupt BluetoothSocket's blocking I/O.
+            val watchdog = launch(start = CoroutineStart.UNDISPATCHED) { delay(1_000); runCatching { closeTransport() } }
+            try { withTimeout(1_000) { block() } }
+            catch (_: Exception) { transportBroken = true; runCatching { closeTransport() } }
+            finally { watchdog.cancel() }
+        }
     }
 
     suspend fun transact(operation: Int, data: ByteArray, beforeCommit: () -> Unit = {}): ByteArray {
         require(operation in listOf(1, 2, 3, 7) && data.size in 1..512)
+        check(!leaseFailed) { "The settings lease was lost; read the settings again" }
+        if (operation == 1 || operation == 2 || leaseToken != null) acquireSettingsLease()
         val target = refresh()
         check(operation == 7 || target.controlsReady) { "Connect the AirPods to the dongle first" }
+        return transactRpc(operation, data, target, beforeCommit)
+    }
+
+    private suspend fun transactRpc(operation: Int, data: ByteArray, target: DongleProtocol.Status,
+        beforeCommit: () -> Unit = {}): ByteArray {
         sequence = (sequence + 1).and(0xffff_ffffL).takeIf { it != 0L } ?: 1L
         val token = sequence
         val deadline = now() + 6_000
@@ -188,6 +261,7 @@ internal class DongleSession(private val io: suspend (Int, Int, ByteArray) -> By
             }
             throw IOException("Dongle request timed out; it was not retried")
         }
+        var completed = false
         try {
             var sent = 0
             while (sent < data.size) {
@@ -220,10 +294,25 @@ internal class DongleSession(private val io: suspend (Int, Int, ByteArray) -> By
             val codecRestart = operation == 7 && data[0] == 3.toByte() &&
                 current.address == target.address && runCatching { DongleProtocol.audio(result) }.isSuccess
             check(current.generation == target.generation || codecRestart) { "AirPods connection changed" }
+            completed = true
             return result
         } finally {
-            // Release only our transaction; a lost transport closes the socket separately.
-            runCatching { io(2, 3, request(5)) }
+            if (!completed) cleanup {
+                // A write acknowledgement only queues Cancel. Confirm it before another PDU.
+                io(2, 3, request(5))
+                val cancelDeadline = now() + 1_000
+                var cancelled = false
+                while (now() < cancelDeadline) {
+                    val reply = io(1, 3, byteArrayOf())
+                    DongleProtocol.checkReport(reply, 3)
+                    if (DongleProtocol.u32(reply, 8) != target.generation ||
+                        DongleProtocol.u32(reply, 12) == token && reply[21] == 4.toByte() && reply[22] == 8.toByte()) {
+                        cancelled = true; break
+                    }
+                    wait()
+                }
+                check(cancelled) { "Dongle cancellation was not confirmed" }
+            }
         }
     }
     suspend fun cached(slot: Int) = DongleProtocol.cached(transact(3, byteArrayOf(slot.toByte())))

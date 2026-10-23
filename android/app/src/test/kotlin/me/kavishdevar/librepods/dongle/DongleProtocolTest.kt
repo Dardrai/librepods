@@ -115,17 +115,24 @@ class DongleProtocolTest {
 
     private class Firmware(private val output: ByteArray = ByteArray(91) { it.toByte() }) {
         var generation = 3L
+            set(value) { if (field != value) leased = false; field = value }
         var pair = 1
+            set(value) { if (field != value) leased = false; field = value }
         var sequence = 0L
         var report = DongleProtocol.header(3).also { DongleProtocol.put32(it, 8, generation) }
         val received = ByteArrayOutputStream()
         var cancelled = false
         var commits = 0
         var fail = false
+        private var leased = false
+        private var operation = 0
+        private val staged = ByteArrayOutputStream()
+        private var response = output
         suspend fun exchange(operation: Int, id: Int, bytes: ByteArray): ByteArray {
             if (id == 2) return DongleProtocol.header(2).also {
                 it[7] = 3; DongleProtocol.put32(it, 8, generation); it[12] = pair.toByte()
                 it[19] = -1; it[20] = -1; it[21] = -1
+                it[42] = 0x20
             }
             if (operation == 1) return report.copyOf()
             val command = bytes[7].toInt()
@@ -133,30 +140,51 @@ class DongleProtocolTest {
             report = DongleProtocol.header(3).also { DongleProtocol.put32(it, 8, generation); DongleProtocol.put32(it, 12, sequence) }
             when (command) {
                 1, 2, 3, 7 -> {
-                    if (DongleProtocol.u16(bytes, 18) == 0) received.reset()
-                    received.write(bytes, 22, bytes[20].toInt() and 255)
-                    report[21] = 1; report[18] = received.size().toByte(); report[19] = (received.size() shr 8).toByte()
+                    this.operation = command
+                    if (DongleProtocol.u16(bytes, 18) == 0) staged.reset()
+                    staged.write(bytes, 22, bytes[20].toInt() and 255)
+                    if (command != 7 || staged.toByteArray()[0] != 10.toByte()) {
+                        received.reset(); received.write(staged.toByteArray())
+                    }
+                    report[21] = 1; report[18] = staged.size().toByte(); report[19] = (staged.size() shr 8).toByte()
                 }
-                6 -> { commits++; if (fail) { report[21] = 4; report[22] = 7 } else page(0) }
+                6 -> {
+                    val request = staged.toByteArray()
+                    if (this.operation == 7 && request[0] == 10.toByte()) {
+                        assertEquals(6, request.size)
+                        when (request[1].toInt()) {
+                            0 -> { assertFalse(leased); leased = true; response = byteArrayOf(1, 42, 0, 0, 0) }
+                            1 -> { assertTrue(leased); assertEquals(42L, DongleProtocol.u32(request, 2)); response = byteArrayOf() }
+                            2 -> { assertTrue(leased); leased = false; response = byteArrayOf() }
+                            else -> error("Unknown lease action")
+                        }
+                        page(0)
+                    } else {
+                        if (this.operation in 1..2) assertTrue(leased)
+                        commits++; response = output
+                        if (fail) { report[21] = 4; report[22] = 7 } else page(0)
+                    }
+                }
                 4 -> page(DongleProtocol.u16(bytes, 18))
-                5 -> cancelled = true
+                5 -> { cancelled = true; report[21] = 4; report[22] = 8 }
             }
             return report.copyOf()
         }
         private fun page(offset: Int) {
-            report[21] = 3; report[16] = output.size.toByte(); report[17] = (output.size shr 8).toByte()
+            report[21] = 3; report[16] = response.size.toByte(); report[17] = (response.size shr 8).toByte()
             report[18] = offset.toByte(); report[19] = (offset shr 8).toByte()
-            val size = minOf(42, output.size - offset); report[20] = size.toByte()
-            output.copyInto(report, 22, offset, offset + size)
+            val size = minOf(42, response.size - offset); report[20] = size.toByte()
+            response.copyInto(report, 22, offset, offset + size)
         }
     }
     @Test fun staged_requests_and_paginated_responses_execute_once_and_release_owner() = runBlocking {
         val firmware = Firmware()
         val request = ByteArray(140) { (it * 2).toByte() }
-        val response = DongleSession(firmware::exchange).transact(2, request)
+        val client = DongleSession(firmware::exchange)
+        val response = client.withTarget(client.refresh()) { client.transact(2, request) }
         assertArrayEquals(request, firmware.received.toByteArray())
         assertArrayEquals(ByteArray(91) { it.toByte() }, response)
-        assertEquals(1, firmware.commits); assertTrue(firmware.cancelled)
+        assertEquals(1, firmware.commits); assertFalse(firmware.cancelled)
     }
     @Test fun failed_writes_are_not_retried_and_client_releases_its_transaction() = runBlocking {
         val firmware = Firmware().also { it.fail = true }
@@ -210,7 +238,7 @@ class DongleProtocolTest {
             })
             if (request[0] == 3.toByte()) assertArrayEquals(output, client.transact(7, request))
             else try { client.transact(7, request); fail() } catch (_: IllegalStateException) { }
-            assertEquals(1, firmware.commits); assertTrue(firmware.cancelled)
+            assertEquals(1, firmware.commits); assertEquals(request[0] != 3.toByte(), firmware.cancelled)
         }
     }
     @Test fun erased_codec_receipt_is_reconciled_read_only_and_never_replayed() = runBlocking {
@@ -278,7 +306,7 @@ class DongleProtocolTest {
             if (op == 2) writes++
             response
         }, { clock }, { clock += 1000 })
-        try { client.transact(2, byteArrayOf(4)); fail() } catch (_: IOException) { }
+        try { client.withTarget(client.refresh()) { client.transact(2, byteArrayOf(4)) }; fail() } catch (_: IOException) { }
         assertTrue(writes <= 2); assertTrue(firmware.cancelled)
     }
     @Test fun timeout_is_bounded_and_cancels_without_a_second_write_attempt() = runBlocking {
@@ -291,8 +319,8 @@ class DongleProtocolTest {
             if (op == 2) writes++
             response
         }, { clock }, { clock += 1000 })
-        try { client.transact(2, byteArrayOf(4)); fail() } catch (_: IOException) { }
-        assertEquals(6000L, clock); assertEquals(2, writes); assertEquals(0, firmware.commits)
+        try { client.withTarget(client.refresh()) { client.transact(2, byteArrayOf(4)) }; fail() } catch (_: IOException) { }
+        assertEquals(7000L, clock); assertEquals(2, writes); assertEquals(0, firmware.commits)
         assertTrue(firmware.cancelled)
     }
     @Test fun att_discovers_uuid_and_rejects_overlapping_pages() = runBlocking {

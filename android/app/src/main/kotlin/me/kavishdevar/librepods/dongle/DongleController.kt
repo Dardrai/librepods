@@ -123,7 +123,8 @@ internal class DongleController(context: Context) : Closeable {
                         catch (rejected: DongleRequestException) { throw rejected }
                         catch (error: Exception) { runCatching { transport.close() }; throw error }
                     }
-                }, now = SystemClock::elapsedRealtime, controlEpoch = mine)
+                }, now = SystemClock::elapsedRealtime, controlEpoch = mine,
+                    closeTransport = { transport.close() })
                 io.withLock {
                     val status = client.refresh()
                     lifecycle.publish(mine) {
@@ -347,6 +348,7 @@ internal class DongleController(context: Context) : Closeable {
     fun readHearing() = command { client -> readProfile(client); refreshHearing(client) }
     fun hearingMode(mode: HearingMode, enabled: Boolean) = command { client ->
         check(hearingSupported()) { "Hearing assistance is unavailable on this model" }
+        client.acquireSettingsLease()
         val generation = client.refresh().generation
         refreshHearing(client)
         val original = mutableState.value.hearingModes

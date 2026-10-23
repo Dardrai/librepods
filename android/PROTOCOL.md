@@ -4,6 +4,18 @@ These contracts follow the captured formats and NTPods implementation at
 [`58ad399`](https://github.com/Ripthulhu/ntpods/tree/58ad3998f18e89ea1ed611b9a2e8aec11b7382bf).
 They describe wire handling, not a guarantee that every feature works on every host.
 
+## Dongle settings
+
+Dongle hearing actions require report-2 capability `0x20`. A client/session-bound
+lease covers baseline reads, edits, verification and mode cleanup, preventing a
+concurrent PC edit from being silently overwritten. Expired leases cannot be
+reacquired inside an action; older firmware needs an update. Completed RPCs retain
+their receipt, while failed requests must finish cancellation before cleanup or
+release. Queued device-setting writes complete only after local transmission;
+device readback remains separate. The
+[dongle reference](https://github.com/Ripthulhu/airpods-dongle/blob/main/docs/CONTROL-EXTENSIONS.md#settings-workflow-lease)
+defines lease actions, tokens and deadlines.
+
 ## Boolean control values
 
 Ear Detection control `0x0A` uses `2` for enabled and `1` for disabled. Ordinary

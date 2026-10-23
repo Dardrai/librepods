@@ -8,6 +8,8 @@ import android.media.AudioManager
 import android.telephony.TelephonyCallback
 import android.telephony.TelephonyManager
 import java.io.ByteArrayOutputStream
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import kotlin.coroutines.Continuation
 import kotlin.coroutines.intrinsics.suspendCoroutineUninterceptedOrReturn
 import kotlinx.coroutines.CompletableDeferred
@@ -15,10 +17,15 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.withTimeout
+import me.kavishdevar.librepods.core.bluetooth.att.types.parseHearingAidSettingsResponse
+import me.kavishdevar.librepods.core.devices.AppleMetadata
+import me.kavishdevar.librepods.core.devices.HearingMode
 import me.kavishdevar.librepods.services.LibrePodsService
 import me.kavishdevar.librepods.shizuku.BridgeState
 import me.kavishdevar.librepods.shizuku.ShizukuAudioClient
@@ -65,6 +72,88 @@ class DongleControllerLifecycleTest {
         controller.close()
         service?.let { (serviceField("serviceScope").get(it) as CoroutineScope).cancel() }
         mediaAudio.set(null, previousAudio)
+    }
+
+    @Test fun aHearingProfileEditExcludesUsbBetweenItsComparisonAndVerifiedWrite() = runBlocking<Unit> {
+        val firmware = DongleLeaseFirmware()
+        val client = DongleSession(firmware::exchange, closeTransport = firmware::close)
+        attach(client, client.refresh())
+        var profile = ByteArray(104).also { it[0] = 2; it[1] = 2; it[2] = 0x60 }
+        field("profileData").set(controller, profile.copyOf())
+        field("profileCharacteristic").set(controller, DongleAtt.Characteristic(0x20, 0x12))
+        @Suppress("UNCHECKED_CAST")
+        val state = field("mutableState").get(controller) as MutableStateFlow<DongleState>
+        state.value = state.value.copy(metadata = AppleMetadata(modelNumber = "A3063"),
+            hearingProfile = checkNotNull(parseHearingAidSettingsResponse(profile)))
+        var competingWrites = 0
+        firmware.beforeRawReply = {
+            if (firmware.rawRequests.size == 1) {
+                competingWrites++
+                assertFalse(firmware.competingEdit {
+                    ByteBuffer.wrap(profile).order(ByteOrder.LITTLE_ENDIAN).putFloat(100, 0.5f)
+                })
+            }
+        }
+        firmware.rawReply = { operation, request ->
+            assertEquals(1, operation)
+            when (request[0].toInt()) {
+                0x0a -> byteArrayOf(0x0b) + profile
+                0x12 -> { profile = request.copyOfRange(3, request.size); byteArrayOf(0x13) }
+                else -> error("Unexpected ATT request")
+            }
+        }
+        controller.updateHearing { it.copy(leftTone = 0.25f, rightTone = 0.25f) }
+        awaitCommand()
+        assertNull(controller.state.value.error)
+        assertEquals(1, competingWrites)
+        assertEquals(listOf(0, 1, 1, 2), firmware.actions)
+        val written = checkNotNull(parseHearingAidSettingsResponse(profile))
+        assertEquals(0.25f, written.leftTone, 0f)
+        assertEquals(0f, written.ownVoiceAmplification, 0f)
+        assertTrue(firmware.competingEdit {
+            ByteBuffer.wrap(profile).order(ByteOrder.LITTLE_ENDIAN).putFloat(100, 0.5f)
+        })
+        assertEquals(0.5f, checkNotNull(parseHearingAidSettingsResponse(profile)).ownVoiceAmplification, 0f)
+    }
+
+    @Test fun modeChangeLeasesBeforeCachedBaselinesAndHoldsThroughPmeConfirmation() = runBlocking<Unit> {
+        val firmware = DongleLeaseFirmware()
+        val client = DongleSession(firmware::exchange, closeTransport = firmware::close)
+        attach(client, client.refresh())
+        @Suppress("UNCHECKED_CAST")
+        val state = field("mutableState").get(controller) as MutableStateFlow<DongleState>
+        state.value = state.value.copy(metadata = AppleMetadata(modelNumber = "A3063"))
+        val hearing = byteArrayOf(4, 0, 4, 0, 9, 0, 0x2c, 1, 2, 0, 0)
+        var gate = byteArrayOf(4, 0, 4, 0, 9, 0, 0x33, 1, 0, 0, 0)
+        var pme = ByteArray(140).also {
+            byteArrayOf(4, 0, 4, 0, 0x53, 0, 0x84.toByte(), 0, 2, 1, 1, 1).copyInto(it)
+        }
+        var revision = 1L
+        firmware.cachedReply = { slot ->
+            assertNotNull("Mode baselines and confirmations must stay leased", firmware.token)
+            val packet = when (slot) { 2 -> hearing; 3 -> gate; 4 -> pme; else -> error("Unexpected cached slot") }
+            ByteArray(8).also { DongleProtocol.put32(it, 4, revision) } + packet
+        }
+        firmware.rawReply = { operation, request ->
+            assertEquals(2, operation)
+            if (request[4] == 0x53.toByte()) pme = request.copyOf() else gate = request.copyOf()
+            revision++
+            byteArrayOf()
+        }
+        controller.hearingMode(HearingMode.MEDIA_ASSIST, false)
+        awaitCommand()
+        assertNull(controller.state.value.error)
+        assertEquals(false, controller.state.value.hearingModes.mediaAssistEnabled)
+        assertEquals(2, firmware.rawRequests.size)
+        assertTrue(firmware.events.indexOf("lease0") < firmware.events.indexOf("cached2"))
+        assertEquals(0, firmware.actions.first())
+        assertEquals(2, firmware.actions.last())
+        assertEquals(1, firmware.actions.count { it == 0 })
+        assertNull(firmware.token)
+    }
+
+    private suspend fun awaitCommand() = withTimeout(3_000) {
+        while (controller.state.value.busy) delay(1)
     }
 
     @Test fun leavingFinderWhileStartIsAwaitingStopsTheLateAcceptedLeaseAndNeverPollsIt() = runBlocking<Unit> {
