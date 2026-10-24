@@ -129,6 +129,22 @@ class AppleStateObserverTest {
         Dispatchers.resetMain()
     }
 
+    @Test fun batteryTimestampRefreshesReachAgeTrackingWithoutRepostingTheNotification() = runBlocking<Unit> {
+        observe()
+        val reading = Battery(BatteryComponent.LEFT, 80, BatteryStatus.CHARGING, 1000)
+        states.value = states.value.copy(battery = setOf(reading))
+        await { calls(notifications, "notify") == 1 }
+        repeat(3) { index ->
+            val before = calls(island, "updatePairedBattery")
+            states.value = states.value.copy(battery = setOf(reading.copy(observedAt = 2000L + index)))
+            await { calls(island, "updatePairedBattery") > before }
+        }
+        states.value = states.value.copy(battery = setOf(reading.copy(status = BatteryStatus.NOT_CHARGING, observedAt = 3000)))
+        await { calls(notifications, "notify") >= 2 }
+        assertEquals(2, calls(notifications, "notify"))
+        assertEquals(3000L, states.value.battery.single().observedAt)
+    }
+
     @Test fun hostHoldEventsReachTheHandlerWithALocalAudioOutput() = runBlocking<Unit> {
         val events = stemEvents()
         val socket = mock(BluetoothSocket::class.java)

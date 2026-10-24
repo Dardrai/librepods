@@ -256,6 +256,165 @@ class NoiseControlSettingsTest {
         assertEquals("The thumb must display the changed request", 80f + finalRequested * 1.6f, thumbLeft(), 1.5f)
     }
 
+    @GraphicsMode(GraphicsMode.Mode.LEGACY)
+    @Test fun adaptiveEndsResistAccidentalModeChangesAndSettleAtTheFullStrengthLimits() {
+        val mode = mutableStateOf(4)
+        val requested = mutableStateOf<Int?>(50)
+        val modes = mutableListOf<Int>()
+        val showOff = mutableStateOf(false)
+        val railWidth = mutableStateOf(400)
+        compose.setContent {
+            LibrePodsTheme(designSystem = DesignSystem.Apple) {
+                NoiseControlSettings(modifier = Modifier.width(railWidth.value.dp).height(64.dp),
+                    showOffListeningMode = showOff.value, noiseControlModeValue = mode.value,
+                    onNoiseControlModeChanged = { modes += it; mode.value = it },
+                    adaptiveStrength = 50, requestedAdaptiveStrength = requested.value,
+                    onAdaptiveStrengthChanged = { requested.value = it }, showLabels = false)
+            }
+        }
+        for (width in listOf(400, 280)) for (off in listOf(false, true)) for (direction in listOf(-1f, 1f)) {
+            compose.runOnIdle { railWidth.value = width; showOff.value = off; mode.value = 4; requested.value = 50; modes.clear() }
+            settle()
+            val thumb = compose.onNodeWithTag("noise-control-thumb")
+            val modeWidth = width / 5f
+            thumb.performTouchInput { down(center); moveBy(Offset((1.5f * modeWidth + 20f) * direction, 0f)) }
+            compose.mainClock.advanceTimeBy(100)
+            compose.waitForIdle()
+            assertEquals("A small pull past Adaptive's end must stay in Adaptive", 4, mode.value)
+            assertTrue("No neighboring mode request may escape the detent: $modes", modes.all { it == 4 })
+            val acceptedBeforeFinish = requireNotNull(requested.value)
+            thumb.performTouchInput { if (off) cancel() else up() }
+            settle()
+            assertEquals(4, mode.value)
+            val finalStrength = if (off) acceptedBeforeFinish else if (direction < 0) 0 else 100
+            assertEquals("Release commits the endpoint; cancellation keeps the last accepted strength", finalStrength, requested.value)
+            assertEquals("Finishing settles at the accepted strength", modeWidth + finalStrength * (2f * modeWidth) / 100f, thumbLeft(), 1.5f)
+        }
+    }
+
+    @GraphicsMode(GraphicsMode.Mode.LEGACY)
+    @Test fun adaptiveEndsTickOnceOnArrivalAndRearmAfterLeavingTheDetent() {
+        val requested = mutableStateOf<Int?>(50)
+        val reported = mutableStateOf(50)
+        val width = mutableStateOf(400)
+        val feedback = mutableListOf<HapticFeedbackType>()
+        compose.setContent {
+            CompositionLocalProvider(LocalHapticFeedback provides object : HapticFeedback {
+                override fun performHapticFeedback(hapticFeedbackType: HapticFeedbackType) { feedback += hapticFeedbackType }
+            }) {
+                LibrePodsTheme(designSystem = DesignSystem.Apple) {
+                    NoiseControlSettings(modifier = Modifier.width(width.value.dp).height(64.dp),
+                        showOffListeningMode = false, noiseControlModeValue = 4,
+                        onNoiseControlModeChanged = {}, adaptiveStrength = reported.value,
+                        requestedAdaptiveStrength = requested.value,
+                        onAdaptiveStrengthChanged = { requested.value = it }, showLabels = false)
+                }
+            }
+        }
+        for (railWidth in listOf(400, 280)) for (direction in listOf(-1f, 1f)) {
+            compose.runOnIdle { width.value = railWidth; requested.value = 50; feedback.clear() }
+            settle()
+            val thumb = compose.onNodeWithTag("noise-control-thumb")
+            thumb.performTouchInput { down(center); moveBy(Offset(30f * direction, 0f)) }
+            compose.mainClock.advanceTimeBy(100)
+            compose.waitForIdle()
+            assertEquals("Starting a strength adjustment ticks once", 1, feedback.size)
+            val outward = railWidth / 5f + 20f
+            thumb.performTouchInput { moveBy(Offset(outward * direction, 0f)) }
+            compose.mainClock.advanceTimeBy(100)
+            compose.waitForIdle()
+            assertEquals("Reaching the strength limit adds one tick", 2, feedback.size)
+            thumb.performTouchInput {
+                moveBy(Offset(direction, 0f)); moveBy(Offset(-2f * direction, 0f)); moveBy(Offset(direction, 0f))
+            }
+            compose.mainClock.advanceTimeBy(100)
+            compose.waitForIdle()
+            assertEquals("Holding and moving within the detent stays quiet", 2, feedback.size)
+            thumb.performTouchInput { moveBy(Offset(-60f * direction, 0f)) }
+            compose.mainClock.advanceTimeBy(100)
+            compose.waitForIdle()
+            thumb.performTouchInput { moveBy(Offset(60f * direction, 0f)) }
+            compose.mainClock.advanceTimeBy(100)
+            compose.waitForIdle()
+            assertEquals("Returning deliberately to the endpoint ticks again", 3, feedback.size)
+            thumb.performTouchInput { up() }
+            settle()
+            assertEquals("Release must not duplicate the endpoint tick", 3, feedback.size)
+            assertTrue(feedback.all { it == HapticFeedbackType.SegmentTick })
+            compose.runOnIdle { requested.value = null; reported.value = if (direction < 0) 100 else 0 }
+            settle()
+            assertEquals("Report-driven movement between endpoints stays quiet", 3, feedback.size)
+        }
+    }
+
+    @GraphicsMode(GraphicsMode.Mode.LEGACY)
+    @Test fun beginningAtAnAdaptiveEndDoesNotTickOnPressOutwardMovementOrCancellation() {
+        val strength = mutableStateOf(0)
+        val feedback = mutableListOf<HapticFeedbackType>()
+        compose.setContent {
+            CompositionLocalProvider(LocalHapticFeedback provides object : HapticFeedback {
+                override fun performHapticFeedback(hapticFeedbackType: HapticFeedbackType) { feedback += hapticFeedbackType }
+            }) {
+                LibrePodsTheme(designSystem = DesignSystem.Apple) {
+                    NoiseControlSettings(modifier = Modifier.width(400.dp).height(64.dp),
+                        showOffListeningMode = false, noiseControlModeValue = 4,
+                        onNoiseControlModeChanged = {}, adaptiveStrength = strength.value,
+                        onAdaptiveStrengthChanged = {}, showLabels = false)
+                }
+            }
+        }
+        for (endpoint in listOf(0, 100)) {
+            compose.runOnIdle { strength.value = endpoint }
+            settle()
+            compose.onNodeWithTag("noise-control-thumb").performTouchInput {
+                down(center); moveBy(Offset(if (endpoint == 0) -25f else 25f, 0f))
+            }
+            compose.mainClock.advanceTimeBy(100)
+            compose.waitForIdle()
+            compose.onNodeWithTag("noise-control-thumb").performTouchInput { cancel() }
+            settle()
+            assertTrue("An already selected endpoint must not tick again", feedback.isEmpty())
+        }
+    }
+
+    @GraphicsMode(GraphicsMode.Mode.LEGACY)
+    @Test fun continuingPastTheAdaptiveDetentStillSelectsTheAdjacentMode() {
+        val mode = mutableStateOf(4)
+        val requested = mutableStateOf<Int?>(50)
+        compose.setContent {
+            LibrePodsTheme(designSystem = DesignSystem.Apple) {
+                NoiseControlSettings(modifier = Modifier.width(400.dp).height(64.dp),
+                    showOffListeningMode = false, noiseControlModeValue = mode.value,
+                    onNoiseControlModeChanged = { mode.value = it },
+                    adaptiveStrength = 50, requestedAdaptiveStrength = requested.value,
+                    onAdaptiveStrengthChanged = { requested.value = it }, showLabels = false)
+            }
+        }
+        for (direction in listOf(-1f, 1f)) {
+            compose.runOnIdle { mode.value = 4; requested.value = 50 }
+            settle()
+            val thumb = compose.onNodeWithTag("noise-control-thumb")
+            thumb.performTouchInput { down(center); moveBy(Offset(140f * direction, 0f)) }
+            compose.mainClock.advanceTimeBy(100)
+            compose.waitForIdle()
+            assertEquals(4, mode.value)
+            thumb.performTouchInput { moveBy(Offset(100f * direction, 0f)); up() }
+            settle()
+            assertEquals("A continued pull must still switch modes", if (direction < 0) 3 else 2, mode.value)
+        }
+    }
+
+    @Test fun adaptiveResistanceDoesNotCompressTheStrengthRangeOrAccumulateOnReversal() {
+        for (position in listOf(80f, 120f, 160f, 200f, 240f))
+            assertEquals(position, resistAdaptiveExit(position, 80f, 240f), 0.001f)
+        assertEquals(72f, resistAdaptiveExit(64f, 80f, 240f), 0.001f)
+        assertEquals(248f, resistAdaptiveExit(256f, 80f, 240f), 0.001f)
+        assertTrue(resistAdaptiveExit(20f, 80f, 240f) + 40f < 80f)
+        assertTrue(resistAdaptiveExit(300f, 80f, 240f) + 40f > 320f)
+        assertEquals(100f, resistAdaptiveExit(100f, 80f, 240f), 0.001f)
+        assertEquals(40f, resistAdaptiveExit(40f, 80f, 80f), 0.001f)
+    }
+
     @Test fun materialStrengthOnlyWritesForUserInputAndFollowsRequestedAndReportedValues() {
         val reported = mutableStateOf(30)
         val requested = mutableStateOf<Int?>(null)

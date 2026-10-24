@@ -136,7 +136,16 @@ import me.kavishdevar.librepods.presentation.design.LocalDesignSystem
 import me.kavishdevar.librepods.presentation.icons.LocalIcons
 import me.kavishdevar.librepods.presentation.utils.LocalDebugMode
 import kotlin.math.roundToInt
+import kotlin.math.abs
+import kotlin.math.sign
 import kotlin.time.Duration.Companion.milliseconds
+
+// Keep the full strength range; an extra 16dp pull breaks out to an adjacent mode.
+internal fun resistAdaptiveExit(offset: Float, start: Float, end: Float): Float {
+    if (end <= start) return offset
+    val excess = offset - offset.coerceIn(start, end)
+    return offset - sign(excess) * minOf(abs(excess) / 2f, 16f)
+}
 
 @Composable
 fun NoiseControlSettings(
@@ -740,6 +749,8 @@ fun NoiseControlSettings(
                         .pointerInput(enabled, showAdaptiveMode) {
                             if (!enabled) return@pointerInput
                             var dragStartRootX: Float? = null
+                            var adaptiveDragRange: ClosedFloatingPointRange<Float>? = null
+                            var adaptiveFeedbackEnd: Int? = null
                             detectHorizontalDragGestures(
                                 onDragStart = {
                                     dragFeedbackMode = currentMode
@@ -747,6 +758,15 @@ fun NoiseControlSettings(
                                     dragOffset = offset.value
                                     dragStartOffset = dragOffset
                                     dragStartRootX = null
+                                    adaptiveDragRange = if (currentMode == 4 && currentShowAdaptive)
+                                        currentAdaptiveStart..(currentAncStart - currentModeWidth) else null
+                                    adaptiveFeedbackEnd = adaptiveDragRange?.let {
+                                        when {
+                                            dragOffset <= it.start -> 0
+                                            dragOffset >= it.endInclusive -> 100
+                                            else -> null
+                                        }
+                                    }
                                     isDragging = true
                                 },
                                 onDragEnd = {
@@ -804,7 +824,23 @@ fun NoiseControlSettings(
                                 dragStartRootX = startRootX
                                 val newOffset = dragStartOffset + with(density) { (rootX - startRootX).toDp().value }
                                 val maxTravel = (currentWidth - currentModeWidth).coerceAtLeast(0f)
-                                val safeOffset = newOffset.coerceIn(0f, maxTravel)
+                                val resistedOffset = adaptiveDragRange?.let {
+                                    val reachedEnd = when {
+                                        newOffset <= it.start -> 0
+                                        newOffset >= it.endInclusive -> 100
+                                        else -> null
+                                    }
+                                    if (reachedEnd != null && reachedEnd != adaptiveFeedbackEnd) {
+                                        adaptiveFeedbackEnd = reachedEnd
+                                        dragStrengthFeedbackSent = true
+                                        haptics.performHapticFeedback(HapticFeedbackType.SegmentTick)
+                                    } else if (newOffset > it.start + 4f && newOffset < it.endInclusive - 4f) {
+                                        // Leave the detent before rearming its tick, avoiding edge jitter.
+                                        adaptiveFeedbackEnd = null
+                                    }
+                                    resistAdaptiveExit(newOffset, it.start, it.endInclusive)
+                                } ?: newOffset
+                                val safeOffset = resistedOffset.coerceIn(0f, maxTravel)
                                 dragOffset = safeOffset
 
                                 animationCoroutineScope.launch {

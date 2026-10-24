@@ -114,6 +114,7 @@ import me.kavishdevar.librepods.core.devices.effectiveEarDetection
 import me.kavishdevar.librepods.core.devices.Battery
 import me.kavishdevar.librepods.core.devices.BatteryComponent
 import me.kavishdevar.librepods.core.devices.BatteryStatus
+import me.kavishdevar.librepods.core.devices.hasSameDisplayValues
 import me.kavishdevar.librepods.core.devices.ComponentStatus
 import me.kavishdevar.librepods.core.devices.ConnectionState
 import me.kavishdevar.librepods.core.devices.Device
@@ -1947,7 +1948,7 @@ class LibrePodsService: Service() {
                 }
             }
 
-            if (state.battery != previousState.battery) {
+            if (!state.battery.hasSameDisplayValues(previousState.battery)) {
                 Log.i(
                     TAG,
                     "battery state changed for device ${device.macAddress.toRedactedString()}"

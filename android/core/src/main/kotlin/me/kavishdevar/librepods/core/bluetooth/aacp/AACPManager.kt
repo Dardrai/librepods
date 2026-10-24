@@ -437,7 +437,7 @@ class AACPManager(private val device: AppleDevice,
                 publishForTransport(this, sourceSocket, ::captureAudioSocket) {
                     device.updateState {
                         it.copy(
-                            leftIsPrimary = when (payload[0].toInt() and 255) { 1 -> true; 0 -> false; else -> it.leftIsPrimary },
+                            leftIsPrimary = when (payload[0].toInt() and 255) { 1 -> true; 2 -> false; else -> it.leftIsPrimary },
                             budRoleRaw = payload.map { byte -> byte.toInt() and 255 },
                             aacpPackets = it.aacpPackets + packet
                         )

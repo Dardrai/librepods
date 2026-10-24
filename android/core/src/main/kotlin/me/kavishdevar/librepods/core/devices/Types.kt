@@ -66,6 +66,13 @@ data class Battery(
         now >= observedAt && now - observedAt < 90_000
 }
 
+/** Presentation only: device state must still retain every accepted observation's timestamp. */
+fun Set<Battery>.hasSameDisplayValues(other: Set<Battery>): Boolean = size == other.size && all { battery ->
+    val next = other.singleOrNull { it.component == battery.component }
+    next != null && battery.level == next.level && battery.status == next.status &&
+        battery.present == next.present && (battery.observedAt == null) == (next.observedAt == null)
+}
+
 /** Omitted components keep their age; unavailable or unknown reports retain only their last known percentage. */
 fun mergeBatteryReports(previous: Set<Battery>, reported: Set<Battery>, retainUnavailable: Boolean = true): Set<Battery> {
     val merged = previous.filter { retainUnavailable || it.isLive() && it.status != BatteryStatus.DISCONNECTED }

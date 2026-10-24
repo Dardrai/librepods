@@ -15,6 +15,7 @@ import me.kavishdevar.librepods.bluetooth.NearbyPairingController
 import me.kavishdevar.librepods.core.bluetooth.MacAddress
 import me.kavishdevar.librepods.core.bluetooth.aacp.AACPManager
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.MagicKeyType
+import me.kavishdevar.librepods.core.bluetooth.ble.CaseBatteryReport
 import me.kavishdevar.librepods.core.devices.*
 import me.kavishdevar.librepods.database.app.AppSettingsEntity
 import me.kavishdevar.librepods.presentation.overlays.IslandWindow
@@ -159,6 +160,24 @@ class CaseBatteryScanTest {
             device.state.value.battery.first { it.component == BatteryComponent.LEFT })
     }
 
+    @Test fun identicalCaseValuesRefreshFreshnessWithoutAVisualChangeAndExpireFromTheLatestObservation() {
+        val device = device()
+        install(device)
+        // Packet reception time makes the first reading older without relying on wall-clock sleeps.
+        scan(observed = SystemClock.elapsedRealtimeNanos() - 1_000_000_000L)
+        val first = device.state.value.battery
+        advance(1_000)
+        scan(value = plain.copyOf().apply { this[12] = (this[12] + 1).toByte() })
+        val fresh = device.state.value.battery
+        assertTrue(first.hasSameDisplayValues(fresh))
+        assertNotEquals(first, fresh)
+        device.expireNearbyBattery(first.first().observedAt!! + 90_000)
+        assertEquals(fresh, device.state.value.battery)
+        device.expireNearbyBattery(fresh.first().observedAt!! + 90_000)
+        assertFalse(fresh.hasSameDisplayValues(device.state.value.battery))
+        assertTrue(device.state.value.battery.all { !it.present })
+    }
+
     @Test fun connectedAACPReadingsWinAndLaterControlReportsReplaceCaseFallback() {
         val device = device(connected = true)
         install(device)
@@ -207,8 +226,10 @@ class CaseBatteryScanTest {
         val recent = setOf(Battery(BatteryComponent.LEFT, 80, BatteryStatus.NOT_CHARGING, now),
             Battery(BatteryComponent.CASE, 70, BatteryStatus.NOT_CHARGING, now))
         device.receiveNearbyBattery(recent)
-        scan(value = plain.copyOf().apply { this[3] = 1; this[4] = -1 },
-            observed = SystemClock.elapsedRealtimeNanos() - 1_000_000_000)
+        // Test snapshot ordering directly; scanner mock/class loading can take longer than its apparent packet age.
+        val report = requireNotNull(CaseBatteryReport.decode(
+            advertisement(plain.copyOf().apply { this[3] = 1; this[4] = -1 }), key, AirPodsModel.AIRPODS_PRO_3, now - 1000))
+        device.receiveCaseBattery(report.batteries, now - 1000)
         assertTrue(device.state.value.battery.containsAll(recent))
         assertEquals(93, device.state.value.battery.first { it.component == BatteryComponent.RIGHT }.level)
         assertTrue(device.state.value.battery.first { it.component == BatteryComponent.RIGHT }.observedAt!! < now)

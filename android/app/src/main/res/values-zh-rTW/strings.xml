@@ -224,4 +224,7 @@
     <string name="bypass_compatiblity_check_confirmation">你確定你的裝置原生支援或已啟用 Xposed 模組嗎？</string>
     <string name="not_supported">不支援</string>
     <string name="check_the_repository_for_more_info">請查看儲存庫以獲取更多資訊。</string>
+    <string name="eq_low">低頻</string>
+    <string name="eq_mid">中頻</string>
+    <string name="eq_high">高頻</string>
 </resources>

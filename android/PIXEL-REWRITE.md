@@ -9,6 +9,24 @@ checks, not the frontend base.
 
 ## Build and upgrade
 
+Selective ports from upstream `android/rewrite` through `80aa746` retain the
+fork's protocol, ownership and presentation safeguards:
+
+- Primary-bud role `0x08` maps 1 to left and 2 to right, matching the saved
+  macOS handoff in `MACOS-CASE-CAPTURE-2026-10-12.md`, frame 2144. Exact-length,
+  header and owning-socket checks remain; unknown roles retain the current side.
+- Battery presentation compares component membership, percentage, charging state,
+  presence and whether a reading exists. Fresh observation timestamps still reach
+  device state, replay protection, expiry and the pairing/island age timers.
+  Timestamp-only updates no longer refresh the main screens, widgets or notification.
+- Translations from upstream `946ecb39` add Japanese (`values-ja`) and Korean and
+  improve existing locales, especially German and Simplified Chinese. Fork-specific
+  copy and saved stem-action names remain unchanged. Untranslated fork features
+  use the default English resources.
+- EQ Low/Mid/High labels use translated resources, adapting `1f70650` without its
+  unrelated onboarding changes. No BLE takeover, theming or database migration
+  from the upstream branch is included.
+
 Use JDK 21 and the Android SDK/NDK versions declared by the project. The existing
 Gradle toolchain configuration selects/downloads JDK 25 for its daemon. Run
 `./gradlew verifyPixel` from `android/`. This checks core and app unit tests,
@@ -24,7 +42,7 @@ pair, local behavior choices and correctly owner-bound BLE keys once. Existing
 rewrite database rows are preserved. Unconfirmed device control values are not
 migrated as device reports. The Android Bluetooth bond stays with Android.
 
-The current fork version is `2.0.0-alpha.1-pixel69`, code `200000154`.
+The current fork version is `2.0.0-alpha.1-pixel94`, code `200000179`.
 
 Apple is the default design system for new or unset preferences, including the
 initial loading frame. Saved theme choices are preserved, and light/dark mode
@@ -32,6 +50,9 @@ continues to follow the existing night-theme preference.
 
 The listening-mode slider includes the first movement beyond Android's drag
 threshold, so short Adaptive-strength drags commit their changed position.
+Drags starting in Adaptive soften movement just beyond either strength endpoint,
+adding up to 16dp of resistance before switching modes. The full 0–100 range,
+deliberate mode changes, direct taps and accessibility adjustments stay available.
 Mode changes requested through the on-screen listening controls update those
 controls without opening another island notice. Independent changes made on
 the AirPods still announce their mode.

@@ -62,6 +62,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -89,6 +90,7 @@ import me.kavishdevar.librepods.presentation.design.DesignSystem
 import me.kavishdevar.librepods.presentation.design.LocalDesignSystem
 import me.kavishdevar.librepods.presentation.icons.LocalIcons
 import me.kavishdevar.librepods.presentation.utils.createAirPodsBatteryRichText
+import me.kavishdevar.librepods.presentation.viewmodel.sameDisplayedAppleState
 import me.kavishdevar.librepods.presentation.screens.settings.CompanionHomeSection
 import me.kavishdevar.librepods.presentation.screens.settings.rememberLibrePodsService
 import kotlin.math.min
@@ -159,7 +161,13 @@ fun DeviceListScreen(
 
             devices.forEach { (macAddress, device) ->
                 val connectionState by device.connectionState.collectAsState()
-                val deviceState by device.state.collectAsState()
+                val displayState = remember(device) {
+                    device.state.distinctUntilChanged { previous, current ->
+                        if (previous is AppleState && current is AppleState) sameDisplayedAppleState(previous, current)
+                        else previous == current
+                    }
+                }
+                val deviceState by displayState.collectAsState(initial = remember(device) { device.state.value })
                 val deviceMetadata by device.metadata.collectAsState()
                 val deviceSettings by device.settings.collectAsState()
                 val canConnect = connectionState in setOf(ConnectionState.AVAILABLE, ConnectionState.DISCONNECTED) &&

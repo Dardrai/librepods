@@ -520,7 +520,7 @@ fun EqualizerCard(
                         modifier = Modifier.weight(1f)
                     ) {
                         Text(
-                            text = "Low".uppercase(),
+                            text = stringResource(R.string.eq_low).uppercase(),
                             style = MaterialTheme.typography.labelSmallEmphasized,
                             color = MaterialTheme.colorScheme.onSurface.copy(0.2f),
                             textAlign = TextAlign.Center,
@@ -531,7 +531,7 @@ fun EqualizerCard(
                         modifier = Modifier.weight(1f)
                     ) {
                         Text(
-                            text = "Mid".uppercase(),
+                            text = stringResource(R.string.eq_mid).uppercase(),
                             style = MaterialTheme.typography.labelSmallEmphasized,
                             color = MaterialTheme.colorScheme.onSurface.copy(0.2f),
                             textAlign = TextAlign.Center,
@@ -542,7 +542,7 @@ fun EqualizerCard(
                         modifier = Modifier.weight(1f)
                     ) {
                         Text(
-                            text = "High".uppercase(),
+                            text = stringResource(R.string.eq_high).uppercase(),
                             style = MaterialTheme.typography.labelSmallEmphasized,
                             color = MaterialTheme.colorScheme.onSurface.copy(0.2f),
                             textAlign = TextAlign.Center,

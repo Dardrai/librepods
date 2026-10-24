@@ -32,6 +32,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.transformLatest
 import kotlinx.coroutines.launch
@@ -49,6 +50,7 @@ import me.kavishdevar.librepods.core.devices.AppleMetadata
 import me.kavishdevar.librepods.core.devices.AppleSettings
 import me.kavishdevar.librepods.core.devices.AppleState
 import me.kavishdevar.librepods.core.devices.HearingMode
+import me.kavishdevar.librepods.core.devices.hasSameDisplayValues
 import me.kavishdevar.librepods.data.xposed.XposedRemotePrefProvider
 import me.kavishdevar.librepods.database.app.AppSettingsEntity
 import me.kavishdevar.librepods.database.app.AppStateEntity
@@ -57,6 +59,9 @@ import me.kavishdevar.librepods.repository.HeartRateRepository
 import me.kavishdevar.librepods.repository.RecordingRepository
 import kotlin.time.Duration
 import kotlin.time.Instant
+
+internal fun sameDisplayedAppleState(previous: AppleState, current: AppleState): Boolean =
+    previous.battery.hasSameDisplayValues(current.battery) && previous.copy(battery = current.battery) == current
 
 data class AppleUiState(
     val state: AppleState = AppleState(),
@@ -136,7 +141,7 @@ class AppleViewModel(
         }
 
     private val deviceDetails = combine(
-        device.state,
+        device.state.distinctUntilChanged(::sameDisplayedAppleState),
         device.settings,
         device.metadata
     ) { state, settings, metadata ->

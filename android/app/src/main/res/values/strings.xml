@@ -445,4 +445,7 @@
     <string name="companion_return_after_call">Return after call</string>
     <string name="companion_return_after_call_description">Return to the PC if it was the last destination and you have not chosen another. Resume only the player NTPods paused.</string>
     <string name="companion_calls_permission_denied">Phone permission was not granted. Turn this on again to allow call detection.</string>
+    <string name="eq_low">Low</string>
+    <string name="eq_mid">Mid</string>
+    <string name="eq_high">High</string>
 </resources>

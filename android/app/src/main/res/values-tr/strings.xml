@@ -208,4 +208,7 @@
     <string name="listening_mode_transparency_description">Dış sesleri içeri alır</string>
     <string name="listening_mode_adaptive_description">Dış gürültüyü dinamik olarak ayarlar</string>
     <string name="listening_mode_noise_cancellation_description">Dış sesleri engeller</string>
+    <string name="eq_low">Bas</string>
+    <string name="eq_mid">Orta</string>
+    <string name="eq_high">Tiz</string>
 </resources>

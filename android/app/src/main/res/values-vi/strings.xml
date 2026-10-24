@@ -208,4 +208,7 @@
     <string name="listening_mode_transparency_description">Cho phép âm thanh bên ngoài</string>
     <string name="listening_mode_adaptive_description">Điều chỉnh động tiếng ồn bên ngoài</string>
     <string name="listening_mode_noise_cancellation_description">Chặn âm thanh bên ngoài</string>
+    <string name="eq_low">Thấp</string>
+    <string name="eq_mid">Trung</string>
+    <string name="eq_high">Cao</string>
 </resources>

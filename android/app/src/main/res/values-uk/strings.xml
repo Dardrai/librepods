@@ -208,4 +208,7 @@
     <string name="listening_mode_transparency_description">Пропускає зовнішні звуки</string>
     <string name="listening_mode_adaptive_description">Динамічно налаштовує зовнішній шум</string>
     <string name="listening_mode_noise_cancellation_description">Блокує зовнішні звуки</string>
+    <string name="eq_low">Низькі</string>
+    <string name="eq_mid">Середні</string>
+    <string name="eq_high">Високі</string>
 </resources>
