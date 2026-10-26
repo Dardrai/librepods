@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-// Pinned Android13 public FDK ABI; no private Q31 types or C++ objects cross this boundary.
+// Pinned public FDK structures; PCM width belongs to the supplying backend.
 typedef struct AACENCODER* EldFdkHandle;
 typedef struct {
     uint32_t maxOutBufBytes, maxAncBytes, inBufFillLevel, inputChannels, frameLength;
@@ -32,6 +32,7 @@ typedef struct {
     int32_t (*encode)(EldFdkHandle, const EldFdkBufDesc*, const EldFdkBufDesc*,
                       const EldFdkInArgs*, EldFdkOutArgs*);
     int32_t (*close)(EldFdkHandle*);
+    uint32_t pcm_sample_bytes;
 } EldFdkApi;
 
 typedef struct EldFdkEncoder EldFdkEncoder;
@@ -58,6 +59,9 @@ int eld_fdk_reset(EldFdkEncoder* encoder);
 // Output is not copied on error. A codec/consumption/size error poisons the instance until reset.
 int eld_fdk_encode(EldFdkEncoder* encoder, const int16_t* pcm, size_t frames,
                    uint8_t* output, size_t capacity, size_t* bytes);
+// The owned Q31 backend only. A width mismatch is rejected before reading PCM.
+int eld_fdk_encode_q31(EldFdkEncoder* encoder, const int32_t* pcm, size_t frames,
+                       uint8_t* output, size_t capacity, size_t* bytes);
 void eld_fdk_close(EldFdkEncoder** encoder);
 
 #ifdef __cplusplus

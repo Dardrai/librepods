@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- shortcut: new call text uses English fallback, add translations when contributed. -->
+<resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="MissingTranslation">
+    <string name="communication_audio_title">High-Quality Calls</string>
+    <string name="communication_audio_description">Use the AirPods microphone while keeping stereo audio for calls and voice chats.</string>
+    <string name="communication_audio_waiting">Ready for calls</string>
+    <string name="communication_audio_starting">Connecting call audio…</string>
+    <string name="communication_audio_active">Using the AirPods microphone</string>
+    <string name="communication_audio_muted">Microphone muted</string>
+    <string name="communication_audio_stopping">Restoring call audio…</string>
+    <string name="communication_audio_unavailable">Root access and a compatible audio route are required.</string>
+    <string name="communication_audio_failed">Couldn’t connect call audio. Turn this setting off and on to try again.</string>
+    <string name="communication_audio_permission">Allow microphone access to use high-quality calls.</string>
+</resources>

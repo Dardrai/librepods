@@ -8,6 +8,10 @@
 #include <mutex>
 #include <new>
 #include <thread>
+#ifndef ELD_KEEP_GAME_FLUSH_BASELINE
+#define ELD_KEEP_GAME_FLUSH_BASELINE 0
+#endif
+static_assert(ELD_KEEP_GAME_FLUSH_BASELINE==0 || ELD_KEEP_GAME_FLUSH_BASELINE==1);
 #ifdef __ANDROID__
 #include <android/log.h>
 #endif
@@ -41,6 +45,13 @@ struct Runtime {
     bool late_reclaimed = false, late_verification_attempted = false;
     Pixel17GamePhase command_phase = Pixel17GamePhase::Idle;
     uint16_t original_cid = 0;
+    bool target_slots(const Pixel17HciOwner& owner,uint16_t* slots) const {
+        if(!baseline.restore_value(owner,slots)) return false;
+#if !ELD_KEEP_GAME_FLUSH_BASELINE
+        *slots=96;
+#endif
+        return true;
+    }
     uint64_t now_ns() const {
         const auto us=clock.now(clock.clock_context);
         return us>UINT64_MAX/1000 ? UINT64_MAX : us*1000;
@@ -212,15 +223,15 @@ struct Runtime {
             }
             if(!captured) { r.restore(); return; }
             if(operation==Pixel17GameOperation::Read || cancelled) { r.restore(); return; }
-            bool marked;
+            bool marked; uint16_t target=0;
             {
                 std::lock_guard<std::mutex> lock(r.mutex);
-                marked=r.baseline.will_write(owner,96);
+                marked=r.target_slots(owner,&target) && r.baseline.will_write(owner,target);
                 if(!marked && r.status.error==Pixel17HciStatus::Ok) { r.status.error=Pixel17HciStatus::Malformed; }
                 r.status.restore_pending=r.baseline.needs_restore();
             }
             if(!marked) { r.restore(); return; }
-            r.command(Pixel17GamePhase::Writing,true,96); return;
+            r.command(Pixel17GamePhase::Writing,true,target); return;
         }
         if(phase==Pixel17GamePhase::Writing) {
             if(cancelled) r.restore(); else r.command(Pixel17GamePhase::Verifying,false);
@@ -229,10 +240,12 @@ struct Runtime {
         if(phase==Pixel17GamePhase::Verifying) {
             bool held=false;
             { std::lock_guard<std::mutex> lock(r.mutex);
-              if(result.slots!=96 && r.status.error==Pixel17HciStatus::Ok) r.status.error=Pixel17HciStatus::Malformed;
-              if(operation==Pixel17GameOperation::Prepare && result.slots==96 && !r.status.cancelled &&
+              uint16_t target=0;
+              const bool verified=r.target_slots(owner,&target) && result.slots==target;
+              if(!verified && r.status.error==Pixel17HciStatus::Ok) r.status.error=Pixel17HciStatus::Malformed;
+              if(operation==Pixel17GameOperation::Prepare && verified && !r.status.cancelled &&
                  r.status.error==Pixel17HciStatus::Ok && r.now_ns()<r.status.deadline_ns) {
-                  // The captured controller baseline may already be96. Exact
+                  // The captured controller baseline may already match. Exact
                   // readback then discharges write uncertainty without inventing
                   // a different "normal" timeout or forcing an unnecessary reset.
                   r.baseline.observe(owner,result);

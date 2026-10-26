@@ -85,6 +85,7 @@ import kotlinx.coroutines.channels.Channel
 import me.kavishdevar.librepods.LibrePodsApplication
 import me.kavishdevar.librepods.R
 import me.kavishdevar.librepods.audio.ExperimentalAudioController
+import me.kavishdevar.librepods.audio.LivePcmConsumer
 import me.kavishdevar.librepods.audio.MicrophonePhase
 import me.kavishdevar.librepods.core.bluetooth.MacAddress
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommandIdentifier
@@ -151,6 +152,7 @@ import me.kavishdevar.librepods.data.xposed.XposedRemotePrefProvider
 private const val TAG = "LibrePodsService"
 private const val NEARBY_SCAN_TAG = "NearbyScan"
 private const val STOP_MICROPHONE = "me.kavishdevar.librepods.STOP_MICROPHONE"
+private const val STOP_COMMUNICATION = "me.kavishdevar.librepods.STOP_COMMUNICATION"
 private const val A2DP_ACTIVE_DEVICE_CHANGED = "android.bluetooth.a2dp.profile.action.ACTIVE_DEVICE_CHANGED"
 private const val HEADSET_ACTIVE_DEVICE_CHANGED = "android.bluetooth.headset.profile.action.ACTIVE_DEVICE_CHANGED"
 
@@ -171,6 +173,7 @@ class LibrePodsService: Service() {
     @Volatile private var destroying = false
     private var startedWithPermissions = false
     private val microphoneOwners = ConcurrentHashMap.newKeySet<MacAddress>()
+    private val communicationArmed = ConcurrentHashMap<MacAddress, me.kavishdevar.librepods.audio.CommunicationAudioController>()
     private val audioDevices = ConcurrentHashMap<MacAddress, AppleDevice>()
     private val audioJobs = ConcurrentHashMap<MacAddress, Job>()
     private val sensorSuspensions = ConcurrentHashMap<MacAddress, Channel<Boolean>>()
@@ -218,6 +221,7 @@ class LibrePodsService: Service() {
     private val nearbyCases = ConcurrentHashMap<MacAddress, NearbyCase>()
     private var microphonePermissionMonitor: Job? = null
     private val audioControllers get() = (application as LibrePodsApplication).experimentalAudioControllers
+    private val communicationControllers get() = (application as LibrePodsApplication).communicationAudioControllers
     private val gameControllers get() = (application as LibrePodsApplication).nativeGameModeControllers
     private val microphoneStarts = ConcurrentHashMap<MacAddress, Job>()
 
@@ -480,6 +484,7 @@ class LibrePodsService: Service() {
         }
         when (intent?.action) {
             STOP_MICROPHONE -> audioControllers.values.forEach { it.stop() }
+            STOP_COMMUNICATION -> communicationControllers.values.forEach { it.setEnabled(false) }
             // TODO: make this a sealed class or something, instead of stringly typed. also, make this different for widget so other apps can use it too
             "ACTION_SET_ANC_MODE" -> {
                 val ancMode = intent.getIntExtra("ANC_MODE", -1)
@@ -1245,6 +1250,17 @@ class LibrePodsService: Service() {
                     device.state.value.hearingModes.pending != null || device.state.value.accommodationsRequest.pending
             }.also { gameControllers[address] = it }
         else null
+        lateinit var communication: me.kavishdevar.librepods.audio.CommunicationAudioController
+        communication = me.kavishdevar.librepods.audio.CommunicationAudioController(this, device, controller,
+            deviceCurrent = { !destroying && audioDevices[address] === device && audioControllers[address] === controller },
+            armForeground = { armed -> armCommunication(address, communication, armed) },
+            suspendGame = { game?.suspendForMicrophone() != false },
+            startInput = { consumer, current -> startCallMicrophone(device, communication, consumer, current) },
+            released = {
+                if (audioControllers[address] === controller && controller.microphone.state.value.phase in
+                    listOf(MicrophonePhase.IDLE, MicrophonePhase.ERROR)) game?.resumeAfterMicrophone()
+            })
+        communicationControllers[address] = communication
         val suspensions = Channel<Boolean>(Channel.CONFLATED)
         sensorSuspensions[address] = suspensions
         device.recordingHandler = { recording ->
@@ -1254,36 +1270,7 @@ class LibrePodsService: Service() {
                 if (controller.microphone.state.value.phase in listOf(MicrophonePhase.IDLE, MicrophonePhase.ERROR))
                     game?.resumeAfterMicrophone()
                 true
-            } else if (game == null || game.state.value.let {
-                    !it.desiredOn && !it.active && !it.restoring && !it.remoteRestorePending }) {
-                controller.startRecording(recording.file)
-            } else if (microphoneStarts.containsKey(address)) false
-            else {
-                val request = serviceScope.launch(start = CoroutineStart.LAZY) {
-                    var started = false
-                    try {
-                        if (game.suspendForMicrophone() && !destroying &&
-                            microphoneStarts[address] === coroutineContext[Job] &&
-                            audioControllers[address] === controller && gameControllers[address] === game &&
-                            !callBlocksSettingsRefresh()) started = controller.startRecording(recording.file)
-                    } finally {
-                        coroutineContext[Job]?.let { microphoneStarts.remove(address, it) }
-                        if (!started && !microphoneStarts.containsKey(address) &&
-                            audioControllers[address] === controller && gameControllers[address] === game) {
-                            device.updateRecordingState { it.copy(isRecording = false) }
-                            if (controller.microphone.state.value.phase in listOf(MicrophonePhase.IDLE, MicrophonePhase.ERROR))
-                                game.resumeAfterMicrophone()
-                        }
-                    }
-                }
-                if (microphoneStarts.putIfAbsent(address, request) != null) {
-                    request.cancel()
-                    false
-                } else {
-                    request.start()
-                    true
-                }
-            }
+            } else requestMicrophoneStart(device, controller, { controller.startRecording(recording.file) })
         }
         audioJobs[address] = serviceScope.launch {
             if (game != null) launch {
@@ -1303,12 +1290,105 @@ class LibrePodsService: Service() {
                     device.updateRecordingState { it.copy(isRecording = false) }
                 }
                 if (state.phase in listOf(MicrophonePhase.IDLE, MicrophonePhase.ERROR) &&
-                    !microphoneStarts.containsKey(address)) game?.resumeAfterMicrophone()
+                    !microphoneStarts.containsKey(address) && communicationControllers[address]?.ownsSession != true)
+                    game?.resumeAfterMicrophone()
             }
         }
     }
 
+    /** No call-route admission yet. Accepted requests own the consumer even if start is cancelled. */
+    internal fun startLiveMicrophone(device: AppleDevice, consumer: LivePcmConsumer): AutoCloseable? {
+        return startMicrophoneConsumer(device, consumer)
+    }
+
+    private fun startCallMicrophone(device: AppleDevice,
+        call: me.kavishdevar.librepods.audio.CommunicationAudioController,
+        consumer: me.kavishdevar.librepods.audio.CallPcmConsumer,
+        current: () -> Boolean): AutoCloseable? {
+        fun permit() = current() && communicationControllers[device.macAddress] === call &&
+            call.hasPreparedRoute && call.ownsInput(consumer)
+        if (!permit()) return null
+        return startMicrophoneConsumer(device, consumer, ::permit)
+    }
+
+    private fun startMicrophoneConsumer(device: AppleDevice, consumer: LivePcmConsumer,
+        callPermit: (() -> Boolean)? = null): AutoCloseable? {
+        val controller = audioControllers[device.macAddress] ?: return null
+        val lock = Any()
+        var closed = false
+        var pending: Job? = null
+        val accepted = requestMicrophoneStart(device, controller,
+            { synchronized(lock) { !closed && if (callPermit == null) controller.startLive(consumer)
+                else controller.startLiveForCall(consumer, callPermit) } },
+            { consumer.close() }, { pending = it }, callPermit)
+        if (!accepted) return null
+        return AutoCloseable {
+            synchronized(lock) {
+                if (!closed) {
+                    closed = true
+                    pending?.let {
+                        microphoneStarts.remove(device.macAddress, it)
+                        it.cancel()
+                    }
+                    controller.stopLive(consumer)
+                }
+            }
+        }
+    }
+
+    private fun requestMicrophoneStart(
+        device: AppleDevice,
+        controller: ExperimentalAudioController,
+        start: () -> Boolean,
+        onNotStarted: () -> Unit = {},
+        onQueued: (Job) -> Unit = {},
+        callPermit: (() -> Boolean)? = null,
+    ): Boolean {
+        val address = device.macAddress
+        val socket = device.aacp.captureAudioSocket() ?: return false
+        val game = gameControllers[address]
+        fun current() = !destroying && audioDevices[address] === device && audioControllers[address] === controller &&
+            gameControllers[address] === game && device.aacp.ownsAudioSocket(socket) &&
+            (callPermit == null || callPermit()) &&
+            (!callBlocksSettingsRefresh() || callPermit?.invoke() == true) &&
+            !bleCaptureBlocked && settingsRefreshes.isEmpty()
+        if (!current() || microphoneStarts.containsKey(address)) return false
+        if (game == null || game.state.value.let { !it.desiredOn && !it.active && !it.restoring && !it.remoteRestorePending })
+            return start()
+        val started = java.util.concurrent.atomic.AtomicBoolean()
+        val request = serviceScope.launch(start = CoroutineStart.LAZY) {
+            try {
+                if (game.suspendForMicrophone() && current() &&
+                    microphoneStarts[address] === coroutineContext[Job]) started.set(start())
+            } finally {
+                coroutineContext[Job]?.let { microphoneStarts.remove(address, it) }
+                if (!started.get() && !microphoneStarts.containsKey(address) &&
+                    audioControllers[address] === controller && gameControllers[address] === game) {
+                    device.updateRecordingState { it.copy(isRecording = false) }
+                    if (controller.microphone.state.value.phase in listOf(MicrophonePhase.IDLE, MicrophonePhase.ERROR))
+                        game.resumeAfterMicrophone()
+                }
+            }
+        }
+        if (microphoneStarts.putIfAbsent(address, request) != null) {
+            request.cancel()
+            return false
+        }
+        // Completion also runs when a queued lazy start is cancelled before its body executes.
+        request.invokeOnCompletion {
+            microphoneStarts.remove(address, request)
+            if (!started.get()) runCatching(onNotStarted)
+        }
+        onQueued(request)
+        request.start()
+        return true
+    }
+
     private fun detachExperimentalAudio(address: MacAddress) {
+        communicationControllers.remove(address)?.let { call ->
+            communicationArmed.remove(address, call)
+            call.close()
+        }
         microphoneStarts.remove(address)?.cancel()
         gameControllers.remove(address)?.close()
         audioDevices.remove(address)?.recordingHandler = null
@@ -1320,14 +1400,36 @@ class LibrePodsService: Service() {
 
     private fun microphonePermissionAllowed(address: MacAddress? = null): Boolean {
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) return false
-        if (getSystemService(AudioManager::class.java).isMicrophoneMute) return false
         val owners = if (address == null) microphoneOwners.toSet() else microphoneOwners + address
+        val callOwnsMute = owners.isNotEmpty() && owners.all { communicationControllers[it]?.let { call ->
+            call.hasPreparedRoute || call.ownsMicrophoneCapture
+        } == true }
+        if (getSystemService(AudioManager::class.java).isMicrophoneMute && !callOwnsMute) return false
         if (owners.any { audioControllers[it]?.bridge?.isMicrophonePrivacyBlocked() != false }) return false
         return runCatching {
             val mode = getSystemService(AppOpsManager::class.java)
                 .checkOpNoThrow(AppOpsManager.OPSTR_RECORD_AUDIO, applicationInfo.uid, packageName)
             mode != AppOpsManager.MODE_IGNORED && mode != AppOpsManager.MODE_ERRORED
         }.getOrDefault(false)
+    }
+
+    private fun armCommunication(address: MacAddress,
+        owner: me.kavishdevar.librepods.audio.CommunicationAudioController, active: Boolean): Boolean {
+        if (!active) {
+            if (!communicationArmed.remove(address, owner)) return true
+            if (!destroying) startForegroundNotification()
+            return true
+        }
+        val controller = audioControllers[address] ?: return false
+        if (destroying || communicationControllers[address] !== owner || !controller.bridge.hasRootPrivileges ||
+            checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED ||
+            controller.bridge.isMicrophonePrivacyBlocked() ||
+            !ProcessLifecycleOwner.get().lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) return false
+        communicationArmed[address] = owner
+        return try { startForegroundNotification(); true } catch (_: Exception) {
+            communicationArmed.remove(address, owner)
+            false
+        }
     }
 
     private fun setMicrophoneActive(address: MacAddress, active: Boolean) {
@@ -1337,7 +1439,8 @@ class LibrePodsService: Service() {
             check(settingsRefreshes.isEmpty()) { "Wait for the settings refresh to finish." }
             check(!destroying && microphonePermissionAllowed(address)) { "Allow microphone access first." }
             if (address !in microphoneOwners) {
-                check(ProcessLifecycleOwner.get().lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+                check(ProcessLifecycleOwner.get().lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED) ||
+                    (communicationArmed.containsKey(address) && communicationControllers[address]?.hasPreparedRoute == true)) {
                     "Open LibrePods before starting the microphone."
                 }
                 microphoneOwners += address
@@ -2379,7 +2482,10 @@ class LibrePodsService: Service() {
         notificationManager.createNotificationChannel(disconnectedNotificationChannel)
         notificationManager.createNotificationChannel(hrmAlertChannel)
         val microphoneActive = microphoneOwners.isNotEmpty()
-        if (microphoneActive) notificationManager.createNotificationChannel(NotificationChannel(
+        val communicationReady = communicationArmed.isNotEmpty()
+        val microphoneService = microphoneActive || communicationReady
+        val callOwnsInput = communicationControllers.values.any { it.ownsSession }
+        if (microphoneService) notificationManager.createNotificationChannel(NotificationChannel(
             "microphone_session", getString(R.string.pixel_microphone_title), NotificationManager.IMPORTANCE_LOW))
 
         val notificationSettingsIntent = Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS).apply {
@@ -2394,7 +2500,7 @@ class LibrePodsService: Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val notification = NotificationCompat.Builder(this, if (microphoneActive) "microphone_session" else "foreground_service_status")
+        val notification = NotificationCompat.Builder(this, if (microphoneService) "microphone_session" else "foreground_service_status")
             .setSmallIcon(R.drawable.ic_airpods).setContentTitle(getString(R.string.service_running))
             .setContentText(getString(R.string.foreground_notification_description))
             .setContentIntent(pendingIntentNotifDisable).setCategory(Notification.CATEGORY_SERVICE)
@@ -2404,7 +2510,15 @@ class LibrePodsService: Service() {
                     setContentTitle(getString(R.string.pixel_microphone_title))
                     setContentText(getString(R.string.pixel_microphone_active))
                     val stop = PendingIntent.getService(this@LibrePodsService, 58,
-                        Intent(this@LibrePodsService, LibrePodsService::class.java).setAction(STOP_MICROPHONE),
+                        Intent(this@LibrePodsService, LibrePodsService::class.java)
+                            .setAction(if (callOwnsInput) STOP_COMMUNICATION else STOP_MICROPHONE),
+                        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+                    addAction(0, getString(R.string.pixel_microphone_stop), stop)
+                } else if (communicationReady) {
+                    setContentTitle(getString(R.string.communication_audio_title))
+                    setContentText(getString(R.string.communication_audio_waiting))
+                    val stop = PendingIntent.getService(this@LibrePodsService, 59,
+                        Intent(this@LibrePodsService, LibrePodsService::class.java).setAction(STOP_COMMUNICATION),
                         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
                     addAction(0, getString(R.string.pixel_microphone_stop), stop)
                 }
@@ -2412,10 +2526,10 @@ class LibrePodsService: Service() {
 
         try {
             val types = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or
-                (if (microphoneActive) ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE else 0)
+                (if (microphoneService) ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE else 0)
             startForeground(1, notification, types)
         } catch (e: Exception) {
-            if (microphoneActive) throw e
+            if (microphoneService) throw e
             e.printStackTrace()
         }
     }

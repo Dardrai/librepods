@@ -112,6 +112,53 @@ class AacpProtocolReportsTest {
         assertArrayEquals(byteArrayOf(4, 0, 4, 0, 1, 0, 8), shadow.output.bytes.toByteArray())
     }
 
+    @Test fun commandWriteBoundaryDistinguishesAdmissionAndFinalFenceFromUncertainIo() {
+        for (rejectAt in 1..3) withTransport { device, socket ->
+            var checks = 0
+            var attempts = 0
+            assertFalse(device.aacp.sendControlCommand(ControlCommandIdentifier.JITTER_BUFFER.value,
+                byteArrayOf(60, 0, 0, 0), expectedSocket = socket,
+                beforeWrite = { attempts++ }, isValid = { ++checks != rejectAt }))
+            assertEquals(rejectAt, checks)
+            assertEquals(if (rejectAt == 3) 1 else 0, attempts)
+            assertEquals(rejectAt == 3, Shadow.extract<ProtocolReportSocketShadow>(socket).output.bytes.size() > 0)
+        }
+        withTransport { device, socket ->
+            var attempts = 0
+            Shadow.extract<ProtocolReportSocketShadow>(socket).output.failWrites = true
+            assertFalse(device.aacp.sendControlCommand(ControlCommandIdentifier.JITTER_BUFFER.value,
+                byteArrayOf(60, 0, 0, 0), expectedSocket = socket, beforeWrite = { attempts++ }))
+            assertEquals("An IO failure is still a possible remote write", 1, attempts)
+        }
+    }
+
+    @Test fun aFastReportDuringWriteRemainsNewerThanTheSingleWriteBoundaryAfterPublication() = withTransport { device, socket ->
+        var nowNs = 1_000_000_000L
+        var boundaryNs = 0L
+        var reportNs = 0L
+        var attempts = 0
+        var checks = 0
+        Shadow.extract<ProtocolReportSocketShadow>(socket).output.beforeWrite = {
+            nowNs += 2_000_000
+            reportNs = nowNs
+        }
+        assertTrue(device.aacp.sendControlCommand(ControlCommandIdentifier.JITTER_BUFFER.value,
+            byteArrayOf(60, 0, 0, 0), expectedSocket = socket,
+            beforeWrite = { attempts++; boundaryNs = nowNs },
+            isValid = { checks++; nowNs += 1_000_000; true }))
+        assertEquals(3, checks) // Includes the check after outputStream.write.
+        assertEquals(1, attempts)
+        assertTrue(boundaryNs < reportNs && reportNs < nowNs)
+        val peer = listOf(1, 2, 3, 4, 5, 6)
+        val owner = me.kavishdevar.librepods.utils.NativeGameModePolicy.Owner(peer, 1, 1)
+        val report = me.kavishdevar.librepods.utils.NativeGameModePolicy.Host(peer, 1, 0,
+            2, reportNs / 1_000_000, 600, true, true, true, true, true, false, reportNs)
+        assertTrue(me.kavishdevar.librepods.utils.NativeGameModePolicy.freshReport(owner, 1, report,
+            1, boundaryNs / 1_000_000, nowNs / 1_000_000, boundaryNs))
+        assertFalse(me.kavishdevar.librepods.utils.NativeGameModePolicy.freshReport(owner, 1, report,
+            1, nowNs / 1_000_000, nowNs / 1_000_000, nowNs))
+    }
+
     @Test fun retiredEarReportsCannotReplaceTheCaseStateOnAReplacementConnection() = withTransport { device, socket ->
         val leftOnly = byteArrayOf(4, 0, 4, 0, 6, 0, 0, 2)
         val rightOnly = byteArrayOf(4, 0, 4, 0, 6, 0, 2, 0)

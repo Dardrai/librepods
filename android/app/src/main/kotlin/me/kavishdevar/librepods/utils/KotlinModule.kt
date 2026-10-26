@@ -24,6 +24,10 @@ class KotlinModule: XposedModule() {
     private val gameBridgeInstalled = AtomicBoolean(false)
     private var gameBridgeContext: Context? = null
     private var gameBridge: AutoCloseable? = null
+    private val hfpBridgeInstalled = AtomicBoolean(false)
+    private var hfpBridgeContext: Context? = null
+    private var hfpBridge: AutoCloseable? = null
+    @Volatile private var hfpControl: HfpCallSuppression? = null
     override fun onModuleLoaded(param: ModuleLoadedParam) {
         log(Log.INFO, TAG, "module initialized at :: ${param.processName}")
         log(Log.INFO, TAG, "framework: $frameworkName($frameworkVersionCode) API $apiVersion")
@@ -59,6 +63,7 @@ class KotlinModule: XposedModule() {
             log(Log.INFO, TAG, "Bluetooth app detected, hooking l2c_fcr_chk_chan_modes")
             try {
                 if (param.isFirstPackage) {
+                    installHfpCallBridge(param.defaultClassLoader)
                     val abi = android.os.Build.SUPPORTED_ABIS.first()
                     val soName = "libfluoride_hooks.so"
 
@@ -111,6 +116,55 @@ class KotlinModule: XposedModule() {
 
         if (param.packageName == "com.android.settings") {
             hookSettingsController(param, "com.android.settings.bluetooth.AdvancedBluetoothDetailsHeaderController")
+        }
+    }
+
+    private fun installHfpCallBridge(loader: ClassLoader) {
+        if (android.os.Build.VERSION.SDK_INT != 37 || !hfpBridgeInstalled.compareAndSet(false, true)) return
+        val handles = mutableListOf<XposedInterface.HookHandle>()
+        val ready = AtomicBoolean(false)
+        try {
+            val adapter = Class.forName("com.android.bluetooth.btservice.AdapterService", false, loader)
+            val headset = Class.forName("com.android.bluetooth.hfp.HeadsetService", false, loader)
+            val methods = HfpCallHookMethods.discover(adapter, headset)
+            handles += hook(methods.connect).intercept { chain ->
+                val peer = (chain.args.firstOrNull() as? android.bluetooth.BluetoothDevice)?.address
+                if (hfpControl?.blockConnect(chain.thisObject, peer) == true) false else chain.proceed()
+            }
+            handles += hook(methods.incoming).intercept { chain ->
+                val peer = (chain.args.firstOrNull() as? android.bluetooth.BluetoothDevice)?.address
+                if (hfpControl?.blockIncoming(chain.thisObject, peer) == true) false else chain.proceed()
+            }
+            handles += hook(methods.cleanup).intercept { chain ->
+                hfpControl?.serviceStopped(chain.thisObject)
+                chain.proceed()
+            }
+            handles += hook(methods.create).intercept { chain ->
+                val result = chain.proceed()
+                val context = chain.thisObject as? Context
+                if (ready.get() && context != null && hfpBridge == null) {
+                    val control = HfpCallSuppression(context) { methods.current.invoke(null) }
+                    val bridge = runCatching { HfpCallTransport.install(context, control, moduleApplicationInfo.uid) }.getOrNull()
+                    if (bridge == null) control.close() else {
+                        hfpControl = control; hfpBridge = bridge; hfpBridgeContext = context
+                        log(Log.INFO, TAG, "Selected-call hands-free control ready")
+                    }
+                }
+                result
+            }
+            handles += hook(methods.destroy).intercept { chain ->
+                if (chain.thisObject === hfpBridgeContext) {
+                    runCatching { hfpBridge?.close() }
+                    hfpControl = null; hfpBridge = null; hfpBridgeContext = null
+                }
+                chain.proceed()
+            }
+            ready.set(true)
+        } catch (_: Throwable) {
+            ready.set(false)
+            handles.asReversed().forEach { runCatching { it.unhook() } }
+            hfpBridgeInstalled.set(false)
+            log(Log.WARN, TAG, "Selected-call hands-free control unavailable; keeping native calling")
         }
     }
 

@@ -44,6 +44,26 @@ class NativeGameSnapshotTest {
         assertFalse(NativeGameSnapshot.parse(source)!!.restored)
     }
 
+    @Test fun stalePrepareBeforeAnyControllerOperationIsANoopRatherThanARestoration() {
+        val source = snapshot().apply {
+            this[1] = 1; this[3] = 9; this[4] = 3; this[5] = 29; this[6] = 7; this[7] = 3
+            this[54] = 255; this[55] = 65535
+        }
+        val failed = NativeGameSnapshot.parse(source)!!
+        assertTrue(failed.noControllerMutation)
+        assertFalse(failed.restored)
+        assertTrue(failed.summary().contains("restored=false noControllerMutation=true"))
+        // A different operation/error, completed read, captured baseline, or clock activity
+        // cannot use this narrow proof to discard potentially outstanding cleanup.
+        for ((index, value) in listOf(1 to 0L, 2 to 1L, 3 to 10L, 4 to 1L, 5 to 0L, 6 to 0L,
+                7 to 4L, 9 to 1L, 11 to 1L, 13 to 1L, 53 to 0xc27L, 54 to 0L, 55 to 64L,
+                56 to 1L, 57 to 1L, 59 to 1L, 62 to 4L, 63 to 1L, 72 to 9L)) {
+            assertFalse("index $index", NativeGameSnapshot.parse(source.copyOf().apply {
+                this[index] = value
+            })!!.noControllerMutation)
+        }
+    }
+
     @Test fun hostTupleRequiresExactSelectedPeerAndRoute() {
         val source = snapshot().apply {
             this[24] = 4; this[25] = 7; this[31] = 11; this[35] = 1
@@ -96,5 +116,20 @@ class NativeGameSnapshotTest {
         parsed.requestPeer[0] = 99; parsed.clockPeer[0] = 99
         assertEquals(1, parsed.requestPeer[0].toInt())
         assertEquals(10, parsed.clockPeer[0].toInt())
+    }
+
+    @Test fun summaryExplainsStreamingWithoutTimingAndExcludesPeerIdentifiers() {
+        val source = snapshot().apply {
+            this[24] = 12; this[25] = 15; this[35] = 15; this[43] = 1
+            for (i in 0..5) this[36 + i] = (160 + i).toLong()
+        }
+        val summary = NativeGameSnapshot.parse(source)!!.summary()
+        assertTrue(summary.contains("streaming=true"))
+        assertTrue(summary.contains("hostFlags=15 reporting=true delayValid=false encoderReady=true"))
+        assertTrue(summary.contains("clockAvailable=true mediaGeneration=12 encoderGeneration=15"))
+        assertTrue(summary.contains("delay=0 delaySerial=0"))
+        assertFalse(summary.contains("peer", ignoreCase = true))
+        assertFalse(summary.contains("160"))
+        assertFalse(summary.contains("a0", ignoreCase = true))
     }
 }

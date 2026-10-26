@@ -34,6 +34,20 @@ class NativeGameModePolicyTest {
         assertFalse(NativeGameModePolicy.freshReport(owner,4,host,1,1400,3401))
         assertFalse(NativeGameModePolicy.freshReport(owner,4,host.copy(delayTenths=0),1,1400,1600))
     }
+    @Test fun exactGameTargetIsAdmittedButLowerAndMissingReportsAreNot() {
+        val target = host.copy(delayTenths = 600)
+        assertTrue(NativeGameModePolicy.canApply(owner,4,target,1500))
+        for (delay in listOf(0, 1, 599, 65535))
+            assertFalse(NativeGameModePolicy.canApply(owner,4,target.copy(delayTenths = delay),1500))
+        assertFalse(NativeGameModePolicy.canApply(owner,5,target,1500))
+        assertFalse(NativeGameModePolicy.canApply(owner,4,target.copy(mediaGeneration = 99),1500))
+        assertFalse(NativeGameModePolicy.canApply(owner,4,target.copy(streaming = false),1500))
+        assertFalse(NativeGameModePolicy.canApply(owner,4,target.copy(scoOrMicrophone = true),1500))
+        assertFalse(NativeGameModePolicy.canApply(owner,4,target.copy(flushReady = false),1500))
+        assertFalse(NativeGameModePolicy.canApply(owner,4,target.copy(clockReady = false),1500))
+        assertFalse(NativeGameModePolicy.canApply(owner,4,target,1499))
+        assertEquals(NativeGameModePolicy.Clock(10,0),NativeGameModePolicy.clock(600,60))
+    }
     @Test fun clockUsesPostWriteReportAndTheExplicit150RestoreException() {
         assertEquals(NativeGameModePolicy.Clock(9,22),NativeGameModePolicy.clock(280,60))
         assertEquals(NativeGameModePolicy.Clock(9,60),NativeGameModePolicy.clock(900,150))

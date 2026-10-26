@@ -3,6 +3,11 @@ cmake_minimum_required(VERSION 3.22.1)
 project("l2c_fcr_hook")
 set(CMAKE_CXX_STANDARD 23)
 option(LIBREPODS_PRIVATE_OWNED_FDK "Private AAC-ELD experiment; not for GPL APK redistribution" OFF)
+option(LIBREPODS_PRIVATE_WIDE_PCM "Private Pixel PCM32/Q31 experiment; requires owned FDK" OFF)
+if(LIBREPODS_PRIVATE_WIDE_PCM AND NOT LIBREPODS_PRIVATE_OWNED_FDK)
+    message(FATAL_ERROR "Wide Pixel PCM requires the matching private owned FDK backend")
+endif()
+option(ELD_KEEP_GAME_FLUSH_BASELINE "Private Game Mode comparison preserving the captured flush timeout" OFF)
 
 add_library(hiddenapi SHARED
         hiddenapi.cpp
@@ -64,6 +69,8 @@ target_include_directories(fluoride_hooks PRIVATE
 )
 
 target_compile_definitions(fluoride_hooks PRIVATE
+        ELD_PRIVATE_WIDE_PCM=$<BOOL:${LIBREPODS_PRIVATE_WIDE_PCM}>
+        ELD_KEEP_GAME_FLUSH_BASELINE=$<BOOL:${ELD_KEEP_GAME_FLUSH_BASELINE}>
         XZ_DEC_X86
         XZ_DEC_ARM
         XZ_DEC_ARMTHUMB

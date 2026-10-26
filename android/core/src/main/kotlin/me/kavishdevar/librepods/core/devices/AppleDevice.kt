@@ -809,7 +809,13 @@ class AppleDevice(
                     delay(250.milliseconds)
                     continue
                 }
-                readATTCharacteristic(handle, transport, session) { initial.attempted += handle }
+                try {
+                    val value = readATTCharacteristic(handle, transport, session) { initial.attempted += handle }
+                    if (value == null && current() && att.canRetryRead()) initial.attempted -= handle
+                } catch (cancelled: CancellationException) {
+                    if (current() && att.canRetryRead()) initial.attempted -= handle
+                    throw cancelled
+                }
                 // A busy read which never entered ATT must remain available after the call or recording ends.
                 if (handle !in initial.attempted) delay(250.milliseconds)
             }

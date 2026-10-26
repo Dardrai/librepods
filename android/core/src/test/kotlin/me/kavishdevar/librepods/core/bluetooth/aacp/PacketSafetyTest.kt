@@ -4,6 +4,15 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class PacketSafetyTest {
+    @Test fun onlyCompleteKnownSuccessfulServiceFourResponsesAuthorizeSettings() {
+        val accepted = byteArrayOf(1, 0, 4, 0, 0, 0, 1, 0, 3, 0) + ByteArray(8) { 0xff.toByte() }
+        assertTrue(successfulSettingsConnectResponse(accepted))
+        assertTrue(successfulSettingsConnectResponse(accepted.copyOf().also { it[8] = 2 }))
+        for (length in (0..17) + 19) assertFalse(successfulSettingsConnectResponse(accepted.copyOf(length)))
+        for ((offset, value) in listOf(0 to 4, 1 to 1, 2 to 0, 3 to 1, 4 to 0x85, 5 to 1, 6 to 2, 7 to 1, 8 to 4, 9 to 1))
+            assertFalse(successfulSettingsConnectResponse(accepted.copyOf().also { it[offset] = value.toByte() }))
+    }
+
     @Test fun rawWritesAndReceivedMessagesRejectShortOrMalformedHeadersWithoutIndexingThem() {
         val message = byteArrayOf(4, 0, 4, 0, 9, 0)
         for (length in 0..5) {

@@ -86,6 +86,63 @@ int main(int argc,char** argv) {
     };
     assert(pixel17_game_status().supported);
     assert(pixel17_game_refresh()); loop.run(); assert(refreshes==1);
+    if(scenario.rfind("flush",0)==0) {
+        const uint16_t original=scenario=="flush320" ? 320 : 0;
+#if ELD_KEEP_GAME_FLUSH_BASELINE
+        const uint16_t target=original;
+#else
+        const uint16_t target=96;
+#endif
+        const auto serial=submit(Pixel17GameOperation::Prepare); assert(serial); loop.run();
+        assert(!pixel17_game_status().baseline_known && radio.transmissions==1 && radio.command[8]==0x27);
+        if(scenario=="flush-unknown") {
+            radio.reply({0x0e,4,1,0x27,0x0c,0x0c}); loop.run();
+            const auto failed=pixel17_game_status();
+            assert(!failed.baseline_known && !failed.holding && !failed.restore_pending && !failed.busy);
+            assert(failed.phase==Pixel17GamePhase::Failed && radio.transmissions==1); return 0;
+        }
+        if(scenario=="flush-cancel-before-read") pixel17_game_cancel_owner(42);
+        radio.reply(read_event(original)); loop.run();
+        if(scenario=="flush-cancel-before-read") {
+            const auto cancelled=pixel17_game_status();
+            assert(!cancelled.holding && !cancelled.busy && !cancelled.restore_pending && radio.transmissions==1);
+            return 0;
+        }
+        assert(radio.transmissions==2 && radio.command[8]==0x28);
+        assert(radio.command[13]==uint8_t(target) && radio.command[14]==uint8_t(target>>8));
+        radio.reply(write_event()); loop.run();
+        assert(radio.transmissions==3 && radio.command[8]==0x27);
+        if(scenario=="flush-stale") ++route.media_generation;
+        radio.reply(read_event(scenario=="flush-misread" ? target+1 : target)); loop.run();
+        if(scenario=="flush-stale") {
+            pixel17_game_runtime_tick_for_test(); loop.run();
+            const auto failed=pixel17_game_status();
+            assert(!failed.holding && !failed.busy && failed.restore_pending && radio.transmissions==3);
+            assert(failed.phase==Pixel17GamePhase::Quarantined); return 0;
+        }
+        if(scenario!="flush-misread") {
+            const auto held=pixel17_game_status();
+            assert(held.holding && !held.busy && held.baseline_known && held.current_known);
+            assert(held.baseline_slots==original && held.current_slots==target);
+            assert(held.restore_pending==(original!=target));
+            assert(!pixel17_game_heartbeat(43,serial) && !pixel17_game_restore(42,serial+1));
+            assert(pixel17_game_status().holding);
+            if(scenario=="flush-expiry") {
+                clock_us+=3000001; pixel17_game_runtime_monitor_for_test();
+            } else assert(pixel17_game_restore(42,serial));
+            pixel17_game_runtime_tick_for_test(); loop.run();
+        }
+        if(pixel17_game_status().restore_pending) {
+            assert(radio.command[8]==0x28 && radio.command[13]==uint8_t(original) && radio.command[14]==uint8_t(original>>8));
+            radio.reply(write_event()); loop.run(); radio.reply(read_event(original)); loop.run();
+        }
+        const auto restored=pixel17_game_status();
+        assert(!restored.holding && !restored.busy && !restored.restore_pending);
+        assert(restored.current_known && restored.current_slots==original && restored.baseline_slots==original);
+        assert(restored.phase==((scenario=="flush-misread" || scenario=="flush-expiry") ? Pixel17GamePhase::Failed : Pixel17GamePhase::Complete));
+        assert(radio.transmissions==((original!=target || scenario=="flush-misread") ? 5U : 3U));
+        return 0;
+    }
     if(scenario=="watchdog-start") {
         assert(submit(Pixel17GameOperation::Roundtrip));
         clock_us+=6000000; pixel17_game_runtime_monitor_for_test();

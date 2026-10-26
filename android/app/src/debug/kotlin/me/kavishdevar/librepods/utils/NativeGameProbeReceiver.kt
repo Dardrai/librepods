@@ -10,6 +10,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
+import me.kavishdevar.librepods.LibrePodsApplication
 
 /** Private-build lab entry only. No exported receiver, sound command or receiver-buffer write. */
 class NativeGameProbeReceiver : BroadcastReceiver() {
@@ -20,6 +21,11 @@ class NativeGameProbeReceiver : BroadcastReceiver() {
             it.matches(Regex("(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}"))
         }?.split(':')?.map { it.toInt(16).toByte() }?.toByteArray()
         if (operation != "query" && expected == null) return
+        if (operation == "query") {
+            (context.applicationContext as? LibrePodsApplication)?.nativeGameModeControllers?.values?.forEach {
+                Log.i(TAG, "app state ${it.state.value}")
+            }
+        }
         // Finish this broadcast immediately: Android17 queues our RPC reply behind
         // an unfinished broadcast to the same app. The lab keeps the app foreground.
         CoroutineScope(Dispatchers.Default).launch {

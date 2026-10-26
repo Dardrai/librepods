@@ -4,5 +4,8 @@
         <receiver
             android:name="me.kavishdevar.librepods.utils.NativeGameProbeReceiver"
             android:exported="false" />
+        <receiver
+            android:name="me.kavishdevar.librepods.utils.MicrophoneRouteProbeReceiver"
+            android:exported="false" />
     </application>
 </manifest>

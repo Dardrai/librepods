@@ -7,10 +7,13 @@ import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.os.Binder
 import android.os.IBinder
+import android.os.Bundle
+import android.os.ParcelFileDescriptor
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -25,6 +28,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.currentCoroutineContext
 import me.kavishdevar.librepods.BuildConfig
+import me.kavishdevar.librepods.utils.HfpCallTransport
 import rikka.shizuku.Shizuku
 import com.topjohnwu.superuser.Shell
 import java.io.Closeable
@@ -63,10 +67,14 @@ class ShizukuAudioClient(context: Context) : Closeable {
     private var pairingRequest: PlaybackRequest? = null
     private var mediaRequest: PlaybackRequest? = null
     private var volumeRequest: Pair<Any, PlaybackRequest>? = null
+    private var microphoneProbeRequest: PlaybackRequest? = null
+    private var communicationRequest: PlaybackRequest? = null
     @Volatile private var bridge: IAudioBridge? = null
     @Volatile private var backendUid: Int? = null
     @Volatile private var rootBackend = false
     val isRoot: Boolean get() = !closed && bridge != null && rootBackend
+    /** Probe capability, independent of whether UID 0 arrived through libsu or root-mode Shizuku. */
+    internal val hasRootPrivileges: Boolean get() = !closed && bridge != null && backendUid == 0
     @Volatile private var closed = false
     private var connecting = false
     private var bound = false
@@ -235,7 +243,7 @@ class ShizukuAudioClient(context: Context) : Closeable {
     /** Its owner outlives the pause IPC, and is retired synchronously on a newer local choice. */
     suspend fun pauseOwnedMedia(address: String, stillCurrent: () -> Boolean): Boolean {
         val request = synchronized(lock) {
-            check(!closed && playbackRequest == null && !settingsRefresh)
+            check(!closed && playbackRequest == null && communicationRequest == null && !settingsRefresh)
             mediaRequest?.active?.set(false)
             PlaybackRequest(checkNotNull(bridge), A2dpRecoveryGuard(address).address, stillCurrent, null, checkNotNull(backendUid))
                 .also { mediaRequest = it }
@@ -264,7 +272,7 @@ class ShizukuAudioClient(context: Context) : Closeable {
             val callerJob = currentCoroutineContext()[Job]
             suspendCancellableCoroutine { continuation ->
                 val request = synchronized(lock) {
-                    check(!closed && !settingsRefresh)
+                    check(!closed && !settingsRefresh && communicationRequest == null)
                     cancelPlaybackRecoveryLocked()
                     PlaybackRequest(checkNotNull(bridge), A2dpRecoveryGuard(address).address, stillCurrent, callerJob, checkNotNull(backendUid))
                         .also { playbackRequest = it }
@@ -289,7 +297,7 @@ class ShizukuAudioClient(context: Context) : Closeable {
             val callerJob = currentCoroutineContext()[Job]
             suspendCancellableCoroutine { continuation ->
                 val request = synchronized(lock) {
-                    check(!closed && !settingsRefresh) { "Another audio operation is active" }
+                    check(!closed && !settingsRefresh && communicationRequest == null) { "Another audio operation is active" }
                     cancelPlaybackRecoveryLocked()
                     PlaybackRequest(checkNotNull(bridge) { "Connect privileged access to restore playback" },
                         A2dpRecoveryGuard(address).address, stillCurrent, callerJob, checkNotNull(backendUid)).also { playbackRequest = it }
@@ -377,7 +385,8 @@ class ShizukuAudioClient(context: Context) : Closeable {
 
     internal fun canConfirmPairing(): Boolean = bridge?.let(::pairingAllowed) == true
 
-    private fun pairingAllowed(remote: IAudioBridge): Boolean = !closed && bridge === remote && runCatching {
+    private fun pairingAllowed(remote: IAudioBridge): Boolean = !closed && bridge === remote &&
+        synchronized(lock) { communicationRequest == null } && runCatching {
         context.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED &&
             (isRoot || (!rootBackend && Shizuku.pingBinder() &&
                 Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED))
@@ -393,7 +402,7 @@ class ShizukuAudioClient(context: Context) : Closeable {
     fun checkVolumeSync(address: String, owner: Any, stillCurrent: () -> Boolean): Boolean {
         val selected = runCatching { A2dpRecoveryGuard(address).address }.getOrNull() ?: return false
         val request = synchronized(lock) {
-            if (closed || bridge == null || settingsRefresh || playbackRequest != null) return false
+            if (closed || bridge == null || settingsRefresh || playbackRequest != null || communicationRequest != null) return false
             volumeRequest?.takeIf { it.first === owner && it.second.address == selected &&
                 it.second.remote === bridge && it.second.active.get() }
                 ?.second?.also { it.updateCurrent(stillCurrent) } ?: run {
@@ -435,8 +444,131 @@ class ShizukuAudioClient(context: Context) : Closeable {
 
     fun cancelPlaybackRecovery() = synchronized(lock) { cancelPlaybackRecoveryLocked() }
 
+    internal class MicrophoneProbeLease internal constructor(
+        val readiness: Bundle,
+        private val finishOwned: suspend () -> Bundle,
+    ) {
+        private val finished = AtomicBoolean()
+        suspend fun finish(): Bundle = if (finished.compareAndSet(false, true)) finishOwned() else Bundle()
+    }
+
+    /** Private stats probe only. Root owns both the virtual policy and its receiving recorder. */
+    internal suspend fun prepareMicrophoneProbe(pcm: ParcelFileDescriptor,
+        stillCurrent: () -> Boolean): MicrophoneProbeLease {
+        check(BuildConfig.DEBUG && android.os.Build.VERSION.SDK_INT == 37 && hasRootPrivileges)
+        val remote = checkNotNull(bridge) { "Root audio service is unavailable" }
+        val request = PlaybackRequest(remote, "", stillCurrent, currentCoroutineContext()[Job], 0)
+        synchronized(lock) {
+            check(!closed && bridge === remote && backendUid == 0 && microphoneProbeRequest == null &&
+                communicationRequest == null && playbackRequest == null && pairingRequest == null && !settingsRefresh)
+            microphoneProbeRequest = request
+        }
+        try {
+            val ready = withContext(Dispatchers.IO) { ipc.withLock {
+                check(request.active.get() && stillCurrent() && bridge === remote && !closed)
+                remote.prepareMicrophoneProbe(pcm, request.owner)
+            } }
+            check(ready.getBoolean("ready") && ready.getInt("inputType") == 25 &&
+                ready.getInt("sourceRate") == 64_000 && ready.getInt("mixRate") == 48_000) {
+                "The private microphone input is not ready"
+            }
+            check(request.active.get() && stillCurrent() && bridge === remote && !closed)
+            return MicrophoneProbeLease(ready) { finishMicrophoneProbe(request) }
+        } catch (failure: Exception) {
+            withContext(NonCancellable + Dispatchers.IO) { runCatching { finishMicrophoneProbe(request) } }
+            throw failure
+        }
+    }
+
+    private suspend fun finishMicrophoneProbe(request: PlaybackRequest): Bundle = try {
+        // Preserve the owner's liveness until the root recorder has stopped intentionally.
+        withContext(Dispatchers.IO) { ipc.withLock { request.remote.finishMicrophoneProbe(request.owner) } }
+    } finally {
+        request.active.set(false)
+        synchronized(lock) { if (microphoneProbeRequest === request) microphoneProbeRequest = null }
+    }
+
+    internal class CommunicationLease internal constructor(
+        val readiness: Bundle,
+        private val inspectOwned: suspend () -> Bundle,
+        private val muteOwned: suspend (Boolean) -> Boolean,
+        private val quiesceOwned: suspend () -> Bundle,
+        private val finishOwned: suspend (Boolean) -> Bundle,
+    ) {
+        private val finished = AtomicBoolean()
+        suspend fun state(): Bundle = if (!finished.get()) inspectOwned() else Bundle()
+        suspend fun setMuted(muted: Boolean): Boolean = !finished.get() && muteOwned(muted)
+        suspend fun quiesce(): Bundle = if (!finished.get()) quiesceOwned() else Bundle()
+        suspend fun finish(inputQuiet: Boolean): Bundle =
+            if (finished.compareAndSet(false, true)) finishOwned(inputQuiet) else Bundle()
+    }
+
+    /** Inspection creates no streams or policies and never requests root permission. */
+    internal suspend fun inspectCommunication(address: String, kind: Int, targetPackage: String = ""): Bundle =
+        withContext(Dispatchers.IO) {
+            val remote = checkNotNull(bridge) { "Root audio service is unavailable" }
+            check(hasRootPrivileges)
+            remote.inspectCommunication(A2dpRecoveryGuard(address).address, kind, targetPackage)
+        }
+
+    internal suspend fun prepareCommunication(pcm: ParcelFileDescriptor, address: String, kind: Int,
+        targetPackage: String, recordingSession: Int, stillCurrent: () -> Boolean,
+        allowMedia: Boolean = false, mediaPackage: String = ""): CommunicationLease {
+        check(hasRootPrivileges) { "High-quality calls require root access" }
+        val remote = checkNotNull(bridge)
+        // A call owner belongs to its explicit lease, not the short preparation coroutine.
+        val request = PlaybackRequest(remote, A2dpRecoveryGuard(address).address, stillCurrent, null, 0)
+        synchronized(lock) {
+            check(!closed && bridge === remote && backendUid == 0 && communicationRequest == null &&
+                microphoneProbeRequest == null && playbackRequest == null && pairingRequest == null &&
+                mediaRequest == null && !settingsRefresh) { "Another audio operation is active" }
+            communicationRequest = request
+        }
+        try {
+            val hfpControl = checkNotNull(HfpCallTransport.discover(context)) {
+                "Bluetooth call control is unavailable. Restart Bluetooth after updating LibrePods."
+            }
+            val ready = withContext(Dispatchers.IO) { ipc.withLock {
+                check(request.active.get() && stillCurrent() && bridge === remote && !closed)
+                remote.prepareCommunication(pcm, request.owner, request.address, kind, targetPackage, recordingSession,
+                    allowMedia, mediaPackage, 2, hfpControl)
+            } }
+            check(ready.getBoolean("ready") && ready.getInt("routeProtocol") == 2 &&
+                ready.getInt("sourceRate") == 64_000 && ready.getInt("mixRate") == 48_000) {
+                ready.getString("error") ?: "The call audio route is unavailable"
+            }
+            check(request.active.get() && stillCurrent() && bridge === remote && !closed)
+            return CommunicationLease(ready,
+                { withContext(Dispatchers.IO) { remote.communicationState(request.owner) } },
+                { muted -> withContext(Dispatchers.IO) { remote.setCommunicationMuted(request.owner, muted) } },
+                { withContext(NonCancellable + Dispatchers.IO) { ipc.withLock {
+                    remote.finishCommunication(request.owner, false)
+                } } },
+                { quiet -> finishCommunication(request, quiet) })
+        } catch (failure: Exception) {
+            // No AACP input has started before this method returns a verified lease.
+            withContext(NonCancellable + Dispatchers.IO) { runCatching { finishCommunication(request, true) } }
+            throw failure
+        }
+    }
+
+    private suspend fun finishCommunication(request: PlaybackRequest, inputQuiet: Boolean): Bundle = try {
+        withContext(NonCancellable + Dispatchers.IO) { ipc.withLock {
+            request.remote.finishCommunication(request.owner, inputQuiet)
+        } }
+    } finally {
+        request.active.set(false)
+        synchronized(lock) { if (communicationRequest === request) communicationRequest = null }
+    }
+
+    internal suspend fun inspectCallMedia(address: String): Bundle = withContext(Dispatchers.IO) {
+        check(hasRootPrivileges) { "Root audio service is unavailable" }
+        checkNotNull(bridge).inspectCallMedia(A2dpRecoveryGuard(address).address)
+    }
+
     fun canRefreshSettings(): Boolean = synchronized(lock) {
-        !closed && !settingsRefresh && playbackRequest == null && !ipc.isLocked
+        !closed && !settingsRefresh && playbackRequest == null && microphoneProbeRequest == null &&
+            communicationRequest == null && !ipc.isLocked
     }
 
     fun tryBeginSettingsRefresh(): Boolean = synchronized(lock) {
@@ -481,6 +613,10 @@ class ShizukuAudioClient(context: Context) : Closeable {
             cancelPlaybackRecoveryLocked()
             volumeRequest?.second?.active?.set(false)
             volumeRequest = null
+            microphoneProbeRequest?.active?.set(false)
+            microphoneProbeRequest = null
+            communicationRequest?.active?.set(false)
+            communicationRequest = null
             bridgeDeath?.let { death -> bridge?.asBinder()?.let { runCatching { it.unlinkToDeath(death, 0) } } }
             bridgeDeath = null
             bridge = null
@@ -504,6 +640,10 @@ class ShizukuAudioClient(context: Context) : Closeable {
             cancelPlaybackRecoveryLocked()
             volumeRequest?.second?.also { it.active.set(false); retiring += it }
             volumeRequest = null
+            microphoneProbeRequest?.also { it.active.set(false); retiring += it }
+            microphoneProbeRequest = null
+            communicationRequest?.also { it.active.set(false); retiring += it }
+            communicationRequest = null
             bridgeDeath?.let { death -> bridge?.asBinder()?.let { runCatching { it.unlinkToDeath(death, 0) } } }
             bridgeDeath = null
             // The tag is unique to this foreground-service instance; a late close cannot kill its replacement.

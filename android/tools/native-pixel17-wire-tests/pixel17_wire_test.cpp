@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "pixel17_wire_hooks.h"
+#include "pixel17_codec.h"
 #include "wire.h"
 #include <array>
 #include <cstdio>
@@ -175,7 +176,7 @@ void own_codec() {
     check(!hook<Equals>(equals_symbol)(info.data(), other.data()));
     check(!hook<Equals>(equals_symbol)(nullptr, info.data()));
     check(hook<Parameter>(rate_symbol)(info.data()) == 48000);
-    check(hook<Parameter>(bits_symbol)(info.data()) == 16);
+    check(hook<Parameter>(bits_symbol)(info.data()) == int(kPixel17PcmBits));
     check(hook<Parameter>(channels_symbol)(info.data()) == 2);
     check(hook<Parameter>(index_symbol)(info.data()) == 5);
     check(hook<Parameter>(vendor_index_symbol)(info.data()) == 5);

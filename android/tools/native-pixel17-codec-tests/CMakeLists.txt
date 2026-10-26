@@ -11,3 +11,12 @@ target_include_directories(pixel17_codec_test PRIVATE ${ELD_SOURCE})
 target_link_libraries(pixel17_codec_test PRIVATE Threads::Threads)
 target_compile_options(pixel17_codec_test PRIVATE -Wall -Wextra -Werror)
 add_test(NAME pixel17_codec_test COMMAND pixel17_codec_test)
+
+add_executable(pixel17_codec_test_q31 pixel17_codec_test.cpp
+    ${ELD_SOURCE}/pixel17_codec.cpp ${ELD_SOURCE}/wire.cpp)
+target_include_directories(pixel17_codec_test_q31 PRIVATE ${ELD_SOURCE})
+target_link_libraries(pixel17_codec_test_q31 PRIVATE Threads::Threads)
+target_compile_options(pixel17_codec_test_q31 PRIVATE -Wall -Wextra -Werror)
+add_test(NAME pixel17_codec_test_q31 COMMAND pixel17_codec_test_q31)
+
+target_compile_definitions(pixel17_codec_test_q31 PRIVATE ELD_PRIVATE_WIDE_PCM=1)

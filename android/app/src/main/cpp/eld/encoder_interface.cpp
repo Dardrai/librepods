@@ -9,11 +9,11 @@
 
 namespace eld {
 namespace {
-constexpr size_t kPcmBytes = kFrameSamples * kChannels * sizeof(int16_t);
 constexpr size_t kHeadroom = 32; // Stock AAC reserves 23; RTP/L2CAP prepend into this space.
 constexpr uint64_t kPeriodUs = 10000;
 constexpr uint64_t kClockSafeguardUs = 10000000;
 constexpr unsigned kPrimerFrames = 10;
+constexpr unsigned kCatchUpFrames = 4;
 struct State {
     EncoderHost host{};
     EldFdkEncoder* encoder = nullptr;
@@ -22,6 +22,7 @@ struct State {
     EnqueuePacket enqueue = nullptr;
     EncoderStatus status{};
     std::array<int16_t, kFrameSamples * kChannels> pcm{};
+    std::array<int32_t, kFrameSamples * kChannels> pcm_q31{};
     size_t filled = 0;
     size_t queued = 0;
     uint64_t due_us = 0;
@@ -43,6 +44,19 @@ bool clock_pending() {
     return state.clock.phase == EncoderClockPhase::Armed || state.clock.phase == EncoderClockPhase::Active;
 }
 uint64_t real_us() { return state.host.monotonic_us ? state.host.monotonic_us() : 0; }
+struct StageTiming {
+    uint64_t& maximum;
+    uint64_t* slow_calls;
+    const uint64_t started = real_us();
+    explicit StageTiming(uint64_t& max, uint64_t* slow = nullptr) : maximum(max), slow_calls(slow) {}
+    ~StageTiming() {
+        const auto finished = real_us();
+        if (!started || !finished || finished < started) return;
+        const auto elapsed = finished - started;
+        maximum = std::max(maximum, elapsed);
+        if (slow_calls && elapsed >= 1000) ++*slow_calls;
+    }
+};
 uint64_t period_us() { return uint64_t(state.clock.effective_interval_tenths) * 1000; }
 uint64_t following_period(uint64_t time_us, uint64_t period = kPeriodUs) {
     return time_us > UINT64_MAX - period ? UINT64_MAX : time_us + period;
@@ -54,10 +68,15 @@ void clock_progress(uint64_t now_us) {
     state.clock.signed_progress_frames = static_cast<int64_t>(state.clock.actual_frames) -
         static_cast<int64_t>(state.clock.nominal_frames);
 }
-void stop_clock(EncoderClockPhase phase, uint64_t now_us) {
+void stop_clock(EncoderClockPhase phase, uint64_t now_us,
+                EncoderClockStopReason reason = EncoderClockStopReason::None) {
     if (!clock_pending()) return;
     clock_progress(now_us);
     state.clock.phase = phase;
+    state.clock.stop_reason = reason;
+    state.clock.stop_media_age_us = state.last_media_submit_us && now_us >= state.last_media_submit_us ?
+        now_us - state.last_media_submit_us : 0;
+    state.clock.stop_host_queue_length = state.queued;
     state.clock.effective_interval_tenths = 10;
     // Keep the next actual AU deadline: normalization must not erase queue debt.
 }
@@ -65,20 +84,21 @@ void refresh_clock(uint64_t now_us) {
     if (!clock_pending()) return;
     const auto requested_us = state.clock.deadline_us - kClockSafeguardUs;
     if (!now_us || now_us < requested_us || now_us < state.last_media_submit_us) {
-        stop_clock(EncoderClockPhase::Cancelled, now_us);
+        stop_clock(EncoderClockPhase::Cancelled, now_us, EncoderClockStopReason::InvalidTime);
     } else if (now_us >= state.clock.deadline_us) {
-        stop_clock(EncoderClockPhase::Expired, state.clock.deadline_us);
+        stop_clock(EncoderClockPhase::Expired, state.clock.deadline_us, EncoderClockStopReason::Deadline);
     } else if (state.last_media_submit_us &&
-               now_us - state.last_media_submit_us > 2 * std::max(kPeriodUs, period_us())) {
-        // A stopped producer/radio queue cannot satisfy a deliberate slow-clock budget.
-        stop_clock(EncoderClockPhase::Cancelled, now_us);
+               now_us - state.last_media_submit_us > kCatchUpFrames * std::max(kPeriodUs, period_us())) {
+        // Accept only gaps within the source's bounded catch-up capacity.
+        stop_clock(EncoderClockPhase::Cancelled, now_us, EncoderClockStopReason::MediaGap);
     } else clock_progress(now_us);
 }
 void commit_clock(uint64_t now_us, size_t queued) {
     refresh_clock(now_us);
     if (state.clock.phase == EncoderClockPhase::Armed) {
         if (queued >= 12 || (now_us > state.due_us && now_us - state.due_us > 2000)) {
-            stop_clock(EncoderClockPhase::Cancelled, now_us);
+            stop_clock(EncoderClockPhase::Cancelled, now_us,
+                queued >= 12 ? EncoderClockStopReason::QueueFull : EncoderClockStopReason::DueDebt);
             return;
         }
         // This AU ran at the normal rate; subsequent accepted media AUs spend the budget.
@@ -89,14 +109,25 @@ void commit_clock(uint64_t now_us, size_t queued) {
     } else if (state.clock.phase == EncoderClockPhase::Active) {
         state.clock.actual_frames += kFrameSamples;
         clock_progress(now_us);
-        if (queued >= 12) stop_clock(EncoderClockPhase::Cancelled, now_us);
-        else {
-            const auto signed_frames = state.clock.signed_progress_frames;
-            const auto achieved = state.clock.requested_interval_tenths == 9 ? signed_frames : -signed_frames;
-            if (achieved >= static_cast<int64_t>(state.clock.target_drift_ms) * 48)
-                stop_clock(EncoderClockPhase::Completed, now_us);
-        }
+        if (queued >= 12) stop_clock(EncoderClockPhase::Cancelled, now_us, EncoderClockStopReason::QueueFull);
     }
+}
+void finish_clock_callback(uint64_t now_us, unsigned produced, unsigned budget) {
+    refresh_clock(now_us);
+    if (state.clock.phase != EncoderClockPhase::Active) return;
+    if (state.due_us <= now_us) {
+        // A producer stall is not deliberate drift. Keep measuring until its
+        // debt is paid, or cancel if the entire catch-up budget could not pay it.
+        if (produced == budget)
+            stop_clock(EncoderClockPhase::Cancelled, now_us, EncoderClockStopReason::DueDebt);
+        return;
+    }
+    // All accepted AUs in this callback must enter the ledger before completion:
+    // later catch-up AUs can undo the apparent slow-clock drift of its first AU.
+    const auto signed_frames = state.clock.signed_progress_frames;
+    const auto achieved = state.clock.requested_interval_tenths == 9 ? signed_frames : -signed_frames;
+    if (achieved >= static_cast<int64_t>(state.clock.target_drift_ms) * 48)
+        stop_clock(EncoderClockPhase::Completed, now_us);
 }
 
 void capture_peer_locked() {
@@ -112,7 +143,7 @@ bool default_peer_params(const void* peer, uint16_t* mtu) {
     return true;
 }
 void retire_locked(bool failed) {
-    stop_clock(EncoderClockPhase::Cancelled, real_us());
+    stop_clock(EncoderClockPhase::Cancelled, real_us(), EncoderClockStopReason::Retired);
     eld_fdk_close(&state.encoder);
     state.status.active = false;
     state.status.failed = failed;
@@ -122,7 +153,7 @@ void retire_locked(bool failed) {
     state.due_us = 0;
 }
 void restart_clock_locked(bool new_transport = false) {
-    stop_clock(EncoderClockPhase::Cancelled, real_us());
+    stop_clock(EncoderClockPhase::Cancelled, real_us(), EncoderClockStopReason::FeedingReset);
     state.filled = state.queued = 0;
     state.due_us = 0;
     state.last_send_us = 0;
@@ -135,6 +166,7 @@ void restart_clock_locked(bool new_transport = false) {
     state.primer = kPrimerFrames;
     state.empty_outputs = 0;
     state.pcm.fill(0);
+    state.pcm_q31.fill(0);
 }
 void init(const void* peer, void* codec, ReadPcm read, EnqueuePacket enqueue) {
     void (*failed)(uint64_t) = nullptr;
@@ -157,7 +189,7 @@ void init(const void* peer, void* codec, ReadPcm read, EnqueuePacket enqueue) {
         valid = valid && max_au_bytes(rate) + kAuHeaderSize <= mtu;
         if (valid && eld_fdk_open(&state.host.fdk, rate, &state.encoder, &state.config) == ELD_FDK_OK &&
             state.config.sample_rate == kSampleRate && state.config.channels == kChannels &&
-            state.config.frame_samples == kFrameSamples && state.config.pcm_sample_bytes == 2 &&
+            state.config.frame_samples == kFrameSamples && state.config.pcm_sample_bytes == state.host.pcm_sample_bytes &&
             state.config.max_au_bytes == max_au_bytes(rate)) {
             restart_clock_locked(true);
             state.mtu = mtu;
@@ -215,6 +247,7 @@ void send_frames(uint64_t now_us) {
     {
         std::lock_guard<std::mutex> lock(mutex);
         if (!state.status.active) return;
+        const StageTiming callback_timing(state.status.callback_max_us);
         refresh_clock(real_us());
         ++state.status.send_calls;
         if (state.last_send_us && now_us >= state.last_send_us)
@@ -230,7 +263,7 @@ void send_frames(uint64_t now_us) {
         } else if (state.due_us && now_us >= state.due_us && now_us - state.due_us < 2 * kPeriodUs) {
             state.due_us = following_period(state.due_us);
         } else rebase_clock_locked(now_us);
-        const unsigned budget = catch_up && !priming ? 4 : 1;
+        const unsigned budget = catch_up && !priming ? kCatchUpFrames : 1;
         size_t queued = state.queued;
         unsigned produced = 0;
         bool accepted_media = false, opportunity_blocked = false;
@@ -238,25 +271,30 @@ void send_frames(uint64_t now_us) {
             if (attempt && state.due_us > now_us) break;
             if (queued >= 12) {
                 opportunity_blocked = true;
-                stop_clock(EncoderClockPhase::Cancelled, real_us());
+                stop_clock(EncoderClockPhase::Cancelled, real_us(), EncoderClockStopReason::QueueFull);
                 ++state.status.queue_deferrals;
                 break; // Keep opt-in debt: the next callback may see a drained native queue.
             }
             bool fatal = false;
             if (state.primer == 0) {
-                const size_t remaining = kPcmBytes - state.filled;
-                auto* destination = reinterpret_cast<uint8_t*>(state.pcm.data()) + state.filled;
+                const size_t remaining = kFrameSamples * kChannels * state.config.pcm_sample_bytes - state.filled;
+                void* pcm = state.config.pcm_sample_bytes == 4 ? static_cast<void*>(state.pcm_q31.data()) : state.pcm.data();
+                auto* destination = static_cast<uint8_t*>(pcm) + state.filled;
                 ++state.status.pcm_read_calls;
-                const auto count = state.read(destination, static_cast<uint32_t>(remaining));
-                if (count > remaining || count % (kChannels * sizeof(int16_t)) != 0) {
+                uint32_t count;
+                {
+                    const StageTiming timing(state.status.pcm_read_max_us, &state.status.pcm_read_slow_calls);
+                    count = state.read(destination, static_cast<uint32_t>(remaining));
+                }
+                if (count > remaining || count % (kChannels * state.config.pcm_sample_bytes) != 0) {
                     fatal = true;
                 } else {
                     state.status.pcm_read_bytes += count;
                     state.filled += count;
-                    if (state.filled < kPcmBytes) {
+                    if (state.filled < kFrameSamples * kChannels * state.config.pcm_sample_bytes) {
                         opportunity_blocked = true;
                         ++state.status.underflows;
-                        stop_clock(EncoderClockPhase::Cancelled, real_us());
+                        stop_clock(EncoderClockPhase::Cancelled, real_us(), EncoderClockStopReason::Underflow);
                         if (catch_up) rebase_clock_locked(now_us);
                         break;
                     }
@@ -264,19 +302,24 @@ void send_frames(uint64_t now_us) {
             } else {
                 // Prime the AirPods before consuming music; do not replace its first 100 ms.
                 state.pcm.fill(0);
+                state.pcm_q31.fill(0);
             }
             std::array<uint8_t, kMaximumAu> au{};
             size_t bytes = 0;
             if (!fatal) {
-                fatal = eld_fdk_encode(state.encoder, state.pcm.data(), kFrameSamples,
-                                       au.data(), au.size(), &bytes) != ELD_FDK_OK;
+                {
+                    const StageTiming timing(state.status.encode_max_us);
+                    fatal = (state.config.pcm_sample_bytes == 4 ?
+                        eld_fdk_encode_q31(state.encoder, state.pcm_q31.data(), kFrameSamples, au.data(), au.size(), &bytes) :
+                        eld_fdk_encode(state.encoder, state.pcm.data(), kFrameSamples, au.data(), au.size(), &bytes)) != ELD_FDK_OK;
+                }
                 state.filled = 0;
             }
             if (!fatal && bytes == 0) {
                 opportunity_blocked = true;
                 // FDK may buffer during startup, but a broken encoder must not stay silent forever.
                 if (++state.empty_outputs <= 16) {
-                    stop_clock(EncoderClockPhase::Cancelled, real_us());
+                    stop_clock(EncoderClockPhase::Cancelled, real_us(), EncoderClockStopReason::EmptyOutput);
                     if (catch_up) rebase_clock_locked(now_us);
                     break;
                 }
@@ -301,7 +344,11 @@ void send_frames(uint64_t now_us) {
                         std::memcpy(data + kHeadroom + kAuHeaderSize, au.data(), bytes);
                         // Both results transfer ownership. False is the native queue's normal
                         // tx-flush path during suspend, not an encoder/transport failure.
-                        const bool accepted = state.enqueue(packet, 1, static_cast<uint32_t>(kPcmBytes));
+                        bool accepted;
+                        {
+                            const StageTiming timing(state.status.enqueue_max_us);
+                            accepted = state.enqueue(packet, 1, kFrameSamples * kChannels * state.config.pcm_sample_bytes);
+                        }
                         ++produced;
                         state.status.burst_max = std::max(state.status.burst_max, produced);
                         // The AU was encoded even if the host discarded it. Never reuse its
@@ -323,7 +370,7 @@ void send_frames(uint64_t now_us) {
                         } else {
                             opportunity_blocked = true;
                             ++state.status.host_discards;
-                            stop_clock(EncoderClockPhase::Cancelled, real_us());
+                            stop_clock(EncoderClockPhase::Cancelled, real_us(), EncoderClockStopReason::HostDiscard);
                             if (catch_up) rebase_clock_locked(now_us);
                             break; // A normal suspension may race this timer; do not read another AU.
                         }
@@ -339,8 +386,10 @@ void send_frames(uint64_t now_us) {
             // Silence primers are paced across real callbacks, never burst to pay old debt.
             if (catch_up && priming && state.due_us <= now_us) rebase_clock_locked(now_us);
         }
-        if(accepted_media && !opportunity_blocked && !failed && state.status.active && !state.filled && queued<12)
+        if(accepted_media && !opportunity_blocked && !failed && state.status.active && !state.filled && queued<12) {
+            finish_clock_callback(real_us(), produced, budget);
             opportunity=state.host.clock_opportunity;
+        }
     }
     // Recovery can re-enter the source lifecycle; never invoke it while holding our mutex.
     if (failed) failed(generation);
@@ -349,7 +398,7 @@ void send_frames(uint64_t now_us) {
 void queue_length(size_t count) {
     std::lock_guard<std::mutex> lock(mutex);
     state.queued = count;
-    if (count >= 12) stop_clock(EncoderClockPhase::Cancelled, real_us());
+    if (count >= 12) stop_clock(EncoderClockPhase::Cancelled, real_us(), EncoderClockStopReason::QueueFull);
 }
 const EncoderInterface interface = {
     init, cleanup, reset, reset, interval_ms, effective_frame_size, send_frames, queue_length
@@ -360,7 +409,9 @@ bool encoder_prepare(const EncoderHost& host) {
     std::lock_guard<std::mutex> lock(mutex);
     if (state.prepared || state.status.active || !host.allocate || !host.release ||
         !host.fdk.open || !host.fdk.set || !host.fdk.get || !host.fdk.info ||
-        !host.fdk.encode || !host.fdk.close) return false;
+        !host.fdk.encode || !host.fdk.close ||
+        (host.pcm_sample_bytes != 2 && host.pcm_sample_bytes != 4) ||
+        host.fdk.pcm_sample_bytes != host.pcm_sample_bytes) return false;
     state.host = host;
     state.clock.phase = host.monotonic_us && host.catch_up_after_stall ?
         EncoderClockPhase::Idle : EncoderClockPhase::Unavailable;
@@ -420,12 +471,12 @@ uint64_t encoder_clock_begin_checked(const uint8_t* peer,size_t size,uint64_t ge
 bool encoder_clock_cancel(uint64_t serial) {
     std::lock_guard<std::mutex> lock(mutex);
     if (!serial || serial != state.clock.serial) return false;
-    stop_clock(EncoderClockPhase::Cancelled, real_us());
+    stop_clock(EncoderClockPhase::Cancelled, real_us(), EncoderClockStopReason::Requested);
     return true;
 }
-EncoderClockStatus encoder_clock_status() {
+EncoderClockStatus encoder_clock_status(bool refresh) {
     std::lock_guard<std::mutex> lock(mutex);
-    refresh_clock(real_us());
+    if (refresh) refresh_clock(real_us());
     return state.clock;
 }
 void encoder_fail_route() {

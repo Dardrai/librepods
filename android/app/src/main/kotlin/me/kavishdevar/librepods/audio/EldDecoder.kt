@@ -9,16 +9,22 @@ import android.media.MediaFormat
 import android.os.SystemClock
 import java.nio.ByteBuffer
 
+internal interface MicrophoneDecoder : AutoCloseable {
+    val decodedFrames: Long
+    fun decode(unit: ByteArray, shouldStop: () -> Boolean)
+    fun drain()
+}
+
 /** One decoder per capture session. All operations belong to its worker thread. */
-class EldDecoder(
+internal class EldDecoder(
     private val onFormat: (PcmFormat) -> Unit,
     private val onPcm: (ByteArray, Long) -> Unit,
-) : AutoCloseable {
+) : MicrophoneDecoder {
     private val codec = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
     private val info = MediaCodec.BufferInfo()
     private var format: PcmFormat? = null
     private var queuedSamples = 0L
-    var decodedFrames = 0L
+    override var decodedFrames = 0L
         private set
 
     init {
@@ -36,7 +42,7 @@ class EldDecoder(
         }
     }
 
-    fun decode(unit: ByteArray, shouldStop: () -> Boolean) {
+    override fun decode(unit: ByteArray, shouldStop: () -> Boolean) {
         require(unit.isNotEmpty() && unit.size <= 255)
         val deadline = SystemClock.elapsedRealtime() + 500
         var index: Int
@@ -56,7 +62,7 @@ class EldDecoder(
         drain()
     }
 
-    fun drain() {
+    override fun drain() {
         while (true) {
             val index = codec.dequeueOutputBuffer(info, 0)
             when {

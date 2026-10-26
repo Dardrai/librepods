@@ -32,7 +32,9 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import me.kavishdevar.librepods.core.bluetooth.aacp.packet.AACPPacket
 import me.kavishdevar.librepods.core.bluetooth.aacp.packet.AACPPacketType
 import me.kavishdevar.librepods.core.bluetooth.aacp.packet.AudioSourcePacket
@@ -96,6 +98,14 @@ class AACPManager(private val device: AppleDevice,
     private val connectLock = java.util.concurrent.locks.ReentrantLock()
     private val connectionEpoch = AtomicLong()
     private var hostClockEpoch: Long? = null
+    private class SettingsStartup(val socket: BluetoothSocket, val session: Long) {
+        @Volatile var sent = false
+        @Volatile var received = false
+        var scope: CoroutineScope? = null
+        var waitFinished = false
+        var readStarted = false
+    }
+    @Volatile private var settingsStartup: SettingsStartup? = null
     private val controlTimeouts = ConcurrentHashMap<ControlCommandIdentifier, Job>()
     private class ListeningModeWrite(val value: ByteArray, val quiet: Boolean) {
         val written = CompletableDeferred<Boolean>()
@@ -112,6 +122,31 @@ class AACPManager(private val device: AppleDevice,
     fun captureAudioSocket(): BluetoothSocket? = socket?.takeIf { pendingConnect?.socket !== it && it.isConnected }
     fun ownsAudioSocket(expected: BluetoothSocket): Boolean =
         socket === expected && pendingConnect?.socket !== expected && expected.isConnected
+
+    internal fun captureSettingsSocket(): BluetoothSocket? = settingsStartup?.takeIf {
+        it.sent && it.received && ownsAudioSocket(it.socket) && device.state.value.controlSession == it.session
+    }?.socket
+
+    private fun settingsStartup(expected: BluetoothSocket): SettingsStartup? = synchronized(this) {
+        val session = device.state.value.controlSession
+        if (!ownsAudioSocket(expected) || session <= 0) return@synchronized null
+        settingsStartup?.takeIf { it.socket === expected && it.session == session }
+            ?: SettingsStartup(expected, session).also { settingsStartup = it }
+    }
+
+    private fun settingsReady(expected: BluetoothSocket) = synchronized(this) {
+        val startup = settingsStartup(expected) ?: return@synchronized
+        startup.received = true
+        if (startup.waitFinished) startInitialSettingsRead(startup)
+    }
+
+    private fun startInitialSettingsRead(startup: SettingsStartup) = synchronized(this) {
+        val scope = startup.scope ?: return@synchronized
+        if (settingsStartup !== startup || captureSettingsSocket() !== startup.socket ||
+            startup.readStarted || !scope.isActive) return@synchronized
+        startup.readStarted = true
+        scope.launch { device.readInitialATTCharacteristics(startup.socket) }
+    }
 
     /** Captured-transport writes never enter packet history or raw logs. */
     fun sendAudioPacket(expected: BluetoothSocket, packet: ByteArray, beforeWrite: (() -> Unit)? = null): Boolean = synchronized(expected) {
@@ -184,9 +219,27 @@ class AACPManager(private val device: AppleDevice,
             if (!ownsAudioSocket(expected)) return
             if (initialized && !initialAttStarted) {
                 initialAttStarted = true
-                // A protected read before source-feature setup can reject and retire this ATT owner.
-                // Its own job keeps reads independent of AACP input and the repeat initialization.
-                scope.launch { device.readInitialATTCharacteristics(expected) }
+                val startup = settingsStartup(expected) ?: return
+                synchronized(this) {
+                    startup.scope = scope
+                    startup.sent = true
+                }
+                // Successful host writes do not prove the peer has accepted service 4 yet.
+                scope.launch {
+                    fun current() = ownsAudioSocket(expected) && device.state.value.controlSession == startup.session
+                    withTimeoutOrNull(12.seconds) {
+                        while (current() && !startup.received) delay(50.milliseconds)
+                    }
+                    synchronized(this@AACPManager) {
+                        startup.waitFinished = true
+                        if (!current()) return@synchronized
+                        // A later accepted reply resumes loading once, without another polling job.
+                        if (captureSettingsSocket() === expected) startInitialSettingsRead(startup)
+                        else device.updateState { it.copy(
+                            hearingAidReadStatus = if (it.hearingAidReadStatus == SettingsReadStatus.WAITING) SettingsReadStatus.UNAVAILABLE else it.hearingAidReadStatus,
+                            transparencyReadStatus = if (it.transparencyReadStatus == SettingsReadStatus.WAITING) SettingsReadStatus.UNAVAILABLE else it.transparencyReadStatus) }
+                    }
+                }
             }
             if (pass == 0) delay(3.seconds)
         }
@@ -378,6 +431,7 @@ class AACPManager(private val device: AppleDevice,
                     connectionScope = scope
                     pendingConnect = null
                     hostClockEpoch = null
+                    settingsStartup = null
                     device.updateState { it.copy(capabilities = emptySet(), hearingModes = hearingStateAfterRefresh(hearingRefresh), controlSession = requestEpoch + 1, accommodationsRequest = accommodationsStateAfterRefresh(hearingRefresh), budRoleRaw = emptyList(), caseInfo = null,
                         hearingAidData = byteArrayOf(), transparencyData = byteArrayOf(),
                         hearingAidReadStatus = SettingsReadStatus.WAITING, transparencyReadStatus = SettingsReadStatus.WAITING) }
@@ -472,6 +526,10 @@ class AACPManager(private val device: AppleDevice,
             if (ownsAudioSocket(sourceSocket)) rtBuddyManager else null
         }
         sensors?.feed(packet)
+        if (successfulSettingsConnectResponse(packet)) {
+            settingsReady(sourceSocket)
+            return
+        }
         if (!validAacpMessage(packet)) {
             Log.w(TAG, "Ignoring malformed AACP message (${packet.size} bytes)")
             return
@@ -512,6 +570,7 @@ class AACPManager(private val device: AppleDevice,
                 )
 
                 publishForTransport(this, sourceSocket, ::captureAudioSocket) {
+                    settingsReady(sourceSocket)
                     device.updateState {
                         it.copy(
                             capabilities = capabilities,
@@ -816,7 +875,8 @@ class AACPManager(private val device: AppleDevice,
     }
 
     fun sendControlCommand(identifier: Byte, value: ByteArray, quietListeningMode: Boolean = false,
-                           expectedSocket: BluetoothSocket? = captureAudioSocket(), isValid: () -> Boolean = { true }): Boolean {
+                           expectedSocket: BluetoothSocket? = captureAudioSocket(),
+                           beforeWrite: (() -> Unit)? = null, isValid: () -> Boolean = { true }): Boolean {
         if (value.isEmpty() || value.size > 4) return false
         val controlCommand = ControlCommand(ControlCommandIdentifier.fromByte(identifier) ?: return false, value)
         // Hearing modes share a gate and need a current report/fitting transaction.
@@ -846,6 +906,7 @@ class AACPManager(private val device: AppleDevice,
         val written = synchronized(originalSocket) {
             val current = synchronized(this) { ownsAudioSocket(originalSocket) && isValid() }
             current && sendAudioPacket(originalSocket, packet.rawPacket) {
+                beforeWrite?.invoke()
                 modeWrite?.apply {
                     expiresAt = SystemClock.elapsedRealtime() + 10_000
                     order = listeningModeWriteOrder.incrementAndGet()
@@ -1280,6 +1341,7 @@ class AACPManager(private val device: AppleDevice,
             socket = null
             pendingConnect = null
             rtBuddyManager = null
+            settingsStartup = null
             microphoneRequested = null
             connectionEpoch.incrementAndGet()
             device.att.disconnect()

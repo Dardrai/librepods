@@ -6,6 +6,9 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Binder
 import android.os.Build
+import android.os.Bundle
+import android.os.ParcelFileDescriptor
+import android.os.Process
 import me.kavishdevar.librepods.BuildConfig
 import java.util.concurrent.atomic.AtomicBoolean
 import rikka.shizuku.SystemServiceHelper
@@ -24,6 +27,8 @@ class ShizukuAudioService @JvmOverloads constructor(context: Context,
     private var callConnection: NativeCallConnection? = null
     private var mediaPause: Pair<IPlaybackRecoveryOwner, OwnedMediaPause>? = null
     private var volumeChecking = false
+    private var microphoneProbe: Pair<IPlaybackRecoveryOwner, RootMicrophoneProbe>? = null
+    private var communication: Pair<IPlaybackRecoveryOwner, RootCommunicationRoute>? = null
     private val volumeSync by lazy {
         BluetoothVolumeSync(shellContext, audio = ShizukuVolumeSyncAudio(shellContext,
             binder = { checkNotNull(SystemServiceHelper.getSystemService(it)) },
@@ -55,7 +60,7 @@ class ShizukuAudioService @JvmOverloads constructor(context: Context,
         val selected = A2dpRecoveryGuard(address).address
         synchronized(lock) {
             check(!cleanupFailed.get() && !volumeChecking && playbackRecovery == null &&
-                playbackRelease == null && callConnection == null)
+                playbackRelease == null && callConnection == null && probeIsQuiet())
             volumeChecking = true
         }
         val identity = Binder.clearCallingIdentity()
@@ -78,6 +83,8 @@ class ShizukuAudioService @JvmOverloads constructor(context: Context,
 
     override fun retireOwner(owner: IPlaybackRecoveryOwner) {
         enforceCaller()
+        finishCommunication(owner, false)
+        finishMicrophoneProbe(owner)
         finishOwnedMedia(owner, false)
         volumeSync.forget(owner.asBinder())
     }
@@ -89,7 +96,7 @@ class ShizukuAudioService @JvmOverloads constructor(context: Context,
                 PackageManager.PERMISSION_GRANTED) { "LibrePods call access is unavailable" }
         val operation = synchronized(lock) {
             check(!cleanupFailed.get() && !volumeChecking && playbackRecovery == null &&
-                playbackRelease == null && callConnection == null) { "Another audio operation is active" }
+                playbackRelease == null && callConnection == null && probeIsQuiet()) { "Another audio operation is active" }
             NativeCallConnection(shellContext, address, owner).also { callConnection = it }
         }
         val identity = Binder.clearCallingIdentity()
@@ -104,7 +111,7 @@ class ShizukuAudioService @JvmOverloads constructor(context: Context,
         val identity = Binder.clearCallingIdentity()
         return try { synchronized(lock) {
             check(!cleanupFailed.get() && !volumeChecking && playbackRecovery == null &&
-                playbackRelease == null && callConnection == null) { "Another audio operation is active" }
+                playbackRelease == null && callConnection == null && probeIsQuiet()) { "Another audio operation is active" }
             mediaPause?.second?.close(); mediaPause = null
             OwnedMediaPause.acquire(shellContext, address, owner)?.let { mediaPause = owner to it; true } ?: false
         } } finally { Binder.restoreCallingIdentity(identity) }
@@ -122,6 +129,164 @@ class ShizukuAudioService @JvmOverloads constructor(context: Context,
 
     private fun enforceCaller() {
         AudioBridgeRules.requireCaller(expectedUid, Binder.getCallingUid())
+    }
+
+    private fun probeIsQuiet() = microphoneProbe?.second?.isCleanupComplete != false &&
+        communication?.second?.isCleanupComplete != false
+
+    override fun inspectCommunication(address: String, kind: Int, targetPackage: String): Bundle {
+        enforceCaller()
+        for (permission in listOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.READ_PHONE_STATE,
+                Manifest.permission.BLUETOOTH_CONNECT))
+            check(originalContext.packageManager.checkPermission(permission, BuildConfig.APPLICATION_ID) ==
+                PackageManager.PERMISSION_GRANTED) { "LibrePods call permission is unavailable" }
+        val identity = Binder.clearCallingIdentity()
+        return try {
+            check(!cleanupFailed.get())
+            RootCommunicationRoute.inspect(shellContext, A2dpRecoveryGuard(address).address, kind, targetPackage)
+        } finally { Binder.restoreCallingIdentity(identity) }
+    }
+
+    override fun prepareCommunication(pcm: ParcelFileDescriptor, owner: IPlaybackRecoveryOwner,
+        address: String, kind: Int, targetPackage: String, recordingSession: Int,
+        allowMedia: Boolean, mediaPackage: String, routeProtocol: Int, hfpControl: IHfpCallControl?): Bundle {
+        try {
+            enforceCaller()
+            require(routeProtocol == 2 && hfpControl != null) { "Unsupported call routing protocol" }
+        } catch (failure: Exception) { pcm.close(); throw failure }
+        val identity = Binder.clearCallingIdentity()
+        var operation: RootCommunicationRoute? = null
+        try {
+            check(Process.myUid() == 0)
+            for (permission in listOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.READ_PHONE_STATE,
+                    Manifest.permission.BLUETOOTH_CONNECT))
+                check(originalContext.packageManager.checkPermission(permission, BuildConfig.APPLICATION_ID) ==
+                    PackageManager.PERMISSION_GRANTED) { "LibrePods call permission is unavailable" }
+            check(!microphonePrivacyBlocked()) { "Microphone privacy is enabled" }
+            val selected = A2dpRecoveryGuard(address).address
+            operation = synchronized(lock) {
+                check(!cleanupFailed.get() && !volumeChecking && playbackRecovery == null && playbackRelease == null &&
+                    callConnection == null && mediaPause == null && microphoneProbe == null && communication == null) {
+                    "Another audio operation is active"
+                }
+                RootCommunicationRoute(shellContext, pcm, owner, selected, kind, targetPackage, recordingSession,
+                    allowMedia, mediaPackage, checkNotNull(hfpControl))
+                    .also { communication = owner to it }
+            }
+            return operation.prepare()
+        } catch (failure: Exception) {
+            runCatching { operation?.close() ?: pcm.close() }
+            synchronized(lock) {
+                if (communication?.second === operation) {
+                    if (operation?.isCleanupComplete != false) communication = null else cleanupFailed.set(true)
+                }
+            }
+            throw failure
+        } finally { Binder.restoreCallingIdentity(identity) }
+    }
+
+    override fun setCommunicationMuted(owner: IPlaybackRecoveryOwner, muted: Boolean): Boolean {
+        enforceCaller()
+        val operation = synchronized(lock) {
+            communication?.takeIf { it.first.asBinder() == owner.asBinder() }?.second
+        } ?: return false
+        val identity = Binder.clearCallingIdentity()
+        return try { operation.setMuted(muted) } finally { Binder.restoreCallingIdentity(identity) }
+    }
+
+    override fun communicationState(owner: IPlaybackRecoveryOwner): Bundle {
+        enforceCaller()
+        return synchronized(lock) {
+            communication?.takeIf { it.first.asBinder() == owner.asBinder() }?.second
+        }?.snapshot() ?: Bundle().apply { putBoolean("owned", false); putBoolean("cleanupComplete", true) }
+    }
+
+    override fun finishCommunication(owner: IPlaybackRecoveryOwner, inputQuiet: Boolean): Bundle {
+        enforceCaller()
+        val operation = synchronized(lock) {
+            communication?.takeIf { it.first.asBinder() == owner.asBinder() }?.second
+        } ?: return Bundle().apply { putBoolean("owned", false); putBoolean("cleanupComplete", true) }
+        val identity = Binder.clearCallingIdentity()
+        return try { operation.finish(inputQuiet) } finally {
+            synchronized(lock) {
+                if (communication?.second === operation) {
+                    if (operation.isCleanupComplete) communication = null
+                    else if (inputQuiet) cleanupFailed.set(true)
+                }
+            }
+            Binder.restoreCallingIdentity(identity)
+        }
+    }
+
+    override fun inspectCallMedia(address: String): Bundle {
+        enforceCaller()
+        check(originalContext.packageManager.checkPermission(Manifest.permission.BLUETOOTH_CONNECT,
+            BuildConfig.APPLICATION_ID) == PackageManager.PERMISSION_GRANTED)
+        val identity = Binder.clearCallingIdentity()
+        return try {
+            check(Process.myUid() == 0 && !cleanupFailed.get())
+            Bundle().apply {
+                try {
+                    val selected = CallMediaLease.inspectSelection(shellContext, A2dpRecoveryGuard(address).address)
+                    putBoolean("eligible", selected != null)
+                    putString("package", selected.orEmpty())
+                    putString("label", selected?.let {
+                        originalContext.packageManager.getApplicationLabel(
+                            originalContext.packageManager.getApplicationInfo(it, 0)).toString()
+                    }.orEmpty())
+                    putString("reason", if (selected == null) "Play music through the AirPods to select a player" else "")
+                } catch (failure: Exception) {
+                    putBoolean("eligible", false); putString("reason", failure.message ?: "Media focus isolation is unavailable")
+                }
+            }
+        } finally { Binder.restoreCallingIdentity(identity) }
+    }
+
+    override fun prepareMicrophoneProbe(pcm: ParcelFileDescriptor, owner: IPlaybackRecoveryOwner): Bundle {
+        try { enforceCaller() } catch (failure: Exception) { pcm.close(); throw failure }
+        val identity = Binder.clearCallingIdentity()
+        var operation: RootMicrophoneProbe? = null
+        try {
+            check(BuildConfig.DEBUG && Process.myUid() == 0 && Build.VERSION.SDK_INT == 37) {
+                "The microphone route probe is unavailable"
+            }
+            check(originalContext.packageManager.checkPermission(Manifest.permission.RECORD_AUDIO,
+                BuildConfig.APPLICATION_ID) == PackageManager.PERMISSION_GRANTED)
+            check(!microphonePrivacyBlocked()) { "Microphone privacy is enabled" }
+            operation = synchronized(lock) {
+                check(!cleanupFailed.get() && !volumeChecking && playbackRecovery == null &&
+                    playbackRelease == null && callConnection == null && microphoneProbe == null && communication == null) {
+                    "Another audio operation is active"
+                }
+                RootMicrophoneProbe(shellContext, pcm, owner).also { microphoneProbe = owner to it }
+            }
+            return operation.prepare()
+        } catch (failure: Exception) {
+            runCatching { operation?.close() ?: pcm.close() }
+            synchronized(lock) {
+                if (microphoneProbe?.second === operation) {
+                    if (operation?.isCleanupComplete != false) microphoneProbe = null
+                    else cleanupFailed.set(true)
+                }
+            }
+            throw failure
+        } finally { Binder.restoreCallingIdentity(identity) }
+    }
+
+    override fun finishMicrophoneProbe(owner: IPlaybackRecoveryOwner): Bundle {
+        enforceCaller()
+        val operation = synchronized(lock) {
+            microphoneProbe?.takeIf { it.first.asBinder() == owner.asBinder() }?.second
+        } ?: return Bundle().apply { putBoolean("cleanupComplete", true); putBoolean("owned", false) }
+        val identity = Binder.clearCallingIdentity()
+        return try { operation.finish() } finally {
+            synchronized(lock) {
+                if (microphoneProbe?.second === operation) {
+                    if (operation.isCleanupComplete) microphoneProbe = null else cleanupFailed.set(true)
+                }
+            }
+            Binder.restoreCallingIdentity(identity)
+        }
     }
 
     override fun isMicrophonePrivacyBlocked(): Boolean {
@@ -155,7 +320,7 @@ class ShizukuAudioService @JvmOverloads constructor(context: Context,
         check(originalContext.packageManager.checkPermission("android.permission.BLUETOOTH_CONNECT", BuildConfig.APPLICATION_ID) ==
             PackageManager.PERMISSION_GRANTED) { "LibrePods Bluetooth permission was revoked" }
         val release = synchronized(lock) {
-            check(!cleanupFailed.get() && !volumeChecking && playbackRecovery == null && playbackRelease == null && callConnection == null) {
+            check(!cleanupFailed.get() && !volumeChecking && playbackRecovery == null && playbackRelease == null && callConnection == null && probeIsQuiet()) {
                 "Another audio operation is active"
             }
             NativePlaybackRelease(shellContext, address, owner).also { playbackRelease = it }
@@ -172,7 +337,7 @@ class ShizukuAudioService @JvmOverloads constructor(context: Context,
         check(originalContext.packageManager.checkPermission("android.permission.BLUETOOTH_CONNECT", BuildConfig.APPLICATION_ID) ==
             PackageManager.PERMISSION_GRANTED) { "LibrePods Bluetooth permission was revoked" }
         val recovery = synchronized(lock) {
-            check(!cleanupFailed.get() && !volumeChecking && playbackRecovery == null && playbackRelease == null && callConnection == null) { "Another audio operation is active" }
+            check(!cleanupFailed.get() && !volumeChecking && playbackRecovery == null && playbackRelease == null && callConnection == null && probeIsQuiet()) { "Another audio operation is active" }
             A2dpPlaybackRecovery(shellContext, address, owner, connectOnly).also { playbackRecovery = it }
         }
         val identity = Binder.clearCallingIdentity()
@@ -189,6 +354,7 @@ class ShizukuAudioService @JvmOverloads constructor(context: Context,
         if (cleanupFailed.get() || originalContext.packageManager.checkPermission(
                 "android.permission.BLUETOOTH_CONNECT", BuildConfig.APPLICATION_ID) != PackageManager.PERMISSION_GRANTED)
             return false
+        if (synchronized(lock) { !probeIsQuiet() }) return false
         val identity = Binder.clearCallingIdentity()
         return try {
             ShellPairing.confirm(shellContext, address, owner)
@@ -206,10 +372,13 @@ class ShizukuAudioService @JvmOverloads constructor(context: Context,
 
     override fun close() {
         if (!cleanupFailed.compareAndSet(false, true)) return
-        synchronized(lock) {
+        val routes = synchronized(lock) {
             playbackRecovery?.cancel(); playbackRelease?.cancel(); callConnection?.binderDied()
             mediaPause?.second?.close(); mediaPause = null
+            (microphoneProbe?.second to communication?.second).also { microphoneProbe = null; communication = null }
         }
+        routes.first?.close()
+        routes.second?.close()
         volumeSync.close()
     }
 }

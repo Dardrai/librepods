@@ -21,6 +21,17 @@ add_executable(pixel17_game_runtime_test pixel17_game_runtime_test.cpp
 target_include_directories(pixel17_game_runtime_test PRIVATE "${ELD}")
 target_compile_definitions(pixel17_game_runtime_test PRIVATE ELD_PIXEL17_GAME_RUNTIME_TESTING)
 target_compile_options(pixel17_game_runtime_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+add_executable(pixel17_game_baseline_runtime_test pixel17_game_runtime_test.cpp
+    "${ELD}/pixel17_hci.cpp" "${ELD}/pixel17_game_runtime.cpp")
+target_include_directories(pixel17_game_baseline_runtime_test PRIVATE "${ELD}")
+target_compile_definitions(pixel17_game_baseline_runtime_test PRIVATE ELD_PIXEL17_GAME_RUNTIME_TESTING ELD_KEEP_GAME_FLUSH_BASELINE=1)
+target_compile_options(pixel17_game_baseline_runtime_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+foreach(profile pixel17_game_runtime_test pixel17_game_baseline_runtime_test)
+    foreach(scenario flush0 flush320 flush-misread flush-unknown flush-stale flush-expiry flush-cancel-before-read)
+        add_test(NAME "${profile}_${scenario}" COMMAND ${profile} "${scenario}")
+        set_tests_properties("${profile}_${scenario}" PROPERTIES TIMEOUT 10)
+    endforeach()
+endforeach()
 foreach(scenario read baseline0 baseline320 pause-restore wrong-cid new-media cancel-at-write allocation expired-dispatch expired-tick restore-allocation watchdog-start late-target late-restore
     hold0 hold320 hold96 hold96-expiry hold96-restore-inflight hold-graceful-refresh hold-expiry hold-binder hold-stalled hold-query-no-renew clock-cancel-pending clock-invalidated-begin clock-cancel-inflight
     clock-stop clock-sco clock-wrong-channel clock-wrong-thread clock-expiry clock-new-token clock-normal

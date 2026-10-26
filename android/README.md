@@ -129,7 +129,8 @@ APK as a system app or grant global permissions.
   Left choices. Older-fork hardware tests do not validate this rewrite. Sensors,
   head gestures and call audio have not been retested on hardware here.
 - High-quality two-way call audio is unavailable; ordinary Android/HFP calls
-  continue to use the native Bluetooth route.
+  continue to use the native Bluetooth route. The proposed root integration and
+  its remaining checks are documented in [High-quality microphone routing for calls](HQ-COMMUNICATION.md).
 - Hearing aid fitting and enablement, custom transparency and loud sound
   reduction are unavailable while the ATT transport is disabled, even with
   VendorID spoofing or an existing iPhone fitting.

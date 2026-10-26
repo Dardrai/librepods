@@ -155,7 +155,7 @@ void creation_and_layout() {
         check(config.codec_type == 5 && config.opaque_tail == 0 && config.padding == 0);
         for (auto value : config.codec_specific) check(value == 0);
         check(config.sample_rate == (i < 3 ? 2u : 0u));
-        check(config.bits_per_sample == (i < 3 ? 1u : 0u));
+        check(config.bits_per_sample == (i < 3 ? kPixel17PcmMask : 0u));
         check(config.channel_mode == (i < 3 ? 2u : 0u));
     }
     check(get<uint8_t>(object, 0x227) == 1);
@@ -221,8 +221,8 @@ void negotiation_and_status() {
     check(std::memcmp(saved.data(), object, saved.size()) == 0 && result[0] == 0x5a);
     check(!method<PeerFn>(object, 6)(object, peer.data()));
     check(make_capabilities(peer.data(), peer.size()));
-    Pixel17NativeConfig user{5, 0, 2, 1, 2, 0x12345678, {0, 0, 0, 0}, UINT64_C(0xfedcba9876543210)};
-    Pixel17NativeConfig audio{0, 0, 2, 1, 2, 0xaabbccdd, {0, 0, 0, 0}, UINT64_MAX};
+    Pixel17NativeConfig user{5, 0, 2, kPixel17PcmMask, 2, 0x12345678, {0, 0, 0, 0}, UINT64_C(0xfedcba9876543210)};
+    Pixel17NativeConfig audio{0, 0, 2, kPixel17PcmMask, 2, 0xaabbccdd, {0, 0, 0, 0}, UINT64_MAX};
     put(object, 0x120, user); put(object, 0x160, audio);
     check(pixel17_codec_set_config(object, peer.data(), peer.size(), true, result.data(), result.size()) == 0);
     check(std::memcmp(static_cast<uint8_t*>(object) + 0x120, &user, sizeof(user)) == 0);
@@ -231,11 +231,12 @@ void negotiation_and_status() {
     check(get<Pixel17NativeConfig>(object, 0x60).opaque_tail == 0);
     check(bitrate(result.data(), result.size()) == 256000);
     check(std::memcmp(static_cast<uint8_t*>(object) + 0x1cd, peer.data(), peer.size()) == 0);
-    for (int invalid : {0, 1, 2}) {
+    for (int invalid : {0, 1, 2, 3}) {
         auto bad = user;
         if (invalid == 0) bad.bits_per_sample = 2;
         if (invalid == 1) bad.sample_rate = 1;
         if (invalid == 2) bad.codec_specific[3] = INT64_MIN;
+        if (invalid == 3) bad.bits_per_sample = kPixel17PcmMask == 4 ? 1 : 4;
         put(object, 0x120, bad);
         std::memcpy(saved.data(), object, saved.size());
         result.fill(0x5a);

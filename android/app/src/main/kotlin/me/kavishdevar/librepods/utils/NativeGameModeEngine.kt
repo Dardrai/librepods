@@ -12,21 +12,24 @@ internal data class GameNativeReceipt(
     val clockRequest: Long = 0, val clockPending: Boolean = false, val clockPhase: Int = 0,
     val clockSerial: Long = 0, val clockEncoder: Long = 0, val clockPeer: List<Int> = emptyList(),
     val clockInterval: Int = 10, val observedMs: Long = 0, val leaseDeadlineMs: Long = 0,
+    val noControllerMutation: Boolean = false,
 ) {
     val restored get() = !busy && !holding && !restorePending && !clockPending && clockInterval == 10 &&
         baselineKnown && currentKnown && baseline == current
+    fun hasExpectedFlush(keepBaseline: Boolean) = currentKnown &&
+        if (keepBaseline) baselineKnown && current == baseline else current == 96
 }
 internal data class GameTargetWrite(val sent: Boolean, val observedAfterMs: Long,
-    val observedAfterNs: Long = observedAfterMs * 1_000_000)
+    val observedAfterNs: Long = observedAfterMs * 1_000_000, val mayHaveReachedRemote: Boolean = true)
 internal object NativeGameTargetGuard {
     fun preflight(owner: GameControlOwner, route: GameNativeReceipt, serial: Long,
-        value: GameNativeReceipt, target: Int, nowMs: Long): Boolean {
+        value: GameNativeReceipt, target: Int, nowMs: Long, keepFlushBaseline: Boolean = false): Boolean {
         if (target !in setOf(60, 150) || serial <= 0 || value.serial != serial ||
             value.requestPeer != owner.peer || value.requestMedia != route.host.mediaGeneration ||
             value.requestEncoder != route.encoderGeneration || value.requestAcl != route.acl ||
             value.host.peer != owner.peer || value.host.mediaGeneration != route.host.mediaGeneration ||
             nowMs - value.observedMs !in 0..100) return false
-        return target == 150 || (value.holding && !value.busy && value.currentKnown && value.current == 96 &&
+        return target == 150 || (value.holding && !value.busy && value.hasExpectedFlush(keepFlushBaseline) &&
             value.host.streaming && value.host.encoderReady && !value.host.scoOrMicrophone &&
             value.encoderGeneration == route.encoderGeneration && value.acl == route.acl &&
             value.leaseDeadlineMs > nowMs)
@@ -49,7 +52,8 @@ internal interface NativeGameModePorts {
 }
 
 /** One transition at a time. The Android wrapper supplies only current-session effects. */
-internal class NativeGameModeEngine(private val ports: NativeGameModePorts) {
+internal class NativeGameModeEngine(private val ports: NativeGameModePorts,
+    private val keepFlushBaseline: Boolean = false) {
     private enum class Stage { IDLE, HOLD, REPORT_ON, CLOCK_ON, ACTIVE, REPORT_OFF, CLOCK_OFF, RESTORE, UNRESOLVED }
     private var stage = Stage.IDLE
     private var owner: GameControlOwner? = null
@@ -69,7 +73,9 @@ internal class NativeGameModeEngine(private val ports: NativeGameModePorts) {
     private var clockBefore = 0L
     private var issue = NativeGameModeController.Issue.NONE
     private var restoreReportSeen = false
+    private var restoreWriteMayHaveReachedRemote = false
     private var restoreNeedsClock = false
+    private var restoreRetryRequested = false
     private var lastRestoreStart = Long.MIN_VALUE
     private var wasBlocked = false
     private data class Attempt(val control: GameControlOwner, val media: Long, val encoder: Long, val start: Long)
@@ -97,7 +103,7 @@ internal class NativeGameModeEngine(private val ports: NativeGameModePorts) {
             value.requestAcl == original.acl
     }
     private fun verifiedHold(value: GameNativeReceipt) = sameNativeOwner(value) && value.holding &&
-        !value.busy && value.baselineKnown && value.currentKnown && value.current == 96
+        !value.busy && value.baselineKnown && value.hasExpectedFlush(keepFlushBaseline)
     private fun sameAttempt(control: GameControlOwner?, value: GameNativeReceipt?): Boolean {
         val failed = failedAttempt ?: return false
         return value != null && sameControl(failed.control, control) && failed.media == value.host.mediaGeneration &&
@@ -126,10 +132,16 @@ internal class NativeGameModeEngine(private val ports: NativeGameModePorts) {
         control: GameControlOwner?): NativeGameModeController.State {
         val becameUnblocked = wasBlocked && !blocked
         wasBlocked = blocked
-        if (desired != previousDesired) { failedAttempt = null; failedIssue = null }
+        val desiredChanged = desired != previousDesired
+        if (desiredChanged) { failedAttempt = null; failedIssue = null }
         previousDesired = desired
         val changed = !sameControl(lastControl, control)
-        if (changed) { lastControl = control; capabilityKnown = false; available = false }
+        if (changed) {
+            lastControl = control; capabilityKnown = false; available = false
+            restoreRetryRequested = false
+        } else if (stage in RESTORING && (becameUnblocked || desiredChanged)) {
+            restoreRetryRequested = true
+        }
         if (!eligible) available = false
         if ((eligible && (!capabilityKnown || desired)) || holdSerial > 0 || remoteRestorePending) {
             val renew = if (stage in RENEWING) holdSerial else 0
@@ -174,7 +186,12 @@ internal class NativeGameModeEngine(private val ports: NativeGameModePorts) {
                     failedAttempt = null; failedIssue = null
                     val expected = NativeGameModePolicy.Owner(control.peer, value.host.mediaGeneration, control.session)
                     if (!NativeGameModePolicy.canApply(expected, control.session, value.host, ports.nowMs()))
-                        issue = NativeGameModeController.Issue.WAITING_FOR_AUDIO
+                        issue = when {
+                            !value.host.streaming -> NativeGameModeController.Issue.WAITING_FOR_AUDIO
+                            value.host.delayTenths !in 1..65534 -> NativeGameModeController.Issue.WAITING_FOR_TIMING
+                            value.host.delayTenths < 600 -> NativeGameModeController.Issue.UNSUPPORTED
+                            else -> NativeGameModeController.Issue.WAITING_FOR_AUDIO
+                        }
                     else {
                         owner = control; route = value; issue = NativeGameModeController.Issue.NONE
                         transitionDeadline = ports.nowMs() + 15_000
@@ -192,8 +209,10 @@ internal class NativeGameModeEngine(private val ports: NativeGameModePorts) {
                 if (value != null && verifiedHold(value)) {
                     beforeReport = value.host.delaySerial
                     // A failed write can still have reached the remote; cleanup owns it before attempting IO.
+                    val wasRemoteRestorePending = remoteRestorePending
                     remoteRestorePending = true
                     val write = ports.target(owner!!, route!!, holdSerial, 60)
+                    if (!write.sent && !write.mayHaveReachedRemote) remoteRestorePending = wasRemoteRestorePending
                     sentAt = write.observedAfterMs
                     sentAtNs = write.observedAfterNs
                     phaseDeadline = sentAt + 2000
@@ -270,26 +289,29 @@ internal class NativeGameModeEngine(private val ports: NativeGameModePorts) {
                 }
             }
             Stage.ACTIVE -> {
-                if (value == null || !sameNativeOwner(value) || !value.holding || !value.currentKnown || value.current != 96)
+                if (value == null || !sameNativeOwner(value) || !value.holding || !value.hasExpectedFlush(keepFlushBaseline))
                     beginRestore(control, value, forced = true)
             }
             Stage.RESTORE -> {
-                if (remoteRestorePending && !restoreReportSeen && ownsRemote(control, value) &&
+                if (remoteRestorePending && restoreWriteMayHaveReachedRemote && !restoreReportSeen && ownsRemote(control, value) &&
                     NativeGameModePolicy.freshRestoreReport(policyOwner()!!, owner!!.session, value!!.host,
                         beforeReport, sentAt, ports.nowMs(), sentAtNs)) {
                     restoreReportSeen = true
                     remoteRestorePending = false
                 }
-                if (value != null && sameNativeOwner(value) && value.restored) {
-                    if (remoteRestorePending) unresolved(NativeGameModeController.Issue.RESTORE_UNCONFIRMED)
-                    else finishRestore()
-                } else if (ports.nowMs() >= phaseDeadline) unresolved(NativeGameModeController.Issue.RESTORE_UNCONFIRMED)
+                // Native cleanup can finish before the remote response arrives. Keep the
+                // existing bounded wait so a later, still-fresh report can settle it.
+                if (finishUnchangedPrepare(value)) return state(desired)
+                if (value != null && sameNativeOwner(value) && value.restored && !remoteRestorePending)
+                    finishRestore()
+                else if (ports.nowMs() >= phaseDeadline) unresolved(NativeGameModeController.Issue.RESTORE_UNCONFIRMED)
             }
             Stage.UNRESOLVED -> {
+                if (finishUnchangedPrepare(value)) return state(desired)
                 if (value != null && sameNativeOwner(value) && value.restored) {
                     if (!remoteRestorePending) finishRestore()
                     else if (!blocked && ownsRemote(control, value) && value.host.streaming &&
-                        (value.host.startedMs != lastRestoreStart || becameUnblocked))
+                        (value.host.startedMs != lastRestoreStart || becameUnblocked || desiredChanged || restoreRetryRequested))
                         beginRestore(control, value, forced = false)
                 }
             }
@@ -298,17 +320,22 @@ internal class NativeGameModeEngine(private val ports: NativeGameModePorts) {
     }
 
     private suspend fun beginRestore(control: GameControlOwner?, value: GameNativeReceipt?, forced: Boolean) {
+        if (finishUnchangedPrepare(value)) return
+        restoreRetryRequested = false
         transitionDeadline = ports.nowMs() + if (forced) 3000 else 15_000
         lastRestoreStart = value?.host?.startedMs ?: Long.MIN_VALUE
         restoreNeedsClock = !forced && value?.holding == true
         issue = if (ownsRemote(control, value)) issue else NativeGameModeController.Issue.OWNER_LOST
         if (holdSerial > 0) ports.cancelClock(holdSerial)
+        restoreReportSeen = false
+        restoreWriteMayHaveReachedRemote = false
         if (remoteRestorePending && ownsRemote(control, value)) {
             beforeReport = value!!.host.delaySerial
+            restoreWriteMayHaveReachedRemote = true
             val write = ports.target(owner!!, route!!, holdSerial, 150)
+            restoreWriteMayHaveReachedRemote = write.sent || write.mayHaveReachedRemote
             sentAt = write.observedAfterMs
             sentAtNs = write.observedAfterNs
-            restoreReportSeen = false
             phaseDeadline = sentAt + 2000
             if (write.sent && !forced) { stage = Stage.REPORT_OFF; return }
         }
@@ -326,7 +353,17 @@ internal class NativeGameModeEngine(private val ports: NativeGameModePorts) {
         issue = failedIssue ?: reason
     }
 
+    private fun finishUnchangedPrepare(value: GameNativeReceipt?): Boolean {
+        if (remoteRestorePending || holdSerial <= 0 || value == null || !sameNativeOwner(value) ||
+            !value.noControllerMutation) return false
+        // This exact Prepare never touched the controller; there is no readback to restore.
+        recordFailure(NativeGameModeController.Issue.REQUEST_FAILED)
+        finishRestore()
+        return true
+    }
+
     private fun finishRestore() {
+        restoreRetryRequested = false
         holdSerial = 0; nativeObligation = false
         stage = Stage.IDLE; owner = null; route = null
         issue = failedIssue ?: NativeGameModeController.Issue.NONE

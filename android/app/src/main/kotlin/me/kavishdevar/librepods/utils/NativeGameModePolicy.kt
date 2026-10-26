@@ -18,7 +18,7 @@ internal object NativeGameModePolicy {
         host.clockReady && !host.scoOrMicrophone
     fun canApply(expected: Owner, session: Long, host: Host, nowMs: Long) = owns(expected, session, host) &&
         ready(host) && host.streaming && nowMs >= host.startedMs && nowMs - host.startedMs >= 500 &&
-        host.delayTenths in 601..65534
+        host.delayTenths in 600..65534
     // Cleanup keeps its original owner even after Stop/SCO makes application inadmissible.
     fun canRestore(expected: Owner, session: Long, host: Host) = owns(expected, session, host)
     fun freshRestoreReport(expected: Owner, session: Long, host: Host, beforeSerial: Long, sentMs: Long, nowMs: Long,

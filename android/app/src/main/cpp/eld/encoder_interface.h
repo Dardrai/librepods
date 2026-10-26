@@ -47,6 +47,8 @@ struct EncoderHost {
     // Optional opportunity after a real accepted non-primer AU callback. Called
     // outside the encoder mutex; never on underflow, flush, failure or queue12.
     void (*clock_opportunity)() = nullptr;
+    // Actual software-HAL feeding format; independently matched to the encoder ABI.
+    uint32_t pcm_sample_bytes = 2;
 };
 inline constexpr size_t kEncoderCodecStorage = 45;
 struct EncoderStatus {
@@ -69,10 +71,21 @@ struct EncoderStatus {
     uint64_t pcm_read_bytes;
     uint64_t catch_up_aus; // Additional accepted AUs beyond the first in a callback.
     uint32_t burst_max; // Complete AUs transferred to the host in one callback, including discards.
+    // Optional host-clock timing. Callback work starts after acquiring our mutex;
+    // it excludes the out-of-lock recovery/opportunity callback and host timer wait.
+    uint64_t pcm_read_max_us;
+    uint64_t pcm_read_slow_calls; // Full or partial PCM reads taking at least 1 ms.
+    uint64_t encode_max_us;
+    uint64_t enqueue_max_us;
+    uint64_t callback_max_us;
 };
 
 enum class EncoderClockPhase : uint32_t {
     Unavailable, Idle, Armed, Active, Completed, Cancelled, Expired
+};
+enum class EncoderClockStopReason : uint32_t {
+    None, InvalidTime, Deadline, MediaGap, QueueFull, DueDebt, Retired,
+    FeedingReset, Underflow, EmptyOutput, HostDiscard, Requested
 };
 struct EncoderClockStatus {
     uint32_t version = 1;
@@ -89,6 +102,10 @@ struct EncoderClockStatus {
     int64_t signed_progress_frames = 0;
     uint64_t started_us = 0;
     uint64_t deadline_us = 0;
+    // Diagnostic only; no timing/admission change and no audio or peer data.
+    EncoderClockStopReason stop_reason = EncoderClockStopReason::None;
+    uint64_t stop_media_age_us = 0;
+    size_t stop_host_queue_length = 0;
 };
 enum class EncoderClockRejection : uint32_t {
     None, Unavailable, Inactive, Priming, Pending, Owner, Parameters,
@@ -112,7 +129,7 @@ uint64_t encoder_clock_begin_checked(const uint8_t* peer, size_t size, uint64_t 
                                      uint32_t interval_tenths, uint32_t drift_ms,
                                      EncoderClockAdmission* admission);
 bool encoder_clock_cancel(uint64_t serial);
-EncoderClockStatus encoder_clock_status();
+EncoderClockStatus encoder_clock_status(bool refresh = true);
 // A validated selected-ELD HAL setup can fail before encoder.init is reached.
 // Record that failure against the actual native source peer for ordinary-codec recovery.
 void encoder_fail_route();

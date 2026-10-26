@@ -10,6 +10,11 @@
 #include <set>
 #include <vector>
 
+#ifndef ELD_TEST_PCM_BYTES
+#define ELD_TEST_PCM_BYTES 2
+#endif
+constexpr uint32_t kTestPcmWidth = ELD_TEST_PCM_BYTES;
+constexpr size_t kTestPcmBytes = 480 * 2 * kTestPcmWidth;
 struct EldFdkEncoder { bool valid = true; };
 namespace {
 bool fail_open = false, fail_reset = false, fail_encode = false, fail_alloc = false;
@@ -22,10 +27,12 @@ bool opportunity_arm = false;
 unsigned opportunities = 0;
 uint64_t opportunity_serial = 0;
 uint64_t monotonic_now = 1000000, enqueue_delay_us = 0;
+uint64_t pcm_read_delay_us = 0, encode_delay_us = 0;
+unsigned read_clock_fault = 0;
 bool incomplete_codec = false, incomplete_params = false;
 unsigned empty_encodes = 0, failures = 0, reads = 0, closes = 0, zero_inputs = 0;
 unsigned note8_codec_reads = 0, note8_peer_reads = 0, custom_codec_reads = 0, custom_peer_reads = 0;
-size_t read_limit = 1920;
+size_t read_limit = kTestPcmBytes;
 size_t pcm_available = SIZE_MAX;
 uint8_t cie[20]{};
 std::array<uint8_t, eld::kEncoderCodecStorage> native_cie{};
@@ -42,6 +49,9 @@ void* allocate(size_t size) {
 void release(void* p) { assert(allocations.erase(p) == 1); std::free(p); }
 uint32_t read_pcm(uint8_t* out, uint32_t capacity) {
     ++reads;
+    monotonic_now += pcm_read_delay_us;
+    if (read_clock_fault == 1) monotonic_now = 0;
+    else if (read_clock_fault == 2) --monotonic_now;
     if (negative_read) return UINT32_MAX;
     if (unaligned_read) return capacity - 1;
     if (oversized_read) return capacity + 4;
@@ -51,7 +61,7 @@ uint32_t read_pcm(uint8_t* out, uint32_t capacity) {
     return count;
 }
 bool enqueue(eld::PacketHeader* packet, size_t frames, uint32_t pcm_bytes) {
-    assert(frames == 1 && pcm_bytes == 1920 && packet->event == 0);
+    assert(frames == 1 && pcm_bytes == kTestPcmBytes && packet->event == 0);
     assert(packet->offset == 32 && packet->layer_specific == 1 && packet->len == 14);
     auto* data = reinterpret_cast<uint8_t*>(packet + 1);
     uint32_t timestamp = 0;
@@ -122,32 +132,43 @@ void defaults() {
     reject_codec = reject_params = incomplete_codec = incomplete_params = false;
     accept = true;
     empty_encodes = 0;
-    read_limit = 1920;
+    read_limit = kTestPcmBytes;
     pcm_available = SIZE_MAX;
     enqueue_delay_us = 0;
+    pcm_read_delay_us = encode_delay_us = 0;
+    read_clock_fault = 0;
     assert(eld::make_configuration(cie, sizeof(cie)));
 }
 }
-extern "C" int eld_fdk_open(const EldFdkApi*, uint32_t bitrate, EldFdkEncoder** out, EldFdkConfig* cfg) {
+extern "C" int eld_fdk_open(const EldFdkApi* api, uint32_t bitrate, EldFdkEncoder** out, EldFdkConfig* cfg) {
     if (fail_open) return ELD_FDK_CONFIG;
     assert(*out == nullptr);
     *out = new EldFdkEncoder;
-    *cfg = {48000,2,480,2,bitrate,eld::max_au_bytes(bitrate),0,{0xf8,0xe6,0x50,0}};
+    *cfg = {48000,2,480,api->pcm_sample_bytes,bitrate,eld::max_au_bytes(bitrate),0,{0xf8,0xe6,0x50,0}};
     return ELD_FDK_OK;
 }
 extern "C" int eld_fdk_reset(EldFdkEncoder*) { return fail_reset ? ELD_FDK_CODEC : ELD_FDK_OK; }
 extern "C" void eld_fdk_close(EldFdkEncoder** out) {
     if (*out) { ++closes; delete *out; *out = nullptr; }
 }
-extern "C" int eld_fdk_encode(EldFdkEncoder*, const int16_t* pcm, size_t frames, uint8_t* out, size_t cap, size_t* bytes) {
-    assert(frames == 480 && cap >= 321);
+template<typename Sample> int mock_encode(const Sample* pcm, size_t frames, uint8_t* out, size_t cap, size_t* bytes) {
+    assert(sizeof(Sample) == kTestPcmWidth && frames == 480 && cap >= 321);
+    monotonic_now += encode_delay_us;
     if (fail_encode) return ELD_FDK_CODEC;
     const bool zero = std::all_of(pcm, pcm + 960, [](auto sample) { return sample == 0; });
     if (zero) ++zero_inputs;
-    else assert(std::all_of(pcm, pcm + 960, [](auto sample) { return sample == 0x4242; }));
+    else assert(std::all_of(pcm, pcm + 960, [](auto sample) {
+        return sample == (sizeof(Sample) == 4 ? 0x42424242 : 0x4242);
+    }));
     *bytes = empty_encodes ? (--empty_encodes, 0) : 10;
     std::memset(out, 0x7a, *bytes);
     return ELD_FDK_OK;
+}
+extern "C" int eld_fdk_encode(EldFdkEncoder*, const int16_t* pcm, size_t frames, uint8_t* out, size_t cap, size_t* bytes) {
+    return mock_encode(pcm, frames, out, cap, bytes);
+}
+extern "C" int eld_fdk_encode_q31(EldFdkEncoder*, const int32_t* pcm, size_t frames, uint8_t* out, size_t cap, size_t* bytes) {
+    return mock_encode(pcm, frames, out, cap, bytes);
 }
 namespace eld {
 bool note8_codec_info(const void* codec, uint8_t* out, size_t size) {
@@ -169,7 +190,7 @@ void scheduler_cases() {
         for (unsigned i = 0; i <= 20; ++i) tick(i);
         const auto health = eld::encoder_status();
         assert(health.packets == 21 && health.send_calls == 21 && health.pcm_read_calls == 11);
-        assert(health.pcm_read_bytes == 11 * 1920 && health.max_gap_us == 10000);
+        assert(health.pcm_read_bytes == 11 * kTestPcmBytes && health.max_gap_us == 10000);
         assert(health.clock_rebases == 0 && health.burst_max == 1);
     };
     const auto first = payloads.size();
@@ -194,7 +215,7 @@ void scheduler_cases() {
     }
     assert(callbacks <= 17 && health.packets == (now - 1000000) / 10000 + 1);
     assert(health.clock_rebases == 0 && reads - reads_before == health.packets - 10);
-    assert(health.pcm_read_bytes == health.pcm_read_calls * 1920);
+    assert(health.pcm_read_bytes == health.pcm_read_calls * kTestPcmBytes);
     for (size_t i = first; i < payloads.size(); ++i) {
         assert(timestamps[i] == (i - first) * 480);
         assert((((payloads[i][0] & 15) << 8) | payloads[i][1]) == int((i - first) & 4095));
@@ -214,12 +235,12 @@ void scheduler_cases() {
     encoder->queue_length(0); encoder->send_frames(now + 30000);
     assert(eld::encoder_status().packets == 27 && eld::encoder_status().burst_max == 4);
 
-    for (size_t available : {size_t(0), size_t(960), size_t(1920)}) {
+    for (size_t available : {size_t(0), size_t(kTestPcmBytes / 2), size_t(kTestPcmBytes)}) {
         begin(); pcm_available = available; now = 1675000;
         const auto previous_reads = reads;
         encoder->send_frames(now); health = eld::encoder_status();
-        assert(health.packets == 21 + available / 1920 && health.underflows == 1);
-        assert(reads - previous_reads == (available == 1920 ? 2 : 1));
+        assert(health.packets == 21 + available / kTestPcmBytes && health.underflows == 1);
+        assert(reads - previous_reads == (available == kTestPcmBytes ? 2u : 1u));
         assert(health.clock_rebases == 1 && health.active && !health.failed);
         pcm_available = SIZE_MAX;
         const auto previous_packets = health.packets;
@@ -251,6 +272,50 @@ void scheduler_cases() {
     assert(eld::encoder_status().send_calls == metrics.send_calls + 1);
     encoder->cleanup();
     assert(eld::encoder_status().send_calls == metrics.send_calls + 1 && failures == failures_before);
+}
+void timing_cases() {
+    auto begin = [] {
+        defaults(); start();
+        for (unsigned i = 0; i < 10; ++i) tick(i);
+        assert(encoder_status().pcm_read_calls == 0);
+    };
+    begin();
+    // Fluoride can wait for a complete frame: a successful read need not be quick.
+    pcm_read_delay_us = 9000;
+    encode_delay_us = 250;
+    enqueue_delay_us = 700;
+    tick(10);
+    auto health = encoder_status();
+    assert(health.active && !health.failed && health.underflows == 0);
+    assert(health.packets == 11 && health.pcm_read_calls == 1 && health.pcm_read_bytes == kTestPcmBytes);
+    assert(timestamps.back() == 10 * 480);
+    assert(health.pcm_read_max_us == (finite_clock ? 9000U : 0U));
+    assert(health.pcm_read_slow_calls == (finite_clock ? 1U : 0U));
+    assert(health.encode_max_us == (finite_clock ? 250U : 0U));
+    assert(health.enqueue_max_us == (finite_clock ? 700U : 0U));
+    assert(health.callback_max_us == (finite_clock ? 9950U : 0U));
+    pcm_read_delay_us = 999;
+    tick(11);
+    assert(encoder_status().pcm_read_slow_calls == (finite_clock ? 1U : 0U));
+    pcm_read_delay_us = 1000;
+    tick(12);
+    health = encoder_status();
+    assert(health.underflows == 0 && health.packets == 13);
+    assert(health.pcm_read_slow_calls == (finite_clock ? 2U : 0U));
+    assert(health.pcm_read_max_us == (finite_clock ? 9000U : 0U));
+    assert(health.callback_max_us == (finite_clock ? 9950U : 0U));
+    encoder->cleanup();
+    assert(encoder_status().callback_max_us == health.callback_max_us);
+    for (unsigned fault : {1U, 2U}) {
+        begin(); // A new source session clears the old timings.
+        read_clock_fault = fault;
+        tick(10); // Zero/backwards clocks must not turn into giant unsigned durations.
+        health = encoder_status();
+        assert(health.active && health.packets == 11 && health.underflows == 0);
+        assert(health.pcm_read_max_us == 0 && health.pcm_read_slow_calls == 0);
+        assert(health.encode_max_us == 0 && health.enqueue_max_us == 0 && health.callback_max_us == 0);
+    }
+    defaults();
 }
 void clock_cases() {
     using Phase = EncoderClockPhase;
@@ -323,37 +388,48 @@ void clock_cases() {
     assert(clock.signed_progress_frames == -240); // Measure enqueue completion, not callback entry.
     assert(!encoder_clock_cancel(serial+1) && encoder_clock_cancel(serial));
     assert(encoder_clock_status().phase == Phase::Cancelled);
+    assert(encoder_clock_status().stop_reason == EncoderClockStopReason::Requested);
 
     serial = arm(); clock = encoder_clock_status();
     monotonic_now = clock.deadline_us;
+    assert(encoder_clock_status(false).phase == Phase::Active); // Reading dump metadata is passive.
     assert(encoder_clock_status().phase == Phase::Expired);
+    assert(encoder_clock_status().stop_reason == EncoderClockStopReason::Deadline);
     assert(encoder_clock_status().effective_interval_tenths == 10);
     assert(encoder_clock_status().actual_frames == 0 && encoder_clock_cancel(serial));
 
     arm(); send_at(1685000);
     assert(encoder_clock_status().phase == Phase::Cancelled); // A radio/scheduler stall cannot claim drift.
+    assert(encoder_clock_status().stop_reason == EncoderClockStopReason::MediaGap);
     assert(encoder_clock_status().effective_interval_tenths == 10);
     arm(); encoder->queue_length(12);
     assert(encoder_clock_status().phase == Phase::Cancelled);
+    assert(encoder_clock_status().stop_reason == EncoderClockStopReason::QueueFull);
+    assert(encoder_clock_status().stop_host_queue_length == 12);
     encoder->queue_length(0); const auto queued_packets = encoder_status().packets;
     send_at(1685000);
     assert(encoder_status().packets == queued_packets+4); // Normal catch-up retains its queue debt.
 
-    for (size_t available : {size_t(0),size_t(960)}) {
+    for (size_t available : {size_t(0),size_t(kTestPcmBytes / 2)}) {
         arm(); pcm_available = available; send_at(1220000);
         assert(encoder_clock_status().phase == Phase::Cancelled && encoder_status().active);
+        assert(encoder_clock_status().stop_reason == EncoderClockStopReason::Underflow);
         pcm_available = SIZE_MAX; send_at(1230000);
         assert(encoder_clock_status().effective_interval_tenths == 10);
     }
     arm(); accept = false; send_at(1220000);
     assert(encoder_clock_status().phase == Phase::Cancelled && encoder_clock_status().actual_frames == 0);
+    assert(encoder_clock_status().stop_reason == EncoderClockStopReason::HostDiscard);
     assert(encoder_status().host_discards == 1 && encoder_status().active);
     arm(); encoder->reset();
     assert(encoder_clock_status().phase == Phase::Cancelled && encoder_clock_status().effective_interval_tenths == 10);
+    assert(encoder_clock_status().stop_reason == EncoderClockStopReason::FeedingReset);
     arm(); encoder->cleanup();
     assert(encoder_clock_status().phase == Phase::Cancelled);
+    assert(encoder_clock_status().stop_reason == EncoderClockStopReason::Retired);
     arm(); monotonic_now = 1200000;
     assert(encoder_clock_status().phase == Phase::Cancelled); // A backwards clock is never successful drift.
+    assert(encoder_clock_status().stop_reason == EncoderClockStopReason::InvalidTime);
 
     const auto gen = begin(); encoder->queue_length(12); send_at(1675000); encoder->queue_length(0);
     assert(!encoder_clock_begin(target,6,gen,9,22)); // Existing catch-up debt is not a rate-adjustment budget.
@@ -372,11 +448,105 @@ void clock_cases() {
     pcm_available=SIZE_MAX; accept=false; send_at(1250000); assert(opportunities==accepted);
     accept=true;
     begin(); const auto settled=opportunities; const auto packets_before=encoder_status().packets;
-    pcm_available=1920; send_at(1220000);
+    pcm_available=kTestPcmBytes; send_at(1220000);
     assert(encoder_status().packets==packets_before+1 && opportunities==settled);
     // One real AU followed by a burst underflow is not a settled clock opportunity.
     pcm_available=SIZE_MAX;
     assert(allocations.empty());
+}
+void clock_catch_up_cases() {
+    if (!finite_clock) return;
+    using Phase = EncoderClockPhase;
+    const uint8_t target[] = {1,2,3,4,5,6};
+    auto begin = [&](uint32_t interval, uint32_t drift_ms) {
+        defaults(); monotonic_now = 1000000; start();
+        for (unsigned i = 0; i <= 20; ++i) tick(i);
+        const auto packets = encoder_status().packets;
+        assert(encoder_clock_begin(target,6,encoder_status().generation,interval,drift_ms));
+        send_at(1210000);
+        assert(encoder_clock_status().phase == Phase::Active);
+        return packets + 1; // The arming AU ran at the normal rate, before the drift ledger.
+    };
+    auto ledger = [](uint64_t packets_at_anchor) {
+        const auto clock = encoder_clock_status();
+        assert(clock.actual_frames == (encoder_status().packets - packets_at_anchor) * 480);
+        assert(clock.nominal_frames == (monotonic_now - clock.started_us) * 48 / 1000);
+        assert(clock.signed_progress_frames == static_cast<int64_t>(clock.actual_frames) -
+            static_cast<int64_t>(clock.nominal_frames));
+        return clock;
+    };
+    for (uint64_t gap : {22000U, 23402U, 25000U, 35000U, 44000U}) {
+        const auto packets_at_anchor = begin(11,15);
+        uint64_t now = 1210000;
+        for (unsigned i = 0; i < 5; ++i) { now += 11000; send_at(now); }
+        assert(ledger(packets_at_anchor).signed_progress_frames == -5 * 48);
+        const auto previous_packets = encoder_status().packets;
+        const auto previous_timestamp = timestamps.back();
+        now += gap;
+        send_at(now);
+        auto clock = ledger(packets_at_anchor);
+        const auto accepted = encoder_status().packets - previous_packets;
+        assert(accepted == gap / 11000 && accepted <= 4);
+        assert(timestamps.back() - previous_timestamp == accepted * 480);
+        // The first catch-up AU appears to exceed 15 ms; the remaining accepted
+        // AUs undo that apparent progress. Neither media-gap nor early success is valid.
+        assert(clock.phase == Phase::Active && clock.effective_interval_tenths == 11);
+        assert(-clock.signed_progress_frames < 15 * 48);
+        assert(clock.stop_reason == EncoderClockStopReason::None);
+        assert(encoder_status().underflows == 0 && encoder_status().host_discards == 0);
+        for (unsigned i = 0; i < 30 && clock.phase == Phase::Active; ++i) {
+            now += 11000; send_at(now); clock = ledger(packets_at_anchor);
+        }
+        assert(clock.phase == Phase::Completed && clock.effective_interval_tenths == 10);
+        assert(-clock.signed_progress_frames >= 15 * 48 && -clock.signed_progress_frames < 25 * 48);
+    }
+
+    // Enqueue completion, not callback entry, determines whether debt is settled.
+    const auto packets_at_anchor = begin(11,10);
+    pcm_read_delay_us = 15000;
+    send_at(1221000);
+    auto clock = ledger(packets_at_anchor);
+    assert(clock.actual_frames == 480 && clock.nominal_frames == 26 * 48);
+    assert(clock.phase == Phase::Active && clock.effective_interval_tenths == 11);
+    pcm_read_delay_us = 0;
+    send_at(1237000);
+    clock = ledger(packets_at_anchor);
+    assert(clock.actual_frames == 960 && clock.signed_progress_frames == -7 * 48);
+    assert(clock.phase == Phase::Active); // Paying the late AU removes the false 16 ms result.
+    assert(encoder_clock_cancel(clock.serial));
+    assert(encoder_clock_status().effective_interval_tenths == 10);
+
+    // A fault later in a burst must still cancel a first AU's apparent completion.
+    for (bool queue_full : {false, true}) {
+        const auto anchor = begin(11,15);
+        for (unsigned i = 1; i <= 5; ++i) send_at(1210000 + i * 11000);
+        if (queue_full) encoder->queue_length(10);
+        else pcm_available = kTestPcmBytes;
+        send_at(1300000);
+        clock = ledger(anchor);
+        assert(clock.phase == Phase::Cancelled && clock.effective_interval_tenths == 10);
+        assert(clock.stop_reason == (queue_full ? EncoderClockStopReason::QueueFull : EncoderClockStopReason::Underflow));
+        assert(clock.actual_frames == (queue_full ? 7U : 6U) * 480);
+    }
+
+    for (uint32_t interval : {9U, 11U}) {
+        begin(interval,500);
+        const uint64_t gap = 4 * std::max(10U, interval) * 1000 + 1;
+        send_at(1210000 + gap);
+        clock = encoder_clock_status();
+        assert(clock.phase == Phase::Cancelled && clock.effective_interval_tenths == 10);
+        assert(clock.stop_reason == EncoderClockStopReason::MediaGap && clock.stop_media_age_us == gap);
+        assert(clock.actual_frames == 0); // The oversized gap never enters the drift budget.
+    }
+
+    const auto debt_anchor = begin(9,500);
+    for (unsigned i = 1; i <= 8; ++i) send_at(1210000 + i * 10000);
+    send_at(1330000); // Within 40 ms, but this phase needs five AUs; the callback may send only four.
+    clock = ledger(debt_anchor);
+    assert(clock.phase == Phase::Cancelled && clock.effective_interval_tenths == 10);
+    assert(clock.stop_reason == EncoderClockStopReason::DueDebt);
+    assert(encoder_status().burst_max == 4);
+    defaults();
 }
 }
 int main(int argc, char** argv) {
@@ -388,13 +558,18 @@ int main(int argc, char** argv) {
         assert(custom_codec || custom_peer);
     } else assert(argc == 1);
     defaults();
-    eld::EncoderHost host{{api_open,api_set,api_get,api_info,api_encode,api_close}, allocate,release,failed,peer};
+    eld::EncoderHost host{{api_open,api_set,api_get,api_info,api_encode,api_close,kTestPcmWidth}, allocate,release,failed,peer};
+    host.pcm_sample_bytes = kTestPcmWidth;
     if (custom_codec) host.codec_info = native_codec_info;
     if (custom_peer) host.peer_params = native_peer_params;
     host.catch_up_after_stall = catch_up;
     if (finite_clock) { host.monotonic_us = clock_us; host.clock_opportunity=clock_opportunity; }
-    auto invalid = host; invalid.allocate = nullptr;
-    assert(!eld::encoder_prepare(invalid));
+    auto invalid_host = host; invalid_host.allocate = nullptr;
+    assert(!eld::encoder_prepare(invalid_host));
+    invalid_host = host; invalid_host.pcm_sample_bytes = kTestPcmWidth == 2 ? 4 : 2;
+    assert(!eld::encoder_prepare(invalid_host));
+    invalid_host = host; invalid_host.fdk.pcm_sample_bytes = 0;
+    assert(!eld::encoder_prepare(invalid_host));
     assert(eld::encoder_prepare(host) && eld::encoder_ready());
     assert(!eld::encoder_prepare(host));
     assert(encoder->interval_ms() == 10 && encoder->effective_frame_size() == 0);
@@ -413,7 +588,7 @@ int main(int argc, char** argv) {
     tick(11);
     assert(payloads.size() == 11 && reads == 1);
     encoder->queue_length(0);
-    read_limit = 960;
+    read_limit = kTestPcmBytes / 2;
     tick(12);
     assert(payloads.size() == 11 && eld::encoder_status().underflows == 1);
     tick(13);
@@ -476,9 +651,9 @@ int main(int argc, char** argv) {
     oversized_read = true; tick(10);
     assert(failures == 8 && allocations.empty());
     defaults(); start();
-    const auto before = payloads.size();
+    const auto before_stall = payloads.size();
     tick(0); tick(1000000); // Stalled controller never drains a million overdue periods.
-    assert(payloads.size() == before + 2);
+    assert(payloads.size() == before_stall + 2);
     encoder->cleanup();
     assert(allocations.empty() && closes > 0);
     const auto before_failure = eld::encoder_status().generation;
@@ -531,6 +706,8 @@ int main(int argc, char** argv) {
     assert(custom_peer ? custom_peer_reads > 0 && note8_peer_reads == 0 : note8_peer_reads > 0);
     eld::scheduler_cases();
     eld::clock_cases();
+    eld::clock_catch_up_cases();
+    eld::timing_cases();
     encoder->cleanup();
     assert(allocations.empty());
     return 0;

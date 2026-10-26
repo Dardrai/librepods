@@ -4,7 +4,8 @@
 #include <cstring>
 #include <type_traits>
 
-static_assert(sizeof(INT_PCM) == sizeof(int16_t), "Owned FDK must retain its original S16 PCM configuration");
+static_assert(sizeof(INT_PCM) * 8 == ELD_OWNED_PCM_BITS, "Owned FDK PCM ABI must match its caller");
+static_assert(sizeof(INT_PCM) == sizeof(EldOwnedPcm) && std::is_signed<INT_PCM>::value);
 static_assert(std::is_same<INT, int32_t>::value && std::is_same<UINT, uint32_t>::value);
 static_assert(std::is_same<HANDLE_AACENCODER, EldFdkHandle>::value);
 static_assert(sizeof(AACENC_InfoStruct::confBuf) == sizeof(EldFdkInfo::confBuf));
@@ -60,5 +61,5 @@ int32_t close_owned(EldFdkHandle* handle) {
 }
 
 EldFdkApi eld_owned_fdk_api(void) {
-    return {open_owned, set_owned, get_owned, info_owned, encode_owned, close_owned};
+    return {open_owned, set_owned, get_owned, info_owned, encode_owned, close_owned, sizeof(INT_PCM)};
 }

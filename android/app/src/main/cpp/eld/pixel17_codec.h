@@ -4,6 +4,11 @@
 #include <cstdint>
 
 namespace eld {
+#if defined(ELD_PRIVATE_WIDE_PCM) && ELD_PRIVATE_WIDE_PCM
+inline constexpr uint32_t kPixel17PcmBits = 32, kPixel17PcmMask = 4;
+#else
+inline constexpr uint32_t kPixel17PcmBits = 16, kPixel17PcmMask = 1;
+#endif
 inline constexpr size_t kPixel17CodecObjectSize = 0x228;
 inline constexpr size_t kPixel17CodecStorage = 45;
 inline constexpr size_t kPixel17CodecVtableEntries = 9;

@@ -4,7 +4,10 @@
     <string name="native_game_mode">Game Mode</string>
     <string name="native_game_mode_description">Reduces audio delay during games.</string>
     <string name="native_game_mode_waiting">Waiting for audio</string>
+    <string name="native_game_mode_waiting_timing">Waiting for audio timing</string>
     <string name="native_game_mode_starting">Turning on…</string>
     <string name="native_game_mode_stopping">Turning off…</string>
     <string name="native_game_mode_unavailable">Game Mode is unavailable.</string>
+    <string name="native_game_mode_start_failed">Game Mode couldn’t start. Try again.</string>
+    <string name="native_game_mode_restore_failed">Couldn’t turn off Game Mode.</string>
 </resources>

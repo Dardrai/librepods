@@ -28,6 +28,8 @@ val releaseSigningAvailable = listOf(
     "RELEASE_KEY_ALIAS",
     "RELEASE_KEY_PASSWORD"
 ).all { props[it]?.toString()?.isNotBlank() == true }
+val privateGameKeepFlushBaseline = providers.gradleProperty("privateGameKeepFlushBaseline")
+    .map(String::toBoolean).getOrElse(false)
 
 room3 {
     schemaDirectory("$projectDir/schemas")
@@ -84,6 +86,7 @@ android {
     }
     buildTypes {
         release {
+            buildConfigField("boolean", "PRIVATE_GAME_KEEP_FLUSH_BASELINE", "false")
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(
@@ -92,6 +95,7 @@ android {
             externalNativeBuild {
                 cmake {
                     arguments += "-DCMAKE_BUILD_TYPE=Release"
+                    arguments += "-DELD_KEEP_GAME_FLUSH_BASELINE=OFF"
                 }
             }
             if (releaseSigningAvailable) {
@@ -102,6 +106,12 @@ android {
             }
         }
         debug {
+            buildConfigField("boolean", "PRIVATE_GAME_KEEP_FLUSH_BASELINE", privateGameKeepFlushBaseline.toString())
+            externalNativeBuild {
+                cmake {
+                    arguments += "-DELD_KEEP_GAME_FLUSH_BASELINE=${if (privateGameKeepFlushBaseline) "ON" else "OFF"}"
+                }
+            }
             if (releaseSigningAvailable) {
                 signingConfig = signingConfigs.getByName("release")
             }

@@ -33,6 +33,13 @@ class ExperimentalSettingsRefreshTest {
             assertTrue(controller.tryBeginSettingsRefresh())
             assertFalse(controller.tryBeginSettingsRefresh())
             assertFalse(controller.startRecording())
+            var liveCloses = 0
+            assertFalse(controller.startLive(object : LivePcmConsumer {
+                override fun onFormat(format: PcmFormat) = Unit
+                override fun onPcm(bytes: ByteArray, presentationTimeUs: Long) = Unit
+                override fun close() { liveCloses++ }
+            }))
+            assertEquals("Rejected live starts retain caller ownership", 0, liveCloses)
             assertTrue(controller.message.value.contains("refresh"))
             assertEquals(MicrophonePhase.IDLE, controller.microphone.state.value.phase)
             assertNull(device.aacp.captureAudioSocket())

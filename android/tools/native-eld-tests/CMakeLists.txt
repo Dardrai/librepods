@@ -7,11 +7,14 @@ get_filename_component(TEST_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../app/src/test
 add_executable(eld_wire_test "${TEST_ROOT}/eld_wire_test.cpp" "${NATIVE_ROOT}/eld/wire.cpp")
 add_executable(eld_encoder_test "${TEST_ROOT}/eld_encoder_test.cpp"
     "${NATIVE_ROOT}/eld/wire.cpp" "${NATIVE_ROOT}/eld/encoder_interface.cpp")
+add_executable(eld_encoder_q31_test "${TEST_ROOT}/eld_encoder_test.cpp"
+    "${NATIVE_ROOT}/eld/wire.cpp" "${NATIVE_ROOT}/eld/encoder_interface.cpp")
+target_compile_definitions(eld_encoder_q31_test PRIVATE ELD_TEST_PCM_BYTES=4)
 add_executable(identity_hook_policy_test "${TEST_ROOT}/identity_hook_policy_test.cpp")
 add_subdirectory("${NATIVE_ROOT}/eld/tests" adapter)
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../native-runtime-test" runtime)
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../native-fdk-probe" fdk)
-foreach(target eld_wire_test eld_encoder_test identity_hook_policy_test runtime_test fdk_encoder_test)
+foreach(target eld_wire_test eld_encoder_test eld_encoder_q31_test identity_hook_policy_test runtime_test fdk_encoder_test)
     if(MSVC)
         target_compile_options(${target} PRIVATE /W4 /WX /UNDEBUG)
         target_compile_definitions(${target} PRIVATE _CRT_SECURE_NO_WARNINGS)
@@ -25,3 +28,6 @@ add_test(NAME eld_encoder_pixel_codec_test COMMAND eld_encoder_test --pixel-code
 add_test(NAME eld_encoder_pixel_peer_test COMMAND eld_encoder_test --pixel-peer)
 add_test(NAME eld_encoder_catch_up_test COMMAND eld_encoder_test --catch-up)
 add_test(NAME eld_encoder_clock_test COMMAND eld_encoder_test --clock)
+add_test(NAME eld_encoder_q31_pixel_test COMMAND eld_encoder_q31_test --pixel)
+add_test(NAME eld_encoder_q31_catch_up_test COMMAND eld_encoder_q31_test --catch-up)
+add_test(NAME eld_encoder_q31_clock_test COMMAND eld_encoder_q31_test --clock)

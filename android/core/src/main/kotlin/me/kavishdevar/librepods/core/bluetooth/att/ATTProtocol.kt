@@ -7,7 +7,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
-internal class ATTFailure(override val message: String) : Exception(message)
+internal class ATTFailure(override val message: String, val retryable: Boolean = false) : Exception(message)
 
 internal fun UUID.attBytes(): ByteArray = ByteArray(16) { index ->
     if (index < 8) (leastSignificantBits ushr (index * 8)).toByte()
@@ -76,7 +76,7 @@ internal fun ByteArray.u16(offset: Int): Int = (this[offset].toInt() and 255) or
 internal class ATTBearer(
     private val mtu: Int,
     private val send: (ByteArray) -> Unit,
-    private val close: () -> Unit,
+    private val close: (Boolean) -> Unit,
     private val current: () -> Boolean
 ) {
     private class Pending(val request: ByteArray, val opcode: Int) {
@@ -91,7 +91,7 @@ internal class ATTBearer(
     fun command(pdu: ByteArray, canSend: () -> Boolean): Boolean = lock.withLock {
         if (!isCurrent || pdu.size < 3 || pdu[0] != 0x52.toByte() || pdu.u16(1) == 0 || pdu.size > mtu || !canSend()) return false
         try { send(pdu.copyOf()); isCurrent && canSend() }
-        catch (_: Exception) { retire(); false }
+        catch (error: Exception) { retire(error is java.io.IOException); false }
     }
 
     fun request(pdu: ByteArray, opcode: Int, timeoutMillis: Long = 2000, canSend: () -> Boolean = { true }): ByteArray = lock.withLock {
@@ -102,22 +102,23 @@ internal class ATTBearer(
             0x12 -> pdu.size >= 3 && pdu.u16(1) != 0 && opcode == 0x13
             else -> false
         }
-        if (!isCurrent || !validRequest || pdu.size > mtu || timeoutMillis !in 1..2000 || !canSend()) throw ATTFailure("ATT session unavailable")
+        if (!validRequest || pdu.size > mtu || timeoutMillis !in 1..2000) throw ATTFailure("Invalid ATT request")
+        if (!isCurrent || !canSend()) throw ATTFailure("ATT session unavailable", retryable = true)
         val waiting = Pending(pdu.copyOf(), opcode)
         synchronized(this) { pending = waiting }
         try {
-            if (!isCurrent || !canSend()) throw ATTFailure("ATT request retired")
+            if (!isCurrent || !canSend()) throw ATTFailure("ATT request retired", retryable = true)
             send(pdu.copyOf())
             if (!waiting.done.await(timeoutMillis, TimeUnit.MILLISECONDS)) {
-                retire()
-                throw ATTFailure("ATT response timed out")
+                retire(retryable = true)
+                throw ATTFailure("ATT response timed out", retryable = true)
             }
-            if (!isCurrent || !canSend()) throw ATTFailure("ATT request retired")
-            waiting.response?.copyOf() ?: throw ATTFailure("ATT response unavailable")
+            if (!isCurrent || !canSend()) throw ATTFailure("ATT request retired", retryable = true)
+            waiting.response?.copyOf() ?: throw ATTFailure("ATT response unavailable", retryable = true)
         } catch (interrupted: InterruptedException) {
             Thread.currentThread().interrupt()
-            retire()
-            throw ATTFailure("ATT request cancelled")
+            retire(retryable = true)
+            throw ATTFailure("ATT request cancelled", retryable = true)
         } finally {
             synchronized(this) { if (pending === waiting) pending = null }
         }
@@ -139,9 +140,9 @@ internal class ATTBearer(
         waiting.done.countDown()
     }
 
-    fun retire() {
+    fun retire(retryable: Boolean = false) {
         if (!retired.compareAndSet(false, true)) return
         synchronized(this) { pending?.done?.countDown() }
-        close()
+        close(retryable)
     }
 }

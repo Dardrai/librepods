@@ -141,6 +141,71 @@ removed after their reports were retained. This owned backend avoids coupling
 the encoder to each firmware's private FDK symbols. It is now connected to the
 SDK37 prototype described below; this synthetic result alone is not a playback result.
 
+### Encoder quality and validation
+
+An offline audit found two quality losses in the shared native encoder settings:
+automatic bandwidth selected 16 kHz even at 256 kbps, and the FDK afterburner
+quality pass was disabled. The 256 kbps profile now explicitly selects and
+verifies 20 kHz bandwidth. All rates enable and verify afterburner; lower rates
+retain FDK's automatic bandwidth. The peak bitrate, AU bound, 480-sample frame,
+48 kHz stereo S16 input, ASC and startup priming are unchanged.
+
+The initial pinned-FDK synthetic comparison measured a 17,501 Hz component at
+about -104 dB relative to its input with automatic bandwidth; selecting 20 kHz
+restored it to -0.023 dB at the same 321-byte AU limit. With bandwidth held
+constant, afterburner improved the two isolated tone reconstruction SNRs from
+39.38/40.38 dB to 58.85/54.64 dB. These are electrical sample comparisons, not
+an audible improvement claim or a measurement of the AirPods' speaker response.
+
+The permanent [owned encoder test](tools/native-owned-fdk-tests/README.md) now
+encodes and decodes the production wrapper's output. Its eight-second stereo
+fixture checks frequency response, channel separation, gain at four input
+levels, near-full-scale peaks and transient shape after aligning encoder delay.
+The test rejects disabled afterburner, automatic 16 kHz bandwidth, halved volume
+and compressed peaks. Frequency response and level consistency are checked
+separately; a high-frequency cutoff does not establish dynamics compression.
+
+On October 26, an isolated Pixel 10 Pro XL check encoded the same 800 synthetic
+frames with these quality settings and no audio input/output. Encode time was
+115.53 microseconds mean, 220.62 microseconds p99 and 490.47 microseconds maximum
+per 10 ms access unit; the decoded-quality assertions passed. This measures
+encoder work, not acoustic latency or scheduling during loaded playback.
+Pixel 7 Pro and Pixel 10 Pro XL listening and load checks for these settings
+remain pending. Earlier phone listening receipts used the old encoder settings.
+Record hearing/EQ modes for a controlled comparison rather than assuming they
+are off.
+
+This remains a lossy codec with an explicitly 16-bit PCM input path. The peak
+bitrate constraint still limits the encoder's bit reservoir; it is not relaxed
+without peer and packet-budget evidence. The private FDK licensing boundary and
+default-off build option are unchanged.
+
+An offline follow-up used the same eight-second stereo fixture, pinned FDK
+encoder/decoder, 20 kHz bandwidth and afterburner, changing only average/peak
+bitrate. These are synthetic reconstruction measurements, not listening scores:
+
+| Average / peak (kbps) | Maximum AU (bytes) | Transient SNR, left / right (dB) |
+| --- | --- | --- |
+| 256 / 256 (current) | 321 | 26.82 / 27.15 |
+| 224 / 256 | 320 | 27.07 / 27.80 |
+| 192 / 256 | 320 | 27.92 / 28.53 |
+| 256 / 320 | 394 | 29.85 / 30.03 |
+
+All four preserved the tested steady-tone gain and had the same 240-sample
+decode alignment delay. The 192/256 variant lost 2–3 dB reconstruction SNR on
+near-full-scale dual tones, so its transient result is not a general quality
+improvement. Equal average and peak rates leave little useful reservoir
+headroom; raising the peak allows more bits for difficult frames, but 394-byte
+AUs exceed the production 321-byte limit.
+
+The retained native Mac capture `20261012T211811Z-048041f7` advertised 256 kbps
+from the AirPods (frame 5164), configured 320 kbps (5177) and received acceptance
+(5194). Its 974 measured AUs nevertheless stayed at or below 320 bytes. Together
+with Apple's 192 kbps target / 256 kbps peak encoder log, this does not establish
+that larger audio bursts work. No production bitrate, peak or packet limit has
+changed; larger peaks need a separate peer/MTU and listening test. Private
+reproduction results are retained under `outputs/codec-quality-followup-20261026`.
+
 A read-only A2DP proxy inventory returned source indices 7 (LHDCv5), 4 (LDAC),
 3 (aptX HD), 2 (aptX), 1 (AAC), 6 (Opus) and 0 (SBC), with unique extended codec
 IDs. Index 5 was not registered in that running inventory; this is not a permanent
@@ -154,6 +219,63 @@ integer `0x4c8001` is not a substitute for this carrier. Registering a Java labe
 alone does not install an encoder, and fabricating AIDL provider support would
 select a provider route that does not implement it. Native registry/dispatch,
 Java carrier mapping and the software audio-provider path must all pass together.
+
+### Internal float mixing and the current PCM16 boundary
+
+Android's internal mixer precision and the Bluetooth encoder's input format are
+separate contracts. AOSP's [mixer and effects buffers use Float32](https://android.googlesource.com/platform/frameworks/av/+/9a9b4dc94123c1915712ddb72613107a40de8e4b/services/audioflinger/Threads.cpp#2886),
+and [AudioFormat recommends float PCM for higher-precision processing](https://developer.android.com/reference/android/media/AudioFormat).
+Do not describe Android's internal audio pipeline as limited to 16 bits.
+
+On October 26, the Pixel 10 Pro XL's live AudioFlinger dump showed Float32
+processing in the upstream duplicating output and PCM16 processing/HAL output
+in the A2DP spatializer output. The baseline S16 integration requests 16 bits in
+`pixel17_codec.cpp` and `pixel17_wire_hooks.cpp`, reads 1,920-byte blocks of 480
+stereo frames, and uses an owned FDK build with 16-bit input. This is a reduction
+at our configured output boundary, despite the higher-precision upstream mixer.
+NTPods' Windows path instead preserves Float32 until conversion to its Q31 FDK
+input.
+
+A wider Android path must change the negotiated software PCM output and the
+reader/encoder together. AOSP's [Bluetooth module maps a 32-bit configuration to
+signed integer PCM](https://android.googlesource.com/platform/hardware/interfaces/+/863f96ecdd628638da61a302f13615e61eec6d60/audio/aidl/default/bluetooth/ModuleBluetooth.cpp#60),
+not Float32. Float mixing followed by PCM32/Q31 input is therefore the candidate
+path to verify on the shipped Pixel provider. Merely converting received PCM16
+to float recovers no information. Provider acceptance, actual source precision,
+decoded quality and unchanged packet timing/budget still need validation; no
+32-bit source change has been deployed at this checkpoint. AAC-ELD remains the
+compressed wire format, without an uncompressed 32-bit-per-sample transport claim.
+
+The private native option `LIBREPODS_PRIVATE_WIDE_PCM=ON` now implements that
+complete PCM32/Q31 path, requiring the owned FDK backend. It requests the 32-bit
+codec mask, reports a 32-bit track width, reads 3,840-byte stereo blocks and uses
+an isolated, explicitly modified Q31 FDK source copy. The platform-bound Note8
+path remains S16, mismatched input widths are rejected, and both private build
+options default off. No codec bitrate, frame period, priming, clock policy or
+321-byte peak AU bound changes with source width.
+
+Both widths pass the existing decoded gain, stereo, frequency, transient and
+peak checks. The Q31 fixture additionally preserves independent -100 dBFS tones
+below half an S16 quantization step: measured level errors were +0.035/+0.001 dB
+and decoded waveform SNR 16.81/12.31 dB. Rounding the production wrapper's input
+to S16 erased those tones and failed the test. This verifies retained input
+precision, not 32-bit acoustic resolution. The Q31 host test retained the
+240-frame codec delay and maximum 321-byte AU. The ARM64 private library builds;
+actual phone-provider negotiation, throughput and listening remain separate
+release checks. Reproduce with `tools/native-owned-fdk-tests/README.md`.
+
+The subsequent private Pixel 10 Pro XL trial on `CP3A.261005.005` accepted the
+32-bit codec mask (`bits_mask=4`). AudioFlinger reported PCM32 processing and HAL
+output for the A2DP spatializer, with Float32 processing upstream. Across a
+steady interval, 53,921 additional source reads consumed 207,056,640 bytes:
+exactly 3,840 bytes per 480-frame stereo block. The same encoder generation
+emitted 53,921 additional access units without increasing the eight underflows
+or four host discards observed after the initial listening/pause-resume test. This interval corresponds to
+539.21 seconds of 10 ms encoded frames, not an acoustic latency measurement.
+The user confirmed clean audio, normal loudness and smooth five-second
+pause/resume starts. Private evidence is `outputs/p17wide/pixel10-live-private.json`.
+The private build remains gated off by default; this is not a Pixel 7, other
+firmware, Game Mode, call-routing or acoustic-resolution compatibility pass.
 
 ### Pixel Headphone Accommodations check
 
@@ -173,6 +295,21 @@ SDP and successful AHPS104/CT104 reads; a following warm Google-DID capture also
 read both records. A later uncaptured stock session failed again with `0x0E`.
 These results do not establish a vendor-only rule or cold-stock authorization.
 
+A subsequent startup capture showed that completed initialization writes alone
+can still precede peer readiness. Protected ATT reads now also require an exact
+successful service-4 ConnectResponse (version 1.2 or 1.3), or a validated
+capabilities report, from the current connection. After a bounded 12-second
+wait, a late valid response automatically resumes one loading job, retaining
+busy-audio deferral and rejecting cancelled or replaced owners.
+
+One replacement ATT bearer is allowed after transient transport loss,
+rediscovering settings and reading them again without replacing the audio/AACP
+connection. Rejected or malformed responses and uncertain writes remain
+quarantined; writes are never replayed automatically. The 202 focused checks in
+15 suites and the debug APK build passed. These changes have no new listening
+result and do not bypass `0x0E`.
+See [bounded ATT loading recovery](PROTOCOL.md#bounded-att-loading-recovery-2026-10-26).
+
 Two fresh restoration captures verified every original AHPS104, CT104 and
 PME140 byte against the privately saved baseline. The stock capture ended before
 the final failed session, so it does not cover that session's settings reads.
@@ -186,9 +323,15 @@ raw profiles remain private.
 Apple's real host `aufx/hear` hearing processor and its separately verified short
 PME On Buds control are distinct from encoding PCM as AAC-ELD. The short control's
 Boolean `01`/`02` mapping is known, but its activation policy, getter and original
-state are not. The positive Windows CT comparison established an ambient effect,
-not a PME music-processing gate. Android accommodations processing therefore
-remains unresolved; this negative test does not invalidate the ELD playback result.
+state are not. The earlier positive Windows CT comparison established an ambient
+effect. A later Windows test, after removing reconnects between edits, found a
+clear audible difference in continuous music between Audiogram and Brightness /
+Strong, with clinical modes Off and the stored hearing profile unchanged. That
+listener result had no new packet capture or acoustic measurement; it does not
+identify a PME music-processing gate. See the
+[Windows music comparison](https://github.com/Ripthulhu/ntpods/blob/main/docs/MACOS-ACCOMMODATIONS-CAPTURE-2026-10-24.md#windows-acceptance-2026-10-25).
+Android accommodations processing remains unresolved; the negative Android test
+does not invalidate the ELD playback result.
 
 ### SDK37 native integration
 
@@ -416,6 +559,42 @@ Broader real-time performance, AAC/SBC recovery, complete stream lifecycle tests
 and Game Mode release checks remain pending; the later single Pixel 10 On/Off
 result is separate from this pacing trial.
 Raw captures, process traces and device identifiers remain private.
+
+### Game Mode admission boundary (2026-10-26)
+
+The Kotlin policy rejected a valid receiver report of exactly 600 tenths of a
+millisecond (60 ms), although that is the requested Game Mode target. It now
+admits that boundary through the existing owned controller-prepare, target-write
+and fresh-report sequence. An equal post-write report needs no sender-clock
+adjustment; it does not bypass controller ownership or restoration. Reports
+below 600 and invalid/missing reports remain inadmissible. During playback,
+missing timing now displays "Waiting for audio timing" rather than "Waiting for
+audio". Forty-eight focused policy, engine, snapshot, transport and UI tests
+passed, including the exact boundary and complete Off restoration.
+
+A later live query showed playback active but no cached delay report. The saved
+wire report was from an earlier Bluetooth process, so it does not prove a
+report-retention failure in the queried generation. Native snapshots now expose
+nonidentifying readiness flags and generation counters for a same-process
+comparison. A subsequent same-process capture resolved that comparison: the
+600-tenths report at frame 750 preceded Open (752/755), followed by Start
+(1637/1653). Controller read/write/readback proved 0 to 96 slots (1775–1794);
+the 60 ms AACP write at 1828 was followed by a fresh 620-tenths report at 1839.
+The same-process native receipt showed an owned completed clock adjustment
+with normal interval 10 and drift 2 ms. The capture's 4,232 media packets had no
+RTP sequence/timestamp gaps and access units at most 321 bytes. A process restart
+after capture remains a separate generation, not evidence about this one.
+
+The listener subsequently reported extra hitches with Game Mode on and that
+they disappeared when it was off. A debug-only comparison retaining the actual
+controller baseline (0 on this pair), instead of 96, is therefore being tested
+with the same receiver target and codec. It is not a new release default or a
+validated hitch/latency fix. During that trial, metadata caught a finite-clock
+cancellation after a 23,402 microsecond media gap with host queue zero; controller
+baseline and normal clock were restored, but the app retained an unconfirmed
+remote restoration. Source-control recovery and short-gap clock accounting
+are separate follow-up repairs. No acoustic latency is established by these
+host packet timings, delay reports or controller values.
 
 ```mermaid
 flowchart LR

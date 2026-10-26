@@ -77,6 +77,7 @@ private fun createAppleViewModelFactory(
                 heartRateRepository = heartRateRepository,
                 audioControllerProvider = { application.experimentalAudioControllers[device.macAddress] },
                 gameModeControllerProvider = { application.nativeGameModeControllers[device.macAddress] },
+                communicationControllerProvider = { application.communicationAudioControllers[device.macAddress] },
             )
         }
     }

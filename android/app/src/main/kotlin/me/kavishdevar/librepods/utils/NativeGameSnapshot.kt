@@ -6,6 +6,7 @@ internal class NativeGameSnapshot private constructor(private val values: LongAr
     val supported get() = values[1] == 1L
     val busy get() = values[2] == 1L
     val phase get() = values[3].toInt()
+    val operation get() = values[4].toInt()
     val serial get() = values[5]
     val leaseOwner get() = values[6]
     val error get() = values[7].toInt()
@@ -58,6 +59,12 @@ internal class NativeGameSnapshot private constructor(private val values: LongAr
     val clockDriftMs get() = values[73].toInt()
     val restored get() = !holding && !busy && !restorePending && !clockPending && clockInterval == 10 && baselineKnown && currentKnown &&
         baselineSlots == currentSlots
+    // Runtime resets each accepted Prepare, checks its owner before the first HCI read,
+    // and records a captured baseline plus restore debt before any controller write.
+    val noControllerMutation get() = supported && operation == 3 && phase == 9 && error == 3 &&
+        serial > 0 && leaseOwner > 0 && !busy && !holding && !baselineKnown && !currentKnown &&
+        !restorePending && lastOpcode == 0 && controllerStatus == 255 && completedHandle == 65535 &&
+        clockRequestSerial == 0L && !clockPending && clockPhase == 0 && clockSerial == 0L && clockInterval == 10
 
     fun sameHost(peer: ByteArray) = this.peer.contentEquals(peer) && routeValid &&
         mediaGeneration > 0 && encoderGeneration > 0 && aclHandle in 0..0xeff
@@ -65,8 +72,10 @@ internal class NativeGameSnapshot private constructor(private val values: LongAr
     // Deliberately excludes peer identifiers and raw payloads from diagnostic logs.
     fun summary() = "supported=$supported busy=$busy phase=$phase serial=$serial error=$error " +
         "route=$routeValid streaming=$streaming delay=$delayTenths delaySerial=$delaySerial " +
+        "hostFlags=$hostFlags reporting=$reporting delayValid=$delayValid encoderReady=$encoderReady " +
+        "clockAvailable=$clockAvailable mediaGeneration=$mediaGeneration encoderGeneration=$encoderGeneration " +
         "baselineKnown=$baselineKnown baseline=$baselineSlots currentKnown=$currentKnown " +
-        "current=$currentSlots restorePending=$restorePending restored=$restored " +
+        "current=$currentSlots restorePending=$restorePending restored=$restored noControllerMutation=$noControllerMutation " +
         "opcode=$lastOpcode controllerStatus=$controllerStatus holding=$holding " +
         "clockRequest=$clockRequestSerial clockPending=$clockPending clockPhase=$clockPhase " +
         "clockSerial=$clockSerial clockInterval=$clockInterval clockDrift=$clockDriftMs " +

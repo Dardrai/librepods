@@ -4,6 +4,7 @@ import android.app.Application
 import android.util.Log
 import java.util.concurrent.ConcurrentHashMap
 import me.kavishdevar.librepods.audio.ExperimentalAudioController
+import me.kavishdevar.librepods.audio.CommunicationAudioController
 import me.kavishdevar.librepods.utils.NativeGameModeController
 import me.kavishdevar.librepods.core.bluetooth.MacAddress
 import androidx.health.connect.client.HealthConnectClient
@@ -33,6 +34,7 @@ import me.kavishdevar.librepods.utils.XposedState
 
 class LibrePodsApplication: Application(), XposedServiceHelper.OnServiceListener, DefaultLifecycleObserver {
     val experimentalAudioControllers = ConcurrentHashMap<MacAddress, ExperimentalAudioController>()
+    val communicationAudioControllers = ConcurrentHashMap<MacAddress, CommunicationAudioController>()
     val nativeGameModeControllers = ConcurrentHashMap<MacAddress, NativeGameModeController>()
     lateinit var database: LibrePodsDatabase
         private set

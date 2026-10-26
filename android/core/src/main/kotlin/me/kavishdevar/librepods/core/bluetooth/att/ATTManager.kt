@@ -30,6 +30,7 @@ import me.kavishdevar.librepods.core.bluetooth.att.types.parseHearingAidSettings
 import me.kavishdevar.librepods.core.bluetooth.att.types.parseTransparencySettingsResponse
 import me.kavishdevar.librepods.core.devices.AppleDevice
 import java.util.UUID
+import java.io.IOException
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -72,7 +73,7 @@ class ATTManager internal constructor(
 ) {
     constructor(device: AppleDevice) : this(
         captureOwner = {
-            device.aacp.captureAudioSocket()?.let { socket ->
+            device.aacp.captureSettingsSocket()?.let { socket ->
                 device.state.value.controlSession.takeIf { it > 0 }?.let { ATTOwner(socket, it) }
             }
         },
@@ -92,6 +93,8 @@ class ATTManager internal constructor(
     private val operation = Mutex()
     @Volatile private var session: Session? = null
     @Volatile private var failedOwner: ATTOwner? = null
+    @Volatile private var attemptOwner: ATTOwner? = null
+    @Volatile private var connectionAttempts = 0
 
     val available: Boolean get() = currentSession()?.let { active -> synchronized(active.reads) {
         active.mtu >= 107 && active.characteristics[ATTHandle.TRANSPARENCY]?.writeOpcode != null &&
@@ -101,20 +104,25 @@ class ATTManager internal constructor(
     internal fun sessionToken(): Any? = currentSession()
     internal fun ownsSession(token: Any?): Boolean = token != null && currentSession() === token
 
-    fun disconnect() { session?.let(::retire) }
+    fun disconnect() { session?.let { retire(it, retryable = false) } }
+
+    /** One fresh ATT bearer may recover transport loss; rejected settings and uncertain writes stay quarantined. */
+    fun canRetryRead(): Boolean {
+        val owner = captureOwner() ?: return false
+        return owner.same(attemptOwner) && !owner.same(failedOwner) && connectionAttempts < 2 && currentSession() == null
+    }
 
     private fun currentSession(): Session? = session?.takeIf {
         !it.retired.get() && it.owner.same(captureOwner()) && it.socket.connected && it.bearer?.isCurrent == true
     }
 
-    private fun retire(active: Session) {
-        if (!active.retired.compareAndSet(false, true)) return
+    private fun retire(active: Session, retryable: Boolean = true) {
         synchronized(this) {
-            if (session === active) session = null
-            failedOwner = active.owner
+            if (session === active && !retryable) failedOwner = active.owner
         }
+        if (!active.retired.compareAndSet(false, true)) return
         synchronized(active.reads) { active.reads.clear() }
-        active.bearer?.retire()
+        active.bearer?.retire(retryable)
         runCatching { active.socket.close() }
         active.reader?.interrupt()
     }
@@ -122,24 +130,26 @@ class ATTManager internal constructor(
     private suspend fun connect(): Session? {
         currentSession()?.let { return it }
         val owner = captureOwner() ?: return null
-        session?.let(::retire)
-        if (owner.same(failedOwner)) return null
+        session?.let { retire(it) }
+        if (!owner.same(attemptOwner)) { attemptOwner = owner; connectionAttempts = 0 }
+        if (owner.same(failedOwner) || connectionAttempts >= 2) return null
+        connectionAttempts++
         val active = try { Session(owner, socketFactory()) } catch (error: Exception) {
-            failedOwner = owner
+            if (error !is IOException) failedOwner = owner
             Log.d("ATTManager", "ATT socket unavailable: ${error.javaClass.simpleName}")
             return null
         }
         synchronized(this) { session = active }
         return try {
             val opened = blocking(active, 4000) {
-                if (!owner.same(captureOwner()) || active.retired.get()) throw ATTFailure("ATT connection retired")
+                if (!owner.same(captureOwner()) || active.retired.get()) throw ATTFailure("ATT connection retired", retryable = true)
                 active.socket.connect()
                 val rx = active.socket.receiveMtu
                 val tx = active.socket.transmitMtu
                 if (rx !in 48..65535 || tx !in 48..65535) throw ATTFailure("Unsupported Classic ATT MTU")
                 active.mtu = minOf(rx, tx)
-                if (!owner.same(captureOwner()) || !active.socket.connected || active.retired.get()) throw ATTFailure("ATT connection retired")
-                active.bearer = ATTBearer(active.mtu, active.socket::write, { retire(active) }) {
+                if (!owner.same(captureOwner()) || !active.socket.connected || active.retired.get()) throw ATTFailure("ATT connection retired", retryable = true)
+                active.bearer = ATTBearer(active.mtu, active.socket::write, { retryable -> retire(active, retryable) }) {
                     session === active && !active.retired.get() && owner.same(captureOwner()) && active.socket.connected
                 }
                 // A full receive buffer preserves L2CAP SDU boundaries; writes are never split into PDUs.
@@ -151,8 +161,9 @@ class ATTManager internal constructor(
                             if (count <= 0) break
                             active.bearer?.receive(buffer.copyOf(count))
                         }
-                    } catch (_: Exception) {
+                    } catch (error: Exception) {
                         // Closing this ATT socket cancels a blocked read without disturbing AACP/audio.
+                        if (error !is IOException && error !is InterruptedException) retire(active, retryable = false)
                     } finally { retire(active) }
                 }, "LibrePods-ATT-reader").also { it.isDaemon = true; it.start() }
                 true
@@ -167,7 +178,7 @@ class ATTManager internal constructor(
             if (error is kotlinx.coroutines.CancellationException) { retire(active); throw error }
             // ATT error codes are useful for authorization diagnostics; never log characteristic values.
             Log.d("ATTManager", if (error is ATTFailure) error.message else "ATT connection unavailable: ${error.javaClass.simpleName}")
-            retire(active)
+            retire(active, retryable(error))
             null
         }
     }
@@ -181,7 +192,7 @@ class ATTManager internal constructor(
         try {
             blocking(active, 2500) { read(active, handle, canRead) }
         } catch (error: Exception) {
-            retire(active)
+            retire(active, retryable(error))
             if (error is kotlinx.coroutines.CancellationException) throw error
             Log.d("ATTManager", "ATT read $handle: " +
                 if (error is ATTFailure) error.message else "unavailable: ${error.javaClass.simpleName}")
@@ -195,8 +206,9 @@ class ATTManager internal constructor(
         if (response[0] == 1.toByte()) throw ATTFailure("ATT read rejected: 0x${(response[4].toInt() and 255).toString(16)}")
         val value = response.copyOfRange(1, response.size)
         // A full-MTU reply can be a truncated long value. No read-blob assembly or guessed padding.
-        if (response.size >= active.mtu || !validValue(handle, value) || currentSession() !== active || !canRead())
+        if (response.size >= active.mtu || !validValue(handle, value))
             throw ATTFailure("Incomplete or unsupported ATT setting")
+        if (currentSession() !== active || !canRead()) throw ATTFailure("ATT read retired", retryable = true)
         synchronized(active.reads) { active.reads[handle] = value.copyOf() }
         return value
     }
@@ -211,13 +223,15 @@ class ATTManager internal constructor(
         val proof = synchronized(active.reads) { active.reads[handle]?.copyOf() }
         if (proof == null || !proof.contentEquals(baseline) || !validWrite(handle, requested) ||
             !validWrite(handle, baseline) || requested.size + 3 > active.mtu || !canSend()) return@withLock false
+        val writeStarted = AtomicBoolean()
         try {
             blocking(active, 8000) {
                 if (read(active, handle, canSend)?.contentEquals(baseline) != true) return@blocking false
                 val pdu = byteArrayOf(opcode.toByte(), characteristic.handle.toByte(), (characteristic.handle ushr 8).toByte()) + requested
+                writeStarted.set(true)
                 val sent = if (opcode == 0x12) active.bearer!!.request(pdu, 0x13, canSend = canSend).contentEquals(byteArrayOf(0x13))
                     else active.bearer!!.command(pdu, canSend)
-                if (!sent) { retire(active); return@blocking false }
+                if (!sent) { retire(active, retryable = false); return@blocking false }
                 repeat(5) { attempt ->
                     val actual = read(active, handle, canSend) ?: return@blocking false
                     val matches = if (handle == ATTHandle.HEARING_AID)
@@ -227,13 +241,16 @@ class ATTManager internal constructor(
                     val unchanged = if (handle == ATTHandle.HEARING_AID)
                         hearingAidSettingsWritable(actual) && actual.copyOfRange(4, 104).contentEquals(baseline.copyOfRange(4, 104))
                     else actual.contentEquals(baseline)
-                    if (!unchanged || attempt == 4) { retire(active); return@blocking false }
+                    if (!unchanged || attempt == 4) { retire(active, retryable = false); return@blocking false }
                     Thread.sleep(75)
                 }
                 false
-            } == true
+            }.let { result ->
+                if (result == null && writeStarted.get()) retire(active, retryable = false)
+                result == true
+            }
         } catch (error: Exception) {
-            retire(active)
+            retire(active, !writeStarted.get() && retryable(error))
             if (error is kotlinx.coroutines.CancellationException) throw error
             Log.d("ATTManager", if (error is ATTFailure) error.message else "ATT write unconfirmed: ${error.javaClass.simpleName}")
             false
@@ -247,6 +264,9 @@ class ATTManager internal constructor(
     }
     private fun validWrite(handle: ATTHandle, data: ByteArray): Boolean = validValue(handle, data) &&
         (handle != ATTHandle.HEARING_AID || hearingAidSettingsWritable(data))
+
+    private fun retryable(error: Exception): Boolean = error is IOException ||
+        error is kotlinx.coroutines.CancellationException || error is ATTFailure && error.retryable
 
     private suspend fun <T> blocking(active: Session, timeoutMillis: Long, block: () -> T): T? =
         withTimeoutOrNull(timeoutMillis) {

@@ -75,13 +75,13 @@ bool same_bindings(const Pixel17CodecBindings& a, const Pixel17CodecBindings& b)
         a.unlock == b.unlock && a.assign_short == b.assign_short && a.debug == b.debug;
 }
 Pixel17NativeConfig fixed_config(int32_t index, int32_t priority) {
-    return {index, priority, 2, 1, 2, 0, {0, 0, 0, 0}, 0};
+    return {index, priority, 2, kPixel17PcmMask, 2, 0, {0, 0, 0, 0}, 0};
 }
 bool accepts(const Pixel17NativeConfig& config, int32_t index, bool type_required) {
     if ((type_required && config.codec_type != index) || config.codec_priority < -1 ||
         config.codec_priority > 1000000 ||
         (config.sample_rate && !(config.sample_rate & 2)) ||
-        (config.bits_per_sample && !(config.bits_per_sample & 1)) ||
+        (config.bits_per_sample && !(config.bits_per_sample & kPixel17PcmMask)) ||
         (config.channel_mode && !(config.channel_mode & 2))) return false;
     for (auto value : config.codec_specific) if (value) return false;
     // Padding and opaque_tail are never assigned a guessed semantic or normalized in caller records.

@@ -58,6 +58,76 @@ on stop, owner change, queue pressure, cancellation or expiry. Its completion
 is quantized to whole 480-sample access units. Neither source-clock accounting
 nor a DelayReport measures acoustic latency.
 
+### October 26 clock and control recovery fixes
+
+A Pixel 10 follow-up caught a cancelled slow-clock adjustment after a 23,402 us
+media gap, with the host queue empty. Ordinary playback already tolerates such
+timer gaps through its four-AU catch-up budget. The old two-period clock guard
+cancelled sooner. The repaired clock uses that same bounded catch-up capacity
+(40 ms normally, 44 ms at interval 11), without enlarging queues or changing the
+codec, primer or target. Completion is checked only after the whole callback's
+accepted-AU ledger and a settled next media deadline. A first catch-up AU cannot
+claim drift that later AUs undo. Remaining debt after a full burst cancels;
+underflow, discard, reset, queue pressure, ownership and expiry still normalize
+the clock. Thirteen sanitizer test targets and three regression mutations pass.
+The later private manual acceptance below covers this repair on one Pixel 10;
+the host checks do not establish acoustic latency.
+
+The app's AACP validation callback runs both before and after a control write.
+It previously moved the freshness boundary again during post-write publication,
+which could reject a fast report that had already arrived. The timestamp now
+comes from the exact owned-socket `beforeWrite` boundary, once. A separate
+attempt receipt distinguishes a rejected, never-written target from a possibly
+partial write. Only the former can avoid a new remote-restoration obligation;
+an uncertain write still needs owned restoration and fresh readback. An explicit
+preference change can retry pending same-owner cleanup once, without a polling
+retry loop. Seventy-five focused transport, engine, policy and UI checks pass,
+including a reply received during write before publication and a publication
+failure after bytes were written. This does not turn a write ACK into proof of
+the AirPods' target or acoustic latency.
+
+Forced cleanup now retains its existing bounded report window after native
+restoration finishes; a later valid Off report is still consumed. Previously,
+the first native-restored tick moved straight to the unresolved state and
+ignored that reply. Reports outside the original two-second freshness window,
+known unsent writes and replaced control owners remain unconfirmed. A failed
+Prepare that lost its owner before the first HCI read has a separate terminal
+no-mutation proof. Only the exact request with no remote debt can be retired
+that way; this is not called verified restoration and does not invent a baseline.
+
+The UI distinguishes unsupported, waiting, failed-start and pending-restoration
+states. A restored native controller with an unconfirmed remote target is not
+reported as an active Game Mode or as fully confirmed Off.
+The normal future restore obligation during startup/active playback is not an
+error; tests cover the actual active/issue-NONE/pending-obligation state.
+
+The private Pixel 10 follow-up (Pro 3, firmware 9A348) completed On and Off with
+the captured controller baseline of 0 retained. Same-process receipts showed
+fresh receiver reports, completed finite clocks and exact native restoration;
+the listener reported good sound. About five minutes of subsequent host
+observations stayed on one encoder generation without additional PCM underflows
+or host discards. That is limited live evidence for this debug comparison, not
+a default change or an acoustic-latency measurement. Background admission,
+interrupted transitions and other supported devices remain separate checks.
+
+The final October 26 manual check used private APK SHA-256
+`3177cfb4908fa26b5786bfadafc5600fa6858bcd5d5ccf003676a5e19baa2264` and native library
+`379898fd7941fbe484babf9dabbd2e46f5fe8ee937ea0547e867c1482f8c73d9`.
+The user repeated On for five seconds, then Off for five seconds, and reported:
+“Works now—switch and audio are correct.” Same-process observations remained on
+media generation 1 and encoder generation 70. Final Off request 31 had no held
+lease or pending restoration, controller baseline/current both 0 with verified
+restoration, and a completed clock at normal interval 10 after a 77 ms drift
+budget. The cumulative underflow/discard counters stayed at 127/116 throughout
+the observed check; these are unchanged totals, not a claim of zero earlier
+faults. Local evidence is `outputs/codec-quality-followup-20261026/game-accepted-private.json`.
+
+This APK used `privateGameKeepFlushBaseline=true`, retaining the captured 0-slot
+controller baseline. The normal source default remains 96 slots; the private
+result does not validate that default or change it. Five-second user actions
+are not measured transition times, and neither the drift budget nor the final
+receipt measures acoustic latency.
+
 Clock request acceptance is separate from actual encoder admission. A queued
 request can be refused while the source is late or its queue is full. The
 private implementation records a bounded, metadata-only admission reason and
@@ -171,9 +241,9 @@ HCI/runtime checks and13 encoder checks with sanitizers.
 The follow-up private APK SHA-256
 `de3ac2de7425b0c3df5ac1348c372cf1fd8a12afb66298b7da0ceaf4a02571b0`
 was installed and ordinary audio was confirmed. The user stopped before its
-final On/Off test, so the corrected completion status has **not** passed a final
-live cycle. Capture cleanup completed and tracing was off; raw evidence remains
-local.
+final On/Off test, so that earlier build did not complete a final live cycle.
+The later baseline-preserving build's manual acceptance is recorded above.
+Capture cleanup completed and tracing was off; raw evidence remains local.
 
 ### Delay Reporting negotiation race
 
@@ -294,7 +364,7 @@ original socket/control session and a fresh native Hold proof. The Note8's
 `ControllerFlushUnavailable` continues to reject admission. Bind every pending
 operation to the peer, media/control generations and explicit user intent.
 Apply only after all adapters are ready, Delay Reporting is negotiated, the
-reported delay exceeds 60 ms, Start has settled for 500 ms and no SCO/microphone
+reported delay is at least 60 ms, Start has settled for 500 ms and no SCO/microphone
 or competing route operation is pending. Do not invent a delay for an unknown
 report or import Windows' previously-held zero-delay exception without evidence.
 
@@ -311,7 +381,8 @@ transmission, response arrival and completed coordination are separate results.
 | Pro 3 using Android AAC; only the Windows AAC fallback is known | No automatic native eligibility inference. Host readiness must be established independently. |
 | Fully ready owner; Start age 499 ms | Wait without sending `0B`. |
 | Same ready owner; Start age 500 ms; requested on; delay 1500 tenths | Admit one owned transition toward 60 ms. Do not declare it active or change codec/bitrate from this event. |
-| Delay Reporting absent; delay unknown/zero; or current delay 600 tenths or lower | No new 60 ms application. Keep the reported/unknown state separate from the preference. |
+| Delay Reporting absent; delay unknown/zero; or current delay below 600 tenths | No new 60 ms application. Keep the reported/unknown state separate from the preference. |
+| Fully ready owner; current delay exactly 600 tenths | Admit through the same owned prepare/write/fresh-report sequence. Equal post-write delay needs no clock drift; it does not bypass restoration. |
 | Off before admission; peer/generation replaced; or SCO begins before the write | Cancel the unsent target. No delayed 60 ms write may escape the cancellation. |
 | Target write accepted; only pre-write report serial is present | Remain unconfirmed; the cached number cannot complete the transition. |
 | Fresh same-owner report has the same numeric value as before the write | Accept its freshness by serial, not numeric inequality. It still does not prove the target buffer value or audible latency. |
@@ -355,8 +426,8 @@ host tests do not turn an ordinary APK into this private ELD/Game Mode build.
 See [the private encoder boundary](AAC-ELD-XPOSED.md) before preparing a local
 experiment. Raw captures, device keys and private APKs are not repository inputs.
 
-The next check is one continuous-music On/Off cycle on the installed `de3ac2de…`
-build, including final native Complete/error0, no hold/clock/restore obligation,
+The current baseline-preserving private build passed the manual On/Off check
+above, including final native Complete/error0, no hold/clock/restore obligation,
 and exact original controller readback. Use diagnostic **query only** while the
 coordinator owns a hold; the separate read/roundtrip probe has its own cleanup.
 Do not force Game Mode when category08 was not negotiated: preserve ordinary

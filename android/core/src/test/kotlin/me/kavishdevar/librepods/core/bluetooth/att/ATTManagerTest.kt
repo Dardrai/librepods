@@ -7,6 +7,7 @@ import org.junit.Assert.*
 import org.junit.Test
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.io.IOException
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
@@ -120,6 +121,113 @@ class ATTManagerTest {
         repeat(3) { assertNull(manager.readCharacteristic(ATTHandle.TRANSPARENCY)) }
         assertEquals(1, starts.get())
         assertFalse(socket.requests.any { it[0] in byteArrayOf(0x12, 0x52) })
+    }
+
+    @Test fun transportLossCanReadOnOneFreshBearerWithoutChangingTheOwner() = runBlocking {
+        for (failure in listOf("connect", "eof", "timeout")) {
+            val old = Transport().also { script(it) }
+            val base = old.reply
+            if (failure == "connect") old.connectAction = { throw IOException("Temporary transport loss") }
+            else old.reply = { request -> if (request[0] == 0x0a.toByte()) {
+                if (failure == "eof") byteArrayOf() else null
+            } else base(request) }
+            val next = Transport().also { script(it) }
+            val owner = ATTOwner(Any(), 1)
+            val starts = AtomicInteger()
+            val manager = ATTManager({ owner }, { if (starts.getAndIncrement() == 0) old else next })
+            try {
+                assertNull(manager.readCharacteristic(ATTHandle.TRANSPARENCY))
+                assertTrue(old.closed.await(1, TimeUnit.SECONDS))
+                assertTrue(manager.canRetryRead())
+                assertNull(manager.readCharacteristic(ATTHandle.TRANSPARENCY, { false }))
+                assertEquals(1, starts.get())
+                assertArrayEquals(transparency(), manager.readCharacteristic(ATTHandle.TRANSPARENCY))
+                assertTrue(manager.available)
+                assertEquals(2, starts.get())
+                assertTrue(next.requests.any { it[0] == 6.toByte() })
+                assertFalse(next.requests.any { it[0] in byteArrayOf(0x12, 0x52) })
+            } finally { manager.disconnect() }
+        }
+    }
+
+    @Test fun repeatedTransportLossExhaustsTheSameOwnerBudget() = runBlocking {
+        val owner = AtomicReference(ATTOwner(Any(), 1))
+        val starts = AtomicInteger()
+        val manager = ATTManager({ owner.get() }, {
+            starts.incrementAndGet()
+            Transport().apply { connectAction = { throw IOException("Offline") } }
+        })
+        repeat(5) { assertNull(manager.readCharacteristic(ATTHandle.TRANSPARENCY)) }
+        assertEquals(2, starts.get())
+        assertFalse(manager.canRetryRead())
+        owner.set(ATTOwner(Any(), 2))
+        assertFalse(manager.canRetryRead())
+        assertNull(manager.readCharacteristic(ATTHandle.TRANSPARENCY))
+        assertEquals(3, starts.get())
+        manager.disconnect()
+    }
+
+    @Test fun malformedAndSecurityResponsesCannotOpenAReplacementBearer() = runBlocking {
+        val replies = listOf(
+            byteArrayOf(1, 0x0a, 0x35, 0, 5), byteArrayOf(1, 0x0a, 0x35, 0, 8),
+            byteArrayOf(1, 0x0a, 0x35, 0, 0x0f), byteArrayOf(0x0b) + ByteArray(103), byteArrayOf(0x13)
+        )
+        for (response in replies) {
+            val socket = Transport().also { script(it) }
+            val base = socket.reply
+            socket.reply = { if (it[0] == 0x0a.toByte()) response else base(it) }
+            val owner = ATTOwner(Any(), 1)
+            val starts = AtomicInteger()
+            val manager = ATTManager({ owner }, { starts.incrementAndGet(); socket })
+            assertNull(manager.readCharacteristic(ATTHandle.TRANSPARENCY))
+            assertFalse(manager.canRetryRead())
+            repeat(3) { assertNull(manager.readCharacteristic(ATTHandle.TRANSPARENCY)) }
+            assertEquals(1, starts.get())
+            assertTrue(socket.closed.await(1, TimeUnit.SECONDS))
+        }
+    }
+
+    @Test fun uncertainWriteNeverRetriesOrEnablesReadRecovery() = runBlocking {
+        val socket = Transport().also { script(it) }
+        val owner = ATTOwner(Any(), 1)
+        val starts = AtomicInteger()
+        val manager = ATTManager({ owner }, { starts.incrementAndGet(); socket })
+        val baseline = manager.readCharacteristic(ATTHandle.TRANSPARENCY)!!
+        val next = baseline.copyOf().also { ByteBuffer.wrap(it).order(ByteOrder.LITTLE_ENDIAN).putFloat(36, .25f) }
+        val base = socket.reply
+        socket.reply = { if (it[0] == 0x12.toByte()) null else base(it) }
+        assertFalse(manager.writeCharacteristic(ATTHandle.TRANSPARENCY, next, baseline) { true })
+        assertFalse(manager.canRetryRead())
+        assertNull(manager.readCharacteristic(ATTHandle.TRANSPARENCY))
+        assertFalse(manager.writeCharacteristic(ATTHandle.TRANSPARENCY, next, baseline) { true })
+        assertEquals(1, starts.get())
+        assertEquals(1, socket.requests.count { it[0] == 0x12.toByte() })
+        assertTrue(socket.closed.await(1, TimeUnit.SECONDS))
+    }
+
+    @Test fun cancelledReadDoesNotReopenUntilAnAdmittedReadAndCannotPublishItsLateReply() = runBlocking {
+        val old = Transport().also { script(it) }
+        val entered = CountDownLatch(1)
+        val base = old.reply
+        old.reply = { if (it[0] == 0x0a.toByte()) { entered.countDown(); null } else base(it) }
+        val expected = transparency().also { ByteBuffer.wrap(it).order(ByteOrder.LITTLE_ENDIAN).putFloat(36, .25f) }
+        val next = Transport().also { script(it, initial = expected) }
+        val owner = ATTOwner(Any(), 1)
+        val starts = AtomicInteger()
+        val manager = ATTManager({ owner }, { if (starts.getAndIncrement() == 0) old else next })
+        val read = launch { manager.readCharacteristic(ATTHandle.TRANSPARENCY) }
+        while (entered.count != 0L) kotlinx.coroutines.yield()
+        read.cancelAndJoin()
+        try {
+            assertTrue(old.closed.await(1, TimeUnit.SECONDS))
+            assertTrue(manager.canRetryRead())
+            assertNull(manager.readCharacteristic(ATTHandle.TRANSPARENCY, { false }))
+            assertEquals(1, starts.get())
+            old.replies.offer(byteArrayOf(0x0b) + transparency())
+            assertArrayEquals(expected, manager.readCharacteristic(ATTHandle.TRANSPARENCY))
+            assertEquals(2, starts.get())
+            assertTrue(manager.available)
+        } finally { manager.disconnect() }
     }
 
     @Test fun negotiatedMtuNeverSplitsAWriteOrPadsATruncatedRead() = runBlocking {

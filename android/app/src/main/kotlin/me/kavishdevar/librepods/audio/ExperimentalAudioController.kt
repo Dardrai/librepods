@@ -16,7 +16,7 @@ import me.kavishdevar.librepods.core.devices.AppleDevice
 import me.kavishdevar.librepods.shizuku.ShizukuAudioClient
 import java.io.File
 
-/** Owns Recorder capture and restores the selected pair's native playback afterward. */
+/** Owns microphone capture and restores the selected pair's native playback afterward. */
 class ExperimentalAudioController(
     private val context: Context,
     private val device: AppleDevice,
@@ -32,6 +32,7 @@ class ExperimentalAudioController(
     private val generation = AudioSessionGeneration()
     private var closed = false
     private var settingsRefresh = false
+    private var callStopRecovery: Pair<LivePcmConsumer, Long>? = null
     val isConnected: Boolean get() = aacp.captureAudioSocket() != null
     val supportsMicrophone: Boolean get() = device.metadata.value.modelNumber in MICROPHONE_MODELS
 
@@ -67,8 +68,13 @@ class ExperimentalAudioController(
         }
     }
 
-    private fun allowedLocked(): Boolean {
+    private fun allowedLocked(callCurrent: (() -> Boolean)? = null): Boolean {
         if (closed) return false
+        val preparedCall = callCurrent?.let { runCatching(it).getOrDefault(false) } == true
+        if (callCurrent != null && !preparedCall) {
+            mutableMessage.value = "The selected call audio route is no longer ready."
+            return false
+        }
         if (settingsRefresh) {
             mutableMessage.value = "Wait for the settings refresh to finish."
             return false
@@ -81,7 +87,8 @@ class ExperimentalAudioController(
             mutableMessage.value = "Allow microphone access first."
             return false
         }
-        if (runCatching { context.getSystemService(AudioManager::class.java)?.isMicrophoneMute }.getOrNull() != false) {
+        val nativeMuted = runCatching { context.getSystemService(AudioManager::class.java)?.isMicrophoneMute }.getOrNull()
+        if (nativeMuted == null || (nativeMuted && !preparedCall)) {
             mutableMessage.value = "Turn on microphone access in Android's privacy controls first."
             return false
         }
@@ -100,13 +107,43 @@ class ExperimentalAudioController(
         return true
     }
 
-    fun startRecording(destination: File? = null): Boolean = synchronized(lock) {
-            if (!allowedLocked()) return false
+    fun startRecording(destination: File? = null): Boolean = startCapture { microphone.start(destination) }
+
+    internal fun startLive(consumer: LivePcmConsumer): Boolean = startCapture { microphone.startLive(consumer) }
+
+    /** Only an already-verified call route may translate Android's call mute into silent call PCM. */
+    internal fun startLiveForCall(consumer: LivePcmConsumer, callCurrent: () -> Boolean): Boolean =
+        startCapture(callCurrent) { microphone.startLive(consumer) }
+
+    internal fun stopLive(consumer: LivePcmConsumer) = synchronized(lock) {
+        if (microphone.ownsLiveConsumer(consumer)) stop()
+    }
+
+    /** Call only after the exact root lease confirms its streams and policy have stopped. */
+    internal fun armCallStopRecovery(consumer: LivePcmConsumer): Boolean = synchronized(lock) {
+        if (closed || !microphone.ownsLiveConsumer(consumer)) return false
+        val state = microphone.state.value
+        if (state.generation <= 0 || state.phase in listOf(MicrophonePhase.IDLE, MicrophonePhase.ERROR)) return false
+        callStopRecovery = consumer to state.generation
+        true
+    }
+
+    internal fun clearCallStopRecovery(consumer: LivePcmConsumer) = synchronized(lock) {
+        if (callStopRecovery?.first === consumer) callStopRecovery = null
+    }
+
+    internal fun receivedFrameFloor(consumer: LivePcmConsumer): Long? = synchronized(lock) {
+        if (closed) null else microphone.receivedFrameFloor(consumer)
+    }
+
+    private fun startCapture(callCurrent: (() -> Boolean)? = null, start: () -> Boolean): Boolean = synchronized(lock) {
+            if (!allowedLocked(callCurrent)) return false
+            callStopRecovery = null
             bridge.cancelPlaybackRecovery()
             val request = generation.next()
             mutableMessage.value = ""
             try {
-                if (!startMicrophoneLocked(request, destination)) {
+                if (!startMicrophoneLocked(request, callCurrent, start)) {
                     mutableMessage.value = microphone.state.value.message
                     false
                 } else true
@@ -117,12 +154,12 @@ class ExperimentalAudioController(
             }
     }
 
-    private fun startMicrophoneLocked(request: Long, destination: File?): Boolean {
+    private fun startMicrophoneLocked(request: Long, callCurrent: (() -> Boolean)?, start: () -> Boolean): Boolean {
         var started = false
         try {
             onMicrophoneActive(true)
-            check(generation.accepts(request) && allowedLocked()) { mutableMessage.value.ifBlank { "Microphone start cancelled" } }
-            started = microphone.start(destination = destination)
+            check(generation.accepts(request) && allowedLocked(callCurrent)) { mutableMessage.value.ifBlank { "Microphone start cancelled" } }
+            started = start()
             return started
         } finally {
             if (!started) {
@@ -147,6 +184,7 @@ class ExperimentalAudioController(
     fun onDisconnected() {
         synchronized(lock) {
             if (closed) return
+            callStopRecovery = null
             generation.invalidate()
             bridge.cancelPlaybackRecovery()
             microphone.onDisconnected()
@@ -156,6 +194,7 @@ class ExperimentalAudioController(
     fun onPermissionRevoked() {
         synchronized(lock) {
             if (closed) return
+            callStopRecovery = null
             stopLocked()
             microphone.onPermissionRevoked()
         }
@@ -165,6 +204,7 @@ class ExperimentalAudioController(
         synchronized(lock) {
             if (closed) return
             closed = true
+            callStopRecovery = null
             settingsRefresh = false
             bridge.endSettingsRefresh()
             generation.close()
@@ -181,7 +221,18 @@ class ExperimentalAudioController(
         scope.launch {
             fun current() = !closed && aacp.ownsAudioSocket(socket) &&
                 microphone.state.value.generation == session && microphone.state.value.phase == MicrophonePhase.RECOVERING
-            val restored = bridge.restoreNativePlayback(device.macAddress.value, ::current)
+            val callStopped = synchronized(lock) {
+                val permit = callStopRecovery?.takeIf { it.second == session }
+                if (permit == null) false else {
+                    callStopRecovery = null
+                    current() && microphone.completeCallStopRecovery(session, permit.first)
+                }
+            }
+            if (callStopped) return@launch
+            val restored = recoverMicrophonePlayback(::current,
+                { microphone.canKeepPlayback(session) },
+                { bridge.connectNativePlayback(device.macAddress.value, ::current) },
+                { bridge.restoreNativePlayback(device.macAddress.value, ::current) })
             microphone.completeRecovery(session, restored && current())
         }
     }
@@ -190,4 +241,21 @@ class ExperimentalAudioController(
         val MICROPHONE_MODELS = setOf("A3053", "A3050", "A3054", "A3056", "A3055", "A3057", "A3531", "A3532", "A3533",
             "A3439", "A3440", "A3441", "A2931", "A2699", "A2698", "A3047", "A3048", "A3049", "A3063", "A3064", "A3065", "A3454")
     }
+}
+
+/** A connected native profile needs no cycling after a successful quiet live-uplink stop. */
+internal suspend fun recoverMicrophonePlayback(
+    current: () -> Boolean,
+    canKeepPlayback: () -> Boolean,
+    connectOnly: suspend () -> Boolean,
+    recover: suspend () -> Boolean,
+): Boolean {
+    if (!current()) return false
+    if (canKeepPlayback()) {
+        val connected = connectOnly()
+        if (!current()) return false
+        if (connected && canKeepPlayback()) return true
+    }
+    if (!current()) return false
+    return recover() && current()
 }

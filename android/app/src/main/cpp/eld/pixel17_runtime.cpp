@@ -335,11 +335,14 @@ void debug_codec(const void* codec,int fd) {
     Pixel17NativeConfig config{};
     if(!pixel17_codec_get_config(codec,&config)) return;
     const auto status=encoder_status();
+    const auto clock=encoder_clock_status(false); // A diagnostics read must not advance/cancel an adjustment.
     dprintf(fd,"\nApple AAC-ELD source: index=%d priority=%d rate_mask=%u bits_mask=%u channels_mask=%u\n"
         "  Shared encoder: generation=%llu active=%d failed=%d bitrate=%u packets=%llu underflows=%llu host_discards=%llu\n"
         "  Runtime: prepared=%d enabled=%d poisoned=%d published=%d initial_slot_free=%d\n"
         "  Pacing: catch_up=%d calls=%llu max_gap_us=%llu max_due_lag_us=%llu rebases=%llu rebased_periods=%llu\n"
-        "  Source: queue_deferrals=%llu read_calls=%llu pcm_bytes=%llu catch_up_aus=%llu burst_max=%llu\n",
+        "  Source: queue_deferrals=%llu read_calls=%llu pcm_bytes=%llu catch_up_aus=%llu burst_max=%llu\n"
+        "  Work timing (us): pcm_read_max=%llu pcm_read_ge_1ms=%llu encode_max=%llu enqueue_max=%llu callback_max=%llu\n"
+        "  Clock: phase=%u stop_reason=%u stop_media_age_us=%llu stop_host_queue=%zu progress_frames=%lld\n",
         config.codec_type,config.codec_priority,config.sample_rate,config.bits_per_sample,config.channel_mode,
         static_cast<unsigned long long>(status.generation),status.active,status.failed,status.bitrate,
         static_cast<unsigned long long>(status.packets),static_cast<unsigned long long>(status.underflows),
@@ -350,7 +353,13 @@ void debug_codec(const void* codec,int fd) {
         static_cast<unsigned long long>(status.max_due_lag_us),static_cast<unsigned long long>(status.clock_rebases),
         static_cast<unsigned long long>(status.rebased_periods),static_cast<unsigned long long>(status.queue_deferrals),
         static_cast<unsigned long long>(status.pcm_read_calls),static_cast<unsigned long long>(status.pcm_read_bytes),
-        static_cast<unsigned long long>(status.catch_up_aus),static_cast<unsigned long long>(status.burst_max));
+        static_cast<unsigned long long>(status.catch_up_aus),static_cast<unsigned long long>(status.burst_max),
+        static_cast<unsigned long long>(status.pcm_read_max_us),static_cast<unsigned long long>(status.pcm_read_slow_calls),
+        static_cast<unsigned long long>(status.encode_max_us),static_cast<unsigned long long>(status.enqueue_max_us),
+        static_cast<unsigned long long>(status.callback_max_us),
+        static_cast<unsigned>(clock.phase),static_cast<unsigned>(clock.stop_reason),
+        static_cast<unsigned long long>(clock.stop_media_age_us),clock.stop_host_queue_length,
+        static_cast<long long>(clock.signed_progress_frames));
 }
 struct Hook { const char* name; void* replacement; void** original; void* target=nullptr; };
 bool transaction(const Image& image,Hook* hooks,size_t count,RuntimeHook install,RuntimeUnhook remove) {
@@ -421,13 +430,14 @@ bool pixel17_runtime_prepare(void* module,RuntimeHook install,RuntimeUnhook remo
         const auto api=eld_owned_fdk_api();
         EldFdkEncoder* test=nullptr; EldFdkConfig config{};
         if(eld_fdk_open(&api,256000,&test,&config)!=ELD_FDK_OK) { log("owned encoder preflight rejected"); return false; }
-        int16_t silence[960]{}; uint8_t access_unit[321]{}; size_t bytes=0;
-        const auto encoded=eld_fdk_encode(test,silence,480,access_unit,sizeof(access_unit),&bytes);
+        static_assert(sizeof(EldOwnedPcm)*8 == kPixel17PcmBits);
+        EldOwnedPcm silence[960]{}; uint8_t access_unit[321]{}; size_t bytes=0;
+        const auto encoded=eld_owned_fdk_encode(test,silence,480,access_unit,sizeof(access_unit),&bytes);
         eld_fdk_close(&test);
         if(encoded!=ELD_FDK_OK || config.sample_rate!=48000 || config.channels!=2 ||
-           config.frame_samples!=480 || config.pcm_sample_bytes!=2) { log("owned PCM/ELD contract rejected"); return false; }
+           config.frame_samples!=480 || config.pcm_sample_bytes!=kPixel17PcmBits/8) { log("owned PCM/ELD contract rejected"); return false; }
         EncoderHost encoder{api,packet_allocate,packet_release,encoder_failed,actual_peer,pixel17_codec_info,peer_mtu,
-            kPixel17CatchUpExperiment,boottime_us,pixel17_game_clock_opportunity};
+            kPixel17CatchUpExperiment,boottime_us,pixel17_game_clock_opportunity,kPixel17PcmBits/8};
         if(!encoder_prepare(encoder) || !pixel17_wire_prepare({wire_active,quarantined,selected_encoder,5})) return false;
         registries={allocate,release,lock,unlock,balance,readable,provider};
         // Actual trampoline addresses are populated transactionally before any Bluetooth init executes.

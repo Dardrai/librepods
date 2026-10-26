@@ -135,7 +135,7 @@ const Pixel17WireHookSpec hooks[] = {
     {"_Z14A2DP_CodecNamePKh", reinterpret_cast<void*>(&name), &originals[Name]},
     {"_Z20A2DP_CodecTypeEqualsPKhS0_", reinterpret_cast<void*>(&type_equals), &originals[TypeEquals]},
     {"_Z23A2DP_GetTrackSampleRatePKh", reinterpret_cast<void*>(&parameter<Rate, 48000>), &originals[Rate]},
-    {"_Z26A2DP_GetTrackBitsPerSamplePKh", reinterpret_cast<void*>(&parameter<Bits, 16>), &originals[Bits]},
+    {"_Z26A2DP_GetTrackBitsPerSamplePKh", reinterpret_cast<void*>(&parameter<Bits, kPixel17PcmBits>), &originals[Bits]},
     {"_Z25A2DP_GetTrackChannelCountPKh", reinterpret_cast<void*>(&parameter<Channels, 2>), &originals[Channels]},
     {"_Z23A2DP_GetPacketTimestampPKhS0_Pj", reinterpret_cast<void*>(&timestamp), &originals[Timestamp]},
     {"_Z21A2DP_BuildCodecHeaderPKhP6BT_HDRt", reinterpret_cast<void*>(&build_header), &originals[Header]},

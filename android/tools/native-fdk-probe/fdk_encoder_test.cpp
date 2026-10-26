@@ -3,6 +3,7 @@
 #include "probe_pin.h"
 #include <stdlib.h>
 #include <string.h>
+#include <initializer_list>
 
 static unsigned checks;
 #define CHECK(value) do { ++checks; if(!(value)) { fprintf(stderr,"FAIL line%d\n",__LINE__); exit(1); } } while(0)
@@ -10,19 +11,25 @@ struct AACENCODER { uint32_t values[0x301]; unsigned blocks; };
 static struct {
     int opened,closed,encodes;
     uint32_t failSet,mismatch;
+    uint32_t afterburner,bandwidth,width;
     bool openFail,initFail,badFrame,badChannels,badAsc,badSize;
     int encodeError,consumed,produced;
 } mock;
-static void defaults() { memset(&mock,0,sizeof(mock)); mock.consumed=960; mock.produced=320; }
+static void defaults() { memset(&mock,0,sizeof(mock)); mock.consumed=960; mock.produced=320; mock.width=2; }
 static int32_t mock_open(EldFdkHandle* handle,uint32_t modules,uint32_t channels) {
     CHECK(modules==1 && channels==2 && !*handle);
     *handle=static_cast<AACENCODER*>(calloc(1,sizeof(AACENCODER))); mock.opened++;
     return mock.openFail?1:0;
 }
 static int32_t mock_set(EldFdkHandle handle,uint32_t key,uint32_t value) {
-    CHECK(key<=0x300); if(key==mock.failSet) return 1; handle->values[key]=value; return 0;
+    CHECK(key<=0x300); if(key==mock.failSet) return 1; handle->values[key]=value;
+    if(key==0x200) mock.afterburner=value;
+    if(key==0x203) mock.bandwidth=value;
+    return 0;
 }
 static uint32_t mock_get(EldFdkHandle handle,uint32_t key) {
+    // FDK returns the selected bandwidth, not the zero used to request automatic selection.
+    if(key==0x203 && handle->values[key]==0) return 16000;
     return handle->values[key]+(key==mock.mismatch?1:0);
 }
 static int32_t mock_info(EldFdkHandle,EldFdkInfo* info) {
@@ -37,9 +44,10 @@ static int32_t mock_encode(EldFdkHandle handle,const EldFdkBufDesc* in,const Eld
                            const EldFdkInArgs* args,EldFdkOutArgs* result) {
     if(!in) { CHECK(!out && !args && !result); return mock.initFail?1:0; }
     mock.encodes++;
-    CHECK(in->numBufs==1 && out->numBufs==1 && *in->bufElSizes==2 && *out->bufElSizes==1);
+    CHECK(in->numBufs==1 && out->numBufs==1 && *in->bufElSizes==int(mock.width) && *out->bufElSizes==1);
     CHECK(*in->bufferIdentifiers==0 && *out->bufferIdentifiers==3);
-    CHECK(*in->bufSizes==1920 && *out->bufSizes>=322 && args->numInSamples==960 && args->numAncBytes==0);
+    CHECK(*in->bufSizes==int(960*mock.width) && *out->bufSizes>=322 && args->numInSamples==960 && args->numAncBytes==0);
+    if(mock.width==4) CHECK(static_cast<const int32_t*>(*in->bufs)[0]==12345);
     CHECK(result->numOutBytes==0 && result->numInSamples==0);
     result->numInSamples=mock.consumed;
     result->numOutBytes=handle->blocks++==0?0:mock.produced;
@@ -49,7 +57,7 @@ static int32_t mock_encode(EldFdkHandle handle,const EldFdkBufDesc* in,const Eld
 static int32_t mock_close(EldFdkHandle* handle) {
     CHECK(handle && *handle); free(*handle); *handle=nullptr; mock.closed++; return 0;
 }
-static const EldFdkApi api={mock_open,mock_set,mock_get,mock_info,mock_encode,mock_close};
+static const EldFdkApi api={mock_open,mock_set,mock_get,mock_info,mock_encode,mock_close,2};
 int main(int argc,char** argv) {
     defaults(); EldFdkEncoder* encoder=nullptr; EldFdkConfig config={};
     CHECK(eld_fdk_open(nullptr,256000,&encoder,&config)==ELD_FDK_INVALID);
@@ -58,6 +66,7 @@ int main(int argc,char** argv) {
     CHECK(eld_fdk_open(&api,256000,&encoder,&config)==0);
     CHECK(config.sample_rate==48000 && config.channels==2 && config.frame_samples==480 && config.pcm_sample_bytes==2);
     CHECK(config.max_au_bytes==321 && config.delay_samples==240 && config.asc[2]==0x50);
+    CHECK(mock.afterburner==1 && mock.bandwidth==20000);
     CHECK(eld_fdk_open(&api,256000,&encoder,&config)==ELD_FDK_INVALID);
     int16_t pcm[960]={}; uint8_t output[400]; memset(output,0xcc,sizeof(output)); size_t bytes=99;
     CHECK(eld_fdk_encode(encoder,pcm,480,output,sizeof(output),&bytes)==0 && bytes==0 && output[0]==0xcc);
@@ -82,16 +91,35 @@ int main(int argc,char** argv) {
     mock.failSet=0x105; CHECK(eld_fdk_update(encoder,128000,&config)==ELD_FDK_CONFIG);
     mock.failSet=0; CHECK(eld_fdk_update(encoder,256000,&config)==0 && config.bitrate==256000);
     CHECK(eld_fdk_update(encoder,128000,&config)==0 && config.max_au_bytes==161);
+    CHECK(mock.afterburner==1 && mock.bandwidth==0);
     mock.produced=160; CHECK(eld_fdk_encode(encoder,pcm,480,output,sizeof(output),&bytes)==0 && bytes==0);
     CHECK(eld_fdk_encode(encoder,pcm,480,output,sizeof(output),&bytes)==0 && bytes==160);
     eld_fdk_close(&encoder); CHECK(!encoder && mock.opened==mock.closed); eld_fdk_close(&encoder); eld_fdk_close(nullptr);
-    for(unsigned mode=0;mode<8;mode++) {
+    for(unsigned mode=0;mode<12;mode++) {
         defaults(); mock.openFail=mode==0; mock.initFail=mode==1; mock.badFrame=mode==2;
         mock.badChannels=mode==3; mock.badAsc=mode==4; mock.badSize=mode==5;
-        mock.failSet=mode==6?0x105:0; mock.mismatch=mode==7?0x104:0;
+        mock.failSet=mode==6?0x105:mode==8?0x200:mode==10?0x203:0;
+        mock.mismatch=mode==7?0x104:mode==9?0x200:mode==11?0x203:0;
         CHECK(eld_fdk_open(&api,256000,&encoder,&config)==ELD_FDK_CONFIG && !encoder);
         CHECK(mock.opened==mock.closed);
     }
+    defaults(); mock.width=4;
+    auto wide=api; wide.pcm_sample_bytes=4;
+    CHECK(eld_fdk_open(&wide,256000,&encoder,&config)==0 && config.pcm_sample_bytes==4);
+    int32_t q31[960]={12345};
+    CHECK(eld_fdk_encode(encoder,pcm,480,output,sizeof(output),&bytes)==ELD_FDK_INVALID && mock.encodes==0);
+    CHECK(eld_fdk_encode_q31(encoder,q31,480,output,sizeof(output),&bytes)==0 && bytes==0);
+    CHECK(eld_fdk_reset(encoder)==0);
+    CHECK(eld_fdk_update(encoder,192000,&config)==0 && config.pcm_sample_bytes==4);
+    CHECK(eld_fdk_encode_q31(encoder,q31,480,output,sizeof(output),&bytes)==0);
+    eld_fdk_close(&encoder);
+    for(unsigned width : {0u,1u,3u,8u}) {
+        wide.pcm_sample_bytes=width;
+        CHECK(eld_fdk_open(&wide,256000,&encoder,&config)==ELD_FDK_INVALID && !encoder);
+    }
+    defaults(); CHECK(eld_fdk_open(&api,256000,&encoder,&config)==0);
+    CHECK(eld_fdk_encode_q31(encoder,q31,480,output,sizeof(output),&bytes)==ELD_FDK_INVALID && mock.encodes==0);
+    eld_fdk_close(&encoder);
     if(argc==2) CHECK(pinned_file(argv[1]));
     CHECK(!pinned_file("this-file-does-not-exist"));
     printf("PASS %u FDK mock/ABI/pin assertions; no real codec executed\n",checks);

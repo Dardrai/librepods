@@ -463,6 +463,15 @@ the Mac wizard capture begins after stream configuration, so its actual codec
 and any codec difference remain unverified. See the
 [Windows CT differential evidence](https://github.com/Ripthulhu/ntpods/blob/main/docs/NOTE8-ATT-WRITES-2026-10-24.md#windows-legacy-ct-acoustic-differential-2026-10-25).
 
+A later Windows comparison, after removing reconnects between edits, did produce
+a listener-reported clear difference in music between Audiogram and Brightness /
+Strong. Playback stayed continuous on AAC-ELD at 48 kHz / 256 kbps, both clinical
+modes remained Off, and the stored hearing profile was unchanged. This was a
+separate result from the earlier inconclusive PME On/Off test. The acceptance
+record contains no new packet capture or acoustic measurement and does not
+identify the processing gate. See the
+[Windows music comparison](https://github.com/Ripthulhu/ntpods/blob/main/docs/MACOS-ACCOMMODATIONS-CAPTURE-2026-10-24.md#windows-acceptance-2026-10-25).
+
 The 2026-10-25 live-settings Note8 comparison sent 21 full PME commands and
 16 full CT writes, with Phone/Media On through stock-preset and Audiogram
 comparisons. CT readback matched every byte, including all 40 preserved non-EQ
@@ -475,8 +484,9 @@ transactions, not Android acoustic parity.
 Wire evidence confirms Apple DID `004C/1200/1436`, vendor source `0001`, with
 no A000/A001/AFFF attributes. Audio was MPEG-2 AAC-LC, 44.1 kHz stereo CBR
 256 kbps, sink SEID 2, with no SCO. The Windows CT comparison negotiated
-Apple AAC-ELD at 48 kHz / 256 kbps; its separate PME music On/Off comparison
-was inconclusive. Source-4D masks also differed (`D7` on
+Apple AAC-ELD at 48 kHz / 256 kbps. Its early PME music On/Off comparison was
+inconclusive; the later continuous Audiogram / Brightness comparison above was
+listener-positive. Source-4D masks also differed (`D7` on
 Android, `FF` on Windows); neither difference is a demonstrated cause.
 The same Pro 3 pair's firmware was last verified as 9A348, not re-read here.
 
@@ -550,9 +560,59 @@ serializer independently sends subtype `01`, value `01` for enabled and `02`
 for disabled. Both iOS and Tahoe confirm that Boolean mapping; the higher-level
 activation policy, a getter and the original gate state remain unresolved.
 The earlier Windows positive CT result proves ambient CT processing in its
-tested configuration, not a PME music gate. Neither these controls nor the
-working Android codec establish audible accommodations parity. See the
+tested configuration. The later continuous Windows music comparison was also
+listener-positive, but neither result identifies a PME music gate. Neither
+these controls nor the working Android codec establish audible Android
+accommodations parity. See the
 [private ELD prototype status](AAC-ELD-XPOSED.md#pixel-headphone-accommodations-check).
+
+### Bounded ATT loading recovery, 2026-10-26
+
+The Pixel 10 Pro XL baseline exposed an earlier startup ordering failure.
+AHPS request 393 received error `0x0E` at frame 395, before the service-4
+ConnectResponses at 424 (status `0x0085`) and 506 (status zero). The capabilities
+report arrived at 846. Completing host initialization writes had not established
+peer readiness. The complete rotated baseline capture has SHA-256
+`5188482334bcea12abe679ef04b41fad330b61acaed6e79117d3c20f3fdc2c5d`.
+
+In the temporary Apple-DID comparison, successful service-4 response 778 preceded
+AHPS request/reply 853/855 and CT request/reply 856/861. A later repeated
+initialization received status `0x0085` at 1007 after the successful reads. This
+complete capture has SHA-256
+`54ccb04fef2ca59faeafe3be5530788e0a7fe1558fa51fa954e0f8f6c462e07a`.
+Both timing and identity differed, so these captures do not isolate the cause of
+authorization success. Full records and host identifiers remain private.
+
+Protected ATT reads now require both a completed host initialization pass and
+peer readiness on the same AACP socket and connection generation. Readiness is
+an exact 18-byte service-4 ConnectResponse with status zero and version 1.2 or
+1.3, or a fully validated capabilities report. Failed, truncated or stale-owner
+responses do not authorize reads. A later nonzero ConnectResponse from repeated
+initialization does not revoke an already accepted response.
+
+The initial readiness wait is bounded to 12 seconds. If it expires, settings
+still waiting to load become unavailable without opening ATT. A later valid
+response on the current connection starts one automatic loading job; duplicate
+responses cannot start another. That job retains the normal call, microphone
+and recording deferrals. Cancellation or connection replacement prevents the
+late response from reviving the old job. No manual Read action is required.
+
+Transport loss, EOF, a read timeout or cancellation no longer permanently blocks
+settings reads for the current AACP session. One replacement ATT bearer is
+allowed, with fresh service discovery and reads; the audio/AACP connection is
+retained. The initial loader retries an admitted transient failure and continues
+to defer during calls, microphone use and recording. Cancellation does not
+restart work by itself, and a replaced AACP owner cannot publish an old reply.
+
+Rejected or malformed responses and any uncertain write still quarantine that
+session. No write is automatically replayed. The replacement budget is exhausted
+after two connection attempts and resets with a new AACP owner. The focused
+offline suite passed 202 checks across 15 suites, and the debug APK built. The
+checks cover readiness ordering, late responses, cancellation, replaced owners,
+busy-audio deferral and bounded transport recovery. These changes avoid reads
+before observed peer readiness and improve loading recovery; they do not bypass
+server rejection `0x0E`, establish a vendor-only authorization rule or demonstrate
+audible accommodations processing.
 
 ## Android ATT access
 

@@ -16,12 +16,13 @@ static_assert(sizeof(void*)!=8 || (sizeof(EldFdkBufDesc)==40 && offsetof(EldFdkB
 namespace {
 constexpr uint32_t AOT=0x100, BITRATE=0x101, BITRATEMODE=0x102, RATE=0x103;
 constexpr uint32_t SBR=0x104, GRANULE=0x105, CHANNELS=0x106, AFTERBURNER=0x200;
-constexpr uint32_t PEAK=0x207, TRANSPORT=0x300;
+constexpr uint32_t BANDWIDTH=0x203, PEAK=0x207, TRANSPORT=0x300;
 constexpr uint8_t ASC[4]={0xf8,0xe6,0x50,0};
 constexpr size_t FRAMES=480, SAMPLES=960;
 bool valid_bitrate(uint32_t bitrate) { return bitrate>=128000 && bitrate<=256000 && bitrate%1000==0; }
 bool valid_api(const EldFdkApi* api) {
-    return api && api->open && api->set && api->get && api->info && api->encode && api->close;
+    return api && api->open && api->set && api->get && api->info && api->encode && api->close &&
+        (api->pcm_sample_bytes==2 || api->pcm_sample_bytes==4);
 }
 }
 
@@ -43,7 +44,9 @@ static int configure(EldFdkEncoder* encoder,uint32_t bitrate) {
     }
     const struct { uint32_t key,value; } settings[]={
         {AOT,39},{RATE,48000},{CHANNELS,2},{GRANULE,480},{SBR,0},
-        {BITRATE,bitrate},{BITRATEMODE,0},{PEAK,bitrate},{AFTERBURNER,0},{TRANSPORT,0}
+        {BITRATE,bitrate},{BITRATEMODE,0},{PEAK,bitrate},{AFTERBURNER,1},{TRANSPORT,0},
+        // The 256 kbps auto preset cuts off at 16 kHz. Lower rates retain FDK's own tuning.
+        {BANDWIDTH,bitrate==256000?20000u:0u}
     };
     for(const auto& setting:settings) {
         if(encoder->api.set(encoder->handle,setting.key,setting.value)!=0) {
@@ -58,11 +61,13 @@ static int configure(EldFdkEncoder* encoder,uint32_t bitrate) {
         dispose_handle(encoder); return ELD_FDK_CONFIG;
     }
     for(const auto& setting:settings) {
+        // Automatic bandwidth reads back as the chosen frequency, not the zero request.
+        if(setting.key==BANDWIDTH && setting.value==0) continue;
         if(encoder->api.get(encoder->handle,setting.key)!=setting.value) {
             dispose_handle(encoder); return ELD_FDK_CONFIG;
         }
     }
-    encoder->config={48000,2,480,2,bitrate,(bitrate+799)/800+1,info.nDelay,{0xf8,0xe6,0x50,0}};
+    encoder->config={48000,2,480,encoder->api.pcm_sample_bytes,bitrate,(bitrate+799)/800+1,info.nDelay,{0xf8,0xe6,0x50,0}};
     encoder->poisoned=false;
     return ELD_FDK_OK;
 }
@@ -100,16 +105,18 @@ int eld_fdk_reset(EldFdkEncoder* encoder) {
     return ELD_FDK_OK;
 }
 
-int eld_fdk_encode(EldFdkEncoder* encoder,const int16_t* pcm,size_t frames,
-                   uint8_t* output,size_t capacity,size_t* bytes) {
+static int encode_pcm(EldFdkEncoder* encoder,const void* pcm,size_t frames,uint32_t sample_bytes,
+                      uint8_t* output,size_t capacity,size_t* bytes) {
     if(bytes) *bytes=0;
-    if(!encoder || !pcm || frames!=FRAMES || !output || !bytes || capacity<encoder->config.max_au_bytes)
+    if(!encoder || !pcm || frames!=FRAMES || !output || !bytes || capacity<encoder->config.max_au_bytes ||
+       sample_bytes!=encoder->config.pcm_sample_bytes)
         return ELD_FDK_INVALID;
     if(encoder->poisoned) return ELD_FDK_POISONED;
     // Scratch capacity is independent of the negotiated limit; never expose an oversized AU.
     uint8_t scratch[8192];
-    void* input=const_cast<int16_t*>(pcm); void* destination=scratch;
-    int32_t inId=0,outId=3,inSize=SAMPLES*sizeof(int16_t),outSize=sizeof(scratch),inElement=2,outElement=1;
+    void* input=const_cast<void*>(pcm); void* destination=scratch;
+    int32_t inId=0,outId=3,inSize=static_cast<int32_t>(SAMPLES*sample_bytes),outSize=sizeof(scratch);
+    int32_t inElement=static_cast<int32_t>(sample_bytes),outElement=1;
     EldFdkBufDesc in={1,&input,&inId,&inSize,&inElement};
     EldFdkBufDesc out={1,&destination,&outId,&outSize,&outElement};
     EldFdkInArgs args={static_cast<int32_t>(SAMPLES),0}; EldFdkOutArgs returned={};
@@ -123,6 +130,15 @@ int eld_fdk_encode(EldFdkEncoder* encoder,const int16_t* pcm,size_t frames,
     return ELD_FDK_OK;
 }
 
+int eld_fdk_encode(EldFdkEncoder* encoder,const int16_t* pcm,size_t frames,
+                   uint8_t* output,size_t capacity,size_t* bytes) {
+    return encode_pcm(encoder,pcm,frames,2,output,capacity,bytes);
+}
+int eld_fdk_encode_q31(EldFdkEncoder* encoder,const int32_t* pcm,size_t frames,
+                       uint8_t* output,size_t capacity,size_t* bytes) {
+    return encode_pcm(encoder,pcm,frames,4,output,capacity,bytes);
+}
+
 void eld_fdk_close(EldFdkEncoder** output) {
     if(!output || !*output) return;
     dispose_handle(*output); free(*output); *output=nullptr;
@@ -131,7 +147,7 @@ void eld_fdk_close(EldFdkEncoder** output) {
 int eld_fdk_bind(void* library,EldFdkApi* output) {
     if(!library || !output) return ELD_FDK_INVALID;
 #if defined(__ANDROID__) || defined(__linux__)
-    EldFdkApi candidate={};
+    EldFdkApi candidate={}; candidate.pcm_sample_bytes=2; // Pinned Note8 library retains its S16 ABI.
     void* base=nullptr;
     {
         static const uint8_t prologue[32]={0x5e,0x86,0x00,0xf8,0xfd,0x7b,0xbc,0xa9,0xfc,0x5f,0x01,0xa9,0xfd,0x03,0x00,0x91,0xf6,0x57,0x02,0xa9,0xf4,0x4f,0x03,0xa9,0xff,0x43,0x2c,0xd1,0x57,0xd0,0x3b,0xd5};

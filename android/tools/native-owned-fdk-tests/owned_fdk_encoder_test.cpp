@@ -15,13 +15,13 @@ namespace {
 constexpr size_t FRAMES = 480;
 constexpr size_t SAMPLES = FRAMES * 2;
 constexpr uint8_t SENTINEL = 0xa5;
-using Pcm = std::array<int16_t, SAMPLES>;
+using Pcm = std::array<EldOwnedPcm, SAMPLES>;
 using Packets = std::vector<std::vector<uint8_t>>;
 
 Pcm pcm_at(unsigned index) {
     Pcm pcm{};
     for (size_t i = 0; i < pcm.size(); ++i)
-        pcm[i] = static_cast<int16_t>(static_cast<int>((i * 137 + index * 547) & 8191) - 4096);
+        pcm[i] = static_cast<EldOwnedPcm>((static_cast<int>((i * 137 + index * 547) & 8191) - 4096) * (sizeof(EldOwnedPcm) == 4 ? 65536 : 1));
     return pcm;
 }
 
@@ -33,7 +33,7 @@ struct Owner {
         CHECK(eld_fdk_open(&api, bitrate, &encoder, &config) == ELD_FDK_OK);
         CHECK(encoder);
         CHECK(config.sample_rate == 48000 && config.channels == 2);
-        CHECK(config.frame_samples == FRAMES && config.pcm_sample_bytes == sizeof(int16_t));
+        CHECK(config.frame_samples == FRAMES && config.pcm_sample_bytes == sizeof(EldOwnedPcm));
         CHECK(config.bitrate == bitrate && config.max_au_bytes == (bitrate + 799) / 800 + 1);
         const std::array<uint8_t, 4> asc{0xf8, 0xe6, 0x50, 0};
         CHECK(std::equal(asc.begin(), asc.end(), config.asc));
@@ -46,7 +46,7 @@ struct Owner {
         std::array<uint8_t, 512> bytes{};
         bytes.fill(SENTINEL);
         size_t count = 999;
-        CHECK(eld_fdk_encode(encoder, pcm.data(), FRAMES, bytes.data(), config.max_au_bytes, &count) == ELD_FDK_OK);
+        CHECK(eld_owned_fdk_encode(encoder, pcm.data(), FRAMES, bytes.data(), config.max_au_bytes, &count) == ELD_FDK_OK);
         CHECK(count <= config.max_au_bytes);
         CHECK(std::all_of(bytes.begin() + count, bytes.end(), [](uint8_t value) { return value == SENTINEL; }));
         return {bytes.begin(), bytes.begin() + count};
@@ -87,11 +87,20 @@ void invalid_input_preserves_owner() {
     std::array<uint8_t, 512> output{};
     output.fill(SENTINEL);
     size_t bytes = 999;
-    CHECK(eld_fdk_encode(owner.encoder, pcm.data(), FRAMES - 1, output.data(), output.size(), &bytes) == ELD_FDK_INVALID);
+    // A typed entry for the other width must fail before touching PCM or state.
+    if constexpr (sizeof(EldOwnedPcm) == 4) {
+        const int16_t wrong_width[960]{};
+        CHECK(eld_fdk_encode(owner.encoder, wrong_width, FRAMES, output.data(), output.size(), &bytes) == ELD_FDK_INVALID);
+    } else {
+        const int32_t wrong_width[960]{};
+        CHECK(eld_fdk_encode_q31(owner.encoder, wrong_width, FRAMES, output.data(), output.size(), &bytes) == ELD_FDK_INVALID);
+    }
     CHECK(bytes == 0);
-    CHECK(eld_fdk_encode(owner.encoder, pcm.data(), FRAMES, output.data(), owner.config.max_au_bytes - 1, &bytes) == ELD_FDK_INVALID);
+    CHECK(eld_owned_fdk_encode(owner.encoder, pcm.data(), FRAMES - 1, output.data(), output.size(), &bytes) == ELD_FDK_INVALID);
     CHECK(bytes == 0);
-    CHECK(eld_fdk_encode(owner.encoder, nullptr, FRAMES, output.data(), output.size(), &bytes) == ELD_FDK_INVALID);
+    CHECK(eld_owned_fdk_encode(owner.encoder, pcm.data(), FRAMES, output.data(), owner.config.max_au_bytes - 1, &bytes) == ELD_FDK_INVALID);
+    CHECK(bytes == 0);
+    CHECK(eld_owned_fdk_encode(owner.encoder, nullptr, FRAMES, output.data(), output.size(), &bytes) == ELD_FDK_INVALID);
     CHECK(bytes == 0);
     CHECK(std::all_of(output.begin(), output.end(), [](uint8_t value) { return value == SENTINEL; }));
     const auto before = owner.config;
@@ -134,5 +143,5 @@ int main() {
     invalid_input_preserves_owner();
     update_and_independent_owners();
     concurrent_owners();
-    std::puts("Owned S16 AAC-ELD: 3 rates, AU bounds, reset, invalid inputs and independent concurrent owners passed");
+    std::puts("Owned typed AAC-ELD: 3 rates, AU bounds, reset, invalid inputs and independent concurrent owners passed");
 }

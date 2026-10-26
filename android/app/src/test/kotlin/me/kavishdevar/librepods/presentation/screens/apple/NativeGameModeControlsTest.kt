@@ -11,6 +11,9 @@ import androidx.compose.ui.test.isToggleable
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import me.kavishdevar.librepods.presentation.components.apple.AudioSettings
+import me.kavishdevar.librepods.R
+import me.kavishdevar.librepods.utils.NativeGameModeController.Issue
+import me.kavishdevar.librepods.utils.NativeGameModeController.State
 import me.kavishdevar.librepods.presentation.design.DesignSystem
 import me.kavishdevar.librepods.presentation.design.LibrePodsTheme
 import org.junit.Assert.assertEquals
@@ -55,4 +58,36 @@ class NativeGameModeControlsTest {
 
     @Test fun lightThemePreservesGuardedOffAction() = controls(false)
     @Test fun darkThemePreservesGuardedOffAction() = controls(true)
+
+    @Test fun supportedAttemptFailureIsDistinctFromUnavailableAndRestoration() {
+        val supported = State(desiredOn = true, available = true)
+        for (issue in listOf(Issue.REQUEST_FAILED, Issue.REPORT_UNCONFIRMED, Issue.CLOCK_UNCONFIRMED)) {
+            assertEquals(R.string.native_game_mode_start_failed,
+                nativeGameModeDescription(supported.copy(issue = issue), true))
+            assertEquals(R.string.native_game_mode_unavailable,
+                nativeGameModeDescription(supported.copy(available = false, issue = issue), true))
+        }
+        assertEquals(R.string.native_game_mode_waiting,
+            nativeGameModeDescription(supported.copy(issue = Issue.WAITING_FOR_AUDIO), true))
+        assertEquals(R.string.native_game_mode_waiting_timing,
+            nativeGameModeDescription(supported.copy(issue = Issue.WAITING_FOR_TIMING), true))
+        assertEquals(R.string.native_game_mode_unavailable,
+            nativeGameModeDescription(supported.copy(issue = Issue.UNSUPPORTED), true))
+        val failedRestore = supported.copy(issue = Issue.RESTORE_UNCONFIRMED, remoteRestorePending = true)
+        assertEquals(R.string.native_game_mode_restore_failed, nativeGameModeDescription(failedRestore, false))
+        assertEquals(R.string.native_game_mode_restore_failed,
+            nativeGameModeDescription(supported.copy(issue = Issue.CLOCK_UNCONFIRMED, remoteRestorePending = true), true))
+        assertEquals(R.string.native_game_mode_stopping,
+            nativeGameModeDescription(failedRestore.copy(restoring = true), false))
+    }
+
+    @Test fun normalRestoreObligationIsNotAnErrorDuringStartupOrActivePlayback() {
+        val starting = State(desiredOn = true, available = true,
+            remoteRestorePending = true, issue = Issue.NONE)
+        assertEquals(R.string.native_game_mode_starting, nativeGameModeDescription(starting, true))
+        assertEquals(R.string.native_game_mode_description,
+            nativeGameModeDescription(starting.copy(active = true), true))
+        assertEquals(R.string.native_game_mode_stopping,
+            nativeGameModeDescription(starting.copy(restoring = true), false))
+    }
 }

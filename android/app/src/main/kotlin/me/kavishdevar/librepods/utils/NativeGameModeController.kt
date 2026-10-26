@@ -4,6 +4,7 @@ package me.kavishdevar.librepods.utils
 import android.bluetooth.BluetoothSocket
 import android.os.Build
 import android.os.SystemClock
+import android.util.Log
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -22,6 +23,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import me.kavishdevar.librepods.BuildConfig
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommandIdentifier
 import me.kavishdevar.librepods.core.devices.AirPodsModel
 import me.kavishdevar.librepods.core.devices.AppleDevice
@@ -35,7 +37,7 @@ class NativeGameModeController(
     parentScope: CoroutineScope,
     private val hostBlocked: () -> Boolean,
 ) : AutoCloseable {
-    enum class Issue { NONE, UNSUPPORTED, WAITING_FOR_AUDIO, BUSY, REQUEST_FAILED,
+    enum class Issue { NONE, UNSUPPORTED, WAITING_FOR_AUDIO, WAITING_FOR_TIMING, BUSY, REQUEST_FAILED,
         REPORT_UNCONFIRMED, CLOCK_UNCONFIRMED, RESTORE_UNCONFIRMED, OWNER_LOST }
     data class State(val desiredOn: Boolean = false, val available: Boolean = false,
         val active: Boolean = false, val restoring: Boolean = false,
@@ -52,7 +54,8 @@ class NativeGameModeController(
     private val effectMutex = Mutex()
     private val wakeup = Channel<Unit>(Channel.CONFLATED)
     private val ports = AndroidPorts()
-    private val engine = NativeGameModeEngine(ports)
+    private val keepFlushBaseline = BuildConfig.DEBUG && BuildConfig.PRIVATE_GAME_KEEP_FLUSH_BASELINE
+    private val engine = NativeGameModeEngine(ports, keepFlushBaseline)
     private val runner = scope.launch {
         while (isActive) {
             try {
@@ -171,7 +174,12 @@ class NativeGameModeController(
         }
         override suspend fun target(owner: GameControlOwner, route: GameNativeReceipt,
             serial: Long, targetMs: Int): GameTargetWrite = effectMutex.withLock {
-            if (targetMs !in setOf(60, 150) || !owns(owner)) return@withLock GameTargetWrite(false, nowMs())
+            fun rejected(reason: String): GameTargetWrite {
+                if (BuildConfig.DEBUG) Log.d("LibrePodsGameMode", "target=$targetMs rejected=$reason attempted=false")
+                return GameTargetWrite(false, nowMs(), mayHaveReachedRemote = false)
+            }
+            if (targetMs !in setOf(60, 150)) return@withLock rejected("invalid-target")
+            if (!owns(owner)) return@withLock rejected("owner-changed")
             val epoch = cancellationEpoch.get()
             val preflightStart = nowMs()
             var proof: GameNativeReceipt? = null
@@ -182,24 +190,47 @@ class NativeGameModeController(
                 val sample = decode(client().poll(serial))
                 if (sample != null && sample.observedMs >= preflightStart) proof = sample
             }
-            val current = proof ?: return@withLock GameTargetWrite(false, nowMs())
-            if (!NativeGameTargetGuard.preflight(owner, route, serial, current, targetMs, nowMs()))
-                return@withLock GameTargetWrite(false, nowMs())
+            val current = proof ?: return@withLock rejected("no-current-native-proof")
+            val checkedAt = nowMs()
+            if (!NativeGameTargetGuard.preflight(owner, route, serial, current, targetMs, checkedAt, keepFlushBaseline)) {
+                if (BuildConfig.DEBUG) {
+                    val sameRequest = serial > 0 && current.serial == serial && current.requestPeer == owner.peer &&
+                        current.requestMedia == route.host.mediaGeneration && current.requestEncoder == route.encoderGeneration &&
+                        current.requestAcl == route.acl
+                    val sameHost = current.host.peer == owner.peer && current.host.mediaGeneration == route.host.mediaGeneration
+                    val sameEncoderAcl = current.encoderGeneration == route.encoderGeneration && current.acl == route.acl
+                    Log.d("LibrePodsGameMode", "target=$targetMs preflight observedAgeMs=${checkedAt - current.observedMs} " +
+                        "sameReqTuple=$sameRequest hostSamePeerMedia=$sameHost sameEncoderAcl=$sameEncoderAcl " +
+                        "holding=${current.holding} busy=${current.busy} " +
+                        "currentKnown=${current.currentKnown} current=${current.current} " +
+                        "baselineKnown=${current.baselineKnown} baseline=${current.baseline} " +
+                        "streaming=${current.host.streaming} encoderReady=${current.host.encoderReady} " +
+                        "scoOrMicrophone=${current.host.scoOrMicrophone} " +
+                        "clockAvailable=${current.host.clockReady} leaseRemainingMs=${current.leaseDeadlineMs - checkedAt} " +
+                        "desired=${desired.value} blocked=${blocked()}")
+                }
+                return@withLock rejected("native-preflight")
+            }
             val provenAt = current.observedMs
             var boundaryNs = SystemClock.elapsedRealtimeNanos()
+            var attempted = false
             val sent = withContext(Dispatchers.IO) {
                 device.aacp.sendControlCommand(ControlCommandIdentifier.JITTER_BUFFER.value,
                     byteArrayOf(targetMs.toByte(), 0, 0, 0), expectedSocket = owner.socket as BluetoothSocket,
+                    beforeWrite = {
+                        boundaryNs = SystemClock.elapsedRealtimeNanos()
+                        attempted = true
+                    },
                     isValid = {
                         // A cross-process route proof cannot make this app-owned socket write atomic.
-                        val valid = NativeGameTargetGuard.finalWrite(owns(owner), targetMs, nowMs(), provenAt,
+                        NativeGameTargetGuard.finalWrite(owns(owner), targetMs, nowMs(), provenAt,
                             epoch, cancellationEpoch.get(), !closed.get() && desired.value && !blocked() && eligible(),
                             current.leaseDeadlineMs)
-                        if (valid) boundaryNs = SystemClock.elapsedRealtimeNanos()
-                        valid
                     })
             }
-            GameTargetWrite(sent, boundaryNs / 1_000_000, boundaryNs)
+            if (!sent && BuildConfig.DEBUG) Log.d("LibrePodsGameMode",
+                "target=$targetMs rejected=${if (attempted) "transport-or-publication" else "final-write-fence"} attempted=$attempted")
+            GameTargetWrite(sent, boundaryNs / 1_000_000, boundaryNs, attempted)
         }
         override suspend fun beginClock(serial: Long, owner: GameControlOwner, route: GameNativeReceipt,
             clock: NativeGameModePolicy.Clock, restoring: Boolean) = effectMutex.withLock {
@@ -227,5 +258,5 @@ private fun NativeGameSnapshot.receipt(): GameNativeReceipt {
         clockRequest = clockRequestSerial, clockPending = clockPending, clockPhase = clockPhase,
         clockSerial = clockSerial, clockEncoder = clockEncoderGeneration,
         clockPeer = clockPeer.map { it.toInt() and 255 }, clockInterval = clockInterval,
-        observedMs = observedMs, leaseDeadlineMs = leaseDeadlineMs)
+        observedMs = observedMs, leaseDeadlineMs = leaseDeadlineMs, noControllerMutation = noControllerMutation)
 }
