@@ -12,7 +12,7 @@ import android.os.SystemClock
 internal object ShellPairing {
     @SuppressLint("MissingPermission")
     fun confirm(context: Context, address: String, owner: IPlaybackRecoveryOwner): Boolean {
-        if (Process.myUid() != 2000 || !hasPermissions(context)) {
+        if (Process.myUid() !in setOf(0, 2000) || !hasPermissions(context)) {
             android.util.Log.i("NearbyPairing", "Shell consent unavailable: identity or permissions")
             return false
         }

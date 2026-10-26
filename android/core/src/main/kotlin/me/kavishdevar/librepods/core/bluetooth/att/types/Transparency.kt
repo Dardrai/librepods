@@ -19,8 +19,11 @@
 package me.kavishdevar.librepods.core.bluetooth.att.types
 
 import me.kavishdevar.librepods.core.bluetooth.att.ATTHandle
+import me.kavishdevar.librepods.core.devices.AccommodationsPreset
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import kotlin.math.min
+import kotlin.math.max
 
 data class TransparencySettings(
     val enabled: Boolean,
@@ -39,8 +42,8 @@ data class TransparencySettings(
     val ownVoiceAmplification: Float? = null
 ) {
     fun withAmplification(amplification: Float = netAmplification, balance: Float = this.balance) = copy(
-        leftAmplification = amplification - balance / 2,
-        rightAmplification = amplification + balance / 2,
+        leftAmplification = (amplification - min(balance, 0f)).coerceIn(-1f, 2f),
+        rightAmplification = (amplification + max(balance, 0f)).coerceIn(-1f, 2f),
         netAmplification = amplification,
         balance = balance
     )
@@ -89,8 +92,10 @@ fun parseTransparencySettingsResponse(data: ByteArray): TransparencySettings? {
     val buffer = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN)
     if ((data.indices step 4).any { !buffer.getFloat(it).isFinite() }) return null
     if (listOf(0, 44, 92).any { buffer.getFloat(it) != 0f && buffer.getFloat(it) != 1f }) return null
-    if (listOf(36, 40, 84, 88).any { buffer.getFloat(it) !in -1f..1f } ||
+    if (listOf(36, 84).any { buffer.getFloat(it) !in -1f..2f } ||
+        listOf(40, 88).any { buffer.getFloat(it) !in -1f..1f } ||
         listOf(48, 96).any { buffer.getFloat(it) !in 0f..1f }) return null
+    if (data.size == 104 && buffer.getFloat(100) !in 0f..1f) return null
 
     val enabled = buffer.float
 
@@ -121,7 +126,7 @@ fun parseTransparencySettingsResponse(data: ByteArray): TransparencySettings? {
         null
     }
 
-    val avg = leftAmplification / 2 + rightAmplification / 2
+    val amplification = min(leftAmplification, rightAmplification)
     val diff = rightAmplification - leftAmplification
     if (!diff.isFinite()) return null
 
@@ -137,7 +142,7 @@ fun parseTransparencySettingsResponse(data: ByteArray): TransparencySettings? {
         rightConversationBoost = rightConversationBoost,
         leftAmbientNoiseReduction = leftAmbientNoiseReduction,
         rightAmbientNoiseReduction = rightAmbientNoiseReduction,
-        netAmplification = avg,
+        netAmplification = amplification,
         balance = diff,
         ownVoiceAmplification = ownVoiceAmplification
     )
@@ -146,6 +151,16 @@ fun parseTransparencySettingsResponse(data: ByteArray): TransparencySettings? {
 fun customTransparencyEnabled(data: ByteArray): Boolean? =
     if (data.contentEquals(byteArrayOf(2, 0, 0, 0))) false
     else parseTransparencySettingsResponse(data)?.enabled
+
+/** Captured stock presets map their two voice arrays to Custom Transparency. */
+fun accommodationsTransparencyPreset(baseline: ByteArray, preset: AccommodationsPreset): ByteArray? {
+    if (baseline.size != 104 || parseTransparencySettingsResponse(baseline) == null) return null
+    val curves = preset.curves()
+    return baseline.copyOf().also {
+        curves.copyInto(it, 4, 0, 32)
+        curves.copyInto(it, 52, 64, 96)
+    }
+}
 
 fun sendTransparencySettings(
     currentData: ByteArray,

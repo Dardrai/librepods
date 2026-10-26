@@ -10,6 +10,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import me.kavishdevar.librepods.shizuku.BackgroundAudioAccess
+import me.kavishdevar.librepods.shizuku.ShizukuAudioClient
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.mockito.Mockito.*
@@ -21,6 +22,30 @@ import rikka.shizuku.Shizuku
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [37], application = Application::class)
 class BackgroundAudioAccessLifecycleTest {
+    @Test fun authorizedRootUsesTheOwnedBridgeWithoutShizuku() = runBlocking {
+        val service = Robolectric.buildService(LibrePodsService::class.java).get()
+        val access = mock(BackgroundAudioAccess::class.java)
+        val bridge = mock(ShizukuAudioClient::class.java)
+        val allowed = MutableStateFlow(false)
+        `when`(bridge.isRoot).thenReturn(true)
+        `when`(bridge.ensureOwnBackgroundAudio()).thenAnswer { allowed.value = true; true }
+        field("backgroundAudioAccess\$delegate").set(service, lazyOf(access))
+        field("companionBridge\$delegate").set(service, lazyOf(bridge))
+        field("startedWithPermissions").set(service, true)
+        mockStatic(Shizuku::class.java).use { shizuku ->
+            try {
+                LibrePodsService::class.java.getDeclaredMethod("ensureBackgroundAudioAccess")
+                    .apply { isAccessible = true }.invoke(service)
+                withTimeout(2_000) { allowed.first { it } }
+                verify(bridge).ensureOwnBackgroundAudio()
+                verifyNoInteractions(access)
+                shizuku.verifyNoInteractions()
+            } finally {
+                (field("serviceScope").get(service) as CoroutineScope).cancel()
+            }
+        }
+    }
+
     @Test fun startupAndGrantedShizukuCallbacksRetryAndDestructionRetiresBothListeners() = runBlocking {
         val service = Robolectric.buildService(LibrePodsService::class.java).get()
         val access = mock(BackgroundAudioAccess::class.java)

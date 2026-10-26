@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- shortcut: new fork text uses English fallback until translations are contributed. -->
+<resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="MissingTranslation">
+    <string name="native_game_mode">Game Mode</string>
+    <string name="native_game_mode_description">Reduces audio delay during games.</string>
+    <string name="native_game_mode_waiting">Waiting for audio</string>
+    <string name="native_game_mode_starting">Turning on…</string>
+    <string name="native_game_mode_stopping">Turning off…</string>
+    <string name="native_game_mode_unavailable">Game Mode is unavailable.</string>
+</resources>

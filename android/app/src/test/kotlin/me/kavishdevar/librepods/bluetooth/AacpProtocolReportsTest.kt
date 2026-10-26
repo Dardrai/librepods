@@ -347,6 +347,21 @@ class AacpProtocolReportsTest {
         } finally { replacement.close() }
     }
 
+    @Test fun queuedHoldPreferencesCannotCrossTheirCapturedSocketOrSession() = withTransport { device, socket ->
+        val original = device.settings.value
+        val session = device.state.value.controlSession
+        val replacement = socket()
+        try {
+            bind(device.aacp, replacement)
+            assertFalse(device.setLongPressAction("left", StemAction.DIGITAL_ASSISTANT, socket, session))
+            assertFalse(device.setLongPressAction("left", StemAction.DIGITAL_ASSISTANT, replacement, session + 1))
+            assertEquals(original, device.settings.value)
+            assertEquals(0, Shadow.extract<ProtocolReportSocketShadow>(replacement).output.bytes.size())
+            assertTrue(device.setLongPressAction("left", StemAction.DIGITAL_ASSISTANT, replacement, session))
+            assertEquals(11, Shadow.extract<ProtocolReportSocketShadow>(replacement).output.bytes.size())
+        } finally { replacement.close() }
+    }
+
     @Test fun otherBudsHoldCyclesNoiseControlOnTheCapturedTransport() = withTransport { device, socket ->
         device.loadInitialState(AppleState(), AppleSettings(), AppleMetadata(model = AirPodsModel.AIRPODS_PRO_3,
             modelNumber = "A3063", version1 = "9A348"))
@@ -386,6 +401,7 @@ class AacpProtocolReportsTest {
         device.loadInitialState(AppleState(controlStates = mapOf(ControlCommandIdentifier.ALLOW_OFF_OPTION to byteArrayOf(1),
             ControlCommandIdentifier.LISTENING_MODE to byteArrayOf(2))),
             AppleSettings(leftLongPressAction = StemAction.DIGITAL_ASSISTANT), metadata)
+        device.aacp.processPacket(byteArrayOf(4, 0, 4, 0, 9, 0, 0x0d, 2, 0, 0, 0), socket)
         assertTrue(device.configureHoldActions(socket))
         val output = Shadow.extract<ProtocolReportSocketShadow>(socket).output.bytes
         output.reset()

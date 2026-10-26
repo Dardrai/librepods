@@ -1,0 +1,6 @@
+id=librepods_bluetooth_identity
+name=LibrePods Bluetooth identity
+version=1.0
+versionCode=1
+author=LibrePods contributors
+description=Uses Android's Device ID properties for Apple accessory settings. Preserves product and version.

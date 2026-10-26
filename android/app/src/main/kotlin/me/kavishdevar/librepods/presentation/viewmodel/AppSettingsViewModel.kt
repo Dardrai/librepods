@@ -2,11 +2,15 @@ package me.kavishdevar.librepods.presentation.viewmodel
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
-import me.kavishdevar.librepods.data.xposed.XposedRemotePrefProvider
+import me.kavishdevar.librepods.utils.BluetoothIdentitySettings
+import me.kavishdevar.librepods.utils.IdentityUpdateResult
 import me.kavishdevar.librepods.database.app.AppSettingsEntity
 import me.kavishdevar.librepods.database.app.AppStateEntity
 import me.kavishdevar.librepods.repository.AppDataRepository
@@ -18,6 +22,7 @@ data class AppUiState(
 
     val accessibilityServiceAvailable: Boolean = false,
     val vendorIdHook: Boolean = false,
+    val vendorIdHookBusy: Boolean = false,
 
     val showResetDialog: Boolean = false,
 )
@@ -26,11 +31,7 @@ class AppSettingsViewModel(
     private val appDataRepository: AppDataRepository,
 ) : ViewModel() {
 
-    private val xposedRemotePref = XposedRemotePrefProvider.create()
-
-    private val vendorIdHook = MutableStateFlow(
-        xposedRemotePref.getBoolean("vendor_id_hook", false)
-    )
+    private val vendorIdHook = BluetoothIdentitySettings.state
 
     private var _showResetDialog = MutableStateFlow(false)
 
@@ -44,8 +45,8 @@ class AppSettingsViewModel(
     private val extras = combine(
         vendorIdHook,
         LibrePodsAccessibilityService.instance,
-    ) {
-        Pair(vendorIdHook, LibrePodsAccessibilityService.instance)
+    ) { identity, accessibility ->
+        Pair(identity, accessibility)
     }
 
     val uiState = combine(
@@ -56,8 +57,9 @@ class AppSettingsViewModel(
         AppUiState(
             state = state,
             settings = settings,
-            vendorIdHook = vendorIdHook.value,
-            accessibilityServiceAvailable = accessibilityService.value != null,
+            vendorIdHook = vendorIdHook.enabled,
+            vendorIdHookBusy = vendorIdHook.busy,
+            accessibilityServiceAvailable = accessibilityService != null,
             showResetDialog = _showResetDialog
         )
     }.stateIn(
@@ -66,7 +68,8 @@ class AppSettingsViewModel(
         AppUiState(
             state = appDataRepository.state.value,
             settings = appDataRepository.settings.value,
-            vendorIdHook = vendorIdHook.value,
+            vendorIdHook = vendorIdHook.value.enabled,
+            vendorIdHookBusy = vendorIdHook.value.busy,
             accessibilityServiceAvailable = LibrePodsAccessibilityService.instance.value != null,
             showResetDialog = _showResetDialog.value
         )
@@ -80,9 +83,11 @@ class AppSettingsViewModel(
         transform: (AppStateEntity) -> AppStateEntity
     ) = appDataRepository.updateState(transform)
 
-    fun setVendorIdHook(enabled: Boolean) {
-        xposedRemotePref.putBoolean("vendor_id_hook", enabled)
-        vendorIdHook.value = enabled
+    fun setVendorIdHook(enabled: Boolean, completed: (IdentityUpdateResult) -> Unit = {}) {
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) { BluetoothIdentitySettings.setEnabled(enabled) }
+            completed(result)
+        }
     }
 
     fun showResetDialog() {

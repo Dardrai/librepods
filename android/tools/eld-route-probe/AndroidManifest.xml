@@ -1,0 +1,7 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="me.kavishdevar.librepods.eldroute" android:versionCode="1" android:versionName="0.1-offline-probe">
+    <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="33" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <application android:label="LibrePods route probe" android:debuggable="true" android:allowBackup="false" />
+    <instrumentation android:name="me.kavishdevar.librepods.eldroute.EldRouteProbe"
+        android:targetPackage="me.kavishdevar.librepods" android:functionalTest="true" />
+</manifest>

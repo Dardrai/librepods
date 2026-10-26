@@ -26,6 +26,7 @@ import kotlinx.coroutines.withTimeout
 import me.kavishdevar.librepods.core.bluetooth.att.types.parseHearingAidSettingsResponse
 import me.kavishdevar.librepods.core.devices.AppleMetadata
 import me.kavishdevar.librepods.core.devices.HearingMode
+import me.kavishdevar.librepods.core.devices.HearingModes
 import me.kavishdevar.librepods.services.LibrePodsService
 import me.kavishdevar.librepods.shizuku.BridgeState
 import me.kavishdevar.librepods.shizuku.ShizukuAudioClient
@@ -74,6 +75,77 @@ class DongleControllerLifecycleTest {
         mediaAudio.set(null, previousAudio)
     }
 
+    @Test fun gameModeRejectsUnsupportedEnableButAllowsRecoveryOff() = runBlocking<Unit> {
+        val firmware = FinderFirmware().also { it.gameRequested = true }
+        val client = DongleSession(firmware::exchange)
+        attach(client, client.refresh())
+        gameState().value = controller.state.value.copy(audio = gameProfile(true, false))
+        val editor = controller.liveGameModeEditor()
+        assertFalse(editor.edit(editor.state.value.revision, true))
+        assertTrue(firmware.commands.isEmpty())
+        assertTrue(editor.edit(editor.state.value.revision, false))
+        awaitGameEdit()
+        assertEquals(listOf(false), firmware.gameRequests)
+        assertFalse(controller.state.value.audio!!.gameRequested)
+        assertNull(controller.state.value.error)
+    }
+
+    @Test fun gameModeEnableLosesEligibilityWhileQueuedWithoutSending() = runBlocking<Unit> {
+        val firmware = FinderFirmware().also { it.gameSupported = true }
+        val client = DongleSession(firmware::exchange)
+        attach(client, client.refresh())
+        gameState().value = controller.state.value.copy(audio = gameProfile(false, true))
+        val editor = controller.liveGameModeEditor()
+        assertTrue(editor.edit(editor.state.value.revision, true))
+        firmware.gameSupported = false
+        gameState().value = controller.state.value.copy(audio = gameProfile(false, false))
+        awaitGameEdit()
+        assertTrue(firmware.commands.isEmpty())
+        assertTrue(firmware.gameRequests.isEmpty())
+    }
+
+    @Test fun gameModeEnableChecksEligibilityAgainImmediatelyBeforeRpcCommit() = runBlocking<Unit> {
+        val firmware = FinderFirmware().also { it.gameSupported = true }
+        val client = DongleSession(firmware::exchange)
+        attach(client, client.refresh())
+        gameState().value = controller.state.value.copy(audio = gameProfile(false, true))
+        firmware.beforeFeatureCommit = { command -> if (command == 4) {
+            firmware.gameSupported = false
+            gameState().value = controller.state.value.copy(audio = gameProfile(false, false))
+        } }
+        val editor = controller.liveGameModeEditor()
+        assertTrue(editor.edit(editor.state.value.revision, true))
+        awaitGameEdit()
+        assertEquals(1, firmware.cancellations)
+        assertTrue(firmware.gameRequests.isEmpty())
+        assertFalse(controller.state.value.audio!!.gameRequested)
+    }
+
+    @Test fun aQueuedGameModeChangeCannotMoveToAnotherPeer() = runBlocking<Unit> {
+        val firmware = FinderFirmware().also { it.gameSupported = true }
+        val client = DongleSession(firmware::exchange)
+        attach(client, client.refresh())
+        gameState().value = controller.state.value.copy(audio = gameProfile(false, true))
+        val editor = controller.liveGameModeEditor()
+        val revision = editor.state.value.revision
+        assertTrue(editor.edit(revision, true))
+        firmware.generation++; firmware.pair = 2
+        gameState().value = controller.state.value.copy(status = client.refresh())
+        editor.observe()
+        assertTrue(editor.state.value.revision > revision)
+        assertNull(editor.state.value.requested)
+        assertTrue(firmware.gameRequests.isEmpty())
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun gameState() = field("mutableState").get(controller) as MutableStateFlow<DongleState>
+    private fun gameProfile(requested: Boolean, supported: Boolean) =
+        DongleProtocol.AudioProfile(3, 3, 0, 256000, 256000, requested, 0, 2, if (supported) 8 else 0, null)
+    private suspend fun awaitGameEdit() = withTimeout(3_000) {
+        val editor = controller.liveGameModeEditor()
+        while (editor.state.value.pending || editor.state.value.requested != null) delay(5)
+    }
+
     @Test fun aHearingProfileEditExcludesUsbBetweenItsComparisonAndVerifiedWrite() = runBlocking<Unit> {
         val firmware = DongleLeaseFirmware()
         val client = DongleSession(firmware::exchange, closeTransport = firmware::close)
@@ -83,7 +155,13 @@ class DongleControllerLifecycleTest {
         field("profileCharacteristic").set(controller, DongleAtt.Characteristic(0x20, 0x12))
         @Suppress("UNCHECKED_CAST")
         val state = field("mutableState").get(controller) as MutableStateFlow<DongleState>
-        state.value = state.value.copy(metadata = AppleMetadata(modelNumber = "A3063"),
+        val hearing = byteArrayOf(4, 0, 4, 0, 9, 0, 0x2c, 1, 1, 0, 0)
+        val gate = byteArrayOf(4, 0, 4, 0, 9, 0, 0x33, 1, 0, 0, 0)
+        val modes = HearingModes.empty().withReport(hearing).withReport(gate)
+        firmware.cachedReply = { slot -> if (slot == 4) byteArrayOf() else ByteArray(8).also {
+            DongleProtocol.put32(it, 4, 1)
+        } + if (slot == 2) hearing else gate }
+        state.value = state.value.copy(metadata = AppleMetadata(modelNumber = "A3063"), hearingModes = modes,
             hearingProfile = checkNotNull(parseHearingAidSettingsResponse(profile)))
         var competingWrites = 0
         firmware.beforeRawReply = {
@@ -106,7 +184,9 @@ class DongleControllerLifecycleTest {
         awaitCommand()
         assertNull(controller.state.value.error)
         assertEquals(1, competingWrites)
-        assertEquals(listOf(0, 1, 1, 2), firmware.actions)
+        assertEquals(0, firmware.actions.first())
+        assertEquals(2, firmware.actions.last())
+        assertEquals(1, firmware.actions.count { it == 0 })
         val written = checkNotNull(parseHearingAidSettingsResponse(profile))
         assertEquals(0.25f, written.leftTone, 0f)
         assertEquals(0f, written.ownVoiceAmplification, 0f)
@@ -152,7 +232,99 @@ class DongleControllerLifecycleTest {
         assertNull(firmware.token)
     }
 
+    @Test fun legacyAccommodationsLeasesFullPmeAndRequiresAnAdvancedReceptionRevision() = runBlocking<Unit> {
+        val firmware = DongleLeaseFirmware()
+        val client = DongleSession(firmware::exchange, closeTransport = firmware::close)
+        attach(client, client.refresh())
+        var pme = ByteArray(140).also { byteArrayOf(4, 0, 4, 0, 0x53, 0, 0x84.toByte(), 0, 2, 2, 1, 2).copyInto(it) }
+        val original = pme.copyOf()
+        val hearing = byteArrayOf(4, 0, 4, 0, 9, 0, 0x2c, 2, 0, 0, 0)
+        val gate = byteArrayOf(4, 0, 4, 0, 9, 0, 0x33, 2, 0, 0, 0)
+        var revision = 1L
+        @Suppress("UNCHECKED_CAST")
+        val state = field("mutableState").get(controller) as MutableStateFlow<DongleState>
+        state.value = state.value.copy(controlSession = 99, hearingModes = me.kavishdevar.librepods.core.devices.HearingModes.empty()
+            .withReport(hearing).withReport(gate).withReport(pme))
+        @Suppress("UNCHECKED_CAST")
+        val revisions = field("cachedRevisions").get(controller) as MutableMap<Int, Long>
+        revisions.putAll(mapOf(2 to 1L, 3 to 1L, 4 to 1L))
+        val expected = state.value.accommodationsReport!!
+        firmware.cachedReply = { slot ->
+            assertNotNull(firmware.token)
+            ByteArray(8).also { DongleProtocol.put32(it, 4, revision) } + when (slot) { 2 -> hearing; 3 -> gate; 4 -> pme; else -> error("Unexpected slot") }
+        }
+        firmware.rawReply = { operation, packet ->
+            assertEquals(2, operation)
+            assertTrue(state.value.accommodationsRequest.pending)
+            pme = packet.copyOf(); revision++
+            byteArrayOf()
+        }
+        controller.accommodations(expected, false, true, null)
+        awaitCommand()
+        assertNull(state.value.error)
+        assertEquals(me.kavishdevar.librepods.core.devices.AccommodationsResult.CONFIRMED, state.value.accommodationsRequest.result)
+        val request = firmware.rawRequests.single().second
+        for (index in original.indices) if (index !in 10..11) assertEquals(original[index], request[index])
+        assertEquals(2.toByte(), request[10]); assertEquals(1.toByte(), request[11])
+        assertTrue(firmware.events.indexOf("lease0") < firmware.events.indexOf("cached2"))
+        assertNull(firmware.token)
+    }
+
+    @Test fun namedAccommodationsPresetCoordinatesBothRecordsAndPreservesEveryTransparencyScalar() = runBlocking<Unit> {
+        val firmware = DongleLeaseFirmware()
+        val client = DongleSession(firmware::exchange, closeTransport = firmware::close)
+        attach(client, client.refresh())
+        val hearing = byteArrayOf(4, 0, 4, 0, 9, 0, 0x2c, 2, 0, 0, 0)
+        val gate = byteArrayOf(4, 0, 4, 0, 9, 0, 0x33, 2, 0, 0, 0)
+        var pme = ByteArray(140).also { byteArrayOf(4, 0, 4, 0, 0x53, 0, 0x84.toByte(), 0, 2, 2, 1, 2).copyInto(it) }
+        var transparency = ByteArray(104).also {
+            ByteBuffer.wrap(it).order(ByteOrder.LITTLE_ENDIAN).putFloat(36, -0.25f).putFloat(84, 0.6f)
+                .putFloat(40, -0.2f).putFloat(88, 0.3f).putFloat(48, 0.1f).putFloat(96, 0.8f)
+                .putFloat(44, 1f).putFloat(100, 0.43f)
+        }
+        val baseline = transparency.copyOf()
+        var revision = 1L
+        @Suppress("UNCHECKED_CAST")
+        val state = field("mutableState").get(controller) as MutableStateFlow<DongleState>
+        state.value = state.value.copy(controlSession = 99, hearingModes = me.kavishdevar.librepods.core.devices.HearingModes.empty()
+            .withReport(hearing).withReport(gate).withReport(pme))
+        @Suppress("UNCHECKED_CAST")
+        val revisions = field("cachedRevisions").get(controller) as MutableMap<Int, Long>
+        revisions.putAll(mapOf(2 to 1L, 3 to 1L, 4 to 1L))
+        val expected = state.value.accommodationsReport!!
+        firmware.cachedReply = { slot -> ByteArray(8).also { DongleProtocol.put32(it, 4, revision) } +
+            when (slot) { 2 -> hearing; 3 -> gate; 4 -> pme; else -> error("Unexpected slot") } }
+        val uuid = java.util.UUID.fromString("d5621cc1-f7ab-45db-9403-9eaf744d5390")
+        val wireUuid = ByteBuffer.allocate(16).putLong(uuid.mostSignificantBits).putLong(uuid.leastSignificantBits).array().reversedArray()
+        firmware.rawReply = { operation, request ->
+            assertNotNull(firmware.token)
+            if (operation == 2) { pme = request.copyOf(); revision++; byteArrayOf() }
+            else when (request[0].toInt()) {
+                6 -> byteArrayOf(7, 1, 0, 0x20, 0)
+                8 -> if (request[1] == 1.toByte()) byteArrayOf(9, 21, 0x10, 0, 0x0a, 0x11, 0) + wireUuid
+                    else byteArrayOf(1, 8, request[1], request[2], 0x0a)
+                0x0a -> { assertEquals(0x11.toByte(), request[1]); byteArrayOf(0x0b) + transparency }
+                0x12 -> { assertEquals(0x11.toByte(), request[1]); transparency = request.copyOfRange(3, request.size); byteArrayOf(0x13) }
+                else -> error("Unexpected request")
+            }
+        }
+        val preset = me.kavishdevar.librepods.core.devices.AccommodationsPreset(
+            me.kavishdevar.librepods.core.devices.AccommodationsTuning.BALANCED_TONE,
+            me.kavishdevar.librepods.core.devices.AccommodationsLevel.SLIGHT)
+        controller.accommodations(expected, null, null, preset)
+        awaitCommand()
+        assertNull(state.value.error)
+        assertEquals(me.kavishdevar.librepods.core.devices.AccommodationsResult.CONFIRMED, state.value.accommodationsRequest.result)
+        assertArrayEquals(me.kavishdevar.librepods.core.bluetooth.att.types.accommodationsTransparencyPreset(baseline, preset), transparency)
+        for (index in baseline.indices) if (index !in 4..35 && index !in 52..83) assertEquals(baseline[index], transparency[index])
+        assertArrayEquals(transparency, state.value.transparencyData)
+        assertEquals(1, firmware.rawRequests.count { it.first == 2 })
+        assertEquals(1, firmware.rawRequests.count { it.first == 1 && it.second[0] == 0x12.toByte() })
+        assertNull(firmware.token)
+    }
+
     private suspend fun awaitCommand() = withTimeout(3_000) {
+        delay(200)
         while (controller.state.value.busy) delay(1)
     }
 
@@ -300,7 +472,7 @@ class DongleControllerLifecycleTest {
         field("audioUpdated").setLong(controller, Long.MAX_VALUE)
         refresh(client)
         verify(bridge).finishOwnedMedia(true)
-        assertEquals("Pause and resume each check current ownership", listOf(9, 9), firmware.commands)
+        assertEquals("The first session reads settings once; pause and resume each check ownership", listOf(2, 9, 9), firmware.commands)
     }
 
     @Test fun idlePollingSkipsDetailedReportsAndTheViewOrEarPolicyRestoresTheirRequiredWork() = runBlocking<Unit> {
@@ -310,7 +482,10 @@ class DongleControllerLifecycleTest {
         controller.automaticPause(false)
         firmware.exchanges = 0
         refresh(client)
-        assertEquals("Idle polling needs only the status exchange", 1, firmware.exchanges)
+        assertTrue("The initial session reads supported cached settings automatically", firmware.exchanges > 1)
+        firmware.exchanges = 0
+        refresh(client)
+        assertEquals("After initialization idle polling needs only status", 1, firmware.exchanges)
         assertEquals(5_000L, pollInterval())
 
         controller.controlsVisible(true)
@@ -338,6 +513,7 @@ class DongleControllerLifecycleTest {
         attach(client, client.refresh())
         controller.automaticPause(false)
         controller.setSetting(0x28, 1)
+        awaitCommand()
         refresh(client)
         assertTrue(firmware.commands.contains(2))
         assertEquals(600L, pollInterval())
@@ -407,7 +583,8 @@ class DongleControllerLifecycleTest {
         field("session").set(controller, client)
         @Suppress("UNCHECKED_CAST")
         val state = field("mutableState").get(controller) as MutableStateFlow<DongleState>
-        state.value = state.value.copy(connected = true, status = status)
+        state.value = state.value.copy(connected = true, status = status,
+            controlSession = state.value.controlSession.takeIf { it > 0 } ?: 1)
     }
 
     private suspend fun ownPause(firmware: FinderFirmware): DongleSession {
@@ -477,6 +654,11 @@ class DongleControllerLifecycleTest {
         var inEars = true
         var exchanges = 0
         var settingValue: Long? = null
+        var gameRequested = false
+        var gameSupported = false
+        val gameRequests = mutableListOf<Boolean>()
+        var beforeFeatureCommit: ((Int) -> Unit)? = null
+        var cancellations = 0
         var beforeAudioReply: (suspend () -> Unit)? = null
         private var operation = 0
         private val received = ByteArrayOutputStream()
@@ -487,7 +669,11 @@ class DongleControllerLifecycleTest {
             if (id == 2) return DongleProtocol.header(2).also {
                 it[7] = flags.toByte(); DongleProtocol.put32(it, 8, generation); it[12] = pair.toByte(); it[42] = 0x10
             }
-            if (operation == 1) return report.copyOf()
+            if (operation == 1) {
+                if (this.operation == 7 && report[21] == 1.toByte())
+                    received.toByteArray().firstOrNull()?.let { beforeFeatureCommit?.invoke(it.toInt()) }
+                return report.copyOf()
+            }
             report = DongleProtocol.header(3).also {
                 DongleProtocol.put32(it, 8, generation); DongleProtocol.put32(it, 12, DongleProtocol.u32(bytes, 12))
             }
@@ -511,8 +697,14 @@ class DongleControllerLifecycleTest {
                         DongleProtocol.put32(it, 7, 2); DongleProtocol.put32(it, 11, value)
                     } } ?: byteArrayOf(1, 0)
                     else if (command == 1 || command == 8) byteArrayOf()
+                    else if (command == 4) {
+                        gameRequested = received.toByteArray()[1] != 0.toByte()
+                        gameRequests += gameRequested
+                        byteArrayOf()
+                    }
                     else if (command == 9) ByteArray(20).also {
-                        it[0] = 1; it[14] = input.toByte(); it[18] = 100
+                        it[0] = 1; it[12] = if (gameRequested) 1 else 0
+                        it[14] = input.toByte(); it[15] = if (gameSupported) 8 else 0; it[18] = 100
                     } else ByteArray(24).also {
                         it[0] = 1; it[1] = if (identityAvailable) 0x80.toByte() else 0; it[2] = 127
                         DongleProtocol.put32(it, 20, 0x8000_0000)
@@ -520,6 +712,7 @@ class DongleControllerLifecycleTest {
                     report[21] = 3; report[16] = nearby.size.toByte(); report[20] = nearby.size.toByte()
                     nearby.copyInto(report, 22)
                 }
+                5 -> { cancellations++; report[21] = 4; report[22] = 8 }
             }
             return report.copyOf()
         }

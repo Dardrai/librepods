@@ -11,9 +11,9 @@ import android.os.Process
 internal object ShellMicrophonePrivacy {
     @SuppressLint("SoonBlockedPrivateApi")
     fun isBlocked(context: Context): Boolean {
-        check(Process.myUid() == 2000) { "Microphone privacy requires the Shizuku shell backend" }
+        ShellAudioContext.packageForUid(Process.myUid())
         check(context.checkPermission("android.permission.OBSERVE_SENSOR_PRIVACY", Process.myPid(), Process.myUid()) ==
-            PackageManager.PERMISSION_GRANTED) { "Shizuku cannot observe microphone privacy" }
+            PackageManager.PERMISSION_GRANTED) { "Audio helper cannot observe microphone privacy" }
         val token = Binder.clearCallingIdentity()
         try {
             val manager = checkNotNull(context.getSystemService(SensorPrivacyManager::class.java)) {

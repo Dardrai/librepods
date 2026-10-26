@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- shortcut: fork-specific settings use English fallback until translations are contributed. -->
+<resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="MissingTranslation">
+    <string name="bluetooth_access">Bluetooth access</string>
+    <string name="bluetooth_access_description">Use root or Shizuku for seamless pairing and media controls.</string>
+</resources>

@@ -3,9 +3,8 @@ package me.kavishdevar.librepods.presentation.navigation
 import androidx.activity.compose.PredictiveBackHandler
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.gestures.Orientation
-import androidx.compose.foundation.gestures.draggable
-import androidx.compose.foundation.gestures.rememberDraggableState
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
@@ -16,8 +15,13 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.ui.input.pointer.util.VelocityTracker
+import androidx.compose.ui.input.pointer.util.addPointerInputChange
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalWindowInfo
+import androidx.compose.ui.unit.dp
 import androidx.navigation3.runtime.NavEntry
 import androidx.navigation3.scene.Scene
 import androidx.navigation3.scene.SceneStrategy
@@ -28,6 +32,7 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlin.coroutines.cancellation.CancellationException
+import kotlin.math.abs
 
 private enum class Direction {
     Forward,
@@ -172,13 +177,16 @@ private fun <T : Any> SwipeBackSceneContent(
         }
     }
 
-    val draggableState = rememberDraggableState { delta ->
+    fun settleSwipe(offset: Float, velocity: Float, cancelled: Boolean) {
         scope.launch {
-            val offset =
-                (animatedOffset.value + delta)
-                    .coerceIn(0f, screenWidthPx)
-
-            animatedOffset.snapTo(offset)
+            val shouldDismiss = !cancelled &&
+                (offset > screenWidthPx * 0.35f || velocity > 1000f)
+            animatedOffset.animateTo(
+                targetValue = if (shouldDismiss) screenWidthPx else 0f,
+                animationSpec = tween(150),
+                initialVelocity = velocity,
+            )
+            if (shouldDismiss) dismiss()
         }
     }
 
@@ -196,35 +204,54 @@ private fun <T : Any> SwipeBackSceneContent(
         Box(
             Modifier
                 .fillMaxSize()
+                // Keep the edge hit area fixed while the page slides.
+                .pointerInput(swipeEnabled, previousEntry?.contentKey, screenWidthPx) {
+                    if (!swipeEnabled || previousEntry == null) return@pointerInput
+                    val edgeWidth = 24.dp.toPx()
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        // Main-pass child consumption keeps buttons, switches and sliders in charge.
+                        if (down.isConsumed || down.position.x !in 0f..edgeWidth) return@awaitEachGesture
+                        val velocityTracker = VelocityTracker()
+                        velocityTracker.addPointerInputChange(down)
+                        var dragging = false
+                        var offset = 0f
+                        try {
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                                if (event.changes.size != 1 || change.isConsumed) break
+                                velocityTracker.addPointerInputChange(change)
+                                if (!change.pressed) {
+                                    if (dragging) {
+                                        change.consume()
+                                        settleSwipe(offset, velocityTracker.calculateVelocity().x, false)
+                                        dragging = false
+                                    }
+                                    break
+                                }
+                                if (!dragging) {
+                                    val travel = change.position - down.position
+                                    val slop = viewConfiguration.touchSlop
+                                    if (abs(travel.x) <= slop && abs(travel.y) <= slop) continue
+                                    if (travel.x <= slop || travel.x <= abs(travel.y) * 1.5f) break
+                                    dragging = true
+                                    offset = (animatedOffset.value + travel.x - slop).coerceIn(0f, screenWidthPx)
+                                } else {
+                                    offset = (offset + change.positionChange().x).coerceIn(0f, screenWidthPx)
+                                }
+                                change.consume()
+                                val nextOffset = offset
+                                scope.launch { animatedOffset.snapTo(nextOffset) }
+                            }
+                        } finally {
+                            if (dragging) settleSwipe(offset, 0f, true)
+                        }
+                    }
+                }
                 .graphicsLayer {
                     translationX = animatedOffset.value
                 }
-                .draggable(
-                    enabled = swipeEnabled && previousEntry != null,
-                    state = draggableState,
-                    orientation = Orientation.Horizontal,
-                    onDragStopped = { velocity ->
-                        val currentOffset = animatedOffset.value
-                        val shouldDismiss = currentOffset > screenWidthPx * 0.35f || velocity > 1000f
-
-                        scope.launch {
-                            if (shouldDismiss) {
-                                animatedOffset.animateTo(
-                                    targetValue = screenWidthPx,
-                                    animationSpec = tween(150),
-                                    initialVelocity = velocity
-                                )
-                                dismiss()
-                            } else {
-                                animatedOffset.animateTo(
-                                    targetValue = 0f,
-                                    animationSpec = tween(150),
-                                    initialVelocity = velocity
-                                )
-                            }
-                        }
-                    }
-                )
         ) {
             currentEntry.Content()
         }

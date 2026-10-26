@@ -20,7 +20,7 @@ internal class BackgroundAudioAccess(
     private val shizukuGranted: () -> Boolean = {
         Shizuku.pingBinder() && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
     },
-    private val allow: (Int, String) -> Unit = ::allowOwnBackgroundAudio,
+    private val allow: (Int, String) -> Unit = { uid, name -> allowOwnBackgroundAudio(uid, name) },
 ) {
     @Synchronized
     @Suppress("DEPRECATION")
@@ -49,13 +49,15 @@ internal class BackgroundAudioAccess(
 }
 
 @SuppressLint("PrivateApi", "SoonBlockedPrivateApi")
-private fun allowOwnBackgroundAudio(uid: Int, packageName: String) {
+internal fun allowOwnBackgroundAudio(uid: Int, packageName: String,
+    binder: () -> IBinder = {
+        ShizukuBinderWrapper(checkNotNull(SystemServiceHelper.getSystemService(Context.APP_OPS_SERVICE)))
+    }) {
     val operation = AppOpsManager::class.java.getMethod("strOpToOp", String::class.java)
         .invoke(null, CONTROL_AUDIO) as Int
     val serviceType = Class.forName("com.android.internal.app.IAppOpsService")
-    val binder = ShizukuBinderWrapper(checkNotNull(SystemServiceHelper.getSystemService(Context.APP_OPS_SERVICE)))
     val service = Class.forName("com.android.internal.app.IAppOpsService\$Stub")
-        .getMethod("asInterface", IBinder::class.java).invoke(null, binder)
+        .getMethod("asInterface", IBinder::class.java).invoke(null, binder())
     serviceType.getMethod("setMode", Int::class.javaPrimitiveType, Int::class.javaPrimitiveType,
         String::class.java, Int::class.javaPrimitiveType)
         .invoke(service, operation, uid, packageName, AppOpsManager.MODE_ALLOWED)

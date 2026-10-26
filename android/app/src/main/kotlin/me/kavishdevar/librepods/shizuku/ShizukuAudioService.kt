@@ -1,14 +1,19 @@
 package me.kavishdevar.librepods.shizuku
 
 import android.Manifest
+import android.app.AppOpsManager
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Binder
+import android.os.Build
 import me.kavishdevar.librepods.BuildConfig
 import java.util.concurrent.atomic.AtomicBoolean
+import rikka.shizuku.SystemServiceHelper
 
 /** App-owned native audio controls and selected-pair media recovery. */
-class ShizukuAudioService(context: Context) : IAudioBridge.Stub() {
+class ShizukuAudioService @JvmOverloads constructor(context: Context,
+    private val exitOnDestroy: Boolean = true,
+) : IAudioBridge.Stub(), AutoCloseable {
     private val originalContext = context
     private val expectedUid = context.packageManager.getApplicationInfo(BuildConfig.APPLICATION_ID, 0).uid
     private val shellContext by lazy { ShellAudioContext(context).also { it.installProcessAttribution() } }
@@ -18,6 +23,64 @@ class ShizukuAudioService(context: Context) : IAudioBridge.Stub() {
     private var playbackRelease: NativePlaybackRelease? = null
     private var callConnection: NativeCallConnection? = null
     private var mediaPause: Pair<IPlaybackRecoveryOwner, OwnedMediaPause>? = null
+    private var volumeChecking = false
+    private val volumeSync by lazy {
+        BluetoothVolumeSync(shellContext, audio = ShizukuVolumeSyncAudio(shellContext,
+            binder = { checkNotNull(SystemServiceHelper.getSystemService(it)) },
+            packageName = shellContext.packageName), granted = { !cleanupFailed.get() })
+    }
+
+    override fun ensureOwnBackgroundAudio(): Boolean {
+        enforceCaller()
+        if (Build.VERSION.SDK_INT < 37) return true
+        val identity = Binder.clearCallingIdentity()
+        return try {
+            check(!cleanupFailed.get())
+            allowOwnBackgroundAudio(expectedUid, BuildConfig.APPLICATION_ID) {
+                checkNotNull(SystemServiceHelper.getSystemService(Context.APP_OPS_SERVICE))
+            }
+            @Suppress("DEPRECATION")
+            val applied = originalContext.getSystemService(AppOpsManager::class.java)
+                .unsafeCheckOpRawNoThrow("android:control_audio", expectedUid, BuildConfig.APPLICATION_ID) ==
+                AppOpsManager.MODE_ALLOWED
+            android.util.Log.i("BluetoothAccess", "Own background audio allowed=$applied")
+            applied
+        } finally { Binder.restoreCallingIdentity(identity) }
+    }
+
+    override fun checkVolumeSync(address: String, owner: IPlaybackRecoveryOwner): Boolean {
+        enforceCaller()
+        check(originalContext.packageManager.checkPermission(Manifest.permission.BLUETOOTH_CONNECT,
+            BuildConfig.APPLICATION_ID) == PackageManager.PERMISSION_GRANTED)
+        val selected = A2dpRecoveryGuard(address).address
+        synchronized(lock) {
+            check(!cleanupFailed.get() && !volumeChecking && playbackRecovery == null &&
+                playbackRelease == null && callConnection == null)
+            volumeChecking = true
+        }
+        val identity = Binder.clearCallingIdentity()
+        return try {
+            if (!owner.isCurrent) return false
+            volumeSync.selectRoute(selected)
+            volumeSync.check(selected, owner.asBinder()) {
+                !cleanupFailed.get() && runCatching { owner.isCurrent }.getOrDefault(false)
+            }
+        } finally {
+            Binder.restoreCallingIdentity(identity)
+            synchronized(lock) { volumeChecking = false }
+        }
+    }
+
+    override fun forgetVolumeSync(owner: IPlaybackRecoveryOwner) {
+        enforceCaller()
+        volumeSync.forget(owner.asBinder())
+    }
+
+    override fun retireOwner(owner: IPlaybackRecoveryOwner) {
+        enforceCaller()
+        finishOwnedMedia(owner, false)
+        volumeSync.forget(owner.asBinder())
+    }
 
     override fun nativeCall(address: String, owner: IPlaybackRecoveryOwner, connect: Boolean): Int {
         enforceCaller()
@@ -25,7 +88,7 @@ class ShizukuAudioService(context: Context) : IAudioBridge.Stub() {
             check(originalContext.packageManager.checkPermission(permission, BuildConfig.APPLICATION_ID) ==
                 PackageManager.PERMISSION_GRANTED) { "LibrePods call access is unavailable" }
         val operation = synchronized(lock) {
-            check(!cleanupFailed.get() && playbackRecovery == null &&
+            check(!cleanupFailed.get() && !volumeChecking && playbackRecovery == null &&
                 playbackRelease == null && callConnection == null) { "Another audio operation is active" }
             NativeCallConnection(shellContext, address, owner).also { callConnection = it }
         }
@@ -40,7 +103,7 @@ class ShizukuAudioService(context: Context) : IAudioBridge.Stub() {
         enforceCaller()
         val identity = Binder.clearCallingIdentity()
         return try { synchronized(lock) {
-            check(!cleanupFailed.get() && playbackRecovery == null &&
+            check(!cleanupFailed.get() && !volumeChecking && playbackRecovery == null &&
                 playbackRelease == null && callConnection == null) { "Another audio operation is active" }
             mediaPause?.second?.close(); mediaPause = null
             OwnedMediaPause.acquire(shellContext, address, owner)?.let { mediaPause = owner to it; true } ?: false
@@ -92,7 +155,7 @@ class ShizukuAudioService(context: Context) : IAudioBridge.Stub() {
         check(originalContext.packageManager.checkPermission("android.permission.BLUETOOTH_CONNECT", BuildConfig.APPLICATION_ID) ==
             PackageManager.PERMISSION_GRANTED) { "LibrePods Bluetooth permission was revoked" }
         val release = synchronized(lock) {
-            check(!cleanupFailed.get() && playbackRecovery == null && playbackRelease == null && callConnection == null) {
+            check(!cleanupFailed.get() && !volumeChecking && playbackRecovery == null && playbackRelease == null && callConnection == null) {
                 "Another audio operation is active"
             }
             NativePlaybackRelease(shellContext, address, owner).also { playbackRelease = it }
@@ -109,7 +172,7 @@ class ShizukuAudioService(context: Context) : IAudioBridge.Stub() {
         check(originalContext.packageManager.checkPermission("android.permission.BLUETOOTH_CONNECT", BuildConfig.APPLICATION_ID) ==
             PackageManager.PERMISSION_GRANTED) { "LibrePods Bluetooth permission was revoked" }
         val recovery = synchronized(lock) {
-            check(!cleanupFailed.get() && playbackRecovery == null && playbackRelease == null && callConnection == null) { "Another audio operation is active" }
+            check(!cleanupFailed.get() && !volumeChecking && playbackRecovery == null && playbackRelease == null && callConnection == null) { "Another audio operation is active" }
             A2dpPlaybackRecovery(shellContext, address, owner, connectOnly).also { playbackRecovery = it }
         }
         val identity = Binder.clearCallingIdentity()
@@ -137,9 +200,16 @@ class ShizukuAudioService(context: Context) : IAudioBridge.Stub() {
     override fun destroy() {
         val caller = Binder.getCallingUid()
         check(caller == expectedUid || caller == 2000 || caller == 0) { "Invalid bridge owner" }
-        cleanupFailed.set(true)
-        synchronized(lock) { playbackRecovery?.cancel(); playbackRelease?.cancel() }
-        mediaPause?.second?.close()
-        kotlin.system.exitProcess(0)
+        close()
+        if (exitOnDestroy) kotlin.system.exitProcess(0)
+    }
+
+    override fun close() {
+        if (!cleanupFailed.compareAndSet(false, true)) return
+        synchronized(lock) {
+            playbackRecovery?.cancel(); playbackRelease?.cancel(); callConnection?.binderDied()
+            mediaPause?.second?.close(); mediaPause = null
+        }
+        volumeSync.close()
     }
 }

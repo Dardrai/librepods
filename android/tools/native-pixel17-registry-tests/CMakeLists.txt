@@ -1,0 +1,13 @@
+cmake_minimum_required(VERSION 3.22.1)
+project(pixel17_registry_tests LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+find_package(Threads REQUIRED)
+enable_testing()
+set(ELD_SOURCE ../../app/src/main/cpp/eld)
+add_executable(pixel17_registry_test pixel17_registry_test.cpp
+    ${ELD_SOURCE}/pixel17_registry.cpp ${ELD_SOURCE}/pixel17_codec.cpp ${ELD_SOURCE}/wire.cpp)
+target_include_directories(pixel17_registry_test PRIVATE ${ELD_SOURCE})
+target_link_libraries(pixel17_registry_test PRIVATE Threads::Threads)
+target_compile_options(pixel17_registry_test PRIVATE -Wall -Wextra -Werror)
+add_test(NAME pixel17_registry_test COMMAND pixel17_registry_test)

@@ -10,16 +10,19 @@ import android.os.Process;
 
 import java.lang.reflect.Field;
 
-/** Process-local shell attribution for the Shizuku UserService, which is not an Android app. */
+/** Actual helper identity: shell for Shizuku, root for the app-owned root service. */
 final class ShellAudioContext extends ContextWrapper {
     ShellAudioContext(Context base) {
         super(base);
-        if (Process.myUid() != 2000) {
-            throw new SecurityException("This bridge supports the Shizuku shell backend only");
-        }
+        packageForUid(Process.myUid());
     }
 
-    @Override public String getPackageName() { return "com.android.shell"; }
+    static String packageForUid(int uid) {
+        if (uid == 0) return "root";
+        if (uid == 2000) return "com.android.shell";
+        throw new SecurityException("Audio controls require an authorized root or shell helper");
+    }
+    @Override public String getPackageName() { return packageForUid(Process.myUid()); }
     // Context's hidden getOpPackageName is invoked by framework audio services.
     @androidx.annotation.Keep
     public String getOpPackageName() { return getPackageName(); }
@@ -36,7 +39,7 @@ final class ShellAudioContext extends ContextWrapper {
         // Framework services also consult ActivityThread for this helper's shell attribution.
         Class<?> type = Class.forName("android.app.ActivityThread");
         Object thread = type.getMethod("currentActivityThread").invoke(null);
-        if (thread == null) throw new IllegalStateException("Shizuku did not supply an ActivityThread");
+        if (thread == null) throw new IllegalStateException("Audio helper has no ActivityThread");
         Field initial = type.getDeclaredField("mInitialApplication");
         initial.setAccessible(true);
         Application application;

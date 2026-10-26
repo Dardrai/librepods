@@ -44,6 +44,39 @@ migrated as device reports. The Android Bluetooth bond stays with Android.
 
 The current fork version is `2.0.0-alpha.1-pixel94`, code `200000179`.
 
+### Root Bluetooth access
+
+Settings → Bluetooth access can authorize the app-owned root helper instead of
+Shizuku. Both backends use the same pairing consent, selected-profile recovery,
+microphone-privacy, owned-player and bounded volume-repair operations. Each
+operation checks the app UID and its current selected-device owner. Root uses
+its real UID and attribution; it does not impersonate Android's shell package.
+The helper exposes no arbitrary shell commands and no system Binder handles.
+Closing a screen releases only that client's binding and leases; the helper
+cleans up when the last client leaves. Failed grants, late callbacks, connection
+loss and timeouts cannot revive an abandoned request. First root authorization
+is explicit; later connections reuse the grant. Shizuku remains the non-root
+fallback. Older hardware-check entries below describe the backend used at the
+time and are not proof of the new root path.
+
+On 2026-10-25, Pixel 7 Pro build `CP3A.261005.002.A1` with KernelSU-Next 3.4.2
+ran the helper as UID 0 with Shizuku absent. KernelSU initially had SU
+compatibility disabled; enabling that interface and allowing LibrePods under
+Superuser made standard `su` available to the app. The helper verified the
+app's `CONTROL_AUDIO` operation was allowed and observed healthy volume sync.
+Stopping the app retired its root process; restarting and a later phone reboot
+both restored the authorized helper. A fresh pairing confirmed selected-device
+consent at 5.498 seconds and reached BONDED at 6.060 seconds after Connect; those
+times include Classic discovery, not just the bond handshake. The user confirmed
+pairing worked and final playback, five-second pause/resume and listening-mode
+stem controls were clean with packet capture off. No stored hearing profile was
+written. Root operation on other phones and future OTAs remains untested.
+
+Android 17's optional native Device ID module is separate from privileged app
+operations. It uses supported Bluetooth properties with transactional restoration
+and a fresh baseline after each boot, rather than Bluetooth binary offsets or
+whole-image hash gates. See its [setup and limits](tools/bluetooth-identity-module/README.md).
+
 Apple is the default design system for new or unset preferences, including the
 initial loading frame. Saved theme choices are preserved, and light/dark mode
 continues to follow the existing night-theme preference.

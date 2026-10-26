@@ -1,0 +1,6 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="me.kavishdevar.librepods.eldcontrol">
+    <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="33" />
+    <application android:label="LibrePods prototype control" android:debuggable="true" android:allowBackup="false" />
+    <instrumentation android:name="me.kavishdevar.librepods.eldcontrol.EldPrototypeControl"
+        android:targetPackage="me.kavishdevar.librepods" android:functionalTest="true" />
+</manifest>

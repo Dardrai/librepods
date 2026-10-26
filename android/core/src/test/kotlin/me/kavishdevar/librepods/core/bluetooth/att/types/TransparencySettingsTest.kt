@@ -1,12 +1,30 @@
 package me.kavishdevar.librepods.core.bluetooth.att.types
 
 import me.kavishdevar.librepods.core.bluetooth.att.ATTHandle
+import me.kavishdevar.librepods.core.devices.AccommodationsPreset
+import me.kavishdevar.librepods.core.devices.AccommodationsTuning
+import me.kavishdevar.librepods.core.devices.AccommodationsLevel
 import org.junit.Assert.*
 import org.junit.Test
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 class TransparencySettingsTest {
+    @Test fun capturedStockPresetMappingOnlyReplacesTheTwoTransparencyCurveArrays() {
+        val baseline = report().put(40, -0f).put(100, 0.43f)
+        for (tuning in AccommodationsTuning.entries) for (level in AccommodationsLevel.entries) {
+            val preset = AccommodationsPreset(tuning, level)
+            val requested = accommodationsTransparencyPreset(baseline, preset)!!
+            val curves = preset.curves()
+            assertArrayEquals(curves.copyOfRange(0, 32), requested.copyOfRange(4, 36))
+            assertArrayEquals(curves.copyOfRange(64, 96), requested.copyOfRange(52, 84))
+            for (offset in baseline.indices) if (offset !in 4..35 && offset !in 52..83)
+                assertEquals("offset=$offset", baseline[offset], requested[offset])
+            assertNotNull(parseTransparencySettingsResponse(requested))
+        }
+        assertNull(accommodationsTransparencyPreset(report(100), AccommodationsPreset(AccommodationsTuning.BALANCED_TONE, AccommodationsLevel.SLIGHT)))
+        assertNull(accommodationsTransparencyPreset(baseline.put(100, Float.NaN), AccommodationsPreset(AccommodationsTuning.BALANCED_TONE, AccommodationsLevel.SLIGHT)))
+    }
     private fun report(size: Int = 104): ByteArray = ByteArray(size).also { data ->
         val buffer = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN)
         buffer.putFloat(0, 1f)
@@ -22,6 +40,40 @@ class TransparencySettingsTest {
 
     private fun ByteArray.put(offset: Int, value: Float) = apply {
         ByteBuffer.wrap(this).order(ByteOrder.LITTLE_ENDIAN).putFloat(offset, value)
+    }
+
+    @Test fun nativeTransparencyGainConversionBoostsTheSelectedBalanceSideAndAllowsStoredGainTwo() {
+        val original = parseTransparencySettingsResponse(report())!!
+        for (amplification in listOf(-1f, -0.5f, 0f, 0.5f, 1f)) for (balance in listOf(-1f, -0.5f, 0f, 0.5f, 1f)) {
+            val adjusted = original.withAmplification(amplification, balance)
+            assertEquals(amplification - minOf(balance, 0f), adjusted.leftAmplification, 0f)
+            assertEquals(amplification + maxOf(balance, 0f), adjusted.rightAmplification, 0f)
+            var value: ByteArray? = null
+            sendTransparencySettings(report(), adjusted) { _, packet, _ -> value = packet }
+            val parsed = parseTransparencySettingsResponse(value!!)!!
+            assertEquals(amplification, parsed.netAmplification, 0f)
+            assertEquals(balance, parsed.balance, 0f)
+        }
+        for (offset in listOf(36, 84)) {
+            assertNotNull(parseTransparencySettingsResponse(report().put(offset, 2f)))
+            assertNull(parseTransparencySettingsResponse(report().put(offset, 2.01f)))
+            assertNull(parseTransparencySettingsResponse(report().put(offset, -1.01f)))
+        }
+        val neutral = original.withAmplification(0f, 0f)
+        val amplified = neutral.withAmplification(0.348610f)
+        assertEquals(0.348610f, amplified.leftAmplification, 0.000001f)
+        assertEquals(0.348610f, amplified.rightAmplification, 0.000001f)
+        val balanced = amplified.withAmplification(balance = 0.359965f)
+        assertEquals(amplified.leftAmplification, balanced.leftAmplification, 0f)
+        assertEquals(0.359965f, balanced.rightAmplification - amplified.rightAmplification, 0.000001f)
+    }
+
+    @Test fun unrelatedEditsPreserveNoncanonicalRawGainPairsAndBothCurveArrays() {
+        val baseline = report().put(36, 2f).put(84, -1f)
+        val settings = parseTransparencySettingsResponse(baseline)!!
+        var written: ByteArray? = null
+        sendTransparencySettings(baseline, settings.copy(ownVoiceAmplification = 0.6f)) { _, value, _ -> written = value }
+        assertArrayEquals(baseline.copyOf().put(100, 0.6f), written)
     }
 
     @Test fun onlyExactLegacyAndCompleteLengthsAreRecognized() {
@@ -52,7 +104,7 @@ class TransparencySettingsTest {
                 assertNull("offset=$offset value=$invalid", parseTransparencySettingsResponse(report().put(offset, invalid)))
             }
         }
-        for (offset in listOf(36, 40, 84, 88)) {
+        for (offset in listOf(40, 88)) {
             for (invalid in listOf(-1.01f, 1.01f)) {
                 assertNull(parseTransparencySettingsResponse(report().put(offset, invalid)))
             }
@@ -108,7 +160,7 @@ class TransparencySettingsTest {
         val writer: (ATTHandle, ByteArray, ByteArray) -> Unit = { _, _, _ -> writes++ }
         for (requested in listOf(
             settings.copy(leftAmplification = -1.01f),
-            settings.copy(rightAmplification = 1.01f),
+            settings.copy(rightAmplification = 2.01f),
             settings.copy(leftTone = 1.01f),
             settings.copy(rightTone = -1.01f),
             settings.copy(leftAmbientNoiseReduction = -0.01f),
@@ -117,6 +169,8 @@ class TransparencySettingsTest {
             settings.copy(rightEQ = FloatArray(9)),
             settings.copy(leftEQ = settings.leftEQ.copyOf().also { it[2] = Float.NaN }),
             settings.copy(ownVoiceAmplification = Float.POSITIVE_INFINITY),
+            settings.copy(ownVoiceAmplification = -0.01f),
+            settings.copy(ownVoiceAmplification = 1.01f),
         )) sendTransparencySettings(current, requested, writer)
         for (invalid in listOf(byteArrayOf(), current.copyOf(108), current.copyOf().put(44, 0.5f))) {
             sendTransparencySettings(invalid, settings.copy(enabled = false), writer)

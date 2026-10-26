@@ -34,6 +34,7 @@ import me.kavishdevar.librepods.core.devices.AppleState
 import me.kavishdevar.librepods.core.devices.ConnectionState
 import me.kavishdevar.librepods.core.devices.Device
 import me.kavishdevar.librepods.shizuku.BluetoothVolumeSync
+import me.kavishdevar.librepods.shizuku.ShizukuAudioClient
 import me.kavishdevar.librepods.presentation.overlays.IslandWindow
 import me.kavishdevar.librepods.utils.ConversationVolume
 import me.kavishdevar.librepods.utils.MediaController
@@ -70,6 +71,7 @@ class BluetoothVolumeSyncServiceTest {
     private val bluetooth = mock(BluetoothDevice::class.java)
     private val controller = mock(ExperimentalAudioController::class.java)
     private val sync = mock(BluetoothVolumeSync::class.java)
+    private val bridge = mock(ShizukuAudioClient::class.java)
     private val audio = mock(AudioManager::class.java)
     private val route = mock(AudioDeviceInfo::class.java)
     private val address = MacAddress("00:11:22:33:44:55")
@@ -87,6 +89,7 @@ class BluetoothVolumeSyncServiceTest {
         ReflectionHelpers.setField(app, "islandWindow", mock(IslandWindow::class.java))
         field("startedWithPermissions").set(service, true)
         field("bluetoothVolumeSync\$delegate").set(service, lazyOf(sync))
+        field("companionBridge\$delegate").set(service, lazyOf(bridge))
         shadowOf(RuntimeEnvironment.getApplication()).grantPermissions(
             Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_SCAN)
         Shadow.extract<ShadowContextImpl>(service.baseContext).setSystemService(Context.AUDIO_SERVICE, audio)
@@ -123,6 +126,28 @@ class BluetoothVolumeSyncServiceTest {
         checkAndJoin()
         assertEquals(2, checks.get())
         verify(controller, times(2)).tryBeginSettingsRefresh()
+        verify(controller, times(2)).endSettingsRefresh()
+    }
+
+    @Test fun periodicChecksPickUpANewRootGrantWithoutChangingAudioRoutes() = runBlocking {
+        setRoutes(emptyList())
+        checkAndJoin()
+        verify(bridge).connect()
+        assertEquals(0, checks.get())
+    }
+
+    @Test fun rootRepairUsesTheSameSelectedOwnerAndAudioReservation() = runBlocking {
+        `when`(bridge.isRoot).thenReturn(true)
+        `when`(bridge.checkVolumeSync(eq(address.value) ?: address.value, same(device) ?: device,
+            any<() -> Boolean>() ?: { false })).thenAnswer { call ->
+            assertTrue(call.getArgument<() -> Boolean>(2).invoke())
+            checks.incrementAndGet()
+            false
+        }
+        checkAndJoin()
+        assertEquals(2, checks.get())
+        verify(sync, never()).check(eq(address.value) ?: address.value, same(device) ?: device,
+            any<() -> Boolean>() ?: { false })
         verify(controller, times(2)).endSettingsRefresh()
     }
 

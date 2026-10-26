@@ -1,5 +1,8 @@
 package me.kavishdevar.librepods.core.devices
 
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+
 enum class HearingMode { HEARING_AID, MEDIA_ASSIST }
 
 /** Only complete reports from the current control transport can authorize a mode change. */
@@ -24,14 +27,26 @@ data class HearingModes internal constructor(
     private val reportedMedia: Boolean? get() = pmeReport?.let { flag(it[11]) }
     private val reportedGate: Boolean? get() = assistReport?.let { flag(it[7]) }
     val enrolled: Boolean? get() = hearingReport?.let { flag(it[7]) }
+    val clinicalReportsKnown: Boolean get() = reportedHearing != null && reportedGate != null
     val hearingAidEnabled: Boolean? get() = if (uncertain != null) null else
         reportedHearing?.let { enabled -> if (!enabled) false else true.takeIf { reportedGate == true } }
     val mediaAssistEnabled: Boolean? get() = if (uncertain != null) null else
         reportedVoice?.let { voice -> reportedMedia?.let { media ->
-            if (!voice && !media) false else true.takeIf { reportedGate == true && pmeReport?.get(9) == 1.toByte() }
+            if (!voice && !media) false else reportedGate
         } }
-    val customTransparencyAllowed: Boolean get() = pending == null && reportedGate == false &&
-        hearingAidEnabled == false && mediaAssistEnabled == false
+    val customTransparencyAllowed: Boolean get() = pending == null && uncertain == null && reportedGate == false &&
+        hearingAidEnabled == false && (mediaAssistEnabled == false || pmeReport?.let(::validLegacyAccommodationsPacket) == true)
+
+    fun accommodationsReport(session: Long): AccommodationsReport? =
+        if (pending != null || uncertain != null) null else pmeReport?.let {
+            AccommodationsReport.parse(it, session, pmeRevision, reportedHearing, reportedGate)
+        }
+
+    val hasReceivedPme: Boolean get() = pmeRevision > 0
+
+    fun receivedAccommodations(session: Long, source: AccommodationsAudiogram? = null): ReceivedAccommodations? = pmeReport?.let {
+        ReceivedAccommodations.parse(it, session, pmeRevision, source)
+    }
 
     fun canChange(mode: HearingMode, enabled: Boolean): Boolean = pending == null && plan(mode, enabled) != null
 
@@ -45,8 +60,18 @@ data class HearingModes internal constructor(
                 return copy(assistReport = packet.copyOf(), assistRevision = assistRevision + 1)
         }
         if (packet.size == 140 && packet.take(9) == listOf<Byte>(4, 0, 4, 0, 0x53, 0, 0x84.toByte(), 0, 2) &&
-            packet.sliceArray(9..11).all { (it.toInt() and 255) in 0..2 })
+            packet.sliceArray(9..11).all { (it.toInt() and 255) in 0..2 } &&
+            ByteBuffer.wrap(packet).order(ByteOrder.LITTLE_ENDIAN).let { values ->
+                (12 until 140 step 4).all { values.getFloat(it).isFinite() }
+            })
             return copy(pmeReport = packet.copyOf(), pmeRevision = pmeRevision + 1)
+        if (packet.take(6) == listOf<Byte>(4, 0, 4, 0, 9, 0)) {
+            if (packet.getOrNull(6) == 0x2c.toByte()) return copy(hearingReport = null, hearingRevision = hearingRevision + 1)
+            if (packet.getOrNull(6) == 0x33.toByte()) return copy(assistReport = null, assistRevision = assistRevision + 1)
+        }
+        if (packet.size >= 9 && packet.take(6) == listOf<Byte>(4, 0, 4, 0, 0x53, 0) &&
+            !(packet.size == 10 && packet.sliceArray(6..8).contentEquals(byteArrayOf(2, 0, 1)) && packet[9] in byteArrayOf(1, 2)))
+            return copy(pmeReport = null, pmeRevision = pmeRevision + 1)
         return this
     }
 
@@ -57,7 +82,6 @@ data class HearingModes internal constructor(
         val media = reportedMedia ?: return null
         val gate = reportedGate ?: return null
         if (enabled && (enrolled != true || gate != (hearing || voice || media))) return null
-        if (enabled && mode == HearingMode.MEDIA_ASSIST && pmeReport?.get(9) != 1.toByte()) return null
         val desiredHearing = if (mode == HearingMode.HEARING_AID) enabled else hearing
         val desiredVoice = if (mode == HearingMode.MEDIA_ASSIST) enabled else voice
         val desiredMedia = if (mode == HearingMode.MEDIA_ASSIST) enabled else media
@@ -79,9 +103,15 @@ data class HearingModes internal constructor(
             (!plan.packets.any { it[6] == 0x33.toByte() } || assistRevision > plan.original.assistRevision) &&
             (!plan.packets.any { it[4] == 0x53.toByte() } || pmeRevision > plan.original.pmeRevision) && matches(plan)
 
+    internal fun confirmsFreshSession(plan: HearingModePlan): Boolean =
+        hearingRevision > 0 && assistRevision > 0 && pmeRevision > 0 && matches(plan)
+
     internal fun sameConfiguration(other: HearingModes): Boolean =
         hearingReport.contentEquals(other.hearingReport) && assistReport.contentEquals(other.assistReport) &&
             pmeReport.contentEquals(other.pmeReport)
+
+    internal fun sameClinicalGuards(other: HearingModes): Boolean =
+        hearingReport.contentEquals(other.hearingReport) && assistReport.contentEquals(other.assistReport)
 
     internal fun matches(plan: HearingModePlan): Boolean =
         reportedHearing == plan.hearing && reportedVoice == plan.voice && reportedMedia == plan.media &&

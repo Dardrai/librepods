@@ -30,6 +30,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import me.kavishdevar.librepods.data.LiveValueState
 import me.kavishdevar.librepods.R
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommandIdentifier
 import me.kavishdevar.librepods.core.data.StemAction
@@ -43,8 +44,11 @@ fun LongPress(viewModel: AppleViewModel, name: String, navigateBack: (() -> Unit
     val uiState by viewModel.uiState.collectAsState()
     val connection by viewModel.connectionState.collectAsState()
     val writing by viewModel.writingNoiseModeCycle.collectAsState()
+    val cycle by viewModel.liveNoiseCycleEditor().state.collectAsState()
     LongPressSettings(uiState, name, connection == ConnectionState.CONNECTED, writing, navigateBack,
-        { side, action -> viewModel.setLongPressAction(side, action) }, viewModel::setListeningModeCycle)
+        { side, action -> viewModel.setLongPressAction(side, action) },
+        { mask, metadata -> viewModel.setListeningModeCycle(mask, metadata, cycle.revision) }, cycle,
+        { viewModel.cancelListeningModeCycle(cycle.revision) })
 }
 
 internal fun resolveLongPressSide(route: String, leftLabel: String, rightLabel: String): String? = when (route) {
@@ -55,7 +59,8 @@ internal fun resolveLongPressSide(route: String, leftLabel: String, rightLabel: 
 
 @Composable
 internal fun LongPressSettings(uiState: AppleUiState, name: String, connected: Boolean, writing: Boolean,
-    navigateBack: (() -> Unit)?, setAction: (String, StemAction) -> Unit, applyCycle: (Int, AppleMetadata) -> Unit) {
+    navigateBack: (() -> Unit)?, setAction: (String, StemAction) -> Unit, applyCycle: (Int, AppleMetadata) -> Unit,
+    liveCycle: LiveValueState<Int>? = null, cancelCycle: () -> Unit = {}) {
     val leftLabel = stringResource(R.string.left)
     val rightLabel = stringResource(R.string.right)
     val side = resolveLongPressSide(name, leftLabel, rightLabel)
@@ -77,7 +82,7 @@ internal fun LongPressSettings(uiState: AppleUiState, name: String, connected: B
                 }
             }
             if (action == StemAction.CYCLE_NOISE_CONTROL_MODES)
-                NoiseModeCycleSettings(uiState.state, uiState.settings, uiState.metadata, connected, writing) {
+                NoiseModeCycleSettings(uiState.state, uiState.settings, uiState.metadata, connected, writing, liveCycle, cancelCycle) {
                     applyCycle(it, uiState.metadata)
                 }
         }
@@ -86,16 +91,19 @@ internal fun LongPressSettings(uiState: AppleUiState, name: String, connected: B
 
 @Composable
 internal fun NoiseModeCycleSettings(state: AppleState, settings: AppleSettings, metadata: AppleMetadata,
-    enabled: Boolean, writing: Boolean, onApply: (Int) -> Unit) {
+    enabled: Boolean, writing: Boolean, liveCycle: LiveValueState<Int>? = null,
+    onCancel: () -> Unit = {}, onApply: (Int) -> Unit) {
     val id = ControlCommandIdentifier.LISTENING_MODE_CONFIGS
     val allowOff = state.effectiveAllowOff(settings, metadata.modelNumber)
     val supported = metadata.supportedNoiseModeCycleMask(allowOff)
     val current = noiseModeCycleValue(state.effectiveControl(id, settings))?.takeIf { validNoiseModeCycle(it, supported) }
     val confirmed = id in state.liveControlReports && state.requestedControls[id] == null &&
         current != null && noiseModeCycleValue(state.controlStates[id]) == current
-    var draft by remember(metadata, supported) { mutableStateOf<Int?>(null) }
-    val chosen = draft ?: current ?: 0
-    LaunchedEffect(confirmed, current) { if (confirmed && draft == current) draft = null }
+    var draft by remember(state.controlSession, metadata, supported, liveCycle?.revision) { mutableStateOf<Int?>(null) }
+    val chosen = draft ?: liveCycle?.displayed ?: current ?: 0
+    LaunchedEffect(confirmed, current, liveCycle?.displayed) {
+        if (draft == liveCycle?.displayed || confirmed && draft == current) draft = null
+    }
     val modes = listOf(
         Triple(1, R.string.off, R.drawable.ic_noise_cancellation),
         Triple(4, R.string.transparency, R.drawable.ic_transparency),
@@ -106,8 +114,12 @@ internal fun NoiseModeCycleSettings(state: AppleState, settings: AppleSettings, 
         StyledList(title = stringResource(R.string.noise_control), key = chosen to supported) {
             modes.filter { it.first != 8 || supported and 8 != 0 }.forEach { (bit, label, icon) ->
                 styledListItem(contentText = stringResource(label), selected = chosen and bit != 0,
-                    enabled = enabled && !writing && supported and bit != 0,
-                    onClick = { draft = chosen xor bit },
+                    enabled = enabled && supported and bit != 0,
+                    onClick = {
+                        val next = chosen xor bit
+                        draft = next
+                        if (validNoiseModeCycle(next, supported)) onApply(next) else onCancel()
+                    },
                     orientation = StyledListItemOrientation.Vertical,
                     leadingContent = { Icon(painterResource(icon), contentDescription = null,
                         tint = MaterialTheme.colorScheme.primary, modifier = Modifier.height(42.dp).wrapContentWidth()) })
@@ -115,10 +127,6 @@ internal fun NoiseModeCycleSettings(state: AppleState, settings: AppleSettings, 
         }
         if (supported and 1 == 0 && metadata.noiseCycleRequiresAllowOff())
             Text(stringResource(R.string.noise_cycle_off_prerequisite), style = MaterialTheme.typography.bodySmall)
-        StyledButton(modifier = Modifier.fillMaxWidth(), enabled = enabled && !writing &&
-            draft != null && validNoiseModeCycle(chosen, supported) && (chosen != current || !confirmed),
-            onClick = { onApply(chosen) }) {
-            Text(stringResource(if (writing) R.string.noise_cycle_applying else R.string.noise_cycle_apply))
-        }
+
     }
 }

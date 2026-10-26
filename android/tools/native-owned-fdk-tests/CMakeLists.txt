@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: MIT
+cmake_minimum_required(VERSION 3.22.1)
+project(owned_fdk_encoder_tests LANGUAGES C CXX)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Isolated private experiment: this project does not link FDK into LibrePods' GPL APK.
+get_filename_component(NATIVE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../app/src/main/cpp" ABSOLUTE)
+include("${NATIVE_ROOT}/eld/owned_fdk.cmake")
+eld_add_private_owned_fdk()
+
+enable_testing()
+find_package(Threads REQUIRED)
+add_executable(owned_fdk_encoder_test owned_fdk_encoder_test.cpp "${NATIVE_ROOT}/eld/fdk_encoder.cpp")
+target_link_libraries(owned_fdk_encoder_test PRIVATE eld_owned_fdk Threads::Threads ${CMAKE_DL_LIBS})
+if(MSVC)
+    target_compile_options(eld_owned_fdk PRIVATE /W4 /WX)
+    target_compile_options(owned_fdk_encoder_test PRIVATE /W4 /WX /UNDEBUG)
+else()
+    target_compile_options(eld_owned_fdk PRIVATE -Wall -Wextra -Werror)
+    target_compile_options(owned_fdk_encoder_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+    if(NOT APPLE)
+        target_link_options(owned_fdk_encoder_test PRIVATE -Wl,--exclude-libs,ALL)
+    endif()
+endif()
+add_test(NAME owned_fdk_encoder_test COMMAND owned_fdk_encoder_test)

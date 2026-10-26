@@ -64,7 +64,7 @@ import kotlin.time.Duration.Companion.milliseconds
 fun AccessibilitySettingsScreen(
     viewModel: AppleViewModel,
     navigateBack: (() -> Unit)?,
-    navigateToTransparencyCustomization: () -> Unit
+    navigateToHeadphoneAccommodations: () -> Unit
 ) {
     val uiState by viewModel.uiState.collectAsState()
 
@@ -236,12 +236,10 @@ fun AccessibilitySettingsScreen(
                 )
             }
 
-            if (hearingModesOff && uiState.vendorIdHook) {
-                StyledListItem(
-                    contentText = stringResource(R.string.customize_transparency_mode),
-                    onClick = navigateToTransparencyCustomization,
-                )
-            }
+            StyledListItem(
+                contentText = stringResource(R.string.headphone_accommodations),
+                onClick = navigateToHeadphoneAccommodations,
+            )
 
             val toneVolumeValue = remember { mutableFloatStateOf(state.controlStates[ControlCommandIdentifier.CHIME_VOLUME]?.getOrNull(0)?.toFloat() ?: 75f) }
 

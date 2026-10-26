@@ -25,9 +25,13 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FiniteAnimationSpec
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
+import androidx.compose.foundation.interaction.DragInteraction
+import androidx.compose.foundation.interaction.Interaction
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -56,6 +60,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -66,6 +71,11 @@ import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.input.pointer.util.addPointerInputChange
 import androidx.compose.ui.layout.layout
@@ -74,7 +84,14 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInParent
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.disabled
+import androidx.compose.ui.semantics.progressBarRangeInfo
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.setProgress
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.Velocity
@@ -237,18 +254,59 @@ fun StyledSlider(
         containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
         selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
         selectedContentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-    )
+    ),
+    onValueChangeFinished: (() -> Unit)? = null,
+    onValueChangeCanceled: (() -> Unit)? = null,
+    steps: Int = 0,
 ) {
     val haptics = LocalHapticFeedback.current
+    val currentEnabled by rememberUpdatedState(enabled)
+    val currentValue by rememberUpdatedState(value)
+    val finishUserChange by rememberUpdatedState(onValueChangeFinished)
+    val cancelUserChange by rememberUpdatedState(onValueChangeCanceled)
     var userChangeStarted by remember { mutableStateOf(false) }
     var lastUserValue by remember { mutableFloatStateOf(value) }
+    var dragObservedValue by remember { mutableFloatStateOf(value) }
+    var dragFraction by remember(valueRange.start, valueRange.endInclusive) { mutableStateOf<Float?>(null) }
+    var dragCanceled by remember { mutableStateOf(false) }
+    // Draggable reports cancellation through interactions before calling onDragStopped.
+    val dragInteractions = remember {
+        val source = MutableInteractionSource()
+        fun record(interaction: Interaction) {
+            if (interaction is DragInteraction.Start) dragCanceled = false
+            if (interaction is DragInteraction.Cancel && !dragCanceled) {
+                dragCanceled = true
+                dragFraction = null
+                userChangeStarted = false
+                cancelUserChange?.invoke()
+            }
+        }
+        object : MutableInteractionSource {
+            override val interactions = source.interactions
+            override suspend fun emit(interaction: Interaction) { record(interaction); source.emit(interaction) }
+            override fun tryEmit(interaction: Interaction): Boolean { record(interaction); return source.tryEmit(interaction) }
+        }
+    }
     LaunchedEffect(enabled) {
-        if (!enabled) userChangeStarted = false
+        if (!enabled) {
+            userChangeStarted = false
+            dragFraction = null
+        }
+    }
+    val resolveUserValue = { newValue: Float ->
+        val bounded = newValue.coerceIn(valueRange.start, valueRange.endInclusive)
+        val stepped = if (steps > 0) {
+            val interval = (valueRange.endInclusive - valueRange.start) / (steps + 1)
+            valueRange.start + ((bounded - valueRange.start) / interval).roundToInt() * interval
+        } else bounded
+        if (snapPoints.isNotEmpty()) snapIfClose(stepped, snapPoints, snapThreshold) else stepped
     }
     val onUserValueChange = { newValue: Float ->
-        val snapped = if (snapPoints.isNotEmpty()) snapIfClose(newValue, snapPoints, snapThreshold) else newValue
-        val previous = if (userChangeStarted) lastUserValue else value
-        if (enabled && snapped != previous) {
+        dragCanceled = false
+        dragObservedValue = currentValue
+        val snapped = resolveUserValue(newValue)
+        val previous = if (userChangeStarted) lastUserValue else currentValue
+        if (currentEnabled && snapped != previous) {
             val crossedSnap = snapPoints.any { snap ->
                 (previous < snap && snapped >= snap) || (previous > snap && snapped <= snap)
             }
@@ -257,8 +315,8 @@ fun StyledSlider(
             }
             userChangeStarted = true
             lastUserValue = snapped
+            onValueChange(snapped)
         }
-        if (enabled) onValueChange(snapped)
     }
     when (LocalDesignSystem.current) {
         DesignSystem.Material -> {
@@ -355,11 +413,19 @@ fun StyledSlider(
                                 }
 
                                 Slider(
-                                    modifier = Modifier.weight(1f),
+                                    modifier = Modifier.weight(1f).testTag("styled-slider").semantics {
+                                        label?.let { contentDescription = it }
+                                    },
                                     value = value,
                                     onValueChange = onUserValueChange,
-                                    onValueChangeFinished = { userChangeStarted = false },
+                                    onValueChangeFinished = {
+                                        if (currentEnabled && !dragCanceled && userChangeStarted &&
+                                            (currentValue == lastUserValue || currentValue == dragObservedValue)) finishUserChange?.invoke()
+                                        userChangeStarted = false
+                                    },
                                     valueRange = valueRange,
+                                    steps = steps,
+                                    interactionSource = dragInteractions,
                                     enabled = enabled
                                 )
 
@@ -399,7 +465,7 @@ fun StyledSlider(
                 }
 
             val fraction by derivedStateOf {
-                ((value - valueRange.start) / (valueRange.endInclusive - valueRange.start))
+                ((currentValue - valueRange.start) / (valueRange.endInclusive - valueRange.start))
                     .fastCoerceIn(0f, 1f)
             }
 
@@ -413,9 +479,41 @@ fun StyledSlider(
             val momentumAnimation = rememberMomentumAnimation(maxScale = 1.5f)
 
             val content = @Composable {
+                fun accessibleChange(target: Float): Boolean {
+                    if (!currentEnabled || !target.isFinite()) return false
+                    val resolved = resolveUserValue(target)
+                    if (resolved == currentValue) return false
+                    onUserValueChange(resolved)
+                    val changed = userChangeStarted
+                    userChangeStarted = false
+                    dragFraction = null
+                    if (changed) finishUserChange?.invoke()
+                    return changed
+                }
                 Box(
                     Modifier
                         .fillMaxWidth(if (startImageVector == null && endImageVector == null) 0.95f else 1f)
+                        .testTag("styled-slider")
+                        .semantics {
+                            label?.let { contentDescription = it }
+                            progressBarRangeInfo = ProgressBarRangeInfo(currentValue.coerceIn(valueRange.start, valueRange.endInclusive), valueRange, steps)
+                            if (!enabled) disabled() else setProgress { accessibleChange(it) }
+                        }
+                        .onKeyEvent { event ->
+                            if (!currentEnabled || event.type != KeyEventType.KeyDown) false else {
+                                val increment = (valueRange.endInclusive - valueRange.start) / if (steps > 0) steps + 1 else 20
+                                val target = when (event.key) {
+                                    Key.DirectionUp, Key.DirectionRight -> currentValue + increment
+                                    Key.DirectionDown, Key.DirectionLeft -> currentValue - increment
+                                    Key.MoveHome -> valueRange.start
+                                    Key.MoveEnd -> valueRange.endInclusive
+                                    else -> return@onKeyEvent false
+                                }
+                                accessibleChange(target)
+                                true
+                            }
+                        }
+                        .focusable(enabled)
                 ) {
                     Box(
                         Modifier
@@ -602,9 +700,18 @@ fun StyledSlider(
                                         .draggable(
                                             rememberDraggableState { delta ->
                                                 val trackWidth = trackWidthState.floatValue
-                                                if (trackWidth > 0f) {
+                                                val previousFraction = dragFraction
+                                                if (currentEnabled && previousFraction != null && trackWidth > 0f) {
+                                                    val baseFraction = if (currentValue != dragObservedValue && currentValue != lastUserValue) {
+                                                        userChangeStarted = false
+                                                        lastUserValue = currentValue
+                                                        fraction
+                                                    } else previousFraction
+                                                    dragObservedValue = currentValue
+                                                    // Snapped controlled values must not discard the next small delta.
                                                     val targetFraction =
-                                                        fraction + delta / trackWidth
+                                                        (baseFraction + delta / trackWidth).fastCoerceIn(0f, 1f)
+                                                    dragFraction = targetFraction
                                                     val targetValue =
                                                         lerp(
                                                             valueRange.start,
@@ -619,13 +726,25 @@ fun StyledSlider(
                                                 }
                                             },
                                             Orientation.Horizontal,
+                                            interactionSource = dragInteractions,
                                             startDragImmediately = true,
                                             onDragStarted = {
                                                 userChangeStarted = false
+                                                lastUserValue = currentValue
+                                                dragObservedValue = currentValue
+                                                dragFraction = if (currentEnabled) fraction else null
                                             },
                                             onDragStopped = {
-                                                onValueChange((value * 100).roundToInt() / 100f)
+                                                val finished = currentEnabled && !dragCanceled && dragFraction != null && userChangeStarted &&
+                                                    (currentValue == lastUserValue || currentValue == dragObservedValue)
+                                                if (finished) {
+                                                    val rounded = ((lastUserValue * 100).roundToInt() / 100f)
+                                                        .fastCoerceIn(valueRange.start, valueRange.endInclusive)
+                                                    if (rounded != lastUserValue) onValueChange(rounded)
+                                                }
+                                                dragFraction = null
                                                 userChangeStarted = false
+                                                if (finished) finishUserChange?.invoke()
                                             }
                                         )
                                         .then(momentumAnimation.modifier)
@@ -682,6 +801,7 @@ fun StyledSlider(
                                 }
                             )
                             .size(40f.dp, 24f.dp)
+                            .testTag("styled-slider-thumb")
                     )
                 }
             }

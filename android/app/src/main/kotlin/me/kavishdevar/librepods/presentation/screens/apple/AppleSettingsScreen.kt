@@ -48,7 +48,6 @@ import com.kyant.backdrop.backdrops.rememberLayerBackdrop
 import me.kavishdevar.librepods.R
 import me.kavishdevar.librepods.bluetooth.DeviceSettingsRefreshResult
 import me.kavishdevar.librepods.core.devices.AppleDevice
-import me.kavishdevar.librepods.core.devices.ConnectionState
 import me.kavishdevar.librepods.core.devices.effectiveControl
 import me.kavishdevar.librepods.core.devices.legacyEndCallSinglePress
 import me.kavishdevar.librepods.core.devices.supportsCallControls
@@ -80,6 +79,8 @@ import me.kavishdevar.librepods.presentation.design.LocalDesignSystem
 import me.kavishdevar.librepods.presentation.utils.LocalDebugMode
 import me.kavishdevar.librepods.presentation.viewmodel.AppleUiState
 import me.kavishdevar.librepods.presentation.viewmodel.AppleViewModel
+import me.kavishdevar.librepods.utils.NativeGameModeController
+import kotlinx.coroutines.flow.MutableStateFlow
 
 @Composable
 fun AppleSettingsRoute(
@@ -102,16 +103,11 @@ fun AppleSettingsRoute(
     navigateToHeartRateScreen: () -> Unit
 ) {
     val uiState by viewModel.uiState.collectAsState()
-    val refreshing by viewModel.refreshingSettings.collectAsState()
-    val connectionState by viewModel.connectionState.collectAsState()
+    val gameMode by (viewModel.gameModeController?.state ?:
+        remember { MutableStateFlow(NativeGameModeController.State()) }).collectAsState()
 
     AppleSettingsScreen(
         uiState = uiState,
-        refreshDeviceSettings = { viewModel.refreshDeviceSettings(refreshDeviceSettings) },
-        refreshingSettings = refreshing,
-        canRefreshSettings = connectionState == ConnectionState.CONNECTED &&
-            !uiState.state.microphoneState.isActive && !uiState.state.recordingState.isRecording,
-
         setControlCommandInt = { id, value ->
             if (id == ControlCommandIdentifier.LISTENING_MODE) viewModel.setListeningModeFromUi(value)
             else viewModel.setControlCommand(id, value)
@@ -141,7 +137,8 @@ fun AppleSettingsRoute(
         navigateToMicrophoneSettings = navigateToMicrophoneSettings,
         navigateToRecordingScreen = navigateToRecordingScreen,
         navigateToHeartRateScreen = navigateToHeartRateScreen,
-        navigateToDebugScreen = navigateToDebugScreen
+        navigateToDebugScreen = navigateToDebugScreen,
+        gameMode = gameMode,
     )
 }
 
@@ -179,9 +176,7 @@ fun AppleSettingsScreen(
     navigateToRecordingScreen: () -> Unit,
     navigateToHeartRateScreen: () -> Unit,
     navigateToDebugScreen: () -> Unit,
-    refreshDeviceSettings: () -> Unit = {},
-    refreshingSettings: Boolean = false,
-    canRefreshSettings: Boolean = false
+    gameMode: NativeGameModeController.State = NativeGameModeController.State(),
 ) {
     val state = uiState.state
     val settings = uiState.settings
@@ -399,6 +394,19 @@ fun AppleSettingsScreen(
                     },
                     navigateToEqualizer = navigateToEqualizer,
                     vendorIdHook = uiState.vendorIdHook,
+                    gameModeVisible = gameMode.available || settings.nativeGameModeEnabled,
+                    gameModeEnabled = gameMode.available,
+                    gameModeChecked = settings.nativeGameModeEnabled,
+                    gameModeDescription = stringResource(when {
+                        gameMode.restoring -> R.string.native_game_mode_stopping
+                        !gameMode.available -> R.string.native_game_mode_unavailable
+                        gameMode.issue == NativeGameModeController.Issue.WAITING_FOR_AUDIO -> R.string.native_game_mode_waiting
+                        gameMode.issue !in setOf(NativeGameModeController.Issue.NONE,
+                            NativeGameModeController.Issue.WAITING_FOR_AUDIO) -> R.string.native_game_mode_unavailable
+                        settings.nativeGameModeEnabled && !gameMode.active -> R.string.native_game_mode_starting
+                        else -> R.string.native_game_mode_description
+                    }),
+                    onGameModeChanged = { enabled -> updateSettings { it.copy(nativeGameModeEnabled = enabled) } },
                 )
             }
 
@@ -505,29 +513,6 @@ fun AppleSettingsScreen(
                     serialNumbers = listOf(metadata.serialNumber, metadata.leftSerialNumber, metadata.rightSerialNumber),
                     version = metadata.publicFirmware ?: "â€”",
                     navigateToVersion = navigateToVersion
-                )
-            }
-
-            item(key = "spacer_refresh") { Spacer(modifier = Modifier.height(28.dp)) }
-            item(key = "refresh_settings") {
-                StyledButton(
-                    onClick = refreshDeviceSettings,
-                    enabled = canRefreshSettings && !refreshingSettings && state.hearingModes.pending == null,
-                    isInteractive = false,
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)
-                ) {
-                    Text(
-                        text = stringResource(if (refreshingSettings) R.string.refresh_device_settings_busy
-                            else R.string.refresh_device_settings),
-                        style = MaterialTheme.typography.bodyMedium,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
-                Text(
-                    text = stringResource(R.string.refresh_device_settings_description),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
                 )
             }
 

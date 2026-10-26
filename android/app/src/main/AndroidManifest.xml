@@ -2,6 +2,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <permission
+        android:name="me.kavishdevar.librepods.permission.NATIVE_GAME_CONTROL"
+        android:protectionLevel="signature" />
+    <uses-permission android:name="me.kavishdevar.librepods.permission.NATIVE_GAME_CONTROL" />
+
     <uses-feature
         android:name="android.hardware.telephony"
         android:required="false" />
@@ -130,6 +135,11 @@
             android:name=".presentation.activities.NoiseControlWidgetConfigurationActivity"
             android:exported="false" />
 
+        <!-- libsu launches this bound service in its own root process, outside Android's Service runtime. -->
+        <service
+            android:name=".shizuku.RootAudioService"
+            android:exported="false"
+            tools:ignore="Instantiatable" />
         <service
             android:name=".bluetooth.PairingConsentService"
             android:exported="false"
@@ -204,6 +214,8 @@
 
     </application>
     <queries>
+        <package android:name="com.google.android.bluetooth" />
+        <package android:name="com.android.bluetooth" />
         <package android:name="com.google.android.apps.healthdata" />
     </queries>
 </manifest>

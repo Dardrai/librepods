@@ -94,7 +94,7 @@ class AirPodsMicrophone(
     }
 
     fun onPermissionRevoked() {
-        session?.let { fail(it, "Microphone access was removed or blocked. Check Android microphone privacy and Shizuku.") }
+        session?.let { fail(it, "Microphone access was removed or blocked. Check microphone privacy and Bluetooth access in Settings.") }
     }
 
     fun completeRecovery(generation: Long, success: Boolean) {

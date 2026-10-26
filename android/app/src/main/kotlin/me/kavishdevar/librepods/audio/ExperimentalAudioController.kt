@@ -86,7 +86,7 @@ class ExperimentalAudioController(
             return false
         }
         if (!bridge.state.value.connected) {
-            mutableMessage.value = "Connect Shizuku so playback can be restored after microphone use."
+            mutableMessage.value = "Allow Bluetooth access in Settings to restore playback after microphone use."
             return false
         }
         if (bridge.isMicrophonePrivacyBlocked()) {

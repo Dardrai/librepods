@@ -47,9 +47,23 @@ fun AudioSettings(
     navigateToEqualizer: () -> Unit,
 
     vendorIdHook: Boolean,
+    gameModeVisible: Boolean = false,
+    gameModeEnabled: Boolean = false,
+    gameModeChecked: Boolean = false,
+    gameModeDescription: String? = null,
+    onGameModeChanged: (Boolean) -> Unit = {},
 ) {
-    if (adaptiveVolumeCapability || conversationAwarenessCapability || loudSoundReductionCapability) {
+    if (adaptiveVolumeCapability || conversationAwarenessCapability || loudSoundReductionCapability || gameModeVisible) {
         StyledList(title = stringResource(R.string.audio)) {
+            if (gameModeVisible) {
+                styledToggle(
+                    label = stringResource(R.string.native_game_mode),
+                    description = gameModeDescription,
+                    checked = gameModeChecked,
+                    enabled = gameModeEnabled || gameModeChecked,
+                    onCheckedChange = onGameModeChanged,
+                )
+            }
             if (adaptiveVolumeCapability) {
                 styledToggle(
                     label = stringResource(R.string.personalized_volume),

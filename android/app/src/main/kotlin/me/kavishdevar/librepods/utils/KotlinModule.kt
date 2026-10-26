@@ -8,16 +8,47 @@ import android.util.Log
 import android.widget.ImageView
 import androidx.core.net.toUri
 import io.github.libxposed.api.XposedModule
+import io.github.libxposed.api.XposedInterface
 import io.github.libxposed.api.XposedModuleInterface.ModuleLoadedParam
 import io.github.libxposed.api.XposedModuleInterface.PackageLoadedParam
+import io.github.libxposed.api.XposedModuleInterface.SystemServerStartingParam
+import java.util.concurrent.atomic.AtomicBoolean
 
 private const val TAG = "LibrePodsHook"
 
 @SuppressLint("DiscouragedApi", "PrivateApi")
 class KotlinModule: XposedModule() {
+    private var eldJavaHooksInstalled = false
+    private var eldAudioFormatHook: XposedInterface.HookHandle? = null
+    private val eldAudioFormatObserved = AtomicBoolean(false)
+    private val gameBridgeInstalled = AtomicBoolean(false)
+    private var gameBridgeContext: Context? = null
+    private var gameBridge: AutoCloseable? = null
     override fun onModuleLoaded(param: ModuleLoadedParam) {
         log(Log.INFO, TAG, "module initialized at :: ${param.processName}")
         log(Log.INFO, TAG, "framework: $frameworkName($frameworkVersionCode) API $apiVersion")
+    }
+
+    override fun onSystemServerStarting(param: SystemServerStartingParam) {
+        if (eldAudioFormatHook != null) return
+        val method = EldAudioFormatBridge.discover(android.os.Build.VERSION.SDK_INT,
+            "system_server", param.classLoader) ?: return
+        try {
+            eldAudioFormatHook = hook(method).intercept { chain ->
+                val codecId = chain.args.firstOrNull() as? Long
+                val original = chain.proceed()
+                if (codecId == null || original !is Int) return@intercept original
+                val mapped = EldAudioFormatBridge.map(codecId, original, enabled = true)
+                if (mapped != original && eldAudioFormatObserved.compareAndSet(false, true))
+                    log(Log.INFO, TAG, "Apple codec mapped to native AAC-ELD audio format")
+                mapped
+            }
+            // The mapping is a format definition, independent of startup codec opt-in. An
+            // already published Apple identity still needs it during disable/recovery.
+            log(Log.INFO, TAG, "SDK37 Apple audio-format bridge installed")
+        } catch (_: Throwable) {
+            log(Log.WARN, TAG, "Audio-format bridge unavailable; keeping framework mapping")
+        }
     }
 
     @SuppressLint("UnsafeDynamicallyLoadedCode")
@@ -62,6 +93,12 @@ class KotlinModule: XposedModule() {
                     log(Log.INFO, TAG, "sdp hook enabled (remote pref): $remotePrefValue")
                     NativeBridge.setSdpHook(remotePrefValue)
                     log(Log.INFO, TAG, "Native library loaded successfully")
+
+                    // A codec failure must not undo the independent, existing identity hook.
+                    installEldCodecBridge(param.defaultClassLoader,
+                        runCatching { getRemotePreferences("me.kavishdevar.librepods")
+                            .getBoolean("aac_eld_hook", false) }.getOrDefault(false))
+                    installNativeGameBridge(param.defaultClassLoader)
                 }
             } catch (e: Exception) {
                 log(Log.ERROR, TAG, "Failed to load native library: ${e.message}")
@@ -75,6 +112,194 @@ class KotlinModule: XposedModule() {
         if (param.packageName == "com.android.settings") {
             hookSettingsController(param, "com.android.settings.bluetooth.AdvancedBluetoothDetailsHeaderController")
         }
+    }
+
+    private fun installNativeGameBridge(loader: ClassLoader) {
+        if (android.os.Build.VERSION.SDK_INT != 37 || !gameBridgeInstalled.compareAndSet(false, true)) return
+        val handles = mutableListOf<XposedInterface.HookHandle>()
+        try {
+            val adapter = Class.forName("com.android.bluetooth.btservice.AdapterService", false, loader)
+            val create = exactEldMethod(adapter, "onCreate", Void.TYPE, emptyList())
+            val destroy = exactEldMethod(adapter, "onDestroy", Void.TYPE, emptyList())
+            val gateway = object : GameNativeGateway {
+                override fun query() = NativeBridge.queryNativeGame()
+                override fun submit(operation: Int, ownerSerial: Long, expectedPeer: ByteArray,
+                    expectedMediaGeneration: Long, arguments: LongArray): LongArray {
+                    if (arguments.size != 2 || arguments[1] !in 0..0xeff) return longArrayOf()
+                    return NativeBridge.submitNativeGame(operation, ownerSerial, expectedPeer,
+                        expectedMediaGeneration, arguments[0], arguments[1].toInt())
+                }
+                override fun poll(ownerSerial: Long, nativeSerial: Long) =
+                    NativeBridge.pollNativeGame(ownerSerial, nativeSerial)
+                override fun restore(ownerSerial: Long, holdSerial: Long) =
+                    NativeBridge.restoreNativeGame(ownerSerial, holdSerial)
+                override fun beginClock(ownerSerial: Long, holdSerial: Long, expectedPeer: ByteArray,
+                    expectedMediaGeneration: Long, arguments: LongArray): LongArray {
+                    if (arguments.size != 4 || arguments[0] <= 0 || arguments[1] !in 0..0xeff ||
+                        arguments[2] !in setOf(9L, 11L) || arguments[3] !in 1..500) return longArrayOf()
+                    return NativeBridge.beginNativeGameClock(ownerSerial, holdSerial, expectedPeer,
+                        expectedMediaGeneration, arguments[0], arguments[1].toInt(),
+                        arguments[2].toInt(), arguments[3].toInt())
+                }
+                override fun cancelClock(ownerSerial: Long, holdSerial: Long) =
+                    NativeBridge.cancelNativeGameClock(ownerSerial, holdSerial)
+                override fun cancelOwner(ownerSerial: Long) = NativeBridge.cancelNativeGame(ownerSerial)
+            }
+            handles += hook(create).intercept { chain ->
+                val result = chain.proceed()
+                val context = chain.thisObject as? Context
+                if (context != null && gameBridge == null) {
+                    runCatching { NativeGameTransportServer.install(context, gateway, moduleApplicationInfo.uid) }
+                        .onSuccess { server ->
+                            if (server != null) {
+                                gameBridge = server
+                                gameBridgeContext = context
+                                log(Log.INFO, TAG, "Native Game Mode diagnostic bridge ready")
+                            }
+                        }.onFailure { log(Log.WARN, TAG, "Native Game Mode bridge unavailable") }
+                }
+                result
+            }
+            handles += hook(destroy).intercept { chain ->
+                if (chain.thisObject === gameBridgeContext) {
+                    runCatching { gameBridge?.close() }
+                    gameBridge = null
+                    gameBridgeContext = null
+                }
+                chain.proceed()
+            }
+        } catch (_: Throwable) {
+            handles.asReversed().forEach { runCatching { it.unhook() } }
+            gameBridgeInstalled.set(false)
+            log(Log.WARN, TAG, "Native Game Mode lifecycle unavailable; keeping ordinary audio")
+        }
+    }
+
+    private fun installEldCodecBridge(loader: ClassLoader, enabled: Boolean) {
+        if (eldJavaHooksInstalled) return
+        val sdk = android.os.Build.VERSION.SDK_INT
+        if (sdk != 33 && sdk != 37) {
+            log(Log.WARN, TAG, "ELD Bluetooth API unsupported; keeping stock codecs")
+            return
+        }
+        try {
+            NativeBridge.setEldJavaBridgeReady(false)
+            NativeBridge.setEldEnabled(enabled)
+            NativeBridge.isEldRuntimeReady() // Resolve every JNI symbol before acknowledging Java.
+            NativeBridge.getEldEncoderGeneration()
+            NativeBridge.getEldEncoderPeer()
+            NativeBridge.isEldEncoderFailed()
+            if (sdk == 37) require(NativeBridge.getEldNativeCodecIndex() in -1..11)
+        } catch (_: Throwable) {
+            log(Log.WARN, TAG, "ELD native bridge unavailable; keeping stock codecs")
+            return
+        }
+        val plan = try {
+            val nativeClass = Class.forName("com.android.bluetooth.a2dp.A2dpNativeInterface", false, loader)
+            val owner = if (sdk == 37) "AdapterService" else "AdapterApp"
+            val adapterClass = Class.forName("com.android.bluetooth.btservice.$owner", false, loader)
+            val hostLoader = adapterClass.classLoader ?: nativeClass.classLoader
+                ?: throw IllegalStateException("Bluetooth defining loader unavailable")
+            require(Class.forName(nativeClass.name, false, hostLoader) === nativeClass)
+            check(NativeBridge.pinEldHostLoader(hostLoader)) { "Bluetooth loader pin unavailable" }
+            EldCodecHookPlan.discover(hostLoader, sdk) {
+                runCatching { NativeBridge.getEldNativeCodecIndex() }.getOrNull()
+            }
+        } catch (_: Throwable) {
+            log(Log.WARN, TAG, "ELD Java signatures unavailable; keeping stock codecs")
+            return
+        }
+        val boundary = EldCodecBoundary(plan.objects)
+        val handles = mutableListOf<XposedInterface.HookHandle>()
+        fun ready() = runCatching {
+            NativeBridge.isEldRuntimeReady() && (!plan.objects.extended || plan.objects.nativeIndex() != null)
+        }.getOrDefault(false)
+        val watchdog = EldFailureWatchdog(plan, read = {
+            runCatching {
+                if (!ready()) null else {
+                    val generation = NativeBridge.getEldEncoderGeneration()
+                    val peer = NativeBridge.getEldEncoderPeer().map { it.toInt() and 255 }
+                    val failed = NativeBridge.isEldEncoderFailed()
+                    if (generation > 0 && NativeBridge.getEldEncoderGeneration() == generation)
+                        EldEncoderHealth(peer, generation, failed) else null
+                }
+            }.getOrNull()
+        }, report = { log(Log.WARN, TAG, it) })
+        fun rejected() = log(Log.ERROR, TAG, "ELD codec mapping rejected an unexpected carrier")
+        try {
+            handles += hook(plan.init).intercept { chain ->
+                val initial = chain.args.toTypedArray()
+                if (plan.objects.extended) {
+                    val free = boundary.initialCodecSlotFree(initial)
+                    try { NativeBridge.setEldInitialCodecSlotFree(free) }
+                    catch (_: Throwable) { rejected(); return@intercept chain.proceed() }
+                    if (!free) { rejected(); return@intercept chain.proceed() }
+                }
+                val active = ready()
+                val args = try { boundary.init(initial, active) }
+                    catch (_: Throwable) {
+                        if (plan.objects.extended) {
+                            runCatching { NativeBridge.setEldInitialCodecSlotFree(false) }
+                            rejected(); return@intercept chain.proceed()
+                        }
+                        if (!active) return@intercept chain.proceed()
+                        rejected(); return@intercept null
+                    }
+                chain.proceed(args)
+            }
+            handles += hook(plan.outbound).intercept { chain ->
+                if (!ready()) return@intercept chain.proceed()
+                val args = try { boundary.outbound(chain.args.toTypedArray(), true) }
+                    catch (_: Throwable) { rejected(); return@intercept null }
+                watchdog.codec(args[0] as ByteArray, args[1]?.let {
+                    if (plan.objects.isEld(it)) EldCodecIdentity.MODULE_CODEC_ID
+                    else if (plan.objects.extended) -1 else plan.objects.fields(it).type
+                } ?: -1)
+                chain.proceed(args)
+            }
+            handles += hook(plan.preference).intercept { chain ->
+                val active = ready()
+                val args = try { boundary.preference(chain.args.toTypedArray(), active) }
+                    catch (_: Throwable) { if (!active) return@intercept chain.proceed(); rejected(); return@intercept false }
+                if (args == null) false else chain.proceed(args)
+            }
+            handles += hook(plan.priorities).intercept { chain ->
+                val original = chain.proceed()
+                try { plan.objects.priorities(original, ready()) }
+                catch (_: Throwable) { rejected(); original }
+            }
+            plan.bufferSwitch?.let { method -> handles += hook(method).intercept { chain ->
+                if (ready() && boundary.suppressBufferSwitch(chain.args[2] as Int, true)) null else chain.proceed()
+            } }
+            plan.name?.let { method -> handles += hook(method).intercept { chain ->
+                if (ready() && chain.args[0] == EldCodecIdentity.MODULE_CODEC_ID) "Apple AAC-ELD" else chain.proceed()
+            } }
+            handles += hook(plan.active).intercept { chain ->
+                val result = chain.proceed()
+                if (result == true) chain.thisObject?.let { watchdog.selected(it, chain.args[0]) }
+                result
+            }
+            handles += hook(plan.audio).intercept { chain ->
+                if (ready()) watchdog.audioChanged(chain.args[0] as ByteArray, chain.args[1] == 2)
+                chain.proceed()
+            }
+            handles += hook(plan.connection).intercept { chain ->
+                if (chain.args[1] == 0 || chain.args[1] == 3) watchdog.disconnected(chain.args[0] as ByteArray)
+                else if (chain.args[1] == 2) watchdog.connected(chain.args[0] as ByteArray)
+                chain.proceed()
+            }
+            handles += hook(plan.cleanup).intercept { chain -> watchdog.clear(); chain.proceed() }
+        } catch (_: Throwable) {
+            handles.asReversed().forEach { runCatching { it.unhook() } }
+            runCatching { NativeBridge.setEldJavaBridgeReady(false) }
+            log(Log.WARN, TAG, "ELD Java hooks incomplete; keeping stock codecs")
+            return
+        }
+        eldJavaHooksInstalled = true
+        // Keep all mapping hooks if acknowledgement fails: native identity may already
+        // have been published. Native readiness is sticky until ELD objects are retired.
+        try { NativeBridge.setEldJavaBridgeReady(true) }
+        catch (_: Throwable) { log(Log.ERROR, TAG, "ELD Java readiness acknowledgement failed") }
     }
 
     private fun hookSettingsController(param: PackageLoadedParam, className: String) {
@@ -151,5 +376,24 @@ class KotlinModule: XposedModule() {
 
 
 object NativeBridge {
+    external fun queryNativeGame(): LongArray
+    external fun submitNativeGame(operation: Int, leaseOwner: Long, peer: ByteArray,
+        mediaGeneration: Long, encoderGeneration: Long, aclHandle: Int): LongArray
+    external fun pollNativeGame(leaseOwner: Long, nativeSerial: Long): LongArray
+    external fun restoreNativeGame(leaseOwner: Long, nativeSerial: Long): LongArray
+    external fun beginNativeGameClock(leaseOwner: Long, nativeSerial: Long, peer: ByteArray,
+        mediaGeneration: Long, encoderGeneration: Long, aclHandle: Int,
+        intervalTenths: Int, driftMs: Int): LongArray
+    external fun cancelNativeGameClock(leaseOwner: Long, nativeSerial: Long): LongArray
+    external fun cancelNativeGame(leaseOwner: Long)
     external fun setSdpHook(enabled: Boolean)
+    external fun setEldJavaBridgeReady(ready: Boolean)
+    external fun setEldInitialCodecSlotFree(free: Boolean)
+    external fun setEldEnabled(enabled: Boolean)
+    external fun isEldRuntimeReady(): Boolean
+    external fun getEldNativeCodecIndex(): Int
+    external fun getEldEncoderGeneration(): Long
+    external fun getEldEncoderPeer(): ByteArray
+    external fun isEldEncoderFailed(): Boolean
+    external fun pinEldHostLoader(loader: ClassLoader): Boolean
 }

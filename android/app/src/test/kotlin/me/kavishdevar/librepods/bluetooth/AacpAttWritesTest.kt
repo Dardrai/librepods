@@ -30,8 +30,8 @@ class AacpAttWritesTest {
             val requested = baseline.copyOf().put(40, 0.75f).also { it[2] = 0x64 }
             val confirmed = requested.copyOf().also { it[2] = 0x60 }
             val prepared = requireNotNull(device.aacp.prepareControlSessionRefresh())
-            `when`(att.readCharacteristic(ATTHandle.HEARING_AID)).thenReturn(baseline, baseline, confirmed)
-            `when`(att.writeCharacteristic(ATTHandle.HEARING_AID, requested)).thenAnswer {
+            att.readReturns(ATTHandle.HEARING_AID, baseline, baseline, confirmed)
+            att.onWrite(ATTHandle.HEARING_AID) {
                 assertArrayEquals("Sending is not confirmation", baseline, device.state.value.hearingAidData)
                 assertFalse(device.aacp.requestMicrophoneStream(socket))
                 assertNull(device.aacp.prepareControlSessionRefresh())
@@ -40,8 +40,8 @@ class AacpAttWritesTest {
             }
             assertTrue(device.writeATTCharacteristic(ATTHandle.HEARING_AID, requested, baseline))
             assertArrayEquals(confirmed, device.state.value.hearingAidData)
-            verify(att, times(1)).writeCharacteristic(ATTHandle.HEARING_AID, requested)
-            verify(att, times(3)).readCharacteristic(ATTHandle.HEARING_AID)
+            assertEquals(1, att.writeCount(ATTHandle.HEARING_AID))
+            assertEquals(3, att.readCount(ATTHandle.HEARING_AID))
             assertNotNull(device.aacp.prepareControlSessionRefresh())
         }
     }
@@ -52,14 +52,15 @@ class AacpAttWritesTest {
             val changed = baseline.copyOf().put(88, 0.5f)
             val requested = baseline.copyOf().put(40, 0.75f).also { it[2] = 0x64 }
             if (staleCache) seed(device, hearing = changed)
-            else `when`(att.readCharacteristic(ATTHandle.HEARING_AID)).thenReturn(changed)
+            else att.readReturns(ATTHandle.HEARING_AID, changed)
             assertFalse(device.writeATTCharacteristic(ATTHandle.HEARING_AID, requested, baseline))
             if (staleCache) {
-                verifyNoInteractions(att)
+                verifyNoInteractions(att.manager)
                 assertArrayEquals(changed, device.state.value.hearingAidData)
             } else {
-                verify(att, never()).writeCharacteristic(ATTHandle.HEARING_AID, requested)
-                assertArrayEquals(byteArrayOf(), device.state.value.hearingAidData)
+                assertEquals(0, att.writeCount(ATTHandle.HEARING_AID))
+                assertArrayEquals(changed, device.state.value.hearingAidData)
+                assertEquals(SettingsReadStatus.AVAILABLE, device.state.value.hearingAidReadStatus)
             }
         }
     }
@@ -74,13 +75,12 @@ class AacpAttWritesTest {
                 "missing" -> null
                 else -> baseline
             }
-            `when`(att.readCharacteristic(ATTHandle.HEARING_AID)).thenReturn(baseline, readback)
-            `when`(att.writeCharacteristic(ATTHandle.HEARING_AID, requested)).thenReturn(result != "write-failed")
+            att.readReturns(ATTHandle.HEARING_AID, baseline, readback)
+            att.onWrite(ATTHandle.HEARING_AID) { result != "write-failed" }
             assertFalse(device.writeATTCharacteristic(ATTHandle.HEARING_AID, requested, baseline))
             assertArrayEquals(byteArrayOf(), device.state.value.hearingAidData)
-            verify(att, times(1)).writeCharacteristic(ATTHandle.HEARING_AID, requested)
-            verify(att, times(when (result) { "unchanged" -> 6; "write-failed" -> 1; else -> 2 }))
-                .readCharacteristic(ATTHandle.HEARING_AID)
+            assertEquals(1, att.writeCount(ATTHandle.HEARING_AID))
+            assertEquals(when (result) { "unchanged" -> 6; "write-failed" -> 1; else -> 2 }, att.readCount(ATTHandle.HEARING_AID))
             assertNotNull(device.aacp.prepareControlSessionRefresh())
         }
     }
@@ -92,16 +92,16 @@ class AacpAttWritesTest {
             device.updateMicrophoneState { it.copy(isActive = true) }
             assertNull(device.readATTCharacteristic(ATTHandle.HEARING_AID))
             assertFalse(device.writeATTCharacteristic(ATTHandle.HEARING_AID, requested, baseline))
-            verifyNoInteractions(att)
+            verifyNoInteractions(att.manager)
             device.updateMicrophoneState { it.copy(isActive = false) }
             assertTrue(device.aacp.requestMicrophoneStream(socket))
             assertFalse(device.writeATTCharacteristic(ATTHandle.HEARING_AID, requested, baseline))
-            verifyNoInteractions(att)
+            verifyNoInteractions(att.manager)
             device.aacp.endMicrophoneStream(socket)
             val replacement = Shadow.newInstanceOf(BluetoothSocket::class.java).apply { connect() }
             val newer = baseline.copyOf().put(88, 0.5f)
             try {
-                `when`(att.readCharacteristic(ATTHandle.HEARING_AID)).thenAnswer {
+                att.onRead(ATTHandle.HEARING_AID) {
                     bind(device.aacp, replacement)
                     seed(device, hearing = newer)
                     baseline
@@ -118,8 +118,8 @@ class AacpAttWritesTest {
             seed(device, transparency = baseline)
             val requested = baseline.copyOf().put(0, 1f)
             val readback = requested.copyOf().also { if (!matches) it.put(44, 0f) }
-            `when`(att.readCharacteristic(ATTHandle.TRANSPARENCY)).thenReturn(baseline, readback)
-            `when`(att.writeCharacteristic(ATTHandle.TRANSPARENCY, requested)).thenReturn(true)
+            att.readReturns(ATTHandle.TRANSPARENCY, baseline, readback)
+            att.onWrite(ATTHandle.TRANSPARENCY) { true }
             assertEquals(matches, device.writeATTCharacteristic(ATTHandle.TRANSPARENCY, requested, baseline))
             assertArrayEquals(if (matches) readback else byteArrayOf(), device.state.value.transparencyData)
         }
@@ -127,9 +127,9 @@ class AacpAttWritesTest {
             val baseline = transparencyRecord()
             reportModes(device, socket, hearing = true)
             assertFalse(device.writeATTCharacteristic(ATTHandle.TRANSPARENCY, baseline.copyOf().put(0, 1f), baseline))
-            verifyNoInteractions(att)
-            `when`(att.readCharacteristic(ATTHandle.LOUD_SOUND_REDUCTION)).thenReturn(byteArrayOf(0), byteArrayOf(1))
-            `when`(att.writeCharacteristic(ATTHandle.LOUD_SOUND_REDUCTION, byteArrayOf(1))).thenReturn(true)
+            verifyNoInteractions(att.manager)
+            att.readReturns(ATTHandle.LOUD_SOUND_REDUCTION, byteArrayOf(0), byteArrayOf(1))
+            att.onWrite(ATTHandle.LOUD_SOUND_REDUCTION) { true }
             assertFalse(device.writeATTCharacteristic(ATTHandle.LOUD_SOUND_REDUCTION, byteArrayOf(2)))
             assertTrue(device.writeATTCharacteristic(ATTHandle.LOUD_SOUND_REDUCTION, byteArrayOf(1)))
             assertTrue(device.state.value.loudSoundReductionEnabled)
@@ -139,8 +139,8 @@ class AacpAttWritesTest {
     @Test fun modeEnablingRequiresAFittedProfileAndAcceptsOnlyKnownInactiveTransparency() = runBlocking<Unit> {
         for (fitted in listOf(true, false)) withFixture { device, att, socket ->
             val profile = hearingRecord().also { if (!fitted) it[1] = 0 }
-            `when`(att.readCharacteristic(ATTHandle.HEARING_AID)).thenReturn(profile)
-            `when`(att.readCharacteristic(ATTHandle.TRANSPARENCY)).thenReturn(byteArrayOf(2, 0, 0, 0))
+            att.readReturns(ATTHandle.HEARING_AID, profile)
+            att.readReturns(ATTHandle.TRANSPARENCY, byteArrayOf(2, 0, 0, 0))
             val output = (Shadow.extract<HearingModeSocketShadow>(socket)).output
             output.onPacket = { packet ->
                 if (packet.getOrNull(6) == 0x0d.toByte()) reportModes(device, socket, hearing = true)
@@ -150,14 +150,15 @@ class AacpAttWritesTest {
             assertNull(device.state.value.hearingModes.uncertain)
             if (!fitted) {
                 assertTrue(output.packets.isEmpty())
-                verify(att, never()).readCharacteristic(ATTHandle.TRANSPARENCY)
+                assertEquals(0, att.readCount(ATTHandle.TRANSPARENCY))
             }
-            verify(att, never()).writeCharacteristic(ATTHandle.HEARING_AID, profile)
+            assertEquals(0, att.writeCount(ATTHandle.HEARING_AID))
         }
     }
 
-    private suspend fun withFixture(block: suspend (AppleDevice, ATTManager, BluetoothSocket) -> Unit) {
-        mockConstruction(ATTManager::class.java).use { construction ->
+    private suspend fun withFixture(block: suspend (AppleDevice, ATTScript, BluetoothSocket) -> Unit) {
+        val script = ATTScript()
+        mockConstruction(ATTManager::class.java, withSettings().defaultAnswer { script.answer(it) }).use { construction ->
             val context = RuntimeEnvironment.getApplication()
             shadowOf(context).grantPermissions(Manifest.permission.BLUETOOTH_CONNECT)
             val adapter = context.getSystemService(BluetoothManager::class.java).adapter
@@ -166,8 +167,38 @@ class AacpAttWritesTest {
             val socket = Shadow.newInstanceOf(BluetoothSocket::class.java).apply { connect() }
             bind(device.aacp, socket)
             reportModes(device, socket)
-            try { block(device, construction.constructed().single(), socket) }
+            script.manager = construction.constructed().single()
+            try { block(device, script, socket) }
             finally { device.aacp.disconnect(); socket.close() }
+        }
+    }
+
+    // Script the typed boundary by JVM method name so app tests need no access to internal write/session APIs.
+    private class ATTScript {
+        lateinit var manager: ATTManager
+        private val reads = mutableMapOf<ATTHandle, () -> ByteArray?>()
+        private val writes = mutableMapOf<ATTHandle, () -> Boolean>()
+        private val token = Any()
+        fun readReturns(handle: ATTHandle, vararg values: ByteArray?) {
+            val remaining = values.toMutableList()
+            onRead(handle) { if (remaining.size > 1) remaining.removeAt(0) else remaining.firstOrNull() }
+        }
+        fun onRead(handle: ATTHandle, read: () -> ByteArray?) { reads[handle] = read }
+        fun onWrite(handle: ATTHandle, write: () -> Boolean) { writes[handle] = write }
+        fun readCount(handle: ATTHandle) = count("readCharacteristic", handle)
+        fun writeCount(handle: ATTHandle) = count("writeCharacteristic", handle)
+        private fun count(method: String, handle: ATTHandle) = mockingDetails(manager).invocations.count {
+            it.method.name.startsWith(method) && it.arguments.firstOrNull() == handle
+        }
+        fun answer(invocation: org.mockito.invocation.InvocationOnMock): Any? = when {
+            invocation.method.name.startsWith("readCharacteristic") -> {
+                (invocation.arguments[2] as () -> Unit).invoke()
+                reads[invocation.arguments[0] as ATTHandle]?.invoke()
+            }
+            invocation.method.name.startsWith("writeCharacteristic") -> writes[invocation.arguments[0] as ATTHandle]?.invoke() ?: false
+            invocation.method.name.startsWith("sessionToken") -> token
+            invocation.method.name.startsWith("ownsSession") -> invocation.arguments[0] === token
+            else -> RETURNS_DEFAULTS.answer(invocation)
         }
     }
 

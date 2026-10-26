@@ -18,277 +18,146 @@
 
 package me.kavishdevar.librepods.presentation.screens.apple
 
-import android.util.Log
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.saveable.Saver
-import androidx.compose.runtime.saveable.rememberSaveable
-import android.annotation.SuppressLint
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.mutableFloatStateOf
-import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.remember
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.shadow
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import me.kavishdevar.librepods.R
-import me.kavishdevar.librepods.core.devices.AirPodsModel
-import me.kavishdevar.librepods.core.devices.AirPodsSpecs
-import me.kavishdevar.librepods.core.devices.BaseCapability
-import me.kavishdevar.librepods.core.bluetooth.att.types.TransparencySettings
+import me.kavishdevar.librepods.core.bluetooth.att.ATTHandle
 import me.kavishdevar.librepods.core.bluetooth.att.types.parseTransparencySettingsResponse
 import me.kavishdevar.librepods.core.bluetooth.att.types.sendTransparencySettings
+import me.kavishdevar.librepods.core.devices.AccommodationsResult
+import me.kavishdevar.librepods.core.devices.ConnectionState
+import me.kavishdevar.librepods.core.devices.SettingsReadStatus
 import me.kavishdevar.librepods.presentation.components.primitives.StyledScaffold
 import me.kavishdevar.librepods.presentation.components.primitives.StyledSlider
 import me.kavishdevar.librepods.presentation.components.primitives.StyledToggle
 import me.kavishdevar.librepods.presentation.icons.LocalIcons
-import me.kavishdevar.librepods.presentation.design.DesignSystem
-import me.kavishdevar.librepods.presentation.design.LocalDesignSystem
-import me.kavishdevar.librepods.presentation.design.sectionHeader
+import me.kavishdevar.librepods.presentation.screens.settings.ObserveDongleControls
+import me.kavishdevar.librepods.presentation.screens.settings.rememberLibrePodsService
 import me.kavishdevar.librepods.presentation.viewmodel.AppleViewModel
 
-private const val TAG = "TransparencySettings"
-
-@SuppressLint("DefaultLocale")
 @Composable
-fun TransparencySettingsScreen(
-    viewModel: AppleViewModel,
-    navigateBack: (() -> Unit)?,
-) {
-    val isDarkTheme = MaterialTheme.colorScheme.surface.luminance() < 0.5f
-    val textColor = if (isDarkTheme) Color.White else Color.Black
-    val verticalScrollState = rememberScrollState()
+fun TransparencySettingsScreen(viewModel: AppleViewModel, navigateBack: (() -> Unit)?) {
+    val ui by viewModel.uiState.collectAsState()
+    val connection by viewModel.connectionState.collectAsState()
+    val editor = remember(viewModel) { viewModel.liveATTEditor(ATTHandle.TRANSPARENCY) }
+    val live by editor.state.collectAsState()
+    TransparencyPage(navigateBack) {
+        TransparencyControls(live.displayed, ui.state.controlSession, live.revision,
+            writable = viewModel.transparencyTransportAvailable && !ui.state.accommodationsRequest.pending && !ui.state.microphoneState.isActive,
+            canEnable = ui.state.hearingModes.customTransparencyAllowed,
+            transportAvailable = viewModel.transparencyTransportAvailable, result = null,
+            onEdit = { editor.edit(live.revision, it) }, onFinished = { editor.flush() },
+            onCanceled = { editor.cancel(live.revision) }, readStatus = ui.state.transparencyReadStatus,
+            connected = connection == ConnectionState.CONNECTED)
+    }
+}
 
-    val trackColor = if (isDarkTheme) Color(0xFFB3B3B3) else Color(0xFF929491)
-    val activeTrackColor = if (isDarkTheme) Color(0xFF007AFF) else Color(0xFF3C6DF5)
-    val thumbColor = if (isDarkTheme) Color(0xFFFFFFFF) else Color(0xFFFFFFFF)
+@Composable
+internal fun DongleTransparencyScreen(navigateBack: (() -> Unit)?) {
+    val controller = rememberLibrePodsService()?.dongleControls ?: return
+    val state by controller.state.collectAsState()
+    ObserveDongleControls(controller)
+    val editor = remember(controller) { controller.liveTransparencyEditor() }
+    val live by editor.state.collectAsState()
+    TransparencyPage(navigateBack) {
+        TransparencyControls(live.displayed, state.controlSession, live.revision,
+            writable = state.connected && (!state.busy || live.pending) && state.status?.microphoneActive == false,
+            canEnable = state.hearingModes.customTransparencyAllowed,
+            transportAvailable = true, result = state.transparencyResult,
+            onEdit = { editor.edit(live.revision, it) }, onFinished = { editor.flush() },
+            onCanceled = { editor.cancel(live.revision) }, pending = live.pending, error = state.error)
+    }
+}
 
-    val uiState by viewModel.uiState.collectAsState()
-
-    val state = uiState.state
-
-    StyledScaffold(
-        title = stringResource(R.string.customize_transparency_mode),
-        navigateBack = navigateBack
-    ) { topPadding, bottomPadding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(MaterialTheme.colorScheme.surfaceContainer)
-                .verticalScroll(verticalScrollState)
-                .padding(horizontal = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
-        ) {
-            Spacer(modifier = Modifier.height(topPadding))
-            val backgroundColor = MaterialTheme.colorScheme.surfaceContainer
-
-            val data = state.transparencyData
-            val hearingAllowsTransparency = uiState.metadata.model != AirPodsModel.UNKNOWN &&
-                (!AirPodsSpecs.getSpec(uiState.metadata.model).baseCapabilities
-                    .contains(BaseCapability.HEARING_AID) ||
-                    state.hearingModes.customTransparencyAllowed)
-            val settings = remember(data, state.hearingModes) { mutableStateOf(parseTransparencySettingsResponse(data)) }
-            val writable = settings.value != null && hearingAllowsTransparency
-            fun updateSettings(edit: (TransparencySettings) -> TransparencySettings) {
-                val current = settings.value ?: return
-                val updated = edit(current)
-                if ((updated.enabled && !hearingAllowsTransparency) || updated == current) return
-                settings.value = updated
-                sendTransparencySettings(data, updated, viewModel::writeATTCharacteristic)
-            }
-            if (uiState.vendorIdHook) {
-                StyledToggle(
-                    enabled = settings.value != null && (settings.value?.enabled == true || hearingAllowsTransparency),
-                    label = stringResource(R.string.transparency_mode),
-                    checked = settings.value?.enabled ?: false,
-                    description = stringResource(R.string.customize_transparency_mode_description),
-                    onCheckedChange = { updateSettings { settings -> settings.copy(enabled = it) } }
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                StyledSlider(
-                    enabled = writable,
-                    label = stringResource(R.string.amplification),
-                    valueRange = -1f..1f,
-                    value = (settings.value?.netAmplification ?: 0f).coerceIn(-1f, 1f),
-                    onValueChange = {
-                        updateSettings { settings -> settings.withAmplification(amplification = it) }
-                    },
-                    startImageVector = LocalIcons.current.SpeakerMin,
-                    endImageVector = LocalIcons.current.SpeakerMax,
-                    independent = true
-                )
-
-                StyledSlider(
-                    enabled = writable,
-                    label = stringResource(R.string.balance),
-                    valueRange = -1f..1f,
-                    value = (settings.value?.balance ?: 0f).coerceIn(-1f, 1f),
-                    onValueChange = {
-                        updateSettings { settings -> settings.withAmplification(balance = it) }
-                    },
-                    snapPoints = listOf(-1f, 0f, 1f),
-                    startLabel = stringResource(R.string.left),
-                    endLabel = stringResource(R.string.right),
-                    independent = true,
-                )
-
-                StyledSlider(
-                    enabled = writable,
-                    label = stringResource(R.string.tone),
-                    valueRange = -1f..1f,
-                    value = (settings.value?.leftTone ?: 0f).coerceIn(-1f, 1f),
-                    onValueChange = {
-                        updateSettings { settings -> settings.copy(leftTone = it, rightTone = it) }
-                    },
-                    startLabel = stringResource(R.string.darker),
-                    endLabel = stringResource(R.string.brighter),
-                    independent = true,
-                )
-
-                StyledSlider(
-                    enabled = writable,
-                    label = stringResource(R.string.ambient_noise_reduction),
-                    valueRange = 0f..1f,
-                    value = (settings.value?.leftAmbientNoiseReduction ?: 0f).coerceIn(0f, 1f),
-                    onValueChange = {
-                        updateSettings { settings -> settings.copy(leftAmbientNoiseReduction = it, rightAmbientNoiseReduction = it) }
-                    },
-                    startLabel = stringResource(R.string.less),
-                    endLabel = stringResource(R.string.more),
-                    independent = true,
-                )
-
-                StyledToggle(
-                    enabled = writable,
-                    label = stringResource(R.string.conversation_boost),
-                    checked = settings.value?.leftConversationBoost ?: false,
-                    description = stringResource(R.string.conversation_boost_description),
-                    onCheckedChange = { updateSettings { settings -> settings.copy(leftConversationBoost = it, rightConversationBoost = it) } }
-                )
-
-                Text(
-                    text = stringResource(R.string.equalizer),
-                    style = MaterialTheme.typography.labelSmallEmphasized,
-                    color = if (LocalDesignSystem.current == DesignSystem.Material) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.sectionHeader,
-                    modifier = Modifier.padding(16.dp, bottom = 4.dp)
-                )
-
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(backgroundColor, RoundedCornerShape(28.dp))
-                        .padding(16.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.SpaceBetween
-                ) {
-                    for (i in 0 until 8) {
-                        val eqValue = remember(settings.value?.leftEQ?.get(i)) { mutableFloatStateOf(settings.value?.leftEQ?.get(i) ?: 0f) }
-                        Row(
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(38.dp)
-                        ) {
-                            Text(
-                                text = String.format("%.2f", eqValue.floatValue),
-                                fontSize = 12.sp,
-                                color = textColor,
-                                modifier = Modifier.padding(bottom = 4.dp)
-                            )
-
-                            Slider(
-                                enabled = writable,
-                                value = eqValue.floatValue,
-                                onValueChange = { newVal ->
-                                    eqValue.floatValue = newVal
-                                    updateSettings { settings -> settings.copy(
-                                        leftEQ = settings.leftEQ.copyOf().also { it[i] = newVal },
-                                        rightEQ = settings.rightEQ.copyOf().also { it[i] = newVal }) }
-                                },
-                                valueRange = 0f..100f,
-                                modifier = Modifier
-                                    .fillMaxWidth(0.9f)
-                                    .height(36.dp),
-                                colors = SliderDefaults.colors(
-                                    thumbColor = thumbColor,
-                                    activeTrackColor = activeTrackColor,
-                                    inactiveTrackColor = trackColor
-                                ),
-                                thumb = {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(24.dp)
-                                            .shadow(4.dp, CircleShape)
-                                            .background(thumbColor, CircleShape)
-                                    )
-                                },
-                                track = {
-                                    Box(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .height(12.dp),
-                                        contentAlignment = Alignment.CenterStart
-                                    )
-                                    {
-                                        Box(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .height(4.dp)
-                                                .background(trackColor, RoundedCornerShape(4.dp))
-                                        )
-                                        Box(
-                                            modifier = Modifier
-                                                .fillMaxWidth(eqValue.floatValue / 100f)
-                                                .height(4.dp)
-                                                .background(
-                                                    activeTrackColor,
-                                                    RoundedCornerShape(4.dp)
-                                                )
-                                        )
-                                    }
-                                }
-                            )
-
-                            Text(
-                                text = stringResource(R.string.band_label, i + 1),
-                                fontSize = 12.sp,
-                                color = textColor,
-                                modifier = Modifier.padding(top = 4.dp)
-                            )
-                        }
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(16.dp))
-            }
-
-            Spacer(modifier = Modifier.height(bottomPadding))
+@Composable
+private fun TransparencyPage(navigateBack: (() -> Unit)?, content: @Composable () -> Unit) {
+    StyledScaffold(title = stringResource(R.string.transparency_mode), navigateBack = navigateBack) { top, bottom ->
+        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            Spacer(Modifier.height(top)); content(); Spacer(Modifier.height(bottom))
         }
+    }
+}
+
+@Composable
+internal fun TransparencyControls(data: ByteArray, session: Long, revision: Long = 0,
+    writable: Boolean, canEnable: Boolean, transportAvailable: Boolean,
+    result: AccommodationsResult?, onEdit: ((ByteArray) -> ByteArray?) -> Unit,
+    onFinished: () -> Unit = {}, onCanceled: () -> Unit = {}, pending: Boolean = false, error: String? = null,
+    readStatus: SettingsReadStatus? = null, connected: Boolean = true) {
+    val original = remember(data.toList()) { parseTransparencySettingsResponse(data)?.takeIf { data.size == 104 } }
+    fun edit(transform: (me.kavishdevar.librepods.core.bluetooth.att.types.TransparencySettings) -> me.kavishdevar.librepods.core.bluetooth.att.types.TransparencySettings) {
+        onEdit { current ->
+            val parsed = parseTransparencySettingsResponse(current)?.takeIf { current.size == 104 }
+            if (parsed == null) null else {
+                var value: ByteArray? = null
+                sendTransparencySettings(current, transform(parsed)) { _, requested, _ -> value = requested }
+                value
+            }
+        }
+    }
+    if (original != null && !transportAvailable) Text(stringResource(R.string.transparency_transport_unavailable), color = MaterialTheme.colorScheme.onSurfaceVariant)
+    if (original != null) key(session, revision) {
+        val gain = original.netAmplification
+        val pan = original.balance
+        val canonical = gain in -1f..1f && pan in -1f..1f
+        val sliderEnabled = writable && original.enabled && canEnable
+        StyledToggle(label = stringResource(R.string.transparency_mode), checked = original.enabled,
+            enabled = writable && (original.enabled || canEnable),
+            description = stringResource(R.string.customize_transparency_mode_description),
+            onCheckedChange = { value -> edit { it.copy(enabled = value) } })
+        StyledSlider(label = stringResource(R.string.amplification), value = gain.coerceIn(-1f, 1f), valueRange = -1f..1f,
+            enabled = sliderEnabled && canonical, independent = true, startImageVector = LocalIcons.current.SpeakerMin,
+            endImageVector = LocalIcons.current.SpeakerMax,
+            onValueChange = { value -> edit { it.withAmplification(value, it.balance) } },
+            onValueChangeFinished = onFinished, onValueChangeCanceled = onCanceled)
+        StyledSlider(label = stringResource(R.string.balance), value = pan.coerceIn(-1f, 1f), valueRange = -1f..1f,
+            enabled = sliderEnabled && canonical, independent = true, snapPoints = listOf(-1f, 0f, 1f),
+            startLabel = stringResource(R.string.left), endLabel = stringResource(R.string.right),
+            onValueChange = { value -> edit { it.withAmplification(it.netAmplification, value) } },
+            onValueChangeFinished = onFinished, onValueChangeCanceled = onCanceled)
+        StyledSlider(label = stringResource(R.string.tone), value = (original.leftTone + original.rightTone) / 2,
+            valueRange = -1f..1f, enabled = sliderEnabled, independent = true,
+            startLabel = stringResource(R.string.darker), endLabel = stringResource(R.string.brighter),
+            onValueChange = { value -> edit { it.copy(leftTone = value, rightTone = value) } },
+            onValueChangeFinished = onFinished, onValueChangeCanceled = onCanceled)
+        StyledSlider(label = stringResource(R.string.ambient_noise_reduction),
+            value = (original.leftAmbientNoiseReduction + original.rightAmbientNoiseReduction) / 2,
+            valueRange = 0f..1f, enabled = sliderEnabled, independent = true,
+            startLabel = stringResource(R.string.less), endLabel = stringResource(R.string.more),
+            onValueChange = { value -> edit { it.copy(leftAmbientNoiseReduction = value, rightAmbientNoiseReduction = value) } },
+            onValueChangeFinished = onFinished, onValueChangeCanceled = onCanceled)
+        StyledSlider(label = stringResource(R.string.own_voice_amplification), value = original.ownVoiceAmplification!!,
+            valueRange = 0f..1f, enabled = sliderEnabled, independent = true,
+            startImageVector = LocalIcons.current.SpeakerMin, endImageVector = LocalIcons.current.SpeakerMax,
+            onValueChange = { value -> edit { it.copy(ownVoiceAmplification = value) } },
+            onValueChangeFinished = onFinished, onValueChangeCanceled = onCanceled)
+        StyledToggle(label = stringResource(R.string.conversation_boost),
+            checked = original.leftConversationBoost && original.rightConversationBoost, enabled = sliderEnabled,
+            description = stringResource(R.string.conversation_boost_description),
+            onCheckedChange = { value -> edit { it.copy(leftConversationBoost = value, rightConversationBoost = value) } })
+    } else Text(stringResource(readStatus?.let { settingsReadMessage(it, connected) }
+        ?: if (transportAvailable) R.string.settings_waiting else R.string.transparency_transport_unavailable),
+        color = MaterialTheme.colorScheme.onSurfaceVariant)
+    when {
+        result == AccommodationsResult.UNCONFIRMED -> Text(stringResource(R.string.att_setting_not_confirmed), color = MaterialTheme.colorScheme.error)
+        error != null -> Text(error, color = MaterialTheme.colorScheme.error)
     }
 }

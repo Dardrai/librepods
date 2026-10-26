@@ -122,7 +122,6 @@ fun StyledIconButton(
             )
             Box(
                 modifier = modifier
-                    .appleGlassSurface(backdrop, enabled, surfaceColor, pressProgress = pressProgress)
                     .clickable(
                         enabled = enabled,
                         interactionSource = interactions,
@@ -130,6 +129,7 @@ fun StyledIconButton(
                         role = Role.Button,
                         onClick = onUserClick,
                     )
+                    .appleGlassSurface(backdrop, enabled, surfaceColor, pressProgress = pressProgress)
                     .size(48.dp),
                 contentAlignment = Alignment.Center,
             ) {

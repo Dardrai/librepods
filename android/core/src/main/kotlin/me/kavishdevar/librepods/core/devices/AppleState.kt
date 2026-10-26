@@ -45,6 +45,8 @@ data class AppleState(
     val loudSoundReductionEnabled: Boolean = false,
     val transparencyData: ByteArray = byteArrayOf(),
     val hearingAidData: ByteArray = byteArrayOf(),
+    val transparencyReadStatus: SettingsReadStatus = SettingsReadStatus.WAITING,
+    val hearingAidReadStatus: SettingsReadStatus = SettingsReadStatus.WAITING,
 
     val customEq: CustomEq = CustomEq(1, 50, 50, 50),
     val requestedCustomEq: CustomEq? = null,
@@ -60,6 +62,9 @@ data class AppleState(
     val caseInfo: CaseInfoReport? = null,
 
     val hearingModes: HearingModes = HearingModes(),
+    val controlSession: Long = 0,
+    val accommodationsRequest: AccommodationsRequestState = AccommodationsRequestState(),
+    val accommodationsAudiogramSource: AccommodationsAudiogram? = null,
 
     val currentHeartRate: HeartRateSample? = null,
     val hrmState: BuddyState = BuddyState.INACTIVE,
@@ -67,6 +72,8 @@ data class AppleState(
 
     val aacpPackets: List<AACPPacket> = emptyList(),
 ): DeviceState
+
+enum class SettingsReadStatus { WAITING, READING, AVAILABLE, UNAVAILABLE }
 
 /** The exact received report and write result survive conflated UI request/echo emissions. */
 data class QuietListeningModeReport(val value: ByteArray, val written: Deferred<Boolean>)

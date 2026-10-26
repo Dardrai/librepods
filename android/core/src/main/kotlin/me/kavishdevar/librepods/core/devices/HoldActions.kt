@@ -3,6 +3,7 @@ package me.kavishdevar.librepods.core.devices
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommandIdentifier
 
 internal fun AppleState.nextHoldListeningMode(settings: AppleSettings, metadata: AppleMetadata): Int? {
+    if (ControlCommandIdentifier.LISTENING_MODE !in liveControlReports) return null
     val current = controlStates[ControlCommandIdentifier.LISTENING_MODE]?.firstOrNull()?.toInt() ?: return null
     if (current !in 1..4) return null
     val supported = metadata.supportedNoiseModeCycleMask(effectiveAllowOff(settings, metadata.modelNumber))

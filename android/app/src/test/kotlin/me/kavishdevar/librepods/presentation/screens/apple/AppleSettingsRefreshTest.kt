@@ -9,7 +9,6 @@ import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
-import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.click
@@ -54,47 +53,29 @@ class AppleSettingsRefreshTest {
 
     // Apple backdrop AGSL is incomplete in Robolectric; test its actual input and semantics separately.
     @GraphicsMode(GraphicsMode.Mode.LEGACY)
-    @Test fun refreshIsReachableAndCannotBeRepeatedWhileBusyOrDisconnected() {
-        val busy = mutableStateOf(false)
-        val connected = mutableStateOf(true)
-        var requests = 0
+    @Test fun settingsHaveNoManualRefreshAndOpeningDoesNotDisconnectOrWrite() {
+        var actions = 0
         compose.setContent {
             LibrePodsTheme(designSystem = DesignSystem.Apple) {
-                SettingsScreen(busy.value, connected.value, refresh = { requests++ })
+                SettingsScreen(disconnect = { actions++ }, setBoolean = { _, _ -> actions++ })
             }
         }
         scrollToBottom()
-        assertEquals("Opening settings must not refresh the device", 0, requests)
-        val label = text(R.string.refresh_device_settings)
-        compose.onNodeWithText(label).assertIsDisplayed().assertIsEnabled()
+        compose.onNodeWithText(text(R.string.refresh_device_settings)).assertDoesNotExist()
+        compose.onNodeWithText(text(R.string.refresh_device_settings_busy)).assertDoesNotExist()
+        compose.onNodeWithText(text(R.string.refresh_device_settings_description)).assertDoesNotExist()
+        compose.runOnIdle { assertEquals("Opening settings must not change the connection or device settings", 0, actions) }
+        compose.onNodeWithText(text(R.string.disconnect)).assertIsDisplayed().assertIsEnabled()
             .performTouchInput { click() }
-        compose.runOnIdle { assertEquals(1, requests); busy.value = true }
-        compose.waitForIdle()
-        compose.onNodeWithText(text(R.string.refresh_device_settings_busy))
-            .assertIsDisplayed().assertIsNotEnabled().performTouchInput { click() }
-        compose.runOnIdle {
-            assertEquals("Busy refresh must not send another request", 1, requests)
-            busy.value = false
-            connected.value = false
-        }
-        compose.waitForIdle()
-        compose.onNodeWithText(label).assertIsDisplayed().assertIsNotEnabled()
-            .performTouchInput { click() }
-        compose.runOnIdle {
-            assertEquals("Disconnected refresh must not send a request", 1, requests)
-            connected.value = true
-        }
-        compose.waitForIdle()
-        compose.onNodeWithText(label).assertIsEnabled().performTouchInput { click() }
-        compose.runOnIdle { assertEquals("A later connected refresh remains usable", 2, requests) }
+        compose.runOnIdle { assertEquals("Disconnect remains an explicit user action", 1, actions) }
     }
 
     @Config(qualifiers = "w320dp-h900dp-mdpi")
-    @Test fun materialRefreshFitsNarrowLightScreenAtLargeText() {
+    @Test fun materialSettingsFitNarrowLightScreenAtLargeText() {
         renderMaterial(dark = false, fontScale = 1.3f, name = "light-narrow-large")
     }
 
-    @Test fun materialRefreshRemainsReadableInDarkAppearance() {
+    @Test fun materialSettingsRemainReadableInDarkAppearance() {
         renderMaterial(dark = true, fontScale = 1f, name = "dark-material")
     }
 
@@ -102,7 +83,7 @@ class AppleSettingsRefreshTest {
         var requested: ControlCommandIdentifier? = null
         compose.setContent {
             LibrePodsTheme(designSystem = DesignSystem.Material) {
-                SettingsScreen(busy = false, connected = true, refresh = {},
+                SettingsScreen(
                     setBoolean = { id, _ -> requested = id })
             }
         }
@@ -130,7 +111,7 @@ class AppleSettingsRefreshTest {
         compose.setContent {
             CompositionLocalProvider(LocalDensity provides Density(1f, 1.3f)) {
                 LibrePodsTheme(designSystem = theme) {
-                    SettingsScreen(busy = false, connected = true, refresh = {},
+                    SettingsScreen(
                         setBoolean = { id, value -> writes += id to value },
                         settings = AppleSettings(savedUnconfirmedChoices = mapOf("desired_noise_modes_cycle" to "0b")))
                 }
@@ -167,7 +148,7 @@ class AppleSettingsRefreshTest {
         val writes = mutableListOf<Pair<ControlCommandIdentifier, Boolean>>()
         compose.setContent {
             LibrePodsTheme(designSystem = DesignSystem.Material) {
-                SettingsScreen(busy = false, connected = true, refresh = {},
+                SettingsScreen(
                     setBoolean = { control, value -> writes += control to value },
                     state = choice.value.first, settings = choice.value.second)
             }
@@ -188,22 +169,18 @@ class AppleSettingsRefreshTest {
         compose.setContent {
             CompositionLocalProvider(LocalDensity provides Density(1f, fontScale)) {
                 LibrePodsTheme(darkTheme = dark, designSystem = DesignSystem.Material) {
-                    SettingsScreen(busy = false, connected = true, refresh = {})
+                    SettingsScreen()
                 }
             }
         }
         scrollToBottom()
-        val button = compose.onNodeWithText(text(R.string.refresh_device_settings))
-            .assertIsDisplayed().assertIsEnabled().fetchSemanticsNode().boundsInRoot
-        val description = compose.onNodeWithText(text(R.string.refresh_device_settings_description))
-            .assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+        compose.onNodeWithText(text(R.string.refresh_device_settings)).assertDoesNotExist()
+        compose.onNodeWithText(text(R.string.refresh_device_settings_description)).assertDoesNotExist()
         val disconnect = compose.onNodeWithText(text(R.string.disconnect))
             .assertIsDisplayed().fetchSemanticsNode().boundsInRoot
-        assertTrue("Refresh must retain a full touch target", button.height >= 48f)
-        assertTrue("Refresh and its explanation must not overlap", button.bottom <= description.top)
-        assertTrue("Refresh must remain above Disconnect", description.bottom <= disconnect.top)
+        assertTrue("Disconnect must retain a full touch target", disconnect.height >= 48f)
         val image = compose.onRoot().captureToImage().asAndroidBitmap()
-        val output = File("build/overlay-previews/refresh-settings-$name.png")
+        val output = File("build/overlay-previews/automatic-settings-$name.png")
         output.parentFile.mkdirs()
         output.outputStream().use { assertTrue(image.compress(Bitmap.CompressFormat.PNG, 100, it)) }
     }
@@ -218,9 +195,7 @@ class AppleSettingsRefreshTest {
 
     @Composable
     private fun SettingsScreen(
-        busy: Boolean,
-        connected: Boolean,
-        refresh: () -> Unit,
+        disconnect: () -> Unit = {},
         setBoolean: (ControlCommandIdentifier, Boolean) -> Unit = { _, _ -> },
         state: AppleState = AppleState(),
         settings: AppleSettings = AppleSettings(),
@@ -234,7 +209,7 @@ class AppleSettingsRefreshTest {
             setControlCommandBoolean = setBoolean,
             writeATTCharacteristic = { _, _ -> },
             updateSettings = {},
-            disconnect = {},
+            disconnect = disconnect,
             navigateBack = null,
             navigateToRename = {},
             navigateToHearingProtection = {},
@@ -249,10 +224,7 @@ class AppleSettingsRefreshTest {
             navigateToMicrophoneSettings = {},
             navigateToRecordingScreen = {},
             navigateToHeartRateScreen = {},
-            navigateToDebugScreen = {},
-            refreshDeviceSettings = refresh,
-            refreshingSettings = busy,
-            canRefreshSettings = connected
+            navigateToDebugScreen = {}
         )
     }
 }

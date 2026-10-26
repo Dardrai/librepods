@@ -12,5 +12,9 @@ interface IAudioBridge {
     int nativeCall(String address, IPlaybackRecoveryOwner owner, boolean connect) = 9;
     boolean pauseOwnedMedia(String address, IPlaybackRecoveryOwner owner) = 10;
     boolean finishOwnedMedia(IPlaybackRecoveryOwner owner, boolean resume) = 11;
+    boolean ensureOwnBackgroundAudio() = 12;
+    boolean checkVolumeSync(String address, IPlaybackRecoveryOwner owner) = 13;
+    void forgetVolumeSync(IPlaybackRecoveryOwner owner) = 14;
+    oneway void retireOwner(IPlaybackRecoveryOwner owner) = 15;
     void destroy() = 16777114;
 }

@@ -40,10 +40,10 @@ class NoiseModeCycleRenderingTest {
     private val id = ControlCommandIdentifier.LISTENING_MODE_CONFIGS
     private val metadata = AppleMetadata(model = AirPodsModel.AIRPODS_PRO_3, modelNumber = "A3063", version1 = "9A348")
 
-    @Test fun materialUnknownMaskNeedsCompleteExplicitApplyAndDoesNotWriteOnEcho() = stagedSelection(DesignSystem.Material)
+    @Test fun materialUnknownMaskUpdatesOnlyCompleteSelectionsAndDoesNotWriteOnEcho() = stagedSelection(DesignSystem.Material)
 
     @GraphicsMode(GraphicsMode.Mode.LEGACY)
-    @Test fun appleUnknownMaskNeedsCompleteExplicitApplyAndDoesNotWriteOnEcho() = stagedSelection(DesignSystem.Apple)
+    @Test fun appleUnknownMaskUpdatesOnlyCompleteSelectionsAndDoesNotWriteOnEcho() = stagedSelection(DesignSystem.Apple)
 
     private fun stagedSelection(theme: DesignSystem) {
         val current = mutableStateOf(AppleState(controlStates = mapOf(ControlCommandIdentifier.ALLOW_OFF_OPTION to byteArrayOf(1))))
@@ -60,20 +60,19 @@ class NoiseModeCycleRenderingTest {
             }
         }
         assertTrue(writes.isEmpty())
-        compose.onNodeWithText("Apply").performScrollTo().assertIsNotEnabled()
+        compose.onAllNodesWithText("Apply").assertCountEquals(0)
         choose("Off")
-        compose.onNodeWithText("Apply").performScrollTo().assertIsNotEnabled()
+        compose.onAllNodesWithText("Apply").assertCountEquals(0)
         choose("Adaptive")
         choose("Noise Cancellation")
         compose.onNodeWithText("Transparency").assertIsNotSelected()
-        assertTrue("Choosing a combination must not send intermediate masks", writes.isEmpty())
-        compose.onNodeWithText("Apply").performScrollTo().assertIsEnabled().performClick()
+        assertTrue("Incomplete masks are never submitted", writes.all { it.countOneBits() >= 2 })
         compose.runOnIdle {
-            assertEquals(listOf(11), writes)
+            assertEquals(listOf(9, 11), writes)
             current.value = current.value.copy(requestedControls = mapOf(id to byteArrayOf(11)))
             writing.value = true
         }
-        compose.onNodeWithText("Applying…").performScrollTo().assertIsDisplayed().assertIsNotEnabled()
+        compose.onAllNodesWithText("Applying…").assertCountEquals(0)
         compose.runOnIdle { writing.value = false }
         compose.onNodeWithText("Off").performScrollTo().assertIsSelected()
         compose.onNodeWithText("Adaptive").assertIsSelected()
@@ -92,11 +91,11 @@ class NoiseModeCycleRenderingTest {
                 requestedControls = emptyMap(), liveControlReports = setOf(id))
         }
         compose.onNodeWithText("Off").performScrollTo().assertIsSelected()
-        compose.onNodeWithText("Apply").performScrollTo().assertIsNotEnabled()
+        compose.onAllNodesWithText("Apply").assertCountEquals(0)
         compose.runOnIdle { current.value = current.value.copy(controlStates = current.value.controlStates + (id to byteArrayOf(6))) }
         compose.onNodeWithText("Transparency").performScrollTo().assertIsSelected()
         compose.onNodeWithText("Off").assertIsNotSelected()
-        compose.runOnIdle { assertEquals("Opening, choosing and incoming reports never cause another write", listOf(11), writes) }
+        compose.runOnIdle { assertEquals("Opening, choosing and incoming reports never cause another write", listOf(9, 11), writes) }
     }
 
     @GraphicsMode(GraphicsMode.Mode.LEGACY)
@@ -116,16 +115,16 @@ class NoiseModeCycleRenderingTest {
         compose.onNodeWithText("Off").performScrollTo().assertIsNotEnabled()
         compose.onNodeWithText("Turn on Off Listening Mode in AirPods settings.").performScrollTo().assertIsDisplayed()
         compose.runOnIdle { allowOff.value = true }
-        choose("Off"); choose("Adaptive"); choose("Noise Cancellation")
-        compose.onNodeWithText("Apply").performScrollTo().assertIsEnabled()
+        choose("Off")
+        assertTrue(writes.isEmpty())
         compose.runOnIdle { connected.value = false }
-        compose.onNodeWithText("Apply").assertIsNotEnabled()
+        compose.onNodeWithText("Noise Cancellation").performScrollTo().assertIsNotEnabled()
         compose.runOnIdle {
             connected.value = true
             currentMetadata.value = AppleMetadata(model = AirPodsModel.AIRPODS_PRO_1, modelNumber = "A2084", version1 = "6A326")
         }
         compose.onNodeWithText("Adaptive").assertDoesNotExist()
-        compose.onNodeWithText("Apply").performScrollTo().assertIsNotEnabled()
+        compose.onAllNodesWithText("Apply").assertCountEquals(0)
         assertTrue(writes.isEmpty())
     }
 

@@ -10,7 +10,14 @@ class HoldActionsTest {
         put(ControlCommandIdentifier.LISTENING_MODE, byteArrayOf(mode.toByte()))
         mask?.let { put(ControlCommandIdentifier.LISTENING_MODE_CONFIGS, byteArrayOf(it.toByte())) }
         off?.let { put(ControlCommandIdentifier.ALLOW_OFF_OPTION, byteArrayOf(it.toByte())) }
-    })
+    }, liveControlReports = setOf(ControlCommandIdentifier.LISTENING_MODE))
+
+    @Test fun aCachedModeCannotDriveADelegatedHoldUntilTheCurrentSessionReportsIt() {
+        val cached = state(2).copy(liveControlReports = emptySet())
+        assertNull(cached.nextHoldListeningMode(AppleSettings(), metadata))
+        val fresh = cached.withControlReport(ControlCommandIdentifier.LISTENING_MODE, byteArrayOf(2))
+        assertEquals(3, fresh.nextHoldListeningMode(AppleSettings(), metadata))
+    }
 
     @Test fun missingAndroidCycleReportsUseTheSupportedModesWithoutEnablingOff() {
         assertEquals(3, state(2).nextHoldListeningMode(AppleSettings(), metadata))
@@ -55,7 +62,7 @@ class HoldActionsTest {
     @Test fun freshReadbackWinsOverSavedIntentAndAnExplicitNewRequestWinsUntilReadback() {
         val id = ControlCommandIdentifier.LISTENING_MODE_CONFIGS
         val saved = AppleSettings(savedUnconfirmedChoices = mapOf("desired_noise_modes_cycle" to "0b"))
-        val fresh = state(2, mask = 6, off = 1).copy(liveControlReports = setOf(id))
+        val fresh = state(2, mask = 6, off = 1).copy(liveControlReports = setOf(id, ControlCommandIdentifier.LISTENING_MODE))
         assertEquals(3, fresh.nextHoldListeningMode(saved, metadata))
         assertEquals(4, fresh.copy(requestedControls = mapOf(id to byteArrayOf(11, 0, 0, 0)))
             .nextHoldListeningMode(saved, metadata))

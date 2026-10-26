@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.22.1)
 
 project("l2c_fcr_hook")
 set(CMAKE_CXX_STANDARD 23)
+option(LIBREPODS_PRIVATE_OWNED_FDK "Private AAC-ELD experiment; not for GPL APK redistribution" OFF)
 
 add_library(hiddenapi SHARED
         hiddenapi.cpp
@@ -27,6 +28,28 @@ set(XPOSED_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../xposed/cpp)
 
 add_library(fluoride_hooks SHARED
         fluoride_hooks.cpp
+        eld/wire.cpp
+        eld/fdk_encoder.cpp
+        eld/encoder_interface.cpp
+        eld/note8_adapter.cpp
+        eld/game_host.cpp
+        eld/hal_adapter.cpp
+        eld/runtime.cpp
+        eld/pixel17_codec.cpp
+        eld/pixel17_registry.cpp
+        eld/pixel17_wire_hooks.cpp
+        eld/pixel17_cohort.cpp
+        eld/symbol_image.cpp
+        eld/pixel17_runtime.cpp
+        eld/pixel17_contract.cpp
+        eld/pixel17_vtable_contract.cpp
+        eld/pixel17_wire_contract.cpp
+        eld/pixel17_hci.cpp
+        eld/pixel17_hci_contract.cpp
+        eld/pixel17_game_host.cpp
+        eld/pixel17_game_host_contract.cpp
+        eld/pixel17_game_runtime.cpp
+        eld/hook_transaction.cpp
 
         xz/xz_crc32.c
         xz/xz_crc64.c
@@ -52,6 +75,17 @@ target_compile_definitions(fluoride_hooks PRIVATE
 )
 
 target_link_libraries(fluoride_hooks
+        PRIVATE
         android
         log
+        dl
 )
+
+if(LIBREPODS_PRIVATE_OWNED_FDK)
+    message(WARNING "Private owned-FDK experiment: do not redistribute this combined GPL/FDK APK")
+    include(eld/owned_fdk.cmake)
+    eld_add_private_owned_fdk()
+    target_link_libraries(fluoride_hooks PRIVATE eld_owned_fdk)
+    target_compile_definitions(fluoride_hooks PRIVATE ELD_PRIVATE_OWNED_FDK=1)
+    target_link_options(fluoride_hooks PRIVATE -Wl,--exclude-libs,ALL)
+endif()

@@ -38,6 +38,12 @@ sealed interface Screen: NavKey {
     data object DongleSettings: Screen
 
     @Serializable
+    data object DongleAccommodations: Screen
+
+    @Serializable
+    data object DongleTransparency: Screen
+
+    @Serializable
     data class HeadTracking(
         override val macAddress: MacAddress
     ): DeviceScreen
@@ -46,6 +52,9 @@ sealed interface Screen: NavKey {
     data class Accessibility(
         override val macAddress: MacAddress
     ): DeviceScreen
+
+    @Serializable
+    data class HeadphoneAccommodations(override val macAddress: MacAddress): DeviceScreen
 
     @Serializable
     data class TransparencyCustomization(

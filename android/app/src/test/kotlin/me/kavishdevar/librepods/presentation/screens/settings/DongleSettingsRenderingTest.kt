@@ -39,6 +39,7 @@ import me.kavishdevar.librepods.dongle.DongleState
 import me.kavishdevar.librepods.presentation.design.DesignSystem
 import me.kavishdevar.librepods.presentation.design.LibrePodsTheme
 import org.junit.Assert.assertTrue
+import org.junit.After
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -54,6 +55,8 @@ import org.robolectric.annotation.LooperMode
 @LooperMode(LooperMode.Mode.PAUSED)
 class DongleSettingsRenderingTest {
     @get:Rule val compose = createComposeRule()
+    private val editors = mutableListOf<DongleControlTestEditors>()
+    @After fun closeEditors() { editors.forEach { it.close() } }
 
     @Test fun settings_remain_readable_without_routine_confirmation_commentary() {
         data class Profile(val theme: DesignSystem, val dark: Boolean, val width: Int, val scale: Float)
@@ -68,7 +71,7 @@ class DongleSettingsRenderingTest {
             hearingProfile = HearingAidSettings(FloatArray(8) { 10f }, FloatArray(8) { 20f },
                 0f, 0f, 0f, 0f, false, false, 0f, 0f, 0f, 0f, 0f),
             finderOpen = true, nearby = nearby))
-        val controller = DongleController(RuntimeEnvironment.getApplication())
+        val controller = DongleControlTestEditors(current).also { editors += it }.controller
         compose.setContent {
             val profile = layout.value
             CompositionLocalProvider(LocalDensity provides Density(1f, profile.scale)) {
@@ -85,6 +88,7 @@ class DongleSettingsRenderingTest {
             compose.onNodeWithText("Listening").performScrollTo().assertIsDisplayed()
             compose.onNodeWithText("On").assertIsDisplayed()
             compose.onAllNodesWithText("Your choice", substring = true).assertCountEquals(0)
+            compose.onAllNodesWithText("Startup priming", substring = true).assertCountEquals(0)
             capture("settings-${profile.theme}-${profile.dark}-${profile.width}")
             compose.onNodeWithText("Preferred microphone").performScrollTo().performClick()
             compose.onNodeWithText("Automatic").assertIsDisplayed()
@@ -122,7 +126,7 @@ class DongleSettingsRenderingTest {
             compose.onNodeWithText("Start finding").assertIsDisplayed()
         }
         compose.runOnIdle { current.value = current.value.copy(busy = true) }
-        compose.onNodeWithText("Preferred microphone").performScrollTo().assertIsNotEnabled()
+        compose.onNodeWithText("Preferred microphone").performScrollTo().assertIsEnabled()
     }
 
     @Test fun finderNumbersFollowTheAppLocaleAndElapsedTimeUsesPlurals() {

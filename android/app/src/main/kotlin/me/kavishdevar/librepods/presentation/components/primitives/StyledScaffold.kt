@@ -28,7 +28,6 @@ import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
@@ -66,7 +65,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
@@ -217,21 +215,6 @@ fun StyledScaffold(
                                 .zIndex(3f)
                                 .padding(top = topPadding + 8.dp, start = 16.dp)
                                 .align(Alignment.TopStart)
-                                .pointerInput(Unit) {
-                                    awaitPointerEventScope {
-                                        while (true) {
-                                            awaitFirstDown(requireUnconsumed = false)
-
-                                            do {
-                                                val event = awaitPointerEvent()
-
-                                                event.changes.forEach { change ->
-                                                    change.consume()
-                                                }
-                                            } while (event.changes.any { it.pressed })
-                                        }
-                                    }
-                                }
                         ) {
                             StyledIconButton(
                                 onClick = { navigateBack?.invoke() },
@@ -308,21 +291,6 @@ fun StyledScaffold(
                             .zIndex(3f)
                             .padding(top = topPadding + 8.dp, end = 16.dp)
                             .align(Alignment.TopEnd)
-                            .pointerInput(Unit) {
-                                awaitPointerEventScope {
-                                    while (true) {
-                                        awaitFirstDown(requireUnconsumed = false)
-
-                                        do {
-                                            val event = awaitPointerEvent()
-
-                                            event.changes.forEach { change ->
-                                                change.consume()
-                                            }
-                                        } while (event.changes.any { it.pressed })
-                                    }
-                                }
-                            }
                     ) {
                         Row(
                             Modifier.onSizeChanged { actionsWidth = with(density) { it.width.toDp() } },

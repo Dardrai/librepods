@@ -18,9 +18,11 @@ Apple is the default design; Material remains available in the app settings.
   work around the Fluoride/AirPods connection issue. Shizuku does not replace
   that workaround. [This issue was tracked here](https://issuetracker.google.com/issues/371713238).
   **Please do not comment on the issue thread.**
-- The existing VendorID hook still needs root/Xposed. This fork's ATT reader and
-  writer are unavailable, so protected settings and hearing-assistance
-  enablement remain disabled. See [Android ATT access](PROTOCOL.md#android-att-access).
+- Older stacks use the Xposed Vendor ID hook. Android 17 can use the optional
+  [native Device ID module](tools/bluetooth-identity-module/README.md) instead.
+  Protected controls require successful ATT discovery and current-session
+  readback; an identity setting alone does not enable them. See
+  [Android ATT access](PROTOCOL.md#android-att-access).
 
 > [!IMPORTANT]
 > This workaround with Xposed is not guaranteed to work on all devices.
@@ -34,24 +36,31 @@ Install the signed release APK. Existing fork installations can be updated in
 place; keep the app installed to preserve its settings and Shizuku authorization.
 An APK signed with a different certificate cannot update an existing installation.
 
-### Pixel/Shizuku setup
+### Bluetooth access with root or Shizuku
 
 1. Install the signed APK and open LibrePods. Grant Nearby devices and allow
    notifications when requested. Allow display over other apps if you
    want nearby pairing cards and the Dynamic Island.
-2. Start Shizuku using wireless debugging. Shizuku may need to be started again
-   after a phone restart.
+2. Open Settings → **Bluetooth access** and grant LibrePods access through your
+   root manager. Rooted phones do not need Shizuku. Without root, start Shizuku
+   using wireless debugging and authorize LibrePods there. Shizuku may need to
+   be started again after a phone restart.
+   KernelSU users need its standard **SU compatibility** interface enabled and
+   LibrePods allowed under Superuser. A root ADB shell alone does not grant the app access.
 3. For a new pair, open the case near the phone and follow the pairing card's
    instructions until the case light flashes white, then tap **Connect**.
-   Authorized Shizuku can confirm the selected pair's consent request; Android's
+   Authorized root or Shizuku can confirm the selected pair's consent request; Android's
    normal confirmation remains the fallback.
-4. In Recorder, tap **Connect Shizuku** and
-   authorize LibrePods. This also enables Shizuku for later pairing attempts.
+4. Access is reused for subsequent connections. Opening Settings or starting the
+   background service does not request a first root grant.
 
-Ordinary Bluetooth music playback stays on Android. Shizuku is used for the
+Ordinary Bluetooth music playback stays on Android. The privileged helper is used for the
 nearby island's explicit Connect action, pairing consent, background volume
 access/recovery and Recorder playback recovery. Opening the case
-alone does not take audio from another host.
+alone does not take audio from another host. The root helper belongs to LibrePods
+and stops after its last client leaves. It exposes only the existing fixed
+Bluetooth and media operations, with selected-pair, permission and cancellation
+checks; it does not expose a shell-command interface.
 
 ### Link NTPods on a PC
 
@@ -60,8 +69,8 @@ paired PC over Bluetooth. Select the PC and the same AirPods used by NTPods, the
 paste NTPods' private linking code. The code is encrypted with Android Keystore
 and excluded from backups. Both apps must explicitly trust the other host.
 
-Keep **Act as an Apple device** off on Android and authorize the existing Shizuku
-shell backend. The PC keeps its existing Bluetooth identity. Pause source music,
+Keep **Act as an Apple device** off on Android and authorize root or Shizuku
+through **Bluetooth access**. The PC keeps its existing Bluetooth identity. Pause source music,
 then choose **Move audio to this phone** or **Move audio to PC**. A transfer first
 confirms release of the source's media, headset and control connections, then
 confirms the destination's native audio route. Manual transfer does not start
@@ -105,8 +114,9 @@ The upstream root module provides privileged Bluetooth permissions to
 - show AirPods icon in the system settings (xposed is also currently required for this)
 - switch audio to phone speakers when you are not wearing your AirPods
 
-This fork does not build or distribute a root module. These optional system-app
-features are not required for the rootless Pixel/Shizuku setup above.
+These system-app features are separate from the app-owned root helper and the
+optional Android 17 Device ID module. The Device ID module does not install the
+APK as a system app or grant global permissions.
 
 ### A few notes on this rewrite
 

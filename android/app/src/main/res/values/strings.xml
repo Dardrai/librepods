@@ -158,6 +158,9 @@
     <string name="use_alternate_head_tracking_packets">Use alternate head tracking packets</string>
     <string name="use_alternate_head_tracking_packets_description">Enable this if head tracking doesn\'t work for you. This sends different data to AirPods for requesting/stopping head tracking data.</string>
     <string name="act_as_an_apple_device">Act as an Apple device</string>
+    <string name="requires_root">Requires root</string>
+    <string name="bluetooth_identity_change_failed">Couldn’t change Bluetooth identity.</string>
+    <string name="bluetooth_identity_root_setup_required">Couldn’t change Bluetooth identity. Check root access and the LibrePods identity module.</string>
     <string name="act_as_an_apple_device_description">Enables multi-device connectivity and Accessibility features like customizing transparency mode (amplification, tone, ambient noise reduction, conversation boost, and EQ)</string>
     <string name="act_as_an_apple_device_warning">Might be unstable!! A maximum of two devices can be connected to your AirPods. If you are using with an Apple device like an iPad or Mac, then please connect that device first and then your Android.</string>
     <string name="reset_hook_offset">Reset Hook Offset</string>
@@ -314,7 +317,7 @@
     <string name="permission_description_phone">Respond to phone calls with head gestures.</string>
     <string name="permission_overlay">Display over other apps</string>
     <string name="permission_description_overlay">Show popups when AirPods are nearby or audio switches to them.</string>
-    <string name="swipe_anywhere_to_go_back">Swipe anywhere to go back</string>
+    <string name="swipe_anywhere_to_go_back">Swipe from the left edge to go back</string>
     <string name="use_highest_refresh_rate">Use highest refresh rate available</string>
     <string name="debug_mode_description">Shows extra information and settings.</string>
     <string name="interaction">Interaction</string>
@@ -414,7 +417,7 @@
     <string name="companion_cancel">Cancel transfer</string>
     <string name="companion_unlink">Unlink PC</string>
     <string name="companion_link">Link PC</string>
-    <string name="companion_setup">Select your paired PC and the same AirPods selected in NTPods, then paste its linking code. Allow LibrePods in Shizuku and keep Apple device mode off.</string>
+    <string name="companion_setup">Select your paired PC and the same AirPods selected in NTPods, then paste its linking code. Allow Bluetooth access in Settings and keep Apple device mode off.</string>
     <string name="companion_pc">Paired PC</string>
     <string name="companion_airpods">AirPods</string>
     <string name="companion_unnamed_pc">Paired computer</string>
@@ -433,7 +436,7 @@
     <string name="companion_settings_sync_failed">Some settings could not sync. Reconnect to retry. Audio switching is still available.</string>
     <string name="companion_shared_settings_description">Sync playback, appearance and saved settings with NTPods.</string>
     <string name="companion_host_auto_pause">Pause when removed</string>
-    <string name="companion_host_auto_pause_unavailable">Exact-player pause and resume need Shizuku running with LibrePods access. Your saved preference still syncs with the PC.</string>
+    <string name="companion_host_auto_pause_unavailable">Allow Bluetooth access in Settings to pause and resume the same player. This preference still syncs with the PC.</string>
     <string name="companion_host_auto_pause_description">Pause this player when you remove an earbud. Resume it when you put the earbuds back in, if you have not chosen something else. Separate from AirPods ear detection.</string>
     <string name="companion_popup">Automatic popups</string>
     <string name="companion_battery_cache">Keep disconnected battery readings</string>
@@ -448,4 +451,30 @@
     <string name="eq_low">Low</string>
     <string name="eq_mid">Mid</string>
     <string name="eq_high">High</string>
+    <string name="own_voice_amplification">Own Voice Amplification</string>
+    <string name="headphone_accommodations">Headphone Accommodations</string>
+    <string name="accommodations_description">Customize soft sounds for phone calls and media.</string>
+    <string name="accommodations_audio_tuning">Audio tuning</string>
+    <string name="accommodations_balanced_tone">Balanced Tone</string>
+    <string name="accommodations_vocal_range">Vocal Range</string>
+    <string name="accommodations_brightness">Brightness</string>
+    <string name="accommodations_optimization">Optimization</string>
+    <string name="accommodations_slight">Slight</string>
+    <string name="accommodations_moderate">Moderate</string>
+    <string name="accommodations_strong">Strong</string>
+    <string name="accommodations_custom">Custom</string>
+    <string name="accommodations_audiogram">Audiogram</string>
+    <string name="accommodations_audiogram_unavailable">Audiogram is unavailable on this connection.</string>
+    <string name="accommodations_customized_audio">Customized audio</string>
+    <string name="accommodations_apply">Apply</string>
+    <string name="accommodations_read">Read settings</string>
+    <string name="accommodations_pending">Waiting for AirPods to confirm…</string>
+    <string name="accommodations_unconfirmed">AirPods have not confirmed this change.</string>
+    <string name="accommodations_waiting">Waiting for complete settings from AirPods.</string>
+    <string name="accommodations_not_sent">These settings could not be changed.</string>
+    <string name="accommodations_preset_unavailable">Preset changes are unavailable on this connection.</string>
+    <string name="transparency_transport_unavailable">Custom Transparency changes are unavailable on this connection.</string>
+    <string name="accommodations_select_destination">Select Phone or Media.</string>
+    <string name="accommodations_read_only">Changes are unavailable on this connection.</string>
+    <string name="accommodations_unavailable">These settings are unavailable on this connection.</string>
 </resources>

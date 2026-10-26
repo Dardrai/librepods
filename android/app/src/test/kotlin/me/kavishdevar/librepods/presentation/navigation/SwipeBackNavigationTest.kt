@@ -1,6 +1,7 @@
 package me.kavishdevar.librepods.presentation.navigation
 
 import android.app.Application
+import android.view.View
 import androidx.activity.OnBackPressedDispatcher
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
@@ -8,10 +9,15 @@ import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Text
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.State
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.snapshots.Snapshot
@@ -19,6 +25,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.platform.LocalViewConfiguration
 import androidx.compose.ui.test.SemanticsNodeInteraction
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertTextEquals
@@ -30,6 +38,11 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.swipe
+import androidx.compose.ui.unit.dp
+import androidx.core.graphics.Insets
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.navigation3.runtime.NavBackStack
 import androidx.navigation3.runtime.NavEntry
 import androidx.navigation3.scene.SceneStrategyScope
@@ -38,6 +51,8 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.channels.Channel
 import me.kavishdevar.librepods.presentation.components.primitives.StyledIconButton
 import me.kavishdevar.librepods.presentation.components.primitives.StyledScaffold
+import me.kavishdevar.librepods.presentation.components.primitives.StyledSlider
+import me.kavishdevar.librepods.presentation.components.primitives.StyledSwitch
 import me.kavishdevar.librepods.presentation.design.DesignSystem
 import me.kavishdevar.librepods.presentation.design.LibrePodsTheme
 import org.junit.After
@@ -59,7 +74,12 @@ class SwipeBackNavigationTest {
 
     private val requests = Channel<CompletableDeferred<Unit>>(Channel.BUFFERED)
     private lateinit var dispatcher: OnBackPressedDispatcher
+    private lateinit var rootView: View
     private var fallbackBacks = 0
+    private var actionClicks = 0
+    private var gestureTouchSlop = 0f
+    private val toggleChecked = mutableStateOf(false)
+    private val sliderValue = mutableFloatStateOf(0f)
 
     @After fun closeRequests() {
         requests.close()
@@ -186,7 +206,7 @@ class SwipeBackNavigationTest {
         assertTrue("Back animation started", pageX(Screen.AppSettings) > 0f)
 
         compose.onNodeWithTag("navigation-host").performTouchInput {
-            down(Offset(width * 0.55f, height * 0.75f))
+            down(Offset(8f, height * 0.75f))
             moveBy(Offset(80f, 0f))
         }
         advance(16)
@@ -204,6 +224,99 @@ class SwipeBackNavigationTest {
         }
         compose.onNodeWithTag("navigation-host").performTouchInput { up() }
         assertDestinationFillsHost(Screen.DeviceList)
+    }
+
+    @Test
+    @Config(sdk = [35])
+    @GraphicsMode(GraphicsMode.Mode.NATIVE)
+    fun headerButtonsAcceptRealTouchesAcrossTheir48dpTargetsBelowTheStatusInset() {
+        val stack = NavBackStack<Screen>(Screen.DeviceList, Screen.AppSettings)
+        showNavigation(stack, swipeEnabled = true, withHeaders = true)
+        compose.runOnIdle {
+            ViewCompat.dispatchApplyWindowInsets(rootView, WindowInsetsCompat.Builder()
+                .setInsets(WindowInsetsCompat.Type.systemBars(), Insets.of(0, 24, 0, 24)).build())
+        }
+        compose.waitForIdle()
+        val back = backButton(Screen.AppSettings)
+        val bounds = back.fetchSemanticsNode().boundsInRoot
+        assertEquals(48f, bounds.width, .5f)
+        assertEquals(48f, bounds.height, .5f)
+        assertTrue("Back clears the status inset", bounds.top >= 32f)
+        back.performTouchInput { down(center); moveBy(Offset(1f, 1f)); up() }
+        compose.waitForIdle()
+        compose.runOnIdle { assertEquals(listOf(Screen.DeviceList), stack.toList()) }
+        mutate { stack.add(Screen.AppSettings) }
+        compose.waitForIdle()
+        val cornerBack = backButton(Screen.AppSettings)
+        cornerBack.performTouchInput { down(Offset(4f, 4f)); moveBy(Offset(1f, 1f)); up() }
+        compose.waitForIdle()
+        compose.runOnIdle { assertEquals(listOf(Screen.DeviceList), stack.toList()) }
+        compose.onNodeWithTag(actionTag(Screen.DeviceList)).performTouchInput {
+            down(Offset(4f, 4f)); moveBy(Offset(1f, 1f)); up()
+        }
+        compose.runOnIdle { assertEquals(1, actionClicks) }
+    }
+
+    @Test fun onlyARightwardSwipeThatStartsAtTheLeftEdgeNavigatesBack() {
+        val stack = NavBackStack<Screen>(Screen.DeviceList, Screen.AppSettings)
+        showNavigation(stack, swipeEnabled = true)
+        val host = compose.onNodeWithTag("navigation-host")
+        host.performTouchInput { swipe(Offset(60f, height * .75f), Offset(330f, height * .75f), 300) }
+        assertDestinationFillsHost(Screen.AppSettings)
+        host.performTouchInput { swipe(Offset(8f, height * .75f), Offset(260f, height * .75f), 300) }
+        compose.waitForIdle()
+        compose.runOnIdle { assertEquals(listOf(Screen.DeviceList), stack.toList()) }
+        assertDestinationFillsHost(Screen.DeviceList)
+    }
+
+    @Test fun verticalDiagonalAndWrongWayEdgeGesturesCannotBecomeBackSwipes() {
+        val stack = NavBackStack<Screen>(Screen.DeviceList, Screen.AppSettings)
+        showNavigation(stack, swipeEnabled = true)
+        val host = compose.onNodeWithTag("navigation-host")
+        host.performTouchInput { swipe(Offset(8f, 200f), Offset(9f, 500f), 300) }
+        compose.runOnIdle { assertEquals("Vertical", listOf(Screen.DeviceList, Screen.AppSettings), stack.toList()) }
+        host.performTouchInput { swipe(Offset(8f, 200f), Offset(250f, 450f), 300) }
+        compose.runOnIdle { assertEquals("Diagonal", listOf(Screen.DeviceList, Screen.AppSettings), stack.toList()) }
+        host.performTouchInput {
+            down(Offset(20f, 400f)); moveBy(Offset(-gestureTouchSlop - 8f, 0f)); moveBy(Offset(260f, 0f)); up()
+        }
+        compose.waitForIdle()
+        compose.runOnIdle { assertEquals(listOf(Screen.DeviceList, Screen.AppSettings), stack.toList()) }
+        assertDestinationFillsHost(Screen.AppSettings)
+    }
+
+    @Test fun cancellingAnEdgeDragReturnsThePageWithoutNavigating() {
+        val stack = NavBackStack<Screen>(Screen.DeviceList, Screen.AppSettings)
+        showNavigation(stack, swipeEnabled = true)
+        compose.onNodeWithTag("navigation-host").performTouchInput {
+            down(Offset(8f, height * .75f)); moveBy(Offset(240f, 0f)); cancel()
+        }
+        compose.waitForIdle()
+        compose.runOnIdle { assertEquals(listOf(Screen.DeviceList, Screen.AppSettings), stack.toList()) }
+        assertDestinationFillsHost(Screen.AppSettings)
+    }
+
+    @Test
+    @Config(sdk = [35])
+    @GraphicsMode(GraphicsMode.Mode.NATIVE)
+    fun switchAndSliderDragsKeepTheirValuesAndNeverMoveThePage() {
+        val stack = NavBackStack<Screen>(Screen.DeviceList, Screen.AppSettings)
+        showNavigation(stack, swipeEnabled = true, withControls = true)
+        compose.onNodeWithTag("styled-switch-thumb", useUnmergedTree = true).performTouchInput {
+            swipe(Offset(2f, center.y), Offset(152f, center.y), 300)
+        }
+        compose.waitForIdle()
+        compose.runOnIdle { assertTrue(toggleChecked.value) }
+        assertDestinationFillsHost(Screen.AppSettings)
+        compose.onNodeWithTag("styled-slider-thumb", useUnmergedTree = true).performTouchInput {
+            swipe(center, center + Offset(100f, 0f), 300)
+        }
+        compose.waitForIdle()
+        compose.runOnIdle {
+            assertTrue(sliderValue.floatValue > .2f)
+            assertEquals(listOf(Screen.DeviceList, Screen.AppSettings), stack.toList())
+        }
+        assertDestinationFillsHost(Screen.AppSettings)
     }
 
     @Test fun staleSceneCannotPopADestinationAddedDuringItsBackAnimation() {
@@ -243,12 +356,15 @@ class SwipeBackNavigationTest {
         swipeEnabled: Boolean = false,
         entryRevision: State<Int>? = null,
         withHeaders: Boolean = false,
+        withControls: Boolean = false,
     ) {
         compose.setContent {
             LibrePodsTheme(designSystem = DesignSystem.Apple) {
                 val backDispatcher = checkNotNull(LocalOnBackPressedDispatcherOwner.current)
                     .onBackPressedDispatcher
-                SideEffect { dispatcher = backDispatcher }
+                val view = LocalView.current
+                val touchSlop = LocalViewConfiguration.current.touchSlop
+                SideEffect { dispatcher = backDispatcher; rootView = view.rootView; gestureTouchSlop = touchSlop }
                 BackHandler { fallbackBacks++ }
                 val pop = {
                     if (stack.size > 1) stack.removeAt(stack.lastIndex)
@@ -276,12 +392,21 @@ class SwipeBackNavigationTest {
                                         StyledIconButton(
                                             modifier = Modifier.testTag(actionTag(screen)),
                                             backdrop = backdrop,
-                                            onClick = {},
+                                            onClick = { actionClicks++ },
                                         ) { Text("A") }
                                     }),
                                 ) { _, _ ->
                                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                                         Text("Content $revision", Modifier.testTag(contentTag(screen)))
+                                    }
+                                }
+                            } else if (withControls && screen == stack.last()) {
+                                Column(Modifier.fillMaxSize().padding(16.dp),
+                                    verticalArrangement = Arrangement.Center) {
+                                    StyledSwitch(toggleChecked.value, { toggleChecked.value = it })
+                                    Box(Modifier.width(280.dp)) {
+                                        StyledSlider(value = sliderValue.floatValue, valueRange = -1f..1f,
+                                            onValueChange = { sliderValue.floatValue = it })
                                     }
                                 }
                             }

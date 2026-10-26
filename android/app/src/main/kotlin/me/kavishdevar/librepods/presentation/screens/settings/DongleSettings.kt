@@ -27,6 +27,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.key
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -41,9 +42,12 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.flow.MutableStateFlow
 import me.kavishdevar.librepods.R
 import me.kavishdevar.librepods.core.devices.HearingMode
+import me.kavishdevar.librepods.core.bluetooth.att.types.HearingAidSettings
+import me.kavishdevar.librepods.core.bluetooth.att.types.parseHearingAidSettingsResponse
+import me.kavishdevar.librepods.core.bluetooth.att.types.hearingAidSettingsWritable
+import me.kavishdevar.librepods.core.bluetooth.att.types.sendHearingAidSettings
 import me.kavishdevar.librepods.dongle.DongleController
 import me.kavishdevar.librepods.dongle.DongleState
-import me.kavishdevar.librepods.presentation.components.primitives.StyledButton
 import me.kavishdevar.librepods.presentation.components.primitives.StyledList
 import me.kavishdevar.librepods.presentation.components.primitives.StyledListItem
 import me.kavishdevar.librepods.presentation.components.primitives.StyledListItemOrientation
@@ -57,12 +61,17 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 
 @Composable
-fun DongleSettingsScreen(navigateBack: (() -> Unit)?) {
+fun DongleSettingsScreen(navigateBack: (() -> Unit)?, navigateToAccommodations: (() -> Unit)? = null) {
     StyledScaffold(title = stringResource(R.string.dongle_title), navigateBack = navigateBack) { top, bottom ->
         Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceContainer)
             .verticalScroll(rememberScrollState()).padding(start = 16.dp, end = 16.dp, top = top + 16.dp, bottom = bottom + 16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)) {
             DongleSettingsSection()
+            navigateToAccommodations?.let { navigate ->
+                StyledList(title = stringResource(R.string.accessibility)) {
+                    styledListItem(contentText = stringResource(R.string.headphone_accommodations), onClick = navigate)
+                }
+            }
         }
     }
 }
@@ -129,8 +138,7 @@ internal fun DongleSettingsSection(onManage: (() -> Unit)? = null) {
 }
 
 @Composable
-internal fun DongleControls(state: DongleState, controller: DongleController) {
-    val locale = LocalLocale.current.platformLocale
+internal fun ObserveDongleControls(controller: DongleController) {
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     DisposableEffect(controller, lifecycle) {
         controller.controlsVisible(lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
@@ -141,52 +149,64 @@ internal fun DongleControls(state: DongleState, controller: DongleController) {
         lifecycle.addObserver(observer)
         onDispose { lifecycle.removeObserver(observer); controller.controlsVisible(false); controller.stopFinder() }
     }
-    val enabled = state.status?.controlsReady == true && !state.busy
+}
+
+@Composable
+internal fun DongleControls(state: DongleState, controller: DongleController) {
+    val locale = LocalLocale.current.platformLocale
+    ObserveDongleControls(controller)
+    val enabled = state.status?.controlsReady == true && state.status.microphoneActive == false
     val onOff = listOf(1L to stringResource(R.string.dongle_on), 2L to stringResource(R.string.dongle_off))
     StyledList(title = stringResource(R.string.dongle_listening)) {
         item { _, _ -> SettingChoice(stringResource(R.string.dongle_mode), 0x0d, state, enabled, listOf(
             1L to stringResource(R.string.dongle_off), 2L to stringResource(R.string.dongle_anc),
-            3L to stringResource(R.string.dongle_transparency), 4L to stringResource(R.string.dongle_adaptive)), controller::setSetting) }
+            3L to stringResource(R.string.dongle_transparency), 4L to stringResource(R.string.dongle_adaptive)), controller) }
         for ((id, label) in listOf(0x28 to R.string.dongle_conversation, 0x26 to R.string.dongle_personalized,
             0x1b to R.string.dongle_one_bud, 0x34 to R.string.dongle_allow_off)) {
-            item { _, _ -> SettingChoice(stringResource(label), id, state, enabled, onOff, controller::setSetting) }
+            item { _, _ -> SettingChoice(stringResource(label), id, state, enabled, onOff, controller) }
         }
     }
     StyledList {
         styledToggle(label = stringResource(R.string.dongle_autopause), checked = state.automaticPause,
             description = stringResource(R.string.dongle_autopause_description), enabled = !state.busy, onCheckedChange = controller::automaticPause)
         item { _, _ -> SettingChoice(stringResource(R.string.dongle_ear_setting), 0x0a, state, enabled,
-            listOf(2L to stringResource(R.string.dongle_on), 1L to stringResource(R.string.dongle_off)), controller::setSetting) }
-        item { _, _ -> SettingChoice(stringResource(R.string.dongle_sleep), 0x35, state, enabled, onOff, controller::setSetting) }
+            listOf(2L to stringResource(R.string.dongle_on), 1L to stringResource(R.string.dongle_off)), controller) }
+        item { _, _ -> SettingChoice(stringResource(R.string.dongle_sleep), 0x35, state, enabled, onOff, controller) }
         item { _, _ -> SettingChoice(stringResource(R.string.dongle_microphone), 1, state, enabled, listOf(
-            0L to stringResource(R.string.dongle_automatic), 1L to stringResource(R.string.dongle_right), 2L to stringResource(R.string.dongle_left)), controller::setSetting) }
+            0L to stringResource(R.string.dongle_automatic), 1L to stringResource(R.string.dongle_right), 2L to stringResource(R.string.dongle_left)), controller) }
     }
     val intervals = listOf(0L to stringResource(R.string.dongle_default), 1L to stringResource(R.string.dongle_slower), 2L to stringResource(R.string.dongle_slowest))
     StyledList(title = stringResource(R.string.dongle_stem)) {
         item { _, _ -> SettingChoice(stringResource(R.string.dongle_hold), 0x16, state, enabled, listOf(
             0x0505L to stringResource(R.string.dongle_hold_noise), 0x0501L to stringResource(R.string.dongle_hold_assistant_left),
-            0x0105L to stringResource(R.string.dongle_hold_assistant_right), 0x0101L to stringResource(R.string.dongle_hold_assistant_both)), controller::setSetting) }
-        item { _, _ -> SettingChoice(stringResource(R.string.dongle_swipe), 0x25, state, enabled, onOff, controller::setSetting) }
+            0x0105L to stringResource(R.string.dongle_hold_assistant_right), 0x0101L to stringResource(R.string.dongle_hold_assistant_both)), controller) }
+        item { _, _ -> SettingChoice(stringResource(R.string.dongle_swipe), 0x25, state, enabled, onOff, controller) }
         item { _, _ -> CycleModes(state, enabled, controller) }
         for ((id, label) in listOf(0x17 to R.string.dongle_press_speed, 0x18 to R.string.dongle_hold_duration, 0x23 to R.string.dongle_swipe_duration))
-            item { _, _ -> SettingChoice(stringResource(label), id, state, enabled, intervals, controller::setSetting) }
+            item { _, _ -> SettingChoice(stringResource(label), id, state, enabled, intervals, controller) }
         item { _, _ -> SettingChoice(stringResource(R.string.dongle_call_controls), 0x24, state, enabled, listOf(
-            0x0200L to stringResource(R.string.dongle_call_once), 0x0300L to stringResource(R.string.dongle_call_twice)), controller::setSetting) }
+            0x0200L to stringResource(R.string.dongle_call_once), 0x0300L to stringResource(R.string.dongle_call_twice)), controller) }
     }
     StyledList(title = stringResource(R.string.dongle_case)) {
-        item { _, _ -> SettingChoice(stringResource(R.string.dongle_case_sounds), 0x31, state, enabled, onOff, controller::setSetting) }
+        item { _, _ -> SettingChoice(stringResource(R.string.dongle_case_sounds), 0x31, state, enabled, onOff, controller) }
     }
     ControlRange(stringResource(R.string.dongle_case_volume), 0x40, state, enabled, controller)
     ControlRange(stringResource(R.string.dongle_chime_volume), 0x1f, state, enabled, controller)
     ControlRange(stringResource(R.string.dongle_adaptive_strength), 0x2e, state, enabled, controller)
     if (state.status?.capabilities?.and(0x10) == 0x10 && state.audio != null) {
-        val profile = state.audio
+        val liveAudio by controller.liveAudioEditor().state.collectAsState()
+        val gameEditor = controller.liveGameModeEditor()
+        val liveGame by gameEditor.state.collectAsState()
+        val gameRevision = liveGame.revision
+        val gameRequested = liveGame.displayed ?: state.audio.gameRequested
+        val profile = liveAudio.displayed?.let { state.audio.copy(requestedCodec = it.codec, rateMode = it.rateMode, requestedBitrate = it.bitrate) } ?: state.audio
         val codecs = listOf(0L to stringResource(R.string.dongle_automatic), 3L to "AAC-ELD", 2L to "AAC", 1L to "SBC")
         val setAudioProfile = { codec: Int, rateMode: Int, bitrate: Long ->
             val request = dongleAudioRequest(codec, rateMode, bitrate)
             controller.audioProfile(request.codec, request.rateMode, request.bitrate)
         }
-        StyledList(title = stringResource(R.string.dongle_audio), description = stringResource(R.string.dongle_priming)) {
+        key(controller, state.controlSession, state.status?.generation, state.status?.address) {
+        StyledList(title = stringResource(R.string.dongle_audio)) {
             item { _, _ -> OptionPicker(stringResource(R.string.dongle_codec), profile.requestedCodec.toLong(), enabled, codecs) {
                 setAudioProfile(it.toInt(), profile.rateMode, profile.requestedBitrate)
             } }
@@ -200,53 +220,33 @@ internal fun DongleControls(state: DongleState, controller: DongleController) {
             } }
             styledListItem(contentText = stringResource(R.string.dongle_active_codec,
                 codecs.firstOrNull { it.first == profile.actualCodec.toLong() && it.first != 0L }?.second ?: "—", profile.actualBitrate / 1000))
-            styledToggle(label = stringResource(R.string.dongle_game_mode), checked = profile.gameRequested,
-                enabled = enabled && profile.flags and 8 != 0, description = when (profile.gameState) {
+            styledToggle(label = stringResource(R.string.dongle_game_mode), checked = gameRequested,
+                enabled = enabled && state.connected && (gameRequested || profile.flags and 8 != 0), description = when (profile.gameState) {
                     1 -> stringResource(R.string.dongle_game_pending)
                     4 -> stringResource(R.string.dongle_game_failed)
                     5 -> stringResource(R.string.dongle_game_unsupported)
                     6 -> stringResource(R.string.dongle_game_restoring)
                     else -> null
-                }, onCheckedChange = controller::gameMode)
+                }, onCheckedChange = { gameEditor.edit(gameRevision, it) })
+        }
         }
     }
     StyledList(title = stringResource(R.string.dongle_hearing), description = stringResource(R.string.dongle_hearing_description)) {
-        styledListItem(contentText = stringResource(R.string.dongle_hearing_read), enabled = enabled, onClick = controller::readHearing)
         state.hearingModes.hearingAidEnabled?.let { value -> styledToggle(label = stringResource(R.string.dongle_hearing_aid), checked = value,
-            enabled = enabled && state.hearingModes.canChange(HearingMode.HEARING_AID, !value), onCheckedChange = { controller.hearingMode(HearingMode.HEARING_AID, it) }) }
+            enabled = enabled && !state.busy && state.hearingModes.canChange(HearingMode.HEARING_AID, !value), onCheckedChange = { controller.hearingMode(HearingMode.HEARING_AID, it) }) }
         state.hearingModes.mediaAssistEnabled?.let { value -> styledToggle(label = stringResource(R.string.dongle_media_assist), checked = value,
-            enabled = enabled && state.hearingModes.canChange(HearingMode.MEDIA_ASSIST, !value), onCheckedChange = { controller.hearingMode(HearingMode.MEDIA_ASSIST, it) }) }
+            enabled = enabled && !state.busy && state.hearingModes.canChange(HearingMode.MEDIA_ASSIST, !value), onCheckedChange = { controller.hearingMode(HearingMode.MEDIA_ASSIST, it) }) }
     }
-    state.hearingProfile?.let { profile ->
-        var gain by remember(profile) { mutableStateOf<Float?>(null) }
-        var balance by remember(profile) { mutableStateOf<Float?>(null) }
-        var tone by remember(profile) { mutableStateOf<Float?>(null) }
-        var boost by remember(profile) { mutableStateOf<Boolean?>(null) }
-        val currentGain = gain ?: profile.netAmplification
-        val currentBalance = balance ?: profile.balance
-        StyledSlider(label = stringResource(R.string.dongle_gain), value = currentGain, valueRange = -1.5f..1.5f, independent = true, enabled = enabled, onValueChange = { gain = it })
-        StyledSlider(label = stringResource(R.string.dongle_balance), value = currentBalance, valueRange = -3f..3f, independent = true, enabled = enabled, onValueChange = { balance = it })
-        StyledSlider(label = stringResource(R.string.dongle_tone), value = tone ?: (profile.leftTone + profile.rightTone) / 2, valueRange = -1f..1f, independent = true, enabled = enabled, onValueChange = { tone = it })
-        StyledList { styledToggle(label = stringResource(R.string.dongle_boost), checked = boost ?: (profile.leftConversationBoost && profile.rightConversationBoost), enabled = enabled, onCheckedChange = { boost = it }) }
-        StyledButton(enabled = enabled && currentGain - currentBalance / 2 in -1.5f..1.5f && currentGain + currentBalance / 2 in -1.5f..1.5f,
-            onClick = { controller.updateHearing { original ->
-                val adjusted = if (gain != null || balance != null)
-                    original.withAmplification(gain ?: original.netAmplification, balance ?: original.balance) else original
-                adjusted.copy(leftTone = tone ?: original.leftTone, rightTone = tone ?: original.rightTone,
-                    leftConversationBoost = boost ?: original.leftConversationBoost, rightConversationBoost = boost ?: original.rightConversationBoost)
-            } }) {
-            Text(stringResource(R.string.dongle_apply), color = MaterialTheme.colorScheme.onSurface)
-        }
-    }
+    DongleHearingControls(state, controller, enabled)
     StyledList(title = stringResource(R.string.dongle_checks), description = stringResource(R.string.dongle_checks_description)) {
-        styledListItem(contentText = stringResource(R.string.dongle_checks_read), onClick = controller::readDiagnostics, enabled = enabled)
         state.diagnostics?.let { checks ->
             for ((ear, result) in listOf(R.string.dongle_left to checks.left, R.string.dongle_right to checks.right))
                 styledListItem(contentText = stringResource(R.string.dongle_check_result, stringResource(ear), result.generalStatus, result.measurementStatus))
         }
     }
     if (state.status?.capabilities?.and(0x10) == 0x10) {
-        StyledList(title = stringResource(R.string.dongle_performance)) {
+        StyledList(title = stringResource(R.string.dongle_performance),
+            description = if (state.performance != null) stringResource(R.string.dongle_priming) else null) {
             styledListItem(contentText = stringResource(R.string.dongle_performance_read), onClick = controller::readPerformance, enabled = !state.busy)
             state.performance?.fields?.let { values ->
                 if (listOf(1, 2, 3).all { values[it] != 0xffffffffL })
@@ -286,23 +286,28 @@ internal fun DongleControls(state: DongleState, controller: DongleController) {
 
 @Composable
 private fun ControlRange(label: String, id: Int, state: DongleState, enabled: Boolean, controller: DongleController) {
-    val reported = state.requested[id] ?: state.settings[id]?.value
+    val editor = remember(controller, id) { controller.liveSettingEditor(id) }
+    val live by editor.state.collectAsState()
+    val reported = live.displayed
     val value = reported?.let { if (id == 0x1f) it and 255 else it }?.takeIf { it <= 100 }
-    var selected by remember(value) { mutableStateOf(value?.toFloat() ?: 50f) }
+    val selected = value?.toFloat() ?: 50f
     Column(Modifier.padding(horizontal = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        StyledSlider(label = label, value = selected, valueRange = 0f..100f, independent = true, enabled = enabled,
-            onValueChange = { selected = it }, description = if (value == null) stringResource(R.string.dongle_choose_value) else null)
-        StyledButton(enabled = enabled, onClick = {
-            controller.setSetting(id, selected.roundToInt().toLong() or if (id == 0x1f) 0x5000L else 0L)
-        }) { Text("${stringResource(R.string.dongle_apply)} · ${selected.roundToInt()}%", color = MaterialTheme.colorScheme.onSurface) }
+        key(live.revision) {
+            StyledSlider(label = label, value = selected, valueRange = 0f..100f, independent = true, enabled = enabled,
+                onValueChange = { editor.edit(live.revision, it.roundToInt().toLong() or if (id == 0x1f) 0x5000L else 0L) },
+                onValueChangeFinished = editor::flush, onValueChangeCanceled = { editor.cancel(live.revision) },
+                description = if (value == null) stringResource(R.string.dongle_choose_value) else null)
+        }
     }
 }
 
 @Composable
 private fun CycleModes(state: DongleState, enabled: Boolean, controller: DongleController) {
     var open by remember { mutableStateOf(false) }
-    val current = (state.requested[0x1a] ?: state.settings[0x1a]?.value)?.toInt()
-    var chosen by remember(open, current) { mutableStateOf(current ?: 0) }
+    val editor = remember(controller) { controller.liveSettingEditor(0x1a) }
+    val live by editor.state.collectAsState()
+    val current = live.displayed?.toInt()
+    var chosen by remember(open, live.revision) { mutableStateOf(current ?: 0) }
     val allowOff = state.requested[0x34] == 1L || state.settings[0x34]?.value == 1L || (current?.and(1) ?: 0) != 0
     val modes = listOf(1 to stringResource(R.string.dongle_off), 2 to stringResource(R.string.dongle_anc),
         4 to stringResource(R.string.dongle_transparency), 8 to stringResource(R.string.dongle_adaptive))
@@ -315,22 +320,24 @@ private fun CycleModes(state: DongleState, enabled: Boolean, controller: DongleC
             modes.forEach { (bit, name) ->
                 Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).toggleable(value = chosen and bit != 0,
                     enabled = enabled && (bit != 1 || allowOff), role = Role.Checkbox,
-                    onValueChange = { checked -> chosen = if (checked) chosen or bit else chosen and bit.inv() })) {
+                    onValueChange = { checked ->
+                        chosen = if (checked) chosen or bit else chosen and bit.inv()
+                        editor.edit(live.revision, chosen.toLong().takeIf { Integer.bitCount(chosen) >= 2 })
+                    })) {
                     Checkbox(checked = chosen and bit != 0, onCheckedChange = null, enabled = bit != 1 || allowOff)
                     Text(name, Modifier.padding(top = 12.dp))
                 }
             }
         }
-    }, confirmButton = { TextButton(enabled = enabled && Integer.bitCount(chosen) >= 2,
-        onClick = { controller.setSetting(0x1a, chosen.toLong()); open = false }) { Text(stringResource(R.string.dongle_apply)) } },
-        dismissButton = { TextButton(onClick = { open = false }) { Text(stringResource(R.string.dongle_close)) } })
+    }, confirmButton = { TextButton(onClick = { open = false }) { Text(stringResource(R.string.dongle_close)) } })
 }
 
 @Composable
 private fun SettingChoice(label: String, id: Int, state: DongleState, enabled: Boolean,
-    choices: List<Pair<Long, String>>, onChoose: (Int, Long) -> Unit) {
-    val value = state.requested[id] ?: state.settings[id]?.value
-    OptionPicker(label, value, enabled, choices) { onChoose(id, it) }
+    choices: List<Pair<Long, String>>, controller: DongleController) {
+    val editor = remember(controller, id) { controller.liveSettingEditor(id) }
+    val live by editor.state.collectAsState()
+    key(live.revision) { OptionPicker(label, live.displayed, enabled, choices) { editor.edit(live.revision, it) } }
 }
 
 @Composable
@@ -347,4 +354,38 @@ private fun OptionPicker(label: String, value: Long?, enabled: Boolean, choices:
                 onClick = { onChoose(value); open = false }) { Text(name) }
         } }
     }, confirmButton = { TextButton(onClick = { open = false }) { Text(stringResource(R.string.dongle_close)) } })
+}
+
+@Composable
+private fun DongleHearingControls(state: DongleState, controller: DongleController, enabled: Boolean) {
+    val editor = remember(controller) { controller.liveHearingEditor() }
+    val live by editor.state.collectAsState()
+    val profile = parseHearingAidSettingsResponse(live.displayed) ?: return
+    val writable = enabled && hearingAidSettingsWritable(live.displayed) && state.hearingModes.enrolled == true &&
+        state.hearingModes.clinicalReportsKnown
+    fun edit(transform: (HearingAidSettings) -> HearingAidSettings) {
+        editor.edit(live.revision) transform@{ baseline ->
+            val original = parseHearingAidSettingsResponse(baseline) ?: return@transform null
+            var requested: ByteArray? = null
+            sendHearingAidSettings(baseline, transform(original)) { _, data, _ -> requested = data }
+            requested
+        }
+    }
+    key(live.revision) {
+        StyledSlider(label = stringResource(R.string.dongle_gain), value = profile.netAmplification,
+            valueRange = -1.5f..1.5f, independent = true, enabled = writable,
+            onValueChange = { gain -> edit { it.withAmplification(gain, it.balance) } },
+            onValueChangeFinished = editor::flush, onValueChangeCanceled = { editor.cancel(live.revision) })
+        StyledSlider(label = stringResource(R.string.dongle_balance), value = profile.balance,
+            valueRange = -3f..3f, independent = true, enabled = writable,
+            onValueChange = { balance -> edit { it.withAmplification(it.netAmplification, balance) } },
+            onValueChangeFinished = editor::flush, onValueChangeCanceled = { editor.cancel(live.revision) })
+        StyledSlider(label = stringResource(R.string.dongle_tone), value = (profile.leftTone + profile.rightTone) / 2,
+            valueRange = -1f..1f, independent = true, enabled = writable,
+            onValueChange = { tone -> edit { it.copy(leftTone = tone, rightTone = tone) } },
+            onValueChangeFinished = editor::flush, onValueChangeCanceled = { editor.cancel(live.revision) })
+        StyledList { styledToggle(label = stringResource(R.string.dongle_boost),
+            checked = profile.leftConversationBoost && profile.rightConversationBoost, enabled = writable,
+            onCheckedChange = { boost -> edit { it.copy(leftConversationBoost = boost, rightConversationBoost = boost) } }) }
+    }
 }

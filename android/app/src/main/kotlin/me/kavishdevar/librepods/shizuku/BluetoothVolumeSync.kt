@@ -184,17 +184,20 @@ internal class BluetoothVolumeSync(
 
 /** Only the bounded audio-service calls run as shell; the app still owns route and lifecycle checks. */
 @android.annotation.SuppressLint("PrivateApi", "SoonBlockedPrivateApi")
-internal class ShizukuVolumeSyncAudio(private val context: Context) : BluetoothVolumeSync.Audio {
+internal class ShizukuVolumeSyncAudio(private val context: Context,
+    private val binder: (String) -> IBinder = {
+        ShizukuBinderWrapper(checkNotNull(SystemServiceHelper.getSystemService(it)))
+    }, private val packageName: String = "com.android.shell",
+) : BluetoothVolumeSync.Audio {
     private val serviceType = Class.forName("android.media.IAudioService")
     private val deviceType = Class.forName("android.media.AudioDeviceAttributes")
     private val attributes = AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).build()
     private fun service(): Any {
-        val binder = ShizukuBinderWrapper(checkNotNull(SystemServiceHelper.getSystemService(Context.AUDIO_SERVICE)))
         return checkNotNull(Class.forName("android.media.IAudioService\$Stub")
-            .getMethod("asInterface", IBinder::class.java).invoke(null, binder))
+            .getMethod("asInterface", IBinder::class.java).invoke(null, binder(Context.AUDIO_SERVICE)))
     }
     private val integer = Int::class.javaPrimitiveType!!
-    override fun syncEnabled(address: String): Boolean = BluetoothVolumeSupport().isEnabled()
+    override fun syncEnabled(address: String): Boolean = BluetoothVolumeSupport { binder("bluetooth_manager") }.isEnabled()
     override fun snapshot(): BluetoothVolumeSync.Snapshot {
         val remote = service()
         val routes = serviceType.getMethod("getDevicesForAttributes", AudioAttributes::class.java)
@@ -213,10 +216,10 @@ internal class ShizukuVolumeSyncAudio(private val context: Context) : BluetoothV
     }
     override fun setVolume(index: Int) {
         serviceType.getMethod("setStreamVolume", integer, integer, integer, String::class.java)
-            .invoke(service(), AudioManager.STREAM_MUSIC, index, 0, "com.android.shell")
+            .invoke(service(), AudioManager.STREAM_MUSIC, index, 0, packageName)
     }
     override fun setAbsolute(route: BluetoothVolumeSync.Route) {
         serviceType.getMethod("setDeviceVolumeBehavior", deviceType, integer, String::class.java)
-            .invoke(service(), route.token, 3, "com.android.shell")
+            .invoke(service(), route.token, 3, packageName)
     }
 }

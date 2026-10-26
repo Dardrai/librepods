@@ -22,6 +22,9 @@ import me.kavishdevar.librepods.core.devices.Device
 import me.kavishdevar.librepods.presentation.screens.DeviceListScreen
 import me.kavishdevar.librepods.presentation.screens.OpenSourceLicensesScreen
 import me.kavishdevar.librepods.presentation.screens.ReleaseNotesScreen
+import me.kavishdevar.librepods.presentation.screens.apple.HeadphoneAccommodationsScreen
+import me.kavishdevar.librepods.presentation.screens.apple.DongleAccommodationsScreen
+import me.kavishdevar.librepods.presentation.screens.apple.DongleTransparencyScreen
 import me.kavishdevar.librepods.presentation.screens.apple.AccessibilitySettingsScreen
 import me.kavishdevar.librepods.presentation.screens.apple.AppleSettingsRoute
 import me.kavishdevar.librepods.presentation.screens.apple.CallControlScreen
@@ -73,6 +76,7 @@ private fun createAppleViewModelFactory(
                 recordingRepository = recordingRepository,
                 heartRateRepository = heartRateRepository,
                 audioControllerProvider = { application.experimentalAudioControllers[device.macAddress] },
+                gameModeControllerProvider = { application.nativeGameModeControllers[device.macAddress] },
             )
         }
     }
@@ -199,7 +203,9 @@ fun RenderScreenContent(
             }
         }
 
-        Screen.DongleSettings -> DongleSettingsScreen(navigateBack)
+        Screen.DongleSettings -> DongleSettingsScreen(navigateBack, { navigate(Screen.DongleAccommodations) })
+        Screen.DongleAccommodations -> DongleAccommodationsScreen(navigateBack) { navigate(Screen.DongleTransparency) }
+        Screen.DongleTransparency -> DongleTransparencyScreen(navigateBack)
 
         is Screen.HeadTracking -> {
             val device = devices[screen.macAddress] as? AppleDevice ?: return
@@ -225,10 +231,19 @@ fun RenderScreenContent(
             AccessibilitySettingsScreen(
                 viewModel = appleViewModel,
                 navigateBack = navigateBack,
-                navigateToTransparencyCustomization = {
-                    navigate(Screen.TransparencyCustomization(screen.macAddress))
+                navigateToHeadphoneAccommodations = {
+                    navigate(Screen.HeadphoneAccommodations(screen.macAddress))
                 }
             )
+        }
+
+        is Screen.HeadphoneAccommodations -> {
+            val device = devices[screen.macAddress] as? AppleDevice ?: return
+            val factory = createAppleViewModelFactory(device, appDataRepository, recordingRepository, heartRateRepository)
+            val appleViewModel: AppleViewModel = viewModel(key = "${screen.macAddress.value}:${device.connectionNumber}", factory = factory)
+            HeadphoneAccommodationsScreen(appleViewModel, navigateBack, refreshDeviceSettings) {
+                navigate(Screen.TransparencyCustomization(screen.macAddress))
+            }
         }
 
         is Screen.TransparencyCustomization -> {

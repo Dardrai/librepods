@@ -123,7 +123,7 @@ static uintptr_t getModuleBase(const char *name) {
     while (fgets(line, sizeof(line), fp)) {
         if (strstr(line, name)) {
             base = strtoull(line, nullptr, 16);
-            LOGI("getModuleBase: found base at 0x%x", base);
+            LOGI("getModuleBase: found base at %p", reinterpret_cast<void*>(base));
             break;
         }
     }

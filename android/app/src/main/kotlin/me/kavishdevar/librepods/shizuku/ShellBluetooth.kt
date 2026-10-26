@@ -9,7 +9,7 @@ import android.os.Process
 internal object ShellBluetooth {
     @SuppressLint("SoonBlockedPrivateApi")
     fun adapter(context: Context): BluetoothAdapter {
-        check(Process.myUid() == 2000) { "Bluetooth recovery requires the Shizuku shell backend" }
+        ShellAudioContext.packageForUid(Process.myUid())
         // app_process skips ActivityThread.main's per-process Bluetooth module initialization.
         val initializer = Class.forName("android.bluetooth.BluetoothFrameworkInitializer")
         synchronized(initializer) {

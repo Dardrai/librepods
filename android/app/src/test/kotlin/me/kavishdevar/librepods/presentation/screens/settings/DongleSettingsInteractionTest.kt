@@ -21,12 +21,15 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performSemanticsAction
 import me.kavishdevar.librepods.core.bluetooth.att.types.HearingAidSettings
+import me.kavishdevar.librepods.core.devices.HearingModes
 import me.kavishdevar.librepods.dongle.DongleController
 import me.kavishdevar.librepods.dongle.DongleProtocol
 import me.kavishdevar.librepods.dongle.DongleState
 import me.kavishdevar.librepods.presentation.design.DesignSystem
 import me.kavishdevar.librepods.presentation.design.LibrePodsTheme
 import org.junit.Assert.assertEquals
+import org.junit.After
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -46,26 +49,26 @@ class DongleSettingsInteractionTest {
     private val current = mutableStateOf(DongleState(connected = true,
         status = DongleProtocol.Status(3, listOf(1, 2, 3, 4, 5, 6), 3, 3, listOf(91, 92, 70), 3, 0x1f)))
     private val audioRequests = mutableListOf<DongleAudioRequest>()
-    private val hearingRequests = mutableListOf<(HearingAidSettings) -> HearingAidSettings>()
+    private val hearingRequests = java.util.concurrent.CopyOnWriteArrayList<(HearingAidSettings) -> HearingAidSettings>()
 
-    @Test fun applying_without_edits_preserves_every_per_ear_value() {
+    private val editors = mutableListOf<DongleControlTestEditors>()
+    @After fun closeEditors() { editors.forEach { it.close() } }
+    @Test fun hydration_without_edits_does_not_write_a_hearing_profile() {
         show(hearing = profile)
-        applyHearing()
-        assertEquals(profile, hearingRequests.single()(profile))
+        compose.waitForIdle()
+        assertTrue(hearingRequests.isEmpty())
     }
 
     @Test fun changing_only_gain_preserves_asymmetric_tones_boosts_and_fitting() {
         show(hearing = profile)
         adjust(-1.5f..1.5f, 0.25f)
-        applyHearing()
-        assertEquals(profile.withAmplification(0.25f), hearingRequests.single()(profile))
+        awaitHearing(profile.withAmplification(0.25f))
     }
 
     @Test fun changing_only_balance_preserves_asymmetric_tones_boosts_and_fitting() {
         show(hearing = profile)
         adjust(-3f..3f, 0.5f)
-        applyHearing()
-        assertEquals(profile.withAmplification(balance = 0.5f), hearingRequests.single()(profile))
+        awaitHearing(profile.withAmplification(balance = 0.5f))
     }
 
     @Test fun explicit_tone_and_boost_edits_change_both_ears_without_recalculating_gain() {
@@ -74,9 +77,8 @@ class DongleSettingsInteractionTest {
         show(hearing = original)
         adjust(-1f..1f, 0.5f)
         compose.onNodeWithText("Conversation Boost").performScrollTo().performClick()
-        applyHearing()
-        assertEquals(original.copy(leftTone = 0.5f, rightTone = 0.5f,
-            leftConversationBoost = true, rightConversationBoost = true), hearingRequests.single()(original))
+        awaitHearing(original.copy(leftTone = 0.5f, rightTone = 0.5f,
+            leftConversationBoost = true, rightConversationBoost = true))
     }
 
     @Test fun codec_selection_normalizes_automatic_sbc_and_aac_requests() {
@@ -120,19 +122,15 @@ class DongleSettingsInteractionTest {
     }
 
     private fun show(hearing: HearingAidSettings? = null, audio: DongleProtocol.AudioProfile? = null) {
-        current.value = current.value.copy(hearingProfile = hearing, audio = audio)
-        val controller = mock(DongleController::class.java) { call ->
-            when (call.method.name) {
-                "audioProfile" -> {
-                    val request = DongleAudioRequest(call.getArgument(0), call.getArgument(1), call.getArgument(2))
-                    audioRequests += request
-                    current.value = current.value.copy(audio = audioProfile(request.codec, request.rateMode, request.bitrate))
-                    null
-                }
-                "updateHearing" -> { hearingRequests += call.getArgument<(HearingAidSettings) -> HearingAidSettings>(0); null }
-                else -> Answers.RETURNS_DEFAULTS.answer(call)
-            }
-        }
+        val modes = HearingModes.empty()
+            .withReport(byteArrayOf(4, 0, 4, 0, 9, 0, 0x2c, 1, 1, 0, 0))
+            .withReport(byteArrayOf(4, 0, 4, 0, 9, 0, 0x33, 1, 0, 0, 0))
+        current.value = current.value.copy(hearingProfile = hearing, audio = audio, hearingModes = modes)
+        val fixture = DongleControlTestEditors(current, onAudio = { request ->
+            audioRequests += request
+            current.value = current.value.copy(audio = audioProfile(request.codec, request.rateMode, request.bitrate))
+        }, onHearing = { requested -> hearingRequests += { requested } }).also { editors += it }
+        val controller = fixture.controller
         compose.setContent {
             LibrePodsTheme(designSystem = DesignSystem.Material) {
                 Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) { DongleControls(current.value, controller) }
@@ -149,7 +147,10 @@ class DongleSettingsInteractionTest {
         }).performScrollTo().performSemanticsAction(SemanticsActions.SetProgress) { it(value) }
     }
 
-    private fun applyHearing() = compose.onNodeWithText("Apply adjustments").performScrollTo().performClick()
+    private fun awaitHearing(expected: HearingAidSettings) {
+        compose.waitUntil(3_000) { hearingRequests.lastOrNull()?.invoke(profile) == expected }
+        assertEquals(expected, hearingRequests.last()(profile))
+    }
     private fun open(label: String) = compose.onNodeWithText(label).performScrollTo().performClick()
     private fun dialogChoice(choice: String) = compose.onNode(hasText(choice) and hasAnyAncestor(isDialog()))
     private fun choose(label: String, choice: String) { open(label); dialogChoice(choice).performClick() }

@@ -78,6 +78,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.channels.Channel
 import me.kavishdevar.librepods.LibrePodsApplication
@@ -143,6 +145,7 @@ import me.kavishdevar.librepods.companion.CompanionPreferenceAdapter
 import me.kavishdevar.librepods.companion.CompanionCallMonitor
 import me.kavishdevar.librepods.shizuku.NativeCallConnection
 import me.kavishdevar.librepods.shizuku.ShizukuAudioClient
+import me.kavishdevar.librepods.utils.BluetoothIdentitySettings
 import me.kavishdevar.librepods.data.xposed.XposedRemotePrefProvider
 
 private const val TAG = "LibrePodsService"
@@ -184,9 +187,7 @@ class LibrePodsService: Service() {
     private var companion: CompanionHandoffController? = null
     val companionHandoff get() = companion
     val companionAudioAvailability get() = companionBridge.state
-    fun companionMediaAvailable(): Boolean = runCatching {
-        Shizuku.pingBinder() && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
-    }.getOrDefault(false)
+    fun companionMediaAvailable(): Boolean = companionBridge.state.value.connected
     private val companionBridge by lazy { ShizukuAudioClient(this) }
     private val companionPreferenceAdapter by lazy {
         CompanionPreferenceAdapter(appDataRepository, appleRepository,
@@ -217,6 +218,8 @@ class LibrePodsService: Service() {
     private val nearbyCases = ConcurrentHashMap<MacAddress, NearbyCase>()
     private var microphonePermissionMonitor: Job? = null
     private val audioControllers get() = (application as LibrePodsApplication).experimentalAudioControllers
+    private val gameControllers get() = (application as LibrePodsApplication).nativeGameModeControllers
+    private val microphoneStarts = ConcurrentHashMap<MacAddress, Job>()
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val backgroundAudioAccess by lazy { BackgroundAudioAccess(this) }
@@ -388,6 +391,7 @@ class LibrePodsService: Service() {
 
     override fun onCreate() {
         super.onCreate()
+        BluetoothIdentitySettings.initialize(this)
         if (!hasNearbyDevicesPermissions(this)) {
             stopSelf()
             return
@@ -395,6 +399,7 @@ class LibrePodsService: Service() {
         startedWithPermissions = true
         dongleControls.restore()
         restoreCompanionHolds()
+        startPrivilegedAccess()
         startBackgroundAudioAccess()
         companion = CompanionHandoffController(this, serviceScope, ::companionStatus, ::companionOperation,
             companionPreferences, ::companionCallAllowed, ::companionCallReturnAllowed, ::companionCallStatus,
@@ -560,6 +565,18 @@ class LibrePodsService: Service() {
 
     override fun onBind(intent: Intent?): IBinder = binder
 
+    private fun startPrivilegedAccess() {
+        serviceScope.launch {
+            companionBridge.state.collect { state ->
+                if (state.connected) {
+                    ensureBackgroundAudioAccess()
+                    checkBluetoothVolumeSync()
+                }
+            }
+        }
+        companionBridge.connect()
+    }
+
     private fun startBackgroundAudioAccess() {
         if (Build.VERSION.SDK_INT < 37) return
         runCatching {
@@ -572,13 +589,17 @@ class LibrePodsService: Service() {
     private fun ensureBackgroundAudioAccess() {
         if (Build.VERSION.SDK_INT < 37 || destroying || !startedWithPermissions) return
         serviceScope.launch(Dispatchers.IO) {
-            if (!destroying) backgroundAudioAccess.ensureAllowed()
+            if (!destroying) {
+                if (companionBridge.isRoot) companionBridge.ensureOwnBackgroundAudio()
+                else backgroundAudioAccess.ensureAllowed()
+            }
         }
     }
 
     /** Active A2DP changes need checking even when Android retains both output endpoints. */
     private fun checkBluetoothVolumeSync() {
         if (destroying || !startedWithPermissions) return
+        companionBridge.connect()
         // Retire the previous route's transient state even while its repair is still running.
         selectBluetoothVolumeSyncRoute()
         if (bluetoothVolumeSyncJob?.isActive == true) return
@@ -600,7 +621,9 @@ class LibrePodsService: Service() {
                     try {
                         // Share the volume lock so a new conversation cannot race the repair's ramp.
                         MediaController.withIdleMediaVolume {
-                            bluetoothVolumeSync.check(device.macAddress.value, device, ::current)
+                            if (companionBridge.isRoot)
+                                companionBridge.checkVolumeSync(device.macAddress.value, device, ::current)
+                            else bluetoothVolumeSync.check(device.macAddress.value, device, ::current)
                         }
                     } finally {
                         controller.endSettingsRefresh()
@@ -626,6 +649,9 @@ class LibrePodsService: Service() {
             null
         }
         bluetoothVolumeSync.selectRoute(route?.address)
+        devices.value.values.filterIsInstance<AppleDevice>()
+            .filterNot { it.macAddress.value.equals(route?.address, ignoreCase = true) }
+            .forEach { companionBridge.forgetVolumeSync(it) }
         return route
     }
 
@@ -641,7 +667,7 @@ class LibrePodsService: Service() {
         (devices.value[MacAddress(address)] as? AppleDevice)?.takeIf {
             !destroying && companionHoldReady && it.bluetoothDevice.bondState == BluetoothDevice.BOND_BONDED &&
                 getSystemService(BluetoothManager::class.java).adapter.isEnabled &&
-                !XposedRemotePrefProvider.create().getBoolean("vendor_id_hook", false)
+                BluetoothIdentitySettings.allowsRootlessCompanion()
         }
     }.getOrNull()
 
@@ -1211,13 +1237,59 @@ class LibrePodsService: Service() {
         }
         audioDevices[address] = device
         audioControllers[address] = controller
+        val game = if (Build.VERSION.SDK_INT == 37)
+            me.kavishdevar.librepods.utils.NativeGameModeController(device, serviceScope) {
+                destroying || audioDevices[address] !== device || callBlocksSettingsRefresh() ||
+                    microphoneOwners.isNotEmpty() || settingsRefreshes.isNotEmpty() || bleCaptureBlocked ||
+                    companionOperations.containsKey(address) || device.settingsOperationPending ||
+                    device.state.value.hearingModes.pending != null || device.state.value.accommodationsRequest.pending
+            }.also { gameControllers[address] = it }
+        else null
         val suspensions = Channel<Boolean>(Channel.CONFLATED)
         sensorSuspensions[address] = suspensions
         device.recordingHandler = { recording ->
-            if (recording == null) { controller.stop(); true }
-            else controller.startRecording(recording.file)
+            if (recording == null) {
+                microphoneStarts.remove(address)?.cancel()
+                controller.stop()
+                if (controller.microphone.state.value.phase in listOf(MicrophonePhase.IDLE, MicrophonePhase.ERROR))
+                    game?.resumeAfterMicrophone()
+                true
+            } else if (game == null || game.state.value.let {
+                    !it.desiredOn && !it.active && !it.restoring && !it.remoteRestorePending }) {
+                controller.startRecording(recording.file)
+            } else if (microphoneStarts.containsKey(address)) false
+            else {
+                val request = serviceScope.launch(start = CoroutineStart.LAZY) {
+                    var started = false
+                    try {
+                        if (game.suspendForMicrophone() && !destroying &&
+                            microphoneStarts[address] === coroutineContext[Job] &&
+                            audioControllers[address] === controller && gameControllers[address] === game &&
+                            !callBlocksSettingsRefresh()) started = controller.startRecording(recording.file)
+                    } finally {
+                        coroutineContext[Job]?.let { microphoneStarts.remove(address, it) }
+                        if (!started && !microphoneStarts.containsKey(address) &&
+                            audioControllers[address] === controller && gameControllers[address] === game) {
+                            device.updateRecordingState { it.copy(isRecording = false) }
+                            if (controller.microphone.state.value.phase in listOf(MicrophonePhase.IDLE, MicrophonePhase.ERROR))
+                                game.resumeAfterMicrophone()
+                        }
+                    }
+                }
+                if (microphoneStarts.putIfAbsent(address, request) != null) {
+                    request.cancel()
+                    false
+                } else {
+                    request.start()
+                    true
+                }
+            }
         }
         audioJobs[address] = serviceScope.launch {
+            if (game != null) launch {
+                device.settings.map { it.nativeGameModeEnabled }.distinctUntilChanged()
+                    .collect { game.setDesiredOn(it) }
+            }
             launch(Dispatchers.IO) {
                 for (suspended in suspensions) device.setSensorsSuspended(suspended)
             }
@@ -1230,11 +1302,15 @@ class LibrePodsService: Service() {
                 if (state.phase in listOf(MicrophonePhase.IDLE, MicrophonePhase.RECOVERING, MicrophonePhase.ERROR)) {
                     device.updateRecordingState { it.copy(isRecording = false) }
                 }
+                if (state.phase in listOf(MicrophonePhase.IDLE, MicrophonePhase.ERROR) &&
+                    !microphoneStarts.containsKey(address)) game?.resumeAfterMicrophone()
             }
         }
     }
 
     private fun detachExperimentalAudio(address: MacAddress) {
+        microphoneStarts.remove(address)?.cancel()
+        gameControllers.remove(address)?.close()
         audioDevices.remove(address)?.recordingHandler = null
         sensorSuspensions.remove(address)?.close()
         audioJobs.remove(address)?.cancel()
@@ -1363,7 +1439,10 @@ class LibrePodsService: Service() {
                         if (intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR) == BluetoothAdapter.STATE_ON) {
                             if (bleRequested) serviceScope.launch { loadDevices(); startBleScanner() }
                         } else {
-                            devices.value.values.filterIsInstance<AppleDevice>().forEach { bluetoothVolumeSync.forget(it) }
+                            devices.value.values.filterIsInstance<AppleDevice>().forEach {
+                                bluetoothVolumeSync.forget(it)
+                                companionBridge.forgetVolumeSync(it)
+                            }
                             stopActiveBleScan()
                             nearbyPairing?.cancelPending()
                             nearbyVisits.clear()
@@ -1385,6 +1464,7 @@ class LibrePodsService: Service() {
                             nearbyPairing?.updatePairingBattery(changed, emptySet())
                             val address = MacAddress(changed.address)
                             bluetoothVolumeSync.forget(address.value)
+                            companionBridge.forgetVolumeSync(address.value)
                             onDeviceDisconnected(address)
                             deviceJobs.remove(address)?.forEach { it.cancel() }
                             _devices.update { it - address }
@@ -1409,8 +1489,10 @@ class LibrePodsService: Service() {
                     when (action) {
                         BluetoothA2dp.ACTION_CONNECTION_STATE_CHANGED -> {
                             if (intent.getIntExtra(BluetoothProfile.EXTRA_STATE, -1) in setOf(
-                                    BluetoothProfile.STATE_DISCONNECTING, BluetoothProfile.STATE_DISCONNECTED))
+                                    BluetoothProfile.STATE_DISCONNECTING, BluetoothProfile.STATE_DISCONNECTED)) {
                                 bluetoothVolumeSync.forget(bluetoothDevice.address)
+                                companionBridge.forgetVolumeSync(bluetoothDevice.address)
+                            }
                             checkBluetoothVolumeSync()
                             (devices.value[MacAddress(bluetoothDevice.address)] as? AppleDevice)?.let {
                                 observeNearbyMedia(it, intent.getIntExtra(BluetoothProfile.EXTRA_STATE, -1))

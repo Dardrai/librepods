@@ -40,6 +40,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -73,6 +74,8 @@ import me.kavishdevar.librepods.presentation.components.primitives.styledToggle
 import me.kavishdevar.librepods.presentation.icons.LocalIcons
 import me.kavishdevar.librepods.presentation.viewmodel.AppSettingsViewModel
 import me.kavishdevar.librepods.utils.XposedState
+import me.kavishdevar.librepods.utils.BluetoothIdentitySettings
+import me.kavishdevar.librepods.utils.IdentityUpdateResult
 
 @Composable
 fun AppSettingsScreen(
@@ -89,6 +92,7 @@ fun AppSettingsScreen(
     val context = LocalContext.current
     val scrollState = rememberScrollState()
     val state by viewModel.uiState.collectAsState()
+    LaunchedEffect(XposedState.isAvailable) { BluetoothIdentitySettings.initialize(context) }
 
     val backdrop = rememberLayerBackdrop()
 
@@ -115,6 +119,8 @@ fun AppSettingsScreen(
             Spacer(modifier = Modifier.height(20.dp))
 
             PcControlsVisibilitySetting()
+            Spacer(modifier = Modifier.height(16.dp))
+            PrivilegedAccessSetting()
             Spacer(modifier = Modifier.height(16.dp))
             CompanionSettingsSection()
             Spacer(modifier = Modifier.height(16.dp))
@@ -175,20 +181,28 @@ fun AppSettingsScreen(
                 title = stringResource(R.string.advanced_options),
                 description = stringResource(R.string.do_not_change)
             ) {
-                if (XposedState.isAvailable && XposedState.bluetoothScopeEnabled) {
+                if (BluetoothIdentitySettings.usesNativeProperties || XposedState.isAvailable && XposedState.bluetoothScopeEnabled) {
                     val restartBluetoothText =
                         stringResource(R.string.found_offset_restart_bluetooth)
+                    val identityFailureText = stringResource(if (BluetoothIdentitySettings.usesNativeProperties)
+                        R.string.bluetooth_identity_root_setup_required else R.string.bluetooth_identity_change_failed)
                     styledToggle(
                         label = stringResource(R.string.act_as_an_apple_device) + " (${
                             stringResource(
-                                R.string.requires_xposed
+                                if (BluetoothIdentitySettings.usesNativeProperties) R.string.requires_root else R.string.requires_xposed
                             )
                         })",
                         description = stringResource(R.string.act_as_an_apple_device_description),
                         checked = state.vendorIdHook,
+                        enabled = !state.vendorIdHookBusy,
                         onCheckedChange = { checked ->
-                            Toast.makeText(context, restartBluetoothText, Toast.LENGTH_SHORT).show()
-                            viewModel.setVendorIdHook(checked)
+                            viewModel.setVendorIdHook(checked) { result ->
+                                when (result) {
+                                    IdentityUpdateResult.UPDATED -> Toast.makeText(context, restartBluetoothText, Toast.LENGTH_SHORT).show()
+                                    IdentityUpdateResult.FAILED -> Toast.makeText(context, identityFailureText, Toast.LENGTH_LONG).show()
+                                    IdentityUpdateResult.BUSY -> Unit
+                                }
+                            }
                         }
                     )
                 }

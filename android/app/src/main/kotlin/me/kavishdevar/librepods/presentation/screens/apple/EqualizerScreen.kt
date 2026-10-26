@@ -22,6 +22,7 @@ import androidx.compose.animation.Crossfade
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
@@ -54,7 +55,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.key
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -64,7 +65,21 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.disabled
+import androidx.compose.ui.semantics.progressBarRangeInfo
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.setProgress
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.IntOffset
@@ -75,8 +90,7 @@ import com.kyant.backdrop.backdrops.rememberLayerBackdrop
 import com.kyant.backdrop.drawBackdrop
 import com.kyant.backdrop.effects.lens
 import com.kyant.backdrop.highlight.Highlight
-import kotlinx.coroutines.flow.debounce
-import kotlinx.coroutines.flow.drop
+import me.kavishdevar.librepods.core.devices.ConnectionState
 import me.kavishdevar.librepods.R
 import me.kavishdevar.librepods.presentation.components.primitives.StyledButton
 import me.kavishdevar.librepods.presentation.components.primitives.StyledList
@@ -88,7 +102,9 @@ import me.kavishdevar.librepods.presentation.viewmodel.AppleUiState
 import me.kavishdevar.librepods.presentation.viewmodel.AppleViewModel
 import kotlin.math.abs
 import kotlin.math.roundToInt
-import kotlin.time.Duration.Companion.milliseconds
+
+internal fun equalizerBand(offset: Float, maxOffset: Float): Int =
+    (100 - ((offset / (2 * maxOffset) + 0.5f) * 100).roundToInt()).coerceIn(0, 100)
 
 @Composable
 fun EqualizerRoute(
@@ -96,12 +112,15 @@ fun EqualizerRoute(
     navigateBack: (() -> Unit)?
 ) {
     val uiState by viewModel.uiState.collectAsState()
-
+    val connection by viewModel.connectionState.collectAsState()
+    val live by viewModel.liveCustomEqEditor().state.collectAsState()
     EqualizerScreen(
-        uiState = uiState,
+        uiState = uiState.copy(state = uiState.state.copy(requestedCustomEq = live.displayed)),
         navigateBack = navigateBack,
-        setCustomEqEnabled = viewModel::setCustomEqEnabled,
-        setCustomEq = viewModel::setCustomEq
+        setCustomEqEnabled = { viewModel.setCustomEqEnabled(it, live.revision) },
+        setCustomEq = { low, mid, high -> viewModel.setCustomEq(low, mid, high, live.revision) },
+        editorRevision = live.revision,
+        controlsEnabled = connection == ConnectionState.CONNECTED
     )
 }
 @Composable
@@ -109,11 +128,13 @@ fun EqualizerScreen(
     uiState: AppleUiState,
     navigateBack: (() -> Unit)?,
     setCustomEqEnabled: (Boolean) -> Unit,
-    setCustomEq: (Int, Int, Int) -> Unit
+    setCustomEq: (Int, Int, Int) -> Unit,
+    editorRevision: Long = 0,
+    controlsEnabled: Boolean = true
 ) {
     val state = uiState.state
 
-    val customEq = state.customEq
+    val customEq = state.requestedCustomEq ?: state.customEq
 
     val scrollState = rememberScrollState()
 
@@ -130,7 +151,7 @@ fun EqualizerScreen(
             val height = 200.dp
             val maxOffset = with(LocalDensity.current) { height.toPx() } / 2
 
-            val offsets = remember(state.customEq) {
+            val offsets = remember(state.controlSession, editorRevision, maxOffset) {
                 listOf(
                     mutableFloatStateOf(lerp(maxOffset, -maxOffset, customEq.low.toFloat() / 100)),
                     mutableFloatStateOf(lerp(maxOffset, -maxOffset, customEq.mid.toFloat() / 100)),
@@ -138,26 +159,17 @@ fun EqualizerScreen(
                 )
             }
 
-            LaunchedEffect(offsets) {
-                snapshotFlow {
-                    Triple(
-                        offsets[0].floatValue,
-                        offsets[1].floatValue,
-                        offsets[2].floatValue
-                    )
-                }
-                    .drop(1)
-                    .debounce(100.milliseconds) // nice, should've been using this since the very beginning
-                    .collect { (lowF, midF, highF) ->
-                        val low =
-                            100 - ((lowF / (2 * maxOffset) + 0.5f) * 100).roundToInt()
-                        val mid =
-                            100 - ((midF / (2 * maxOffset) + 0.5f) * 100).roundToInt()
-                        val high =
-                            100 - ((highF / (2 * maxOffset) + 0.5f) * 100).roundToInt()
-
-                        setCustomEq(low, mid, high)
+            fun bandsChanged() {
+                val values = offsets.map { equalizerBand(it.floatValue, maxOffset) }
+                setCustomEq(values[0], values[1], values[2])
+            }
+            LaunchedEffect(customEq, offsets) {
+                val current = offsets.map { equalizerBand(it.floatValue, maxOffset) }
+                if (current != listOf(customEq.low, customEq.mid, customEq.high)) {
+                    listOf(customEq.low, customEq.mid, customEq.high).forEachIndexed { index, value ->
+                        offsets[index].floatValue = lerp(maxOffset, -maxOffset, value / 100f)
                     }
+                }
             }
 
             Spacer(modifier = Modifier.height(topPadding))
@@ -168,12 +180,14 @@ fun EqualizerScreen(
                 styledListItem(
                     contentText = stringResource(R.string.recommended),
                     selected = !enabled,
+                    enabled = controlsEnabled,
                     onClick = { setCustomEqEnabled(false) }
                 )
 
                 styledListItem(
                     contentText = stringResource(R.string.custom),
                     selected = enabled,
+                    enabled = controlsEnabled,
                     onClick = { setCustomEqEnabled(true) }
                 )
             }
@@ -190,11 +204,12 @@ fun EqualizerScreen(
                     verticalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
 
-                    EqualizerCard(
-                        lowOffset = offsets[0],
-                        midOffset = offsets[1],
-                        highOffset = offsets[2]
-                    )
+                    key(state.controlSession, editorRevision) {
+                        EqualizerCard(
+                            lowOffset = offsets[0], midOffset = offsets[1], highOffset = offsets[2],
+                            enabled = controlsEnabled && visible && enabled, onBandsChanged = ::bandsChanged
+                        )
+                    }
 
                     val resetButtonEnabled = remember { derivedStateOf { !offsets.all { it.floatValue == 0f } } }
 
@@ -203,11 +218,12 @@ fun EqualizerScreen(
                             offsets[0].floatValue = 0f
                             offsets[1].floatValue = 0f
                             offsets[2].floatValue = 0f
+                            bandsChanged()
                         },
                         backdrop = rememberLayerBackdrop(),
                         modifier = Modifier.fillMaxWidth(),
                         isInteractive = false,
-                        enabled = resetButtonEnabled.value
+                        enabled = controlsEnabled && visible && enabled && resetButtonEnabled.value
                     ) {
                         Text(
                             text = stringResource(R.string.reset),
@@ -227,10 +243,13 @@ fun EqualizerScreen(
 fun EqualizerCard(
     lowOffset: MutableState<Float>,
     midOffset: MutableState<Float>,
-    highOffset: MutableState<Float>
+    highOffset: MutableState<Float>,
+    enabled: Boolean = true,
+    onBandsChanged: () -> Unit = {}
 ) {
     val height = 200.dp
     val maxOffset = with(LocalDensity.current) { height.toPx() } / 2
+    val haptics = LocalHapticFeedback.current
 
     val dashColor = MaterialTheme.colorScheme.onSurface.copy(0.2f)
 
@@ -522,7 +541,7 @@ fun EqualizerCard(
                         Text(
                             text = stringResource(R.string.eq_low).uppercase(),
                             style = MaterialTheme.typography.labelSmallEmphasized,
-                            color = MaterialTheme.colorScheme.onSurface.copy(0.2f),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                             textAlign = TextAlign.Center,
                             modifier = Modifier.fillMaxWidth()
                         )
@@ -533,7 +552,7 @@ fun EqualizerCard(
                         Text(
                             text = stringResource(R.string.eq_mid).uppercase(),
                             style = MaterialTheme.typography.labelSmallEmphasized,
-                            color = MaterialTheme.colorScheme.onSurface.copy(0.2f),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                             textAlign = TextAlign.Center,
                             modifier = Modifier.fillMaxWidth()
                         )
@@ -544,7 +563,7 @@ fun EqualizerCard(
                         Text(
                             text = stringResource(R.string.eq_high).uppercase(),
                             style = MaterialTheme.typography.labelSmallEmphasized,
-                            color = MaterialTheme.colorScheme.onSurface.copy(0.2f),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                             textAlign = TextAlign.Center,
                             modifier = Modifier.fillMaxWidth()
                         )
@@ -567,6 +586,20 @@ fun EqualizerCard(
                         horizontalArrangement = Arrangement.Center
                     ) {
                         val pressed = remember { mutableStateOf(false) }
+                        val bandOffset = when (i) { 0 -> lowOffset; 1 -> midOffset; else -> highOffset }
+                        val bandLabel = stringResource(when (i) { 0 -> R.string.eq_low; 1 -> R.string.eq_mid; else -> R.string.eq_high })
+                        fun moveBand(offset: Float): Boolean {
+                            if (!enabled || !offset.isFinite()) return false
+                            val next = offset.coerceIn(-maxOffset, maxOffset)
+                            if (next == bandOffset.value) return false
+                            val previousBand = equalizerBand(bandOffset.value, maxOffset)
+                            bandOffset.value = next
+                            if (equalizerBand(next, maxOffset) != previousBand) {
+                                haptics.performHapticFeedback(HapticFeedbackType.SegmentTick)
+                            }
+                            onBandsChanged()
+                            return true
+                        }
                         Box(
                             modifier = Modifier
                                 .offset {
@@ -622,49 +655,36 @@ fun EqualizerCard(
                             }
                             Box(
                                 modifier = Modifier
-                                    .size(18.dp)
-                                    .background(
-                                        colorFromY(
-                                            when (i) {
-                                                0 -> lowOffset.value; 1 -> midOffset.value; 2 -> highOffset.value
-                                                else -> 0f
+                                    .size(48.dp)
+                                    .testTag("equalizer-band-$i")
+                                    .semantics {
+                                        contentDescription = bandLabel
+                                        progressBarRangeInfo = ProgressBarRangeInfo(equalizerBand(bandOffset.value, maxOffset).toFloat(), 0f..100f)
+                                        if (!enabled) disabled()
+                                        else setProgress { target ->
+                                            target.isFinite() && moveBand(lerp(maxOffset, -maxOffset, target.coerceIn(0f, 100f) / 100f))
+                                        }
+                                    }
+                                    .onKeyEvent { event ->
+                                        if (!enabled || event.type != KeyEventType.KeyDown) false else {
+                                            val current = equalizerBand(bandOffset.value, maxOffset)
+                                            val target = when (event.key) {
+                                                Key.DirectionUp, Key.DirectionRight -> current + 1
+                                                Key.DirectionDown, Key.DirectionLeft -> current - 1
+                                                Key.MoveHome -> 0
+                                                Key.MoveEnd -> 100
+                                                else -> return@onKeyEvent false
                                             }
-                                        ),
-                                        CircleShape
-                                    )
-                                    .border(
-                                        2.5.dp,
-                                        MaterialTheme.colorScheme.surfaceContainer,
-                                        CircleShape
-                                    )
+                                            moveBand(lerp(maxOffset, -maxOffset, target.coerceIn(0, 100) / 100f))
+                                            true
+                                        }
+                                    }
+                                    .focusable(enabled)
                                     .draggable(
                                         orientation = Orientation.Vertical,
+                                        enabled = enabled,
                                         state = rememberDraggableState { delta ->
-                                            when (i) {
-                                                0 -> {
-                                                    lowOffset.value =
-                                                        (lowOffset.value + delta).coerceIn(
-                                                            -maxOffset,
-                                                            maxOffset
-                                                        )
-                                                }
-
-                                                1 -> {
-                                                    midOffset.value =
-                                                        (midOffset.value + delta).coerceIn(
-                                                            -maxOffset,
-                                                            maxOffset
-                                                        )
-                                                }
-
-                                                2 -> {
-                                                    highOffset.value =
-                                                        (highOffset.value + delta).coerceIn(
-                                                            -maxOffset,
-                                                            maxOffset
-                                                        )
-                                                }
-                                            }
+                                            moveBand(bandOffset.value + delta)
                                         },
                                         onDragStarted = {
                                             pressed.value = true
@@ -672,8 +692,13 @@ fun EqualizerCard(
                                         onDragStopped = {
                                             pressed.value = false
                                         }
-                                    )
-                            )
+                                    ),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Box(Modifier.size(18.dp)
+                                    .background(colorFromY(bandOffset.value), CircleShape)
+                                    .border(2.5.dp, MaterialTheme.colorScheme.surfaceContainer, CircleShape))
+                            }
                         }
                     }
                 }

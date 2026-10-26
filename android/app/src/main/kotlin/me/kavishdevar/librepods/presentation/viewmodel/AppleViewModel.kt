@@ -19,6 +19,7 @@
 package me.kavishdevar.librepods.presentation.viewmodel
 
 import android.widget.Toast
+import android.bluetooth.BluetoothSocket
 import me.kavishdevar.librepods.R
 
 import androidx.lifecycle.ViewModel
@@ -32,6 +33,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.transformLatest
@@ -42,6 +44,25 @@ import me.kavishdevar.librepods.bluetooth.DeviceSettingsRefreshResult
 import me.kavishdevar.librepods.audio.ExperimentalAudioController
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommandIdentifier
 import me.kavishdevar.librepods.core.bluetooth.att.ATTHandle
+import me.kavishdevar.librepods.core.bluetooth.att.types.parseTransparencySettingsResponse
+import me.kavishdevar.librepods.core.bluetooth.att.types.parseHearingAidSettingsResponse
+import me.kavishdevar.librepods.core.bluetooth.att.types.hearingAidSettingsWritable
+import me.kavishdevar.librepods.core.devices.ConnectionState
+import me.kavishdevar.librepods.core.devices.AirPodsModel
+import me.kavishdevar.librepods.data.accommodationsPairKey
+import me.kavishdevar.librepods.data.LiveRecordEditor
+import me.kavishdevar.librepods.data.LiveRecordSource
+import me.kavishdevar.librepods.data.LiveAccommodationsEditor
+import me.kavishdevar.librepods.data.LiveAccommodationsSource
+import me.kavishdevar.librepods.core.bluetooth.aacp.types.AudioSourceType
+import me.kavishdevar.librepods.data.LiveValueEditor
+import me.kavishdevar.librepods.data.LiveValueSource
+import me.kavishdevar.librepods.core.bluetooth.aacp.types.CustomEq
+import me.kavishdevar.librepods.core.devices.noiseModeCycleValue
+import me.kavishdevar.librepods.core.devices.validNoiseModeCycle
+import me.kavishdevar.librepods.core.devices.supportedNoiseModeCycleMask
+import me.kavishdevar.librepods.core.devices.effectiveAllowOff
+import me.kavishdevar.librepods.core.devices.effectiveControl
 import me.kavishdevar.librepods.core.data.StemAction
 import me.kavishdevar.librepods.core.data.heartrate.HeartRateSample
 import me.kavishdevar.librepods.core.data.recording.Recording
@@ -52,6 +73,8 @@ import me.kavishdevar.librepods.core.devices.AppleState
 import me.kavishdevar.librepods.core.devices.HearingMode
 import me.kavishdevar.librepods.core.devices.hasSameDisplayValues
 import me.kavishdevar.librepods.data.xposed.XposedRemotePrefProvider
+import me.kavishdevar.librepods.utils.BluetoothIdentitySettings
+import me.kavishdevar.librepods.utils.NativeGameModeController
 import me.kavishdevar.librepods.database.app.AppSettingsEntity
 import me.kavishdevar.librepods.database.app.AppStateEntity
 import me.kavishdevar.librepods.repository.AppDataRepository
@@ -85,8 +108,13 @@ class AppleViewModel(
     private val recordingRepository: RecordingRepository,
     private val heartRateRepository: HeartRateRepository,
     private val audioControllerProvider: () -> ExperimentalAudioController? = { null },
+    private val gameModeControllerProvider: () -> NativeGameModeController? = { null },
 ) : ViewModel(), DeviceViewModel {
+    val accommodationsPreferenceKey: String? get() = accommodationsPairKey(device.macAddress.value)
+    val transparencyTransportAvailable: Boolean get() = device.transparencyTransportAvailable
     val audioController: ExperimentalAudioController? get() = audioControllerProvider()
+    val gameModeController: NativeGameModeController? get() = gameModeControllerProvider()
+    init { BluetoothIdentitySettings.initialize(device.context) }
 
     val events = device.events
     val connectionState = device.connectionState
@@ -99,7 +127,7 @@ class AppleViewModel(
     val writingCallControls = _writingCallControls.asStateFlow()
 
     fun refreshDeviceSettings(refresh: suspend (AppleDevice) -> DeviceSettingsRefreshResult) {
-        if (device.state.value.hearingModes.pending != null) return
+        if (device.state.value.hearingModes.pending != null || device.state.value.accommodationsRequest.pending) return
         if (!_refreshingSettings.compareAndSet(false, true)) return
         viewModelScope.launch {
             try {
@@ -125,6 +153,71 @@ class AppleViewModel(
     }
 
     private var attObserveJob: Job? = null
+    private data class ATTEditorOwner(val socket: BluetoothSocket, val session: Long)
+    private val attEditors = mutableMapOf<ATTHandle, LiveRecordEditor>()
+    private var accommodationsEditor: LiveAccommodationsEditor? = null
+
+    internal fun liveAccommodationsEditor(): LiveAccommodationsEditor = accommodationsEditor ?: run {
+        fun source(): LiveAccommodationsSource {
+            val state = device.state.value
+            val report = state.hearingModes.accommodationsReport(state.controlSession)
+            val ready = device.connectionState.value == ConnectionState.CONNECTED && device.transparencyTransportAvailable &&
+                !state.microphoneState.isActive && !device.aacp.isMicrophoneRequested() && !state.recordingState.isRecording &&
+                state.audioSource.type != AudioSourceType.CALL && state.accommodationsRequest.copy(pending = false).editable(report)
+            val owner = device.aacp.captureAudioSocket()?.takeIf { ready && state.controlSession > 0 }
+                ?.let { ATTEditorOwner(it, state.controlSession) }
+            return LiveAccommodationsSource(owner, report,
+                state.hearingModes.receivedAccommodations(state.controlSession, state.accommodationsAudiogramSource),
+                state.accommodationsRequest, ready, state.accommodationsAudiogramSource)
+        }
+        LiveAccommodationsEditor(viewModelScope, ::source) { captured, report, version, choice, curves ->
+            val owner = captured as? ATTEditorOwner
+            withContext(Dispatchers.IO) {
+                if (owner == null) me.kavishdevar.librepods.core.devices.AccommodationsResult.NOT_SENT
+                else device.setAccommodations(report, choice.phone, choice.media, choice.preset.takeIf { curves }, version,
+                    curves && choice.audiogram, owner.socket, owner.session)
+            }
+        }.also { editor ->
+            accommodationsEditor = editor
+            viewModelScope.launch {
+                combine(device.state, device.connectionState) { _, _ -> Unit }.collect { editor.observe() }
+            }
+        }
+    }
+
+    internal fun liveATTEditor(handle: ATTHandle): LiveRecordEditor = attEditors.getOrPut(handle) {
+        fun source(): LiveRecordSource {
+            val state = device.state.value
+            val socket = device.aacp.captureAudioSocket()
+            val idle = !state.microphoneState.isActive && !device.aacp.isMicrophoneRequested() && !state.recordingState.isRecording &&
+                state.audioSource.type != AudioSourceType.CALL && state.hearingModes.pending == null &&
+                state.hearingModes.uncertain == null && !state.accommodationsRequest.pending
+            val owner = socket?.takeIf { device.connectionState.value == ConnectionState.CONNECTED && state.controlSession > 0 && idle }
+                ?.let { ATTEditorOwner(it, state.controlSession) }
+            val data = if (handle == ATTHandle.HEARING_AID) state.hearingAidData else state.transparencyData
+            val ready = owner != null && device.metadata.value.model != AirPodsModel.UNKNOWN &&
+                (handle != ATTHandle.HEARING_AID || state.hearingModes.enrolled == true && state.hearingModes.clinicalReportsKnown)
+            return LiveRecordSource(owner, data, ready)
+        }
+        fun valid(data: ByteArray): Boolean = if (handle == ATTHandle.HEARING_AID) hearingAidSettingsWritable(data)
+            else data.size == 104 && parseTransparencySettingsResponse(data) != null
+        fun matches(actual: ByteArray, target: ByteArray): Boolean = actual.contentEquals(target) ||
+            handle == ATTHandle.HEARING_AID && valid(actual) && valid(target) &&
+                actual.copyOfRange(0, 2).contentEquals(target.copyOfRange(0, 2)) &&
+                actual.copyOfRange(4, 104).contentEquals(target.copyOfRange(4, 104))
+        LiveRecordEditor(viewModelScope, ::source, ::valid, ::matches, write = { captured, expected, requested ->
+            val owner = captured as? ATTEditorOwner
+            val confirmed = withContext(Dispatchers.IO) {
+                owner != null && device.writeATTCharacteristic(handle, requested, expected, owner.socket, owner.session)
+            }
+            if (!confirmed) Toast.makeText(device.context, R.string.att_setting_not_confirmed, Toast.LENGTH_LONG).show()
+            confirmed
+        }).also { editor ->
+            viewModelScope.launch {
+                combine(device.state, device.connectionState, device.metadata) { _, _, _ -> Unit }.collect { editor.observe() }
+            }
+        }
+    }
 
     private val _heartRateRange = MutableStateFlow<ClosedRange<Long>?>(null)
 
@@ -159,8 +252,9 @@ class AppleViewModel(
         deviceDetails,
         appData,
         _heartRateRange,
-        heartRateSamples
-    ) { (state, settings, metadata), (appState, appSettings), heartRateRange, heartRateSamples ->
+        heartRateSamples,
+        BluetoothIdentitySettings.state
+    ) { (state, settings, metadata), (appState, appSettings), heartRateRange, heartRateSamples, _ ->
         AppleUiState(
             // Ear detection validates pending choices separately from the reported fallback.
             state = state.copy(controlStates = state.controlStates +
@@ -168,10 +262,11 @@ class AppleViewModel(
                 customEq = state.requestedCustomEq ?: state.customEq),
             settings = settings,
             metadata = metadata,
-            vendorIdHook = XposedRemotePrefProvider.create().getBoolean(
+            vendorIdHook = if (BluetoothIdentitySettings.usesNativeProperties) device.transparencyTransportAvailable
+            else XposedRemotePrefProvider.create().getBoolean(
                 "vendor_id_hook",
                 false
-            ), // TODO: make this a Flow (even if it means polling every few seconds?)
+            ),
             heartRateRange = heartRateRange,
             heartRateSamples = heartRateSamples,
             appState = appState,
@@ -184,8 +279,8 @@ class AppleViewModel(
             state = device.state.value,
             settings = device.settings.value,
             metadata = device.metadata.value,
-            vendorIdHook = XposedRemotePrefProvider.create()
-                .getBoolean("vendor_id_hook", false)
+            vendorIdHook = if (BluetoothIdentitySettings.usesNativeProperties) device.transparencyTransportAvailable
+                else XposedRemotePrefProvider.create().getBoolean("vendor_id_hook", false)
         )
     )
 
@@ -209,6 +304,16 @@ class AppleViewModel(
         }
     }
 
+    fun setAccommodations(expected: me.kavishdevar.librepods.core.devices.AccommodationsReport,
+        phone: Boolean?, media: Boolean?, preset: me.kavishdevar.librepods.core.devices.AccommodationsPreset?, editRevision: Long = 0,
+        audiogram: Boolean = false) {
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) { device.setAccommodations(expected, phone, media, preset, editRevision, audiogram) }
+            if (result == me.kavishdevar.librepods.core.devices.AccommodationsResult.NOT_SENT)
+                Toast.makeText(device.context, R.string.accommodations_not_sent, Toast.LENGTH_LONG).show()
+        }
+    }
+
     fun setControlCommand(identifier: ControlCommandIdentifier, value: ByteArray): Boolean =
         device.setControlCommand(identifier, value)
 
@@ -223,16 +328,14 @@ class AppleViewModel(
     fun setControlCommand(identifier: ControlCommandIdentifier, value: Boolean): Boolean =
         device.setControlCommand(identifier, value)
 
-    fun writeATTCharacteristic(handle: ATTHandle, value: ByteArray) {
-        writeATTCharacteristic(handle, value, null)
-    }
+    fun writeATTCharacteristic(handle: ATTHandle, value: ByteArray): Job = writeATTCharacteristic(handle, value, null)
 
-    fun writeATTCharacteristic(handle: ATTHandle, value: ByteArray, expected: ByteArray?) {
+    fun writeATTCharacteristic(handle: ATTHandle, value: ByteArray, expected: ByteArray?): Job {
         val request = value.copyOf()
         val baseline = expected?.copyOf()
         val transport = device.aacp.captureAudioSocket()
         val connection = device.connectionNumber.value
-        viewModelScope.launch {
+        return viewModelScope.launch {
             val confirmed = withContext(Dispatchers.IO) {
                 transport != null && device.aacp.captureAudioSocket() === transport &&
                     device.connectionNumber.value == connection && device.writeATTCharacteristic(handle, request, baseline)
@@ -254,15 +357,46 @@ class AppleViewModel(
     fun startRecording() = device.startRecording(recordingRepository.createRecording())
     fun stopRecording() = device.stopRecording()
 
-    fun setListeningModeCycle(mask: Int, metadata: AppleMetadata) {
-        if (!_writingNoiseModeCycle.compareAndSet(false, true)) return
-        val socket = device.aacp.captureAudioSocket()
-        viewModelScope.launch {
-            try {
-                val sent = withContext(Dispatchers.IO) { device.setListeningModeCycle(mask, metadata, socket) }
-                if (!sent) Toast.makeText(device.context, R.string.noise_cycle_update_failed, Toast.LENGTH_LONG).show()
-            } finally { _writingNoiseModeCycle.value = false }
+    private data class NativeValueOwner(val socket: BluetoothSocket, val session: Long, val metadata: AppleMetadata)
+    private fun nativeValueOwner(): NativeValueOwner? = device.aacp.captureAudioSocket()?.takeIf {
+        device.connectionState.value == ConnectionState.CONNECTED && device.state.value.controlSession > 0
+    }?.let { NativeValueOwner(it, device.state.value.controlSession, device.metadata.value) }
+    private fun ownsNativeValue(owner: NativeValueOwner) = device.aacp.captureAudioSocket() === owner.socket &&
+        device.state.value.controlSession == owner.session && device.metadata.value === owner.metadata &&
+        device.connectionState.value == ConnectionState.CONNECTED
+    private fun <T : Any> observeNativeEditor(editor: LiveValueEditor<T>): LiveValueEditor<T> = editor.also {
+        viewModelScope.launch { device.state.collect { editor.observe() } }
+        viewModelScope.launch { device.connectionState.collect { editor.observe() } }
+        viewModelScope.launch { device.metadata.collect { editor.observe() } }
+    }
+    private val noiseCycleEditor by lazy {
+        fun source(): LiveValueSource<Int> {
+            val owner = nativeValueOwner()
+            val state = device.state.value
+            return LiveValueSource(owner, noiseModeCycleValue(state.effectiveControl(
+                ControlCommandIdentifier.LISTENING_MODE_CONFIGS, device.settings.value)), owner != null)
         }
+        observeNativeEditor(LiveValueEditor(viewModelScope, ::source, { mask ->
+            validNoiseModeCycle(mask, device.metadata.value.supportedNoiseModeCycleMask(
+                device.state.value.effectiveAllowOff(device.settings.value, device.metadata.value.modelNumber)))
+        }, write = { captured, mask ->
+            val owner = captured as? NativeValueOwner
+            _writingNoiseModeCycle.value = true
+            try {
+                val sent = withContext(Dispatchers.IO) { owner != null && ownsNativeValue(owner) &&
+                    device.setListeningModeCycle(mask, owner.metadata, owner.socket) }
+                if (!sent) Toast.makeText(device.context, R.string.noise_cycle_update_failed, Toast.LENGTH_LONG).show()
+                sent
+            } finally { _writingNoiseModeCycle.value = false }
+        }))
+    }
+    internal fun liveNoiseCycleEditor(): LiveValueEditor<Int> = noiseCycleEditor
+    fun setListeningModeCycle(mask: Int, metadata: AppleMetadata, expectedRevision: Long? = null) {
+        if (device.metadata.value !== metadata) return
+        noiseCycleEditor.edit(expectedRevision ?: noiseCycleEditor.state.value.revision, mask)
+    }
+    fun cancelListeningModeCycle(expectedRevision: Long? = null) {
+        noiseCycleEditor.edit(expectedRevision ?: noiseCycleEditor.state.value.revision, null)
     }
 
     fun setCallControls(singlePress: Boolean, metadata: AppleMetadata) {
@@ -277,11 +411,15 @@ class AppleViewModel(
     }
 
     private val holdActionMutex = Mutex()
-    fun setLongPressAction(side: String, action: StemAction) = viewModelScope.launch {
-        val sent = holdActionMutex.withLock {
-            withContext(Dispatchers.IO) { device.setLongPressAction(side, action) }
+    fun setLongPressAction(side: String, action: StemAction): Job {
+        val owner = nativeValueOwner()
+        return viewModelScope.launch {
+            val sent = holdActionMutex.withLock {
+                withContext(Dispatchers.IO) { owner != null && ownsNativeValue(owner) &&
+                    device.setLongPressAction(side, action, owner.socket, owner.session) }
+            }
+            if (!sent) Toast.makeText(device.context, R.string.press_and_hold_update_failed, Toast.LENGTH_LONG).show()
         }
-        if (!sent) Toast.makeText(device.context, R.string.press_and_hold_update_failed, Toast.LENGTH_LONG).show()
     }
 
     fun renameDevice(newName: String) = viewModelScope.launch {
@@ -295,8 +433,30 @@ class AppleViewModel(
 
     fun setHeadGesturesEnabled(enabled: Boolean) = device.setHeadGesturesEnabled(enabled)
 
-    fun setCustomEqEnabled(enabled: Boolean) = device.setCustomEqEnabled(enabled)
-    fun setCustomEq(low: Int, mid: Int, high: Int) = device.setCustomEq(low, mid, high)
+    private val customEqEditor by lazy {
+        fun source(): LiveValueSource<CustomEq> {
+            val owner = nativeValueOwner()
+            val state = device.state.value
+            return LiveValueSource(owner, state.requestedCustomEq ?: state.customEq, owner != null)
+        }
+        observeNativeEditor(LiveValueEditor(viewModelScope, ::source, { _: CustomEq -> true }, write = { captured, value ->
+            val owner = captured as? NativeValueOwner
+            withContext(Dispatchers.IO) { owner != null && ownsNativeValue(owner) &&
+                device.aacp.setCustomEq(value, owner.socket) { ownsNativeValue(owner) } }
+        }))
+    }
+    internal fun liveCustomEqEditor(): LiveValueEditor<CustomEq> = customEqEditor
+    fun setCustomEqEnabled(enabled: Boolean, expectedRevision: Long? = null) {
+        val editor = customEqEditor
+        val value = editor.state.value.displayed ?: return
+        editor.edit(expectedRevision ?: editor.state.value.revision, value.copy(state = if (enabled) 2 else 1))
+    }
+    fun setCustomEq(low: Int, mid: Int, high: Int, expectedRevision: Long? = null) {
+        if (listOf(low, mid, high).any { it !in 0..100 }) return
+        val editor = customEqEditor
+        val value = editor.state.value.displayed ?: return
+        editor.edit(expectedRevision ?: editor.state.value.revision, value.copy(low = low, mid = mid, high = high))
+    }
 
     fun detectHeadGestures(callback: (Boolean) -> Unit) = device.detectHeadGestures(callback)
 

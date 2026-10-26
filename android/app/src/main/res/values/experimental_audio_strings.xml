@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- shortcut: fork text uses English fallback until translations are contributed. -->
 <resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="MissingTranslation">
-    <string name="experimental_shizuku_connect">Connect Shizuku</string>
+    <string name="experimental_shizuku_connect">Allow Bluetooth access</string>
     <string name="experimental_audio_permission">Allow microphone access, reconnect the AirPods and tap the action again.</string>
     <string name="recorder_connect_airpods">Connect your AirPods before recording.</string>
     <string name="recorder_microphone_unsupported">The high-quality microphone has not been verified for this AirPods model.</string>

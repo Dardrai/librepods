@@ -2,8 +2,28 @@ package me.kavishdevar.librepods.core.devices
 
 import org.junit.Assert.*
 import org.junit.Test
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 
 class HearingModesTest {
+    @Test fun legacyDestinationsDoNotMakeExplicitClinicalGateOffLookLikeMissingSettings() {
+        val pme = ByteArray(140).also {
+            byteArrayOf(4, 0, 4, 0, 0x53, 0, 0x84.toByte(), 0, 2, 0, 1, 1).copyInto(it)
+        }
+        val modes = HearingModes.empty()
+            .withReport(byteArrayOf(4, 0, 4, 0, 9, 0, 0x2c, 1, 2, 0, 0))
+            .withReport(byteArrayOf(4, 0, 4, 0, 9, 0, 0x33, 2, 0, 0, 0))
+            .withReport(pme)
+        assertEquals(false, modes.hearingAidEnabled)
+        assertEquals(false, modes.mediaAssistEnabled)
+        assertTrue(modes.clinicalReportsKnown)
+        assertNotNull(modes.accommodationsReport(7))
+        assertFalse(modes.canChange(HearingMode.HEARING_AID, true))
+        assertFalse(modes.canChange(HearingMode.MEDIA_ASSIST, true))
+        assertNull(modes.copy(assistReport = null).mediaAssistEnabled)
+        assertNull(modes.copy(assistReport = null).accommodationsReport(7))
+    }
+
     private fun fixture(hearing: Boolean = false, voice: Boolean = false, media: Boolean = false,
         enrollment: Byte = 1, pmeEnrollment: Byte = 1): HearingModes {
         val pme = ByteArray(140) { (it * 19).toByte() }
@@ -46,10 +66,9 @@ class HearingModesTest {
         assertNull(modes.plan(HearingMode.MEDIA_ASSIST, true))
     }
 
-    @Test fun mediaEnableRequiresItsOwnEnrollmentAndPreservesAllFourIndependentCurves() {
-        for (enrollment in byteArrayOf(0, 2))
-            assertNull(fixture(pmeEnrollment = enrollment).plan(HearingMode.MEDIA_ASSIST, true))
-        val original = fixture()
+    @Test fun mediaEnableUsesClinicalEnrollmentAndPreservesOpaquePmeEnrollmentAndEveryCurve() {
+        assertNull(fixture(enrollment = 2).plan(HearingMode.MEDIA_ASSIST, true))
+        val original = fixture(pmeEnrollment = 0)
         val before = original.pmeReport!!.copyOf()
         val plan = original.plan(HearingMode.MEDIA_ASSIST, true)!!
         val pme = plan.packets.single { it[4] == 0x53.toByte() }
@@ -58,6 +77,23 @@ class HearingModesTest {
         assertArrayEquals(before, original.pmeReport)
         assertFalse(plan.packets.any { it[6] == 0x0d.toByte() })
         assertFalse(before.sliceArray(12..43).contentEquals(before.sliceArray(44..75)))
+        assertTrue(freshReport(plan).confirms(plan))
+        assertEquals(true, freshReport(plan).mediaAssistEnabled)
+        assertEquals(0.toByte(), pme[9])
+    }
+
+    @Test fun replacementSessionNeedsAllThreeFreshReportsAndExactUnchangedProfileBytes() {
+        val original = fixture(pmeEnrollment = 0).copy(hearingRevision = 20, assistRevision = 30, pmeRevision = 40)
+        val plan = original.plan(HearingMode.MEDIA_ASSIST, true)!!
+        val matching = freshReport(plan)
+        var replacement = HearingModes(pending = HearingMode.MEDIA_ASSIST, uncertain = HearingMode.MEDIA_ASSIST)
+            .withReport(matching.hearingReport!!).withReport(matching.assistReport!!)
+        assertFalse(replacement.confirmsFreshSession(plan))
+        replacement = replacement.withReport(matching.pmeReport!!)
+        assertTrue(replacement.confirmsFreshSession(plan))
+        assertFalse(replacement.confirms(plan))
+        for (offset in intArrayOf(9, 12, 139))
+            assertFalse(replacement.withReport(matching.pmeReport!!.copyOf().also { it[offset] = (it[offset].toInt() xor 1).toByte() }).confirmsFreshSession(plan))
     }
 
     @Test fun disablingEitherModePreservesTheOtherAndTheSharedGate() {
@@ -83,16 +119,20 @@ class HearingModesTest {
         assertTrue(media.packets.all { it[4] in byteArrayOf(9, 0x53) })
     }
 
-    @Test fun malformedAndShortRouteReportsPreserveTheCompleteCurrentProfile() {
+    @Test fun malformedRecognizedReportsInvalidateStateWhileTheSeparateRoutePropertyIsIgnored() {
         val original = fixture()
         val packet = original.pmeReport!!
-        for (length in 0 until packet.size) assertSame(original, original.withReport(packet.copyOf(length)))
-        assertSame(original, original.withReport(packet + 0))
-        for (offset in intArrayOf(0, 1, 4, 5, 6, 7, 8))
+        for (length in 0 until 9) assertSame(original, original.withReport(packet.copyOf(length)))
+        for (length in 9 until packet.size) assertNull(original.withReport(packet.copyOf(length)).pmeReport)
+        assertNull(original.withReport(packet + 0).pmeReport)
+        for (offset in intArrayOf(0, 1, 4, 5))
             assertSame(original, original.withReport(packet.copyOf().also { it[offset] = 0x7f }))
+        for (offset in intArrayOf(6, 7, 8))
+            assertNull(original.withReport(packet.copyOf().also { it[offset] = 0x7f }).pmeReport)
         assertSame(original, original.withReport(byteArrayOf(4, 0, 4, 0, 0x53, 0, 2, 0, 1, 1)))
         assertSame(original, original.withReport(byteArrayOf(4, 0, 4, 0, 9, 1, 0x33, 1, 0, 0, 0)))
-        assertSame(original, original.withReport(byteArrayOf(4, 0, 4, 0, 9, 0, 0x33, 1, 1, 0, 0)))
+        assertNull(original.withReport(byteArrayOf(4, 0, 4, 0, 9, 0, 0x33, 1, 1, 0, 0)).assistReport)
+        assertNull(original.withReport(byteArrayOf(4, 0, 4, 0, 9, 0, 0x2c)).hearingReport)
     }
 
     @Test fun completeUnknownPmeFlagsInvalidateKnownModesWithoutSynthesizingDefaults() {
@@ -101,6 +141,20 @@ class HearingModesTest {
         assertFalse(modes.customTransparencyAllowed)
         assertNull(modes.plan(HearingMode.HEARING_AID, true))
         assertNull(modes.plan(HearingMode.MEDIA_ASSIST, true))
+    }
+
+    @Test fun nonFinitePmeCurvesInvalidateModesAndCannotAuthorizeOrConfirmAnEnable() {
+        val original = fixture(pmeEnrollment = 0)
+        val plan = original.plan(HearingMode.MEDIA_ASSIST, true)!!
+        for (value in floatArrayOf(Float.NaN, Float.POSITIVE_INFINITY, Float.NEGATIVE_INFINITY)) {
+            val packet = freshReport(plan).pmeReport!!.copyOf()
+            ByteBuffer.wrap(packet).order(ByteOrder.LITTLE_ENDIAN).putFloat(12, value)
+            val malformed = original.withReport(packet)
+            assertNull(malformed.pmeReport)
+            assertNull(malformed.mediaAssistEnabled)
+            assertNull(malformed.plan(HearingMode.MEDIA_ASSIST, true))
+            assertFalse(malformed.confirmsFreshSession(plan))
+        }
     }
 
     @Test fun successRequiresFreshChangedReportsAndUnchangedEnrollmentAndEveryCurveByte() {
