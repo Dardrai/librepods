@@ -23,6 +23,7 @@ import androidx.compose.ui.unit.dp
 import me.kavishdevar.librepods.core.devices.AppleSettings
 import me.kavishdevar.librepods.presentation.design.DesignSystem
 import me.kavishdevar.librepods.presentation.design.LibrePodsTheme
+import me.kavishdevar.librepods.shizuku.BridgeState
 import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
@@ -97,9 +98,55 @@ class CompanionPoliciesRenderingTest {
         }
         compose.runOnIdle { host.value = false }
         compose.onNodeWithText("Pause when removed").performScrollTo()
-        compose.onNodeWithText("Exact-player pause and resume need Shizuku running with LibrePods access. Your saved preference still syncs with the PC.").assertIsDisplayed()
+        compose.onNodeWithText(UNAVAILABLE).assertIsDisplayed()
+        compose.onAllNodes(isToggleable(), useUnmergedTree = true)[0].assertIsNotEnabled().assertIsOn()
         assertEquals(3, calls)
     }
+
+    @Test fun rootAndShizukuAccessBothEnableExactPlayerControlsWithoutChangingTheSavedChoice() {
+        val bridge = mutableStateOf(BridgeState())
+        val settings = mutableStateOf(AppleSettings(hostAutoPause = true))
+        var edits = 0
+        compose.setContent {
+            LibrePodsTheme(designSystem = DesignSystem.Apple) {
+                Column(Modifier.requiredSize(448.dp, 998.dp).verticalScroll(rememberScrollState())) {
+                    CompanionPoliciesContent(settings.value, enabled = true, permissionGranted = false,
+                        hostAvailable = bridge.value.connected,
+                        onAutoPause = { value -> edits++; settings.value = settings.value.copy(hostAutoPause = value) },
+                        onPopup = {}, onCache = {}, onCalls = {}, onReturn = {})
+                }
+            }
+        }
+        for (backend in listOf("root", "shizuku")) {
+            compose.runOnIdle {
+                settings.value = settings.value.copy(hostAutoPause = true)
+                bridge.value = BridgeState(connected = false, backend = backend)
+            }
+            compose.onNodeWithText("Pause when removed").performScrollTo()
+            compose.onNodeWithText(UNAVAILABLE).assertIsDisplayed()
+            compose.onAllNodes(isToggleable(), useUnmergedTree = true)[0].assertIsNotEnabled().assertIsOn()
+            val before = edits
+            compose.runOnIdle { bridge.value = bridge.value.copy(connected = true) }
+            compose.onNodeWithText(UNAVAILABLE).assertDoesNotExist()
+            compose.onAllNodes(isToggleable(), useUnmergedTree = true)[0].assertIsEnabled().assertIsOn()
+            compose.runOnIdle { assertEquals("$backend connection must not change the saved choice", before, edits) }
+            compose.onNodeWithText("Pause when removed").performClick()
+            compose.onAllNodes(isToggleable(), useUnmergedTree = true)[0].assertIsOff()
+            compose.runOnIdle { bridge.value = bridge.value.copy(connected = false) }
+            compose.onNodeWithText(UNAVAILABLE).assertIsDisplayed()
+            compose.onAllNodes(isToggleable(), useUnmergedTree = true)[0].assertIsNotEnabled().assertIsOff()
+            compose.runOnIdle { bridge.value = bridge.value.copy(connected = true) }
+            compose.onAllNodes(isToggleable(), useUnmergedTree = true)[0].assertIsEnabled().assertIsOff()
+            compose.onNodeWithText("Pause when removed").performClick()
+            compose.onAllNodes(isToggleable(), useUnmergedTree = true)[0].assertIsOn()
+            compose.runOnIdle { assertEquals("$backend edits", before + 2, edits) }
+        }
+    }
+
+    private companion object {
+        const val UNAVAILABLE = "Allow Bluetooth access in Settings to pause and resume the same player. This preference still syncs with the PC."
+    }
+
     private fun capture(name: String) {
         compose.mainClock.advanceTimeBy(500); compose.waitForIdle()
         val file = File("build/overlay-previews/companion-v2-$name.png")

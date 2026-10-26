@@ -336,7 +336,10 @@ class RecordingScreenTest {
     }
 
     private fun saved(id: String, timestamp: String): Recording {
-        val file = File(context.getExternalFilesDir(Environment.DIRECTORY_RECORDINGS), "$id.wav")
+        val file = object : File(context.getExternalFilesDir(Environment.DIRECTORY_RECORDINGS), "$id.wav") {
+            // FileProvider expects Android's separator even when Robolectric runs on Windows.
+            override fun getCanonicalPath() = parentFile!!.canonicalPath + "/" + name
+        }
         file.parentFile!!.mkdirs()
         file.writeBytes(ByteArray(44))
         files += file
