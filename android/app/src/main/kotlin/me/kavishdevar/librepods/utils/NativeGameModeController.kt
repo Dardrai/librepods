@@ -175,7 +175,8 @@ class NativeGameModeController(
         override suspend fun target(owner: GameControlOwner, route: GameNativeReceipt,
             serial: Long, targetMs: Int): GameTargetWrite = effectMutex.withLock {
             fun rejected(reason: String): GameTargetWrite {
-                if (BuildConfig.DEBUG) Log.d("LibrePodsGameMode", "target=$targetMs rejected=$reason attempted=false")
+                if (BuildConfig.DEBUG && Log.isLoggable("LibrePodsGameMode", Log.DEBUG))
+                    Log.d("LibrePodsGameMode", "target=$targetMs rejected=$reason attempted=false")
                 return GameTargetWrite(false, nowMs(), mayHaveReachedRemote = false)
             }
             if (targetMs !in setOf(60, 150)) return@withLock rejected("invalid-target")
@@ -193,7 +194,7 @@ class NativeGameModeController(
             val current = proof ?: return@withLock rejected("no-current-native-proof")
             val checkedAt = nowMs()
             if (!NativeGameTargetGuard.preflight(owner, route, serial, current, targetMs, checkedAt, keepFlushBaseline)) {
-                if (BuildConfig.DEBUG) {
+                if (BuildConfig.DEBUG && Log.isLoggable("LibrePodsGameMode", Log.DEBUG)) {
                     val sameRequest = serial > 0 && current.serial == serial && current.requestPeer == owner.peer &&
                         current.requestMedia == route.host.mediaGeneration && current.requestEncoder == route.encoderGeneration &&
                         current.requestAcl == route.acl
@@ -228,7 +229,7 @@ class NativeGameModeController(
                             current.leaseDeadlineMs)
                     })
             }
-            if (!sent && BuildConfig.DEBUG) Log.d("LibrePodsGameMode",
+            if (!sent && BuildConfig.DEBUG && Log.isLoggable("LibrePodsGameMode", Log.DEBUG)) Log.d("LibrePodsGameMode",
                 "target=$targetMs rejected=${if (attempted) "transport-or-publication" else "final-write-fence"} attempted=$attempted")
             GameTargetWrite(sent, boundaryNs / 1_000_000, boundaryNs, attempted)
         }

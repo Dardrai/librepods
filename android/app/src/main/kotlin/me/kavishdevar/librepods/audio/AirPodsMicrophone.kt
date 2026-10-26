@@ -282,8 +282,8 @@ class AirPodsMicrophone internal constructor(
                 active.failure = e.message ?: "Microphone capture failed"
         } finally {
             captureEnded = nowMs()
-            clock.snapshot()?.let { stats ->
-                Log.i("AirPodsMicrophone", "Session ${active.generation}: clock first_packet_ms=${stats.firstPacketMs} warmup_ms=${stats.warmupMs} steady_ms=${stats.steadyMs} aus=${stats.accessUnits} decoded_frames=${stats.decodedFrames} source_hz=${stats.sourceHz} physical_hz=${AirPodsMicrophoneClock.PHYSICAL_RATE} timestamp_ticks=${stats.timestampTicks} intervals=${stats.timestampIntervals} repeats=${stats.repeats} backwards=${stats.backwards}")
+            if (Log.isLoggable("AirPodsMicrophone", Log.DEBUG)) clock.snapshot()?.let { stats ->
+                Log.d("AirPodsMicrophone", "Session ${active.generation}: clock first_packet_ms=${stats.firstPacketMs} warmup_ms=${stats.warmupMs} steady_ms=${stats.steadyMs} aus=${stats.accessUnits} decoded_frames=${stats.decodedFrames} source_hz=${stats.sourceHz} physical_hz=${AirPodsMicrophoneClock.PHYSICAL_RATE} timestamp_ticks=${stats.timestampTicks} intervals=${stats.timestampIntervals} repeats=${stats.repeats} backwards=${stats.backwards}")
             }
             active.accepting = false
             active.stop.set(true)

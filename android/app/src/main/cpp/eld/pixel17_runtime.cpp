@@ -70,10 +70,12 @@ bool permissions(uintptr_t address,size_t bytes,unsigned flags,bool exact=false)
 bool readable(const void* p,size_t bytes) {
     const auto address=reinterpret_cast<uintptr_t>(p);
     const bool valid=permissions(address,bytes,4);
+#if defined(LIBREPODS_NATIVE_TRACE) && LIBREPODS_NATIVE_TRACE
     static std::atomic<bool> reported_tag{false};
     if((address>>56) && !reported_tag.exchange(true)) __android_log_print(ANDROID_LOG_INFO,"LibrePodsELD",
         "Pixel17: tagged host range tag=%u bytes=%zu mapped=%d (pointer retained)",
         static_cast<unsigned>(address>>56),bytes,valid);
+#endif
     return valid;
 }
 struct Image {
@@ -264,6 +266,7 @@ Pixel17RegistryResult commit(void*,void* const* members,size_t count,int32_t ind
                               Pixel17RegistryReceipt* receipts) noexcept {
     try {
         const auto result=pixel17_registry_register_many(members,count,index,priority,registries,receipts);
+#if defined(LIBREPODS_NATIVE_TRACE) && LIBREPODS_NATIVE_TRACE
         __android_log_print(ANDROID_LOG_INFO,"LibrePodsELD","Pixel17: registry transaction result=%u count=%zu",
             static_cast<unsigned>(result),count);
         for(size_t i=0;i<count && i<8;++i) __android_log_print(ANDROID_LOG_INFO,"LibrePodsELD",
@@ -271,6 +274,7 @@ Pixel17RegistryResult commit(void*,void* const* members,size_t count,int32_t ind
             static_cast<unsigned>(receipts[i].result),receipts[i].before.active,receipts[i].before.disabled,
             receipts[i].before.source,receipts[i].before.sink,receipts[i].after.active,receipts[i].after.disabled,
             receipts[i].after.source,receipts[i].after.sink);
+#endif
         if(result==Pixel17RegistryResult::Invalid) for(size_t i=0;i<count && i<8;++i) {
             Pixel17RegistryDiagnostic diagnostic{};
             pixel17_registry_diagnose(members[i],registries,&diagnostic);

@@ -58,7 +58,7 @@ internal class NativeGameTransportServer private constructor(
     }
 
     private fun diagnostic(stage: String) {
-        if (BuildConfig.DEBUG && diagnosticLines.getAndIncrement() < 64)
+        if (BuildConfig.DEBUG && Log.isLoggable("LibrePodsGameTransport", Log.DEBUG) && diagnosticLines.getAndIncrement() < 64)
             Log.i("LibrePodsGameTransport", "server $stage")
     }
 

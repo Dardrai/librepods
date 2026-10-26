@@ -57,8 +57,6 @@ class KotlinModule: XposedModule() {
 
     @SuppressLint("UnsafeDynamicallyLoadedCode")
     override fun onPackageLoaded(param: PackageLoadedParam) {
-        log(Log.INFO, TAG, "onPackageLoaded :: ${param.packageName}")
-
         if (param.packageName == "com.google.android.bluetooth" || param.packageName == "com.android.bluetooth") {
             log(Log.INFO, TAG, "Bluetooth app detected, hooking l2c_fcr_chk_chan_modes")
             try {
@@ -79,9 +77,8 @@ class KotlinModule: XposedModule() {
 
                     for (path in candidates) {
                         try {
-                            log(Log.INFO, TAG, "Trying to load native lib from $path")
+                            if (Log.isLoggable(TAG, Log.DEBUG)) log(Log.DEBUG, TAG, "Trying to load native lib from $path")
                             System.load(path)
-                            log(Log.INFO, TAG, "Loaded native lib from $path")
                             loaded = true
                             break
                         } catch (e: Throwable) {
@@ -368,7 +365,6 @@ class KotlinModule: XposedModule() {
 
             hook(updateIconMethod).intercept { chain ->
                 try {
-                    log(Log.INFO, TAG, "Bluetooth icon hook called with args: ${chain.args.joinToString(", ")}")
                     val imageView = chain.args[0] as? ImageView
                     val iconUri = chain.args[1] as? String
 
@@ -381,7 +377,6 @@ class KotlinModule: XposedModule() {
                         return@intercept chain.proceed()
                     }
 
-                    log(Log.INFO, TAG, "Handling AirPods icon URI: $uri")
 
                     Handler(Looper.getMainLooper()).post {
                         try {
@@ -405,7 +400,6 @@ class KotlinModule: XposedModule() {
                                     )
                                     imageView.setImageDrawable(drawable)
                                     imageView.alpha = 1.0f
-                                    log(Log.INFO, TAG, "Successfully loaded icon from resource: $resourceName")
                                 } else {
                                     log(Log.ERROR, TAG, "Resource not found: $resourceName")
                                 }

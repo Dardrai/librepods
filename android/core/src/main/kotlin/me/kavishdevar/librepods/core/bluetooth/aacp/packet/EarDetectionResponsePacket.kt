@@ -33,10 +33,6 @@ data class EarDetectionResponsePacket(
             isLeftPrimary: Boolean
         ): EarDetectionResponsePacket {
             val payload = packet.copyOfRange(6, packet.size)
-            Log.d(
-                TAG,
-                "parsing Ear Detection Response: ${packet.joinToString(" ") { "%02X".format(it) }}"
-            )
 
             val primaryStatus = payload[0]
             val secondaryStatus = payload[1]
@@ -71,7 +67,8 @@ data class EarDetectionResponsePacket(
                 )
             }
 
-            Log.i(TAG, "parsed Ear Detection Response: $componentStates")
+            if (Log.isLoggable(TAG, Log.DEBUG))
+                Log.d(TAG, "parsed Ear Detection Response: $componentStates")
 
             return EarDetectionResponsePacket(componentStates, isLeftPrimary)
         }

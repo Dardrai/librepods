@@ -151,6 +151,8 @@ import me.kavishdevar.librepods.data.xposed.XposedRemotePrefProvider
 
 private const val TAG = "LibrePodsService"
 private const val NEARBY_SCAN_TAG = "NearbyScan"
+private const val NEARBY_TAKEOVER_TAG = "NearbyTakeover"
+private const val STEM_ACTIONS_TAG = "StemActions"
 private const val STOP_MICROPHONE = "me.kavishdevar.librepods.STOP_MICROPHONE"
 private const val STOP_COMMUNICATION = "me.kavishdevar.librepods.STOP_COMMUNICATION"
 private const val A2DP_ACTIVE_DEVICE_CHANGED = "android.bluetooth.a2dp.profile.action.ACTIVE_DEVICE_CHANGED"
@@ -308,19 +310,6 @@ class LibrePodsService: Service() {
 
     private val islandWindow: IslandWindow by lazy {
         (application as LibrePodsApplication).islandWindow
-    }
-
-    @Suppress("unused")
-    private fun observeCameraState() {
-        serviceScope.launch(Dispatchers.IO) {
-            LibrePodsAccessibilityService.isCameraOpen.collect { isCamera ->
-                if (isCamera) {
-                    Log.d(TAG, "Camera is open")
-                } else {
-                    Log.d(TAG, "Camera is closed")
-                }
-            }
-        }
     }
 
     @Volatile private var isCallRinging = false
@@ -939,7 +928,8 @@ class LibrePodsService: Service() {
         val deferUntil = if (activeDeadline > 0) activeDeadline
             else if (open && previous?.closedLocally == true) now + 4_000 else 0
         nearbyCases[device.macAddress] = NearbyCase(device, !open && local, deferUntil)
-        if (open && deferUntil > 0) Log.i("NearbyTakeover", "Deferring Connect briefly after a local case close")
+        if (open && deferUntil > 0 && Log.isLoggable(NEARBY_TAKEOVER_TAG, Log.DEBUG))
+            Log.d(NEARBY_TAKEOVER_TAG, "Deferring Connect briefly after a local case close")
         return open
     }
 
@@ -975,7 +965,7 @@ class LibrePodsService: Service() {
         val caller = currentCoroutineContext()[Job]
         val retiredReason = AtomicReference<String?>()
         var outcome = "declined"
-        Log.i("NearbyTakeover", "Tap: device=${device.macAddress.toRedactedString()}")
+        if (Log.isLoggable(NEARBY_TAKEOVER_TAG, Log.DEBUG)) Log.d(NEARBY_TAKEOVER_TAG, "Tap: device=${device.macAddress.toRedactedString()}")
         try {
             val controller = withContext(Dispatchers.Main.immediate) {
                 if (destroying || devices.value[device.macAddress] !== device ||
@@ -1008,7 +998,7 @@ class LibrePodsService: Service() {
                     else -> null
                 }
                 if (reason != null && retiredReason.compareAndSet(null, reason))
-                    Log.i("NearbyTakeover", "Retired: reason=$reason elapsedMs=${SystemClock.elapsedRealtime() - started}")
+                    if (Log.isLoggable(NEARBY_TAKEOVER_TAG, Log.DEBUG)) Log.d(NEARBY_TAKEOVER_TAG, "Retired: reason=$reason elapsedMs=${SystemClock.elapsedRealtime() - started}")
                 return reason == null
             }
             if (!current() || !controller.canRefreshSettings()) return false
@@ -1026,7 +1016,7 @@ class LibrePodsService: Service() {
                         current() && advertisesAacp()
                     } != true) return false
             }
-            Log.i("NearbyTakeover", "Ready: elapsedMs=${SystemClock.elapsedRealtime() - started}")
+            if (Log.isLoggable(NEARBY_TAKEOVER_TAG, Log.DEBUG)) Log.d(NEARBY_TAKEOVER_TAG, "Ready: elapsedMs=${SystemClock.elapsedRealtime() - started}")
             if (device.connectionState.value !in setOf(ConnectionState.CONNECTED, ConnectionState.CONNECTING)) {
                 val published = CompletableDeferred<Unit>()
                 fun controlCurrent() = !controlRetired.get() && caller?.isCancelled != true &&
@@ -1037,12 +1027,12 @@ class LibrePodsService: Service() {
                 keepControl = ::controlCurrent
                 val control = serviceScope.launch(Dispatchers.IO) {
                     var connected = false
-                    Log.i("NearbyTakeover", "Control start: elapsedMs=${SystemClock.elapsedRealtime() - started}")
+                    if (Log.isLoggable(NEARBY_TAKEOVER_TAG, Log.DEBUG)) Log.d(NEARBY_TAKEOVER_TAG, "Control start: elapsedMs=${SystemClock.elapsedRealtime() - started}")
                     try {
                         if (device.connectionState.value !in setOf(ConnectionState.CONNECTED, ConnectionState.CONNECTING)) {
                             connected = device.connect(::controlCurrent) { socket ->
                                 pendingControl.set(socket)
-                                Log.i("NearbyTakeover", "Control socket: elapsedMs=${SystemClock.elapsedRealtime() - started}")
+                                if (Log.isLoggable(NEARBY_TAKEOVER_TAG, Log.DEBUG)) Log.d(NEARBY_TAKEOVER_TAG, "Control socket: elapsedMs=${SystemClock.elapsedRealtime() - started}")
                                 published.complete(Unit)
                                 if (!controlCurrent()) device.aacp.cancelPendingConnect(socket)
                             }
@@ -1053,7 +1043,7 @@ class LibrePodsService: Service() {
                         Log.w(TAG, "Early control connection failed", error)
                     } finally {
                         published.complete(Unit)
-                        Log.i("NearbyTakeover", "Control complete: connected=$connected elapsedMs=${SystemClock.elapsedRealtime() - started}")
+                        if (Log.isLoggable(NEARBY_TAKEOVER_TAG, Log.DEBUG)) Log.d(NEARBY_TAKEOVER_TAG, "Control complete: connected=$connected elapsedMs=${SystemClock.elapsedRealtime() - started}")
                     }
                 }
                 earlyControl = control
@@ -1096,12 +1086,14 @@ class LibrePodsService: Service() {
                     while (current() && !isNearbyDeviceAudioConnected(device)) delay(40)
                     current() && isNearbyDeviceAudioConnected(device)
                 } != true) {
-                val outputs = runCatching {
-                    getSystemService(AudioManager::class.java).getDevices(AudioManager.GET_DEVICES_OUTPUTS)
-                        .joinToString { "type=${it.type}:selected=${it.address.equals(device.macAddress.value, true)}:addressPresent=${it.address.isNotBlank()}" }
-                }.getOrElse { "query failed: ${it.javaClass.simpleName}" }
-                Log.i("NearbyTakeover", "Output unavailable: ownerFailure=${ownerFailure()} retired=${retiredReason.get()} " +
-                    "nativeState=${nearbyMedia[device.macAddress]?.state} outputs=[$outputs]")
+                if (Log.isLoggable(NEARBY_TAKEOVER_TAG, Log.DEBUG)) {
+                    val outputs = runCatching {
+                        getSystemService(AudioManager::class.java).getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+                            .joinToString { "type=${it.type}:selected=${it.address.equals(device.macAddress.value, true)}:addressPresent=${it.address.isNotBlank()}" }
+                    }.getOrElse { "query failed: ${it.javaClass.simpleName}" }
+                    Log.d(NEARBY_TAKEOVER_TAG, "Output unavailable: ownerFailure=${ownerFailure()} retired=${retiredReason.get()} " +
+                        "nativeState=${nearbyMedia[device.macAddress]?.state} outputs=[$outputs]")
+                }
                 return false
             }
             outcome = "connected"
@@ -1707,7 +1699,8 @@ class LibrePodsService: Service() {
                 onConnect = { connectNearbyDevice(device) },
                 isAudioConnected = { isNearbyDeviceAudioConnected(device) },
                 deferConnectAction = { shouldDeferNearbyConnect(device) })
-            Log.d(TAG, "Lid advertisement to paired overlay: ${(SystemClock.elapsedRealtimeNanos() - observed) / 1_000_000}ms")
+            if (Log.isLoggable(NEARBY_SCAN_TAG, Log.DEBUG))
+                Log.d(NEARBY_SCAN_TAG, "Lid advertisement to paired overlay: ${(SystemClock.elapsedRealtimeNanos() - observed) / 1_000_000}ms")
         }
     }
 
@@ -1838,7 +1831,7 @@ class LibrePodsService: Service() {
         bleScanStarts.addLast(now)
         try {
             scanner.startScan(listOf(filter), settings, callback)
-            Log.d(TAG, "BLE lid monitoring started: mode=$mode, reportDelay=0")
+            if (Log.isLoggable(NEARBY_SCAN_TAG, Log.DEBUG)) Log.d(NEARBY_SCAN_TAG, "BLE lid monitoring started: mode=$mode, reportDelay=0")
         } catch (_: SecurityException) {
             stopActiveBleScan()
             stopSelf()
@@ -1948,7 +1941,6 @@ class LibrePodsService: Service() {
         return serviceScope.launch(Dispatchers.IO) {
             appDataRepository.settings.collect { settings ->
                 if (oldAppSettings.bleReportDelay != settings.bleReportDelay || oldAppSettings.bleScanMode != settings.bleScanMode) {
-                    Log.d(TAG, "BLE settings changed: $settings, restarting scanner")
                     startBleScanner(updateMode = true)
                 }
                 islandWindow.updateSettings(settings)
@@ -1959,12 +1951,12 @@ class LibrePodsService: Service() {
     }
 
     fun observeStemActions(device: AppleDevice): Job = serviceScope.launch(Dispatchers.IO, start = CoroutineStart.UNDISPATCHED) {
-        Log.i("StemActions", "Observer started")
         device.events.collect { event ->
             if (event !is AppleEvent.StemPress) return@collect
             fun current() = !destroying && devices.value[device.macAddress] === device &&
                 isNearbyDeviceAudioConnected(device) && device.aacp.ownsAudioSocket(event.sourceSocket)
-            Log.i("StemActions", "hold=${event.pressType}/${event.bud} current=${!destroying && devices.value[device.macAddress] === device} audio=${isNearbyDeviceAudioConnected(device)} socket=${device.aacp.ownsAudioSocket(event.sourceSocket)} action=${if (current()) device.hostHoldAction(event) else null}")
+            if (Log.isLoggable(STEM_ACTIONS_TAG, Log.DEBUG))
+                Log.d(STEM_ACTIONS_TAG, "hold=${event.pressType}/${event.bud} current=${current()} action=${if (current()) device.hostHoldAction(event) else null}")
             if (!current()) return@collect
             when (device.hostHoldAction(event)) {
                 StemAction.DIGITAL_ASSISTANT -> withContext(Dispatchers.Main.immediate) {
@@ -2122,11 +2114,7 @@ class LibrePodsService: Service() {
             }
 
             if (state.capabilities != previousState.capabilities) {
-                Log.i(
-                    TAG,
-                    "capabilities changed for device ${device.macAddress.toRedactedString()}"
-                )
-                Log.d(TAG, "capabilities: ${state.capabilities}")
+                if (Log.isLoggable(TAG, Log.DEBUG)) Log.d(TAG, "capabilities: ${state.capabilities}")
 
                 if (state.capabilities.isNotEmpty()) {
                     appleRepository.saveCacheFromState(device.macAddress, state)
@@ -2134,16 +2122,9 @@ class LibrePodsService: Service() {
             }
 
             if (!state.battery.hasSameDisplayValues(previousState.battery)) {
-                Log.i(
-                    TAG,
-                    "battery state changed for device ${device.macAddress.toRedactedString()}"
-                )
-                Log.d(TAG, "battery state: ${state.battery}")
-
-                Log.d(TAG, "updating widgets")
+                if (Log.isLoggable(TAG, Log.DEBUG)) Log.d(TAG, "battery state: ${state.battery}")
                 updateWidgets()
 
-                Log.d(TAG, "updating notification")
                 updateDeviceNotification(device = device)
 
                 // TODO:Shizuku
@@ -2190,14 +2171,9 @@ class LibrePodsService: Service() {
             }
 
             if (state.componentState != previousState.componentState) {
-                Log.i(
-                    TAG,
-                    "component state changed for device ${device.macAddress.toRedactedString()}"
-                )
-                Log.d(TAG, "component state: ${state.componentState}")
+                if (Log.isLoggable(TAG, Log.DEBUG)) Log.d(TAG, "component state: ${state.componentState}")
 
                 val earDetectionEnabled = deviceSettings.hostAutoPause
-                Log.d(TAG, "ear detection enabled: $earDetectionEnabled")
                 if (earDetectionEnabled) {
                     processComponentStateChange(
                         device = device,
@@ -2207,32 +2183,17 @@ class LibrePodsService: Service() {
                     )
                 }
 
-                Log.d(TAG, "updating notification")
                 updateDeviceNotification(device = device)
             }
 
             if (state.controlStates != previousState.controlStates) {
-                Log.i(
-                    TAG,
-                    "control states changed for device ${device.macAddress.toRedactedString()}"
-                )
-                Log.d(TAG, "control states: ${state.controlStates}")
+                if (Log.isLoggable(TAG, Log.DEBUG)) Log.d(TAG, "control states: ${state.controlStates}")
 
-                Log.d(TAG, "updating notification")
                 updateDeviceNotification(device = device)
             }
 
             if (state.currentHeartRate?.timestamp != previousState.currentHeartRate?.timestamp) {
                 state.currentHeartRate?.let { heartRateSample ->
-                    Log.i(
-                        TAG,
-                        "current heart rate changed from device ${device.macAddress.toRedactedString()}"
-                    )
-                    Log.d(
-                        TAG,
-                        "current heart rate: ${heartRateSample.bpm} bpm, timestamp: ${heartRateSample.timestamp.toJavaInstant()}. processing."
-                    )
-
                     processHeartRateSample(
                         device = device,
                         heartRateSample = heartRateSample,
@@ -2277,8 +2238,7 @@ class LibrePodsService: Service() {
                 }
             }
             if (metadata != previousMetadata) {
-                Log.i(TAG, "metadata changed for device ${device.macAddress.toRedactedString()}")
-                Log.d(TAG, "metadata: $metadata")
+                if (Log.isLoggable(TAG, Log.DEBUG)) Log.d(TAG, "metadata: $metadata")
 
                 appleRepository.saveMetadata(device.macAddress, metadata)
 
@@ -2301,7 +2261,6 @@ class LibrePodsService: Service() {
         otherDeviceName: String? = null,
         statusText: String? = null
     ) {
-        Log.d(TAG, "Showing island window")
 
         val state = device.state.value
         val settings = device.settings.value
@@ -2324,7 +2283,6 @@ class LibrePodsService: Service() {
                         return
                     }
 
-                    Log.i(TAG, "Showing island for device ${device.macAddress.toRedactedString()}")
 
                     val leftBattery = state.battery.find { it.component == BatteryComponent.LEFT }?.level ?: 0
                     val rightBattery = state.battery.find { it.component == BatteryComponent.RIGHT }?.level ?: 0
@@ -2343,7 +2301,6 @@ class LibrePodsService: Service() {
                         statusText = statusText,
 
                         openApp = {
-                            Log.d(TAG, "Opening app")
                             val intent = Intent(
                                 this,
                                 MainActivity::class.java,
@@ -2369,7 +2326,7 @@ class LibrePodsService: Service() {
             }
 
             else -> {
-                Log.d(
+                if (Log.isLoggable(TAG, Log.DEBUG)) Log.d(
                     TAG,
                     "Unsupported device state: ${device.state.value.javaClass.simpleName}, not showing island"
                 )
@@ -2396,11 +2353,6 @@ class LibrePodsService: Service() {
         if (device.connectionState.value == ConnectionState.CONNECTED || device.connectionState.value == ConnectionState.AVAILABLE) {
             when (device) {
                 is AppleDevice -> {
-                    Log.d(
-                        TAG,
-                        "Updating notification for Apple device ${device.macAddress.toRedactedString()}"
-                    )
-
                     val updatedNotificationBuilder =
                         NotificationCompat.Builder(this, "device_${device.macAddress}")
                             .setSmallIcon(R.drawable.ic_airpods)
@@ -2530,7 +2482,7 @@ class LibrePodsService: Service() {
             startForeground(1, notification, types)
         } catch (e: Exception) {
             if (microphoneService) throw e
-            e.printStackTrace()
+            Log.w(TAG, "Could not start the connected-device notification", e)
         }
     }
 
@@ -2635,7 +2587,7 @@ class LibrePodsService: Service() {
         val new = earPresenceOf(newComponentState)
         if (old == new || !MediaController.isMediaRoute(device.macAddress.value)) return
 
-        Log.d(TAG, "earPresence: $old -> $new")
+        if (Log.isLoggable(TAG, Log.DEBUG)) Log.d(TAG, "earPresence: $old -> $new")
 
         // new != NONE because old!=new
         if (old == EarPresence.NONE) {
@@ -2643,7 +2595,6 @@ class LibrePodsService: Service() {
                 device = device,
                 type = IslandType.CONNECTED
             )
-            Log.i(TAG, "User put in at least one component, showing island.")
         }
 
         if (new == EarPresence.NONE && appDataRepository.settings.value.islandSettings.keepCompactVisible) {
@@ -2715,7 +2666,6 @@ class LibrePodsService: Service() {
         if (destroying || devices.value[device.macAddress] !== device ||
             device.connectionState.value != ConnectionState.CONNECTED) return
         serviceScope.launch(Dispatchers.IO) {
-            Log.d(TAG, "inserting to local db")
             heartRateRepository.insert(heartRateSample)
         }
 
@@ -2749,11 +2699,7 @@ class LibrePodsService: Service() {
                             Log.e(TAG, "Error inserting heart rate record", e)
                         }
                     }
-                } else {
-                    Log.w(TAG, "Health Connect client not available")
                 }
-            } else {
-                Log.d(TAG, "U SDK Extension <7")
             }
         }
     }
@@ -2819,7 +2765,6 @@ class LibrePodsService: Service() {
             BluetoothMetadata.METADATA_UNTETHERED_RIGHT_LOW_BATTERY_THRESHOLD,
             "20".toByteArray()
         )
-        Log.d(TAG, "Metadata set for apple device ${device.macAddress.toRedactedString()}")
      */
     }
 }

@@ -8,6 +8,7 @@ if(LIBREPODS_PRIVATE_WIDE_PCM AND NOT LIBREPODS_PRIVATE_OWNED_FDK)
     message(FATAL_ERROR "Wide Pixel PCM requires the matching private owned FDK backend")
 endif()
 option(ELD_KEEP_GAME_FLUSH_BASELINE "Private Game Mode comparison preserving the captured flush timeout" OFF)
+option(LIBREPODS_NATIVE_TRACE "Verbose native hook diagnostics" OFF)
 
 add_library(hiddenapi SHARED
         hiddenapi.cpp
@@ -69,6 +70,7 @@ target_include_directories(fluoride_hooks PRIVATE
 )
 
 target_compile_definitions(fluoride_hooks PRIVATE
+        LIBREPODS_NATIVE_TRACE=$<BOOL:${LIBREPODS_NATIVE_TRACE}>
         ELD_PRIVATE_WIDE_PCM=$<BOOL:${LIBREPODS_PRIVATE_WIDE_PCM}>
         ELD_KEEP_GAME_FLUSH_BASELINE=$<BOOL:${ELD_KEEP_GAME_FLUSH_BASELINE}>
         XZ_DEC_X86

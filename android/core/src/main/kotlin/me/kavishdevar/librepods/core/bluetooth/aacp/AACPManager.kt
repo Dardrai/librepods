@@ -495,7 +495,8 @@ class AACPManager(private val device: AppleDevice,
     fun sendPacket(packet: AACPPacket, expected: BluetoothSocket? = captureAudioSocket()): Boolean {
         try {
             val privatePacket = packet.rawPacket.getOrNull(4) in listOf(0x31.toByte(), 0x58.toByte())
-            if (!privatePacket) Log.d(TAG, "Sending packet opcode=${packet.rawPacket.getOrNull(4)}")
+            if (!privatePacket && Log.isLoggable(TAG, Log.DEBUG))
+                Log.d(TAG, "Sending packet opcode=${packet.rawPacket.getOrNull(4)}")
 
             val socket = expected ?: run {
                 Log.e(TAG, "Can't send packet: Socket is null")
@@ -600,7 +601,8 @@ class AACPManager(private val device: AppleDevice,
                     return
                 }
 
-                Log.i(TAG, "Received control command: ${controlCommand.identifier}")
+                if (Log.isLoggable(TAG, Log.DEBUG))
+                    Log.d(TAG, "Received control command: ${controlCommand.identifier}")
 
                 publishForTransport(this, sourceSocket, ::captureAudioSocket) {
                     val modeWrite = if (controlCommand.identifier == ControlCommandIdentifier.LISTENING_MODE) {
@@ -869,7 +871,8 @@ class AACPManager(private val device: AppleDevice,
                         )
                     }
                 }
-                Log.w(TAG, "Unhandled messageOpcode received: ${opcode.toHexString()}")
+                if (Log.isLoggable(TAG, Log.DEBUG))
+                    Log.d(TAG, "Unhandled messageOpcode received: ${opcode.toHexString()}")
             }
         }
     }
@@ -1505,11 +1508,8 @@ class AACPManager(private val device: AppleDevice,
 
         require(offset == packet.size) { "Trailing capabilities data" }
 
-        for (capability in capabilities) {
-            Log.d(
-                TAG,
-                "Capability: ${capability.capability.name}"
-            )
+        if (Log.isLoggable(TAG, Log.DEBUG)) {
+            for (capability in capabilities) Log.d(TAG, "Capability: ${capability.capability.name}")
         }
 
         return capabilities

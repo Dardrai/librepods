@@ -43,12 +43,12 @@ static HookFunType hook_func = nullptr;
 static uint8_t (*original_l2c_fcr_chk_chan_modes)(void *) = nullptr;
 
 uint8_t fake_l2c_fcr_chk_chan_modes(void *p_ccb) {
-    LOGI("fake_l2c_fcr_chk_chan_modes called");
-    uint8_t orig = 0;
+    LOGD("fake_l2c_fcr_chk_chan_modes called");
+    [[maybe_unused]] uint8_t orig = 0;
     if (original_l2c_fcr_chk_chan_modes)
         orig = original_l2c_fcr_chk_chan_modes(p_ccb);
 
-    LOGI("fake_l2c_fcr_chk_chan_modes: orig = %d, returning 1", orig);
+    LOGD("fake_l2c_fcr_chk_chan_modes: orig = %d, returning 1", orig);
     return 1;
 }
 
@@ -56,18 +56,18 @@ static tBTA_STATUS (*original_BTA_DmSetLocalDiRecord)(tSDP_DI_RECORD *, uint32_t
 
 tBTA_STATUS fake_BTA_DmSetLocalDiRecord(tSDP_DI_RECORD *p_device_info, uint32_t *p_handle) {
 
-    LOGI("fake_BTA_DmSetLocalDiRecord called");
+    LOGD("fake_BTA_DmSetLocalDiRecord called");
 
     const auto status = setLocalDiRecord(p_device_info, p_handle,
                                         enableSdpHook.load(std::memory_order_relaxed),
                                         original_BTA_DmSetLocalDiRecord);
-    LOGI("fake_BTA_DmSetLocalDiRecord: returning status %d", status);
+    LOGD("fake_BTA_DmSetLocalDiRecord: returning status %d", status);
     return status;
 }
 
 
 static bool hookLibrary(const char *libname) {
-    LOGI("hookLibrary called with libname: %s", libname);
+    LOGD("hookLibrary called with libname: %s", libname);
 
     if (!hook_func) {
         LOGE("hook_func not initialized");
@@ -79,7 +79,7 @@ static bool hookLibrary(const char *libname) {
         LOGE("Failed to locate %s", libname);
         return false;
     }
-    LOGI("hookLibrary: located path: %s", path.c_str());
+    LOGD("hookLibrary: located path: %s", path.c_str());
 
     int fd = open(path.c_str(), O_RDONLY);
     if (fd < 0) {
@@ -93,7 +93,7 @@ static bool hookLibrary(const char *libname) {
         close(fd);
         return false;
     }
-    LOGI("hookLibrary: opened file, size: %lld", (long long) st.st_size);
+    LOGD("hookLibrary: opened file, size: %lld", (long long) st.st_size);
 
     std::vector<uint8_t> file(st.st_size);
     read(fd, file.data(), st.st_size);
@@ -111,7 +111,7 @@ static bool hookLibrary(const char *libname) {
 
     for (int i = 0; i < eh->e_shnum; ++i) {
         if (!strcmp(shstr + shdr[i].sh_name, ".gnu_debugdata")) {
-            LOGI("hookLibrary: found .gnu_debugdata section");
+            LOGD("hookLibrary: found .gnu_debugdata section");
 
             std::vector<uint8_t> compressed(file.begin() + shdr[i].sh_offset,
                                             file.begin() + shdr[i].sh_offset + shdr[i].sh_size);
@@ -130,12 +130,12 @@ static bool hookLibrary(const char *libname) {
     }
 
     if (!chk_offset) {
-        LOGI("fallback dynsym chk");
+        LOGD("fallback dynsym chk");
         chk_offset = findSymbolOffsetDynsym(file, "l2c_fcr_chk_chan_modes");
     }
 
     if (!sdp_offset) {
-        LOGI("fallback dynsym sdp");
+        LOGD("fallback dynsym sdp");
         sdp_offset = findSymbolOffsetDynsym(file, "BTA_DmSetLocalDiRecord");
     }
 
@@ -166,7 +166,7 @@ static bool hookLibrary(const char *libname) {
 static void on_library_loaded(const char *name, void *handle) {
     if (!name) return;
     eld::runtime_library_loaded(name, handle);
-    LOGI("on_library_loaded called with name: %s", name);
+    LOGD("on_library_loaded called with name: %s", name);
 
     const int apiLevel = android_get_device_api_level();
     if (!useLegacyBluetoothIdentityHooks(apiLevel)) {
@@ -189,7 +189,7 @@ static void on_library_loaded(const char *name, void *handle) {
 extern "C" [[gnu::visibility("default")]]
 [[gnu::used]]
 NativeOnModuleLoaded native_init(const NativeAPIEntries *entries) {
-    LOGI("native_init called with entries: %p", entries);
+    LOGD("native_init called with entries: %p", entries);
     if (!entries || !entries->hook_func) return nullptr;
     hook_func = (HookFunType) entries->hook_func;
     // Keep the existing identity hook independent of the optional codec ABI.
@@ -205,7 +205,7 @@ NativeOnModuleLoaded native_init(const NativeAPIEntries *entries) {
 extern "C" JNIEXPORT void JNICALL
 Java_me_kavishdevar_librepods_utils_NativeBridge_setSdpHook(JNIEnv *, jobject,
                                                             jboolean enable) {
-    LOGI("setSdpHook called with enable: %d", enable);
+    LOGD("setSdpHook called with enable: %d", enable);
     enableSdpHook.store(enable, std::memory_order_relaxed);
 
     LOGI("sdp hook enabled: %d", enable);

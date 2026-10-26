@@ -74,7 +74,7 @@ class CommunicationAudioController internal constructor(
                 try { poll() }
                 catch (cancelled: CancellationException) { throw cancelled }
                 catch (failure: Exception) {
-                    logPoll("inspection-failed reason=${failure.javaClass.simpleName}")
+                    logPoll { "inspection-failed reason=${failure.javaClass.simpleName}" }
                     if (sessionJob == null && mutableState.value.enabled) publish(Phase.UNAVAILABLE)
                 }
                 delay(1_000)
@@ -109,40 +109,40 @@ class CommunicationAudioController internal constructor(
 
     private suspend fun poll() {
         if (!mutableState.value.enabled) {
-            logPoll("off")
+            logPoll { "off" }
             if (sessionJob == null) { disarm(); publish(Phase.OFF) }
             return
         }
         if (!supported || !deviceCurrent() || !audio.isConnected ||
             !hasPermissions()) {
-            logPoll("unavailable supported=$supported current=${deviceCurrent()} connected=${audio.isConnected} permissions=${hasPermissions()}")
+            logPoll { "unavailable supported=$supported current=${deviceCurrent()} connected=${audio.isConnected} permissions=${hasPermissions()}" }
             sessionJob?.cancel()
             if (sessionJob == null) { disarm(); publish(Phase.UNAVAILABLE) }
             return
         }
         audio.bridge.connect()
         if (!audio.bridge.hasRootPrivileges) {
-            logPoll("root-unavailable")
+            logPoll { "root-unavailable" }
             if (sessionJob == null) publish(Phase.UNAVAILABLE)
             return
         }
         if (!armed) {
             if (!ProcessLifecycleOwner.get().lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
-                logPoll("waiting-for-foreground")
+                logPoll { "waiting-for-foreground" }
                 publish(Phase.WAITING)
                 return
             }
             armed = armForeground(true)
-            if (!armed) { logPoll("foreground-admission-failed"); publish(Phase.UNAVAILABLE); return }
+            if (!armed) { logPoll { "foreground-admission-failed" }; publish(Phase.UNAVAILABLE); return }
         }
-        if (sessionJob != null) { logPoll("owned-session"); return }
+        if (sessionJob != null) { logPoll { "owned-session" }; return }
         if (!audio.canRefreshSettings()) {
-            logPoll("audio-busy microphone=${audio.microphone.state.value.phase} bridgeReady=${audio.bridge.canRefreshSettings()}")
+            logPoll { "audio-busy microphone=${audio.microphone.state.value.phase} bridgeReady=${audio.bridge.canRefreshSettings()}" }
             publish(Phase.WAITING); return
         }
         val mode = context.getSystemService(AudioManager::class.java).mode
         if (mode !in listOf(AudioManager.MODE_IN_CALL, AudioManager.MODE_IN_COMMUNICATION)) {
-            logPoll("waiting-for-call mode=$mode")
+            logPoll { "waiting-for-call mode=$mode" }
             lastCall = null
             publish(Phase.WAITING)
             return
@@ -154,19 +154,19 @@ class CommunicationAudioController internal constructor(
             val report = audio.bridge.inspectCommunication(device.macAddress.value, kind, packageName)
             val call = inspectedCall(report, kind)
             if (call == null) {
-                rejected += "kind=$kind reason=${inspectionReason(report)}"
+                if (Log.isLoggable(TAG, Log.DEBUG)) rejected += "kind=$kind reason=${inspectionReason(report)}"
                 continue
             }
-            if (lastCall == call) { logPoll("waiting-for-retry kind=$kind"); return }
+            if (lastCall == call) { logPoll { "waiting-for-retry kind=$kind" }; return }
             lastCall = call
-            logPoll("starting kind=$kind")
+            logPoll { "starting kind=$kind" }
             val token = Any()
             owner = token
             sessionJob = scope.launch(start = CoroutineStart.LAZY) { runCall(token, call) }
             sessionJob?.start()
             return
         }
-        logPoll("ineligible mode=$mode " + rejected.joinToString("; "))
+        logPoll { "ineligible mode=$mode " + rejected.joinToString("; ") }
         publish(Phase.WAITING)
     }
 
@@ -291,13 +291,13 @@ class CommunicationAudioController internal constructor(
         context.checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED
     }
 
-    private fun logPoll(message: String) {
-        if (!me.kavishdevar.librepods.BuildConfig.DEBUG) return
-        pollDiagnostic.changed(message)?.let { Log.i(TAG, "inspection $it") }
+    private inline fun logPoll(message: () -> String) {
+        if (!Log.isLoggable(TAG, Log.DEBUG)) return
+        pollDiagnostic.changed(message())?.let { Log.d(TAG, "inspection $it") }
     }
 
     private fun logReceipt(stage: String, report: Bundle) {
-        if (!me.kavishdevar.librepods.BuildConfig.DEBUG) return
+        if (!Log.isLoggable(TAG, Log.DEBUG)) return
         val fields = listOf("kind", "uid", "session", "ready", "ended", "cleanupComplete", "resourcesStopped",
             "awaitingInputQuiet", "hfpOriginalPolicy", "hfpDisconnectAttempted", "hfpRestoreAttempted", "hfpResult",
             "hfpSuppressionAttempted", "hfpSuppressionActive", "hfpSuppressionReleased", "hfpSuppressionGeneration", "inputVerified",
@@ -309,7 +309,7 @@ class CommunicationAudioController internal constructor(
             "outputSilenceFrames", "maxOutputWriteUs", "maxLoopUs", "maxControlCheckUs", "maxActiveOutputWriteUs",
             "maxActiveLoopUs", "maxActiveControlCheckUs", "maxGuardAgeMs", "epoch", "muted", "error")
         @Suppress("DEPRECATION")
-        Log.i(TAG, "$stage " + fields.joinToString(" ") { "$it=${report.get(it)}" })
+        Log.d(TAG, "$stage " + fields.joinToString(" ") { "$it=${report.get(it)}" })
     }
 
     companion object {

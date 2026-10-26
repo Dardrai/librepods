@@ -16,10 +16,15 @@ extern "C" {
 #define LOG_TAG "LibrePodsHook"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+#if defined(LIBREPODS_NATIVE_TRACE) && LIBREPODS_NATIVE_TRACE
+#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
+#else
+#define LOGD(...) ((void)0)
+#endif
 
 static bool decompressXZ(const uint8_t *input, size_t input_size, std::vector<uint8_t> &output) {
 
-    LOGI("decompressXZ called with input_size: %zu", input_size);
+    LOGD("decompressXZ called with input_size: %zu", input_size);
 
     xz_crc32_init();
 #ifdef XZ_USE_CRC64
@@ -31,7 +36,7 @@ static bool decompressXZ(const uint8_t *input, size_t input_size, std::vector<ui
         LOGE("decompressXZ: xz_dec_init failed");
         return false;
     }
-    LOGI("decompressXZ: xz_dec_init succeeded");
+    LOGD("decompressXZ: xz_dec_init succeeded");
 
     struct xz_buf buf{};
     buf.in = input;
@@ -44,13 +49,13 @@ static bool decompressXZ(const uint8_t *input, size_t input_size, std::vector<ui
     buf.out_pos = 0;
     buf.out_size = output.size();
 
-    LOGI("decompressXZ: entering decompression loop");
+    LOGD("decompressXZ: entering decompression loop");
     while (true) {
-        LOGI("decompressXZ: xz_dec_run iteration, buf.in_pos: %zu, buf.out_pos: %zu", buf.in_pos,
+        LOGD("decompressXZ: xz_dec_run iteration, buf.in_pos: %zu, buf.out_pos: %zu", buf.in_pos,
              buf.out_pos);
         enum xz_ret ret = xz_dec_run(dec, &buf);
 
-        LOGI("decompressXZ: xz_dec_run returned %d", ret);
+        LOGD("decompressXZ: xz_dec_run returned %d", ret);
 
         if (ret == XZ_STREAM_END)
             break;
@@ -63,7 +68,7 @@ static bool decompressXZ(const uint8_t *input, size_t input_size, std::vector<ui
 
         if (buf.out_pos == buf.out_size) {
             size_t old = output.size();
-            LOGI("decompressXZ: resizing output to %zu", old * 2);
+            LOGD("decompressXZ: resizing output to %zu", old * 2);
             output.resize(old * 2);
             buf.out = output.data();
             buf.out_size = output.size();
@@ -72,12 +77,12 @@ static bool decompressXZ(const uint8_t *input, size_t input_size, std::vector<ui
 
     output.resize(buf.out_pos);
     xz_dec_end(dec);
-    LOGI("decompressXZ: decompression successful, output size: %zu", output.size());
+    LOGD("decompressXZ: decompression successful, output size: %zu", output.size());
     return true;
 }
 
 static bool getLibraryPath(const char *name, std::string &out) {
-    LOGI("getLibraryPath called with name: %s", name);
+    LOGD("getLibraryPath called with name: %s", name);
 
     FILE *fp = fopen("/proc/self/maps", "r");
     if (!fp) {
@@ -87,15 +92,15 @@ static bool getLibraryPath(const char *name, std::string &out) {
 
     char line[1024];
 
-    LOGI("getLibraryPath: scanning /proc/self/maps");
+    LOGD("getLibraryPath: scanning /proc/self/maps");
     while (fgets(line, sizeof(line), fp)) {
         if (strstr(line, name)) {
-            LOGI("getLibraryPath: found line containing %s", name);
+            LOGD("getLibraryPath: found line containing %s", name);
             char *path = strchr(line, '/');
             if (path) {
                 out = path;
                 out.erase(out.find('\n'));
-                LOGI("getLibraryPath: path found: %s", out.c_str());
+                LOGD("getLibraryPath: path found: %s", out.c_str());
                 fclose(fp);
                 return true;
             }
@@ -103,12 +108,12 @@ static bool getLibraryPath(const char *name, std::string &out) {
     }
 
     fclose(fp);
-    LOGI("getLibraryPath: failed to find path for %s", name);
+    LOGD("getLibraryPath: failed to find path for %s", name);
     return false;
 }
 
 static uintptr_t getModuleBase(const char *name) {
-    LOGI("getModuleBase called with name: %s", name);
+    LOGD("getModuleBase called with name: %s", name);
 
     FILE *fp = fopen("/proc/self/maps", "r");
     if (!fp) {
@@ -119,24 +124,24 @@ static uintptr_t getModuleBase(const char *name) {
     char line[1024];
     uintptr_t base = 0;
 
-    LOGI("getModuleBase: scanning /proc/self/maps");
+    LOGD("getModuleBase: scanning /proc/self/maps");
     while (fgets(line, sizeof(line), fp)) {
         if (strstr(line, name)) {
             base = strtoull(line, nullptr, 16);
-            LOGI("getModuleBase: found base at %p", reinterpret_cast<void*>(base));
+            LOGD("getModuleBase: found base at %p", reinterpret_cast<void*>(base));
             break;
         }
     }
 
     fclose(fp);
-    LOGI("getModuleBase: failed to find base for %s", name);
+    LOGD("getModuleBase: failed to find base for %s", name);
     return base;
 }
 
 static uint64_t
 findSymbolOffsetDynsym(const std::vector<uint8_t> &elf, const char *symbol_substring) {
 
-    LOGI("findSymbolOffsetDynsym called with %s", symbol_substring);
+    LOGD("findSymbolOffsetDynsym called with %s", symbol_substring);
 
     auto *eh = reinterpret_cast<const Elf64_Ehdr *>(elf.data());
     auto *shdr = reinterpret_cast<const Elf64_Shdr *>(
@@ -170,27 +175,27 @@ findSymbolOffsetDynsym(const std::vector<uint8_t> &elf, const char *symbol_subst
 
     size_t count = dynsym->sh_size / sizeof(Elf64_Sym);
 
-    LOGI("findSymbolOffsetDynsym: scanning %zu symbols", count);
+    LOGD("findSymbolOffsetDynsym: scanning %zu symbols", count);
 
     for (size_t i = 0; i < count; ++i) {
         const char *name = strings + symbols[i].st_name;
 
         if (strstr(name, symbol_substring) && ELF64_ST_TYPE(symbols[i].st_info) == STT_FUNC) {
 
-            LOGI("findSymbolOffsetDynsym: matched %s @ 0x%lx", name,
+            LOGD("findSymbolOffsetDynsym: matched %s @ 0x%lx", name,
                  (unsigned long) symbols[i].st_value);
 
             return symbols[i].st_value;
         }
     }
 
-    LOGI("findSymbolOffsetDynsym: no match for %s", symbol_substring);
+    LOGD("findSymbolOffsetDynsym: no match for %s", symbol_substring);
     return 0;
 }
 
 static uint64_t findSymbolOffset(const std::vector<uint8_t> &elf, const char *symbol_substring) {
 
-    LOGI("findSymbolOffset called with symbol_substring: %s", symbol_substring);
+    LOGD("findSymbolOffset called with symbol_substring: %s", symbol_substring);
 
     auto *eh = reinterpret_cast<const Elf64_Ehdr *>(elf.data());
     auto *shdr = reinterpret_cast<const Elf64_Shdr *>(
@@ -202,7 +207,7 @@ static uint64_t findSymbolOffset(const std::vector<uint8_t> &elf, const char *sy
     const Elf64_Shdr *symtab = nullptr;
     const Elf64_Shdr *strtab = nullptr;
 
-    LOGI("findSymbolOffset: parsing ELF sections");
+    LOGD("findSymbolOffset: parsing ELF sections");
     for (int i = 0; i < eh->e_shnum; ++i) {
         const char *secname = shstr + shdr[i].sh_name;
         if (!strcmp(secname, ".symtab"))
@@ -215,7 +220,7 @@ static uint64_t findSymbolOffset(const std::vector<uint8_t> &elf, const char *sy
         LOGE("findSymbolOffset: symtab or strtab not found");
         return 0;
     }
-    LOGI("findSymbolOffset: found symtab and strtab");
+    LOGD("findSymbolOffset: found symtab and strtab");
 
     auto *symbols = reinterpret_cast<const Elf64_Sym *>(
             elf.data() + symtab->sh_offset);
@@ -225,19 +230,19 @@ static uint64_t findSymbolOffset(const std::vector<uint8_t> &elf, const char *sy
 
     size_t count = symtab->sh_size / sizeof(Elf64_Sym);
 
-    LOGI("findSymbolOffset: scanning %zu symbols", count);
+    LOGD("findSymbolOffset: scanning %zu symbols", count);
     for (size_t i = 0; i < count; ++i) {
         const char *name = strings + symbols[i].st_name;
 
         if (strstr(name, symbol_substring) && ELF64_ST_TYPE(symbols[i].st_info) == STT_FUNC) {
 
-            LOGI("findSymbolOffset: matched symbol %s at 0x%lx", name,
+            LOGD("findSymbolOffset: matched symbol %s at 0x%lx", name,
                  (unsigned long) symbols[i].st_value);
 
             return symbols[i].st_value;
         }
     }
 
-    LOGI("findSymbolOffset: no match found for %s", symbol_substring);
+    LOGD("findSymbolOffset: no match found for %s", symbol_substring);
     return 0;
 }

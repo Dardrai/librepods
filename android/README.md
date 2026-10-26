@@ -160,6 +160,13 @@ tag. Publishing requires the fork's `RELEASE_KEYSTORE_FILE` (base64 keystore), `
 `RELEASE_KEY_ALIAS` and `RELEASE_KEY_PASSWORD` secrets. Signing happens only in
 the release path, after tests and builds pass.
 
+Detailed call, packet, sensor and Game Mode logs are off by default, including in
+debug APKs. For a targeted investigation, enable only the required log tag with
+`adb shell setprop log.tag.LibrePodsCallAudio DEBUG`, then restore it to `INFO`
+afterward. Warnings, errors and diagnostic counters remain available. Verbose
+native hook tracing requires an explicit CMake build with
+`-DLIBREPODS_NATIVE_TRACE=ON`; its default is `OFF` for all build types.
+
 ## Screenshots
 
 These are upstream screenshots and a demo. This fork uses the Android rewrite's

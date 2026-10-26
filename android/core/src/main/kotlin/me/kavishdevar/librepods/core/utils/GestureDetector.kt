@@ -85,7 +85,7 @@ class GestureDetector {
     fun startDetection(acceleration: StateFlow<Acceleration>, callback: (Boolean) -> Unit): Boolean = synchronized(stateLock) {
         if (activeSession != null) return false
 
-        Log.d(TAG, "Starting gesture detection...")
+        if (Log.isLoggable(TAG, Log.DEBUG)) Log.d(TAG, "Starting gesture detection...")
         val session = Job()
         activeSession = session
         val scope = CoroutineScope(Dispatchers.Default + session)
@@ -147,7 +147,7 @@ class GestureDetector {
 
     private fun stopDetection(session: Job): Unit = synchronized(stateLock) {
         if (activeSession === session) {
-            Log.d(TAG, "Stopping gesture detection")
+            if (Log.isLoggable(TAG, Log.DEBUG)) Log.d(TAG, "Stopping gesture detection")
             activeSession = null
             session.cancel()
         }
@@ -157,7 +157,7 @@ class GestureDetector {
         val session = activeSession ?: return
 
         if (abs(horizontal) > MAX_VALID_ORIENTATION_VALUE || abs(vertical) > MAX_VALID_ORIENTATION_VALUE) {
-            Log.d(TAG, "Ignoring likely calibration data: h=$horizontal, v=$vertical")
+            if (Log.isLoggable(TAG, Log.DEBUG)) Log.d(TAG, "Ignoring likely calibration data: h=$horizontal, v=$vertical")
             return
         }
 
@@ -173,7 +173,7 @@ class GestureDetector {
             }
             significantMotion = true
             lastSignificantMotionTime = System.currentTimeMillis()
-            Log.d(TAG, "Significant HORIZONTAL movement: $horizontalDelta")
+            if (Log.isLoggable(TAG, Log.DEBUG)) Log.d(TAG, "Significant HORIZONTAL movement: $horizontalDelta")
         }
         else if (significantVertical) {
             CoroutineScope(Dispatchers.Main + session).launch {
@@ -181,7 +181,7 @@ class GestureDetector {
             }
             significantMotion = true
             lastSignificantMotionTime = System.currentTimeMillis()
-            Log.d(TAG, "Significant VERTICAL movement: $verticalDelta")
+            if (Log.isLoggable(TAG, Log.DEBUG)) Log.d(TAG, "Significant VERTICAL movement: $verticalDelta")
         }
         else if (significantMotion &&
                  (System.currentTimeMillis() - lastSignificantMotionTime) > 300) {
@@ -351,7 +351,7 @@ class GestureDetector {
         if (movementSpeedIntervals.isEmpty()) return MIN_REQUIRED_EXTREMES
 
         val avgInterval = movementSpeedIntervals.average()
-        Log.d(TAG, "Average movement interval: $avgInterval ms")
+        if (Log.isLoggable(TAG, Log.DEBUG)) Log.d(TAG, "Average movement interval: $avgInterval ms")
 
         return if (avgInterval < FAST_MOVEMENT_THRESHOLD) {
             MAX_REQUIRED_EXTREMES
@@ -362,17 +362,16 @@ class GestureDetector {
 
     private fun detectGestures(): Boolean? = synchronized(stateLock) {
         val requiredExtremes = getRequiredExtremes()
-//        Log.d(TAG, "Current required extremes: $requiredExtremes")
 
         if (verticalPeaks.size + verticalTroughs.size >= requiredExtremes) {
             val allExtremes = (verticalPeaks + verticalTroughs).sortedBy { it.first }
 
             val confidence = calculateConfidenceScore(allExtremes, isVertical = true)
 
-            Log.d(TAG, "Vertical motion confidence: $confidence (need $minConfidenceThreshold)")
+            if (Log.isLoggable(TAG, Log.DEBUG)) Log.d(TAG, "Vertical motion confidence: $confidence (need $minConfidenceThreshold)")
 
             if (confidence >= minConfidenceThreshold) {
-                Log.d(TAG, "\"Yes\" Gesture Detected (confidence: $confidence, extremes: ${allExtremes.size}/$requiredExtremes)")
+                if (Log.isLoggable(TAG, Log.DEBUG)) Log.d(TAG, "\"Yes\" Gesture Detected (confidence: $confidence, extremes: ${allExtremes.size}/$requiredExtremes)")
                 return true
             }
         }
@@ -382,10 +381,10 @@ class GestureDetector {
 
             val confidence = calculateConfidenceScore(allExtremes, isVertical = false)
 
-            Log.d(TAG, "Horizontal motion confidence: $confidence (need $minConfidenceThreshold)")
+            if (Log.isLoggable(TAG, Log.DEBUG)) Log.d(TAG, "Horizontal motion confidence: $confidence (need $minConfidenceThreshold)")
 
             if (confidence >= minConfidenceThreshold) {
-                Log.d(TAG, "\"No\" Gesture Detected (confidence: $confidence, extremes: ${allExtremes.size}/$requiredExtremes)")
+                if (Log.isLoggable(TAG, Log.DEBUG)) Log.d(TAG, "\"No\" Gesture Detected (confidence: $confidence, extremes: ${allExtremes.size}/$requiredExtremes)")
                 return false
             }
         }

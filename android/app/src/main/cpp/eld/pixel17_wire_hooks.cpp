@@ -6,7 +6,7 @@
 #include <atomic>
 #include <cstring>
 #include <mutex>
-#if defined(__ANDROID__) && defined(__aarch64__) && defined(ELD_PRIVATE_OWNED_FDK)
+#if defined(__ANDROID__) && defined(__aarch64__) && defined(ELD_PRIVATE_OWNED_FDK) && defined(LIBREPODS_NATIVE_TRACE) && LIBREPODS_NATIVE_TRACE
 #include <android/log.h>
 #include <cstdio>
 #endif
@@ -98,7 +98,7 @@ template<Hook hook> int32_t source_index(const uint8_t* info) {
     const int32_t result = candidate(info)
         ? (compatible(info) ? host.source_index : kPixel17InvalidCodecIndex)
         : (next ? next(info) : kPixel17InvalidCodecIndex);
-#if defined(__ANDROID__) && defined(__aarch64__) && defined(ELD_PRIVATE_OWNED_FDK)
+#if defined(__ANDROID__) && defined(__aarch64__) && defined(ELD_PRIVATE_OWNED_FDK) && defined(LIBREPODS_NATIVE_TRACE) && LIBREPODS_NATIVE_TRACE
     // Bounded control-path evidence for the private prototype; never trace media callbacks.
     static std::atomic<unsigned> accepted{0}, rejected{0};
     if (is_apple(info, kPixel17WireStorage) &&
