@@ -154,7 +154,7 @@ at the repository root. Release signing uses the existing `RELEASE_STORE_FILE`,
 in an untracked `android/local.properties`. Without those entries, the release
 APK is unsigned. Keep signing material out of the repository.
 
-To publish a signed GitHub prerelease, run the workflow against `android/rewrite`
+To publish a signed GitHub prerelease, run the workflow against `main`
 with its `publish_release` and `release_tag` inputs, or push a `v*` or `pixel-*`
 tag. Publishing requires the fork's `RELEASE_KEYSTORE_FILE` (base64 keystore), `RELEASE_STORE_PASSWORD`,
 `RELEASE_KEY_ALIAS` and `RELEASE_KEY_PASSWORD` secrets. Signing happens only in

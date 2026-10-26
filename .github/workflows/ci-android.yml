@@ -19,7 +19,7 @@ on:
         description: Branch or commit to build
         type: string
         required: true
-        default: android/rewrite
+        default: main
       publish_release:
         description: Publish a signed GitHub prerelease (requires fork signing secrets)
         type: boolean

@@ -2,7 +2,7 @@
 
 This branch starts at upstream `android/rewrite`, commit
 `a4d8377df0bb468f371289a1b53eeba7c23a9f06`. It retains the rewrite's screens,
-design choices, settings and per-device architecture. `android/rewrite` is the
+design choices, settings and per-device architecture. `main` is the
 fork's active branch. The older port is preserved at
 `archive/pixel-shizuku-port-2026-10-20` as a reference for previous hardware
 checks, not the frontend base.

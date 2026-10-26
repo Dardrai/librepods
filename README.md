@@ -2,7 +2,7 @@
 
 This is [Ripthulhu/librepods](https://github.com/Ripthulhu/librepods), based on the
 upstream Android rewrite, with Pixel/Shizuku support, nearby pairing and Dynamic Island
-overlays. Android builds are distributed through GitHub only, from `android/rewrite`.
+overlays. Android builds are distributed through GitHub only, from `main`.
 
 - [Download signed APKs](https://github.com/Ripthulhu/librepods/releases)
 - [Development builds and checks](https://github.com/Ripthulhu/librepods/actions/workflows/ci-android.yml)
