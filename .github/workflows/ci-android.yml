@@ -159,7 +159,7 @@ jobs:
           signing_details=$("$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs "$apk")
           printf '%s\n' "$signing_details"
           signer_sha256=$(printf '%s\n' "$signing_details" | awk '/^Signer #[0-9]+ certificate SHA-256 digest: / {print $NF}')
-          if [ "$signer_sha256" != 'df20046be1ac11bd7feb5e8d8158fe59c5627210652776f9f974b204191907e2' ]; then
+          if [ "$signer_sha256" != '041c993537c37f30ccc48a20320562d81d32671a505aac118f0f5bcca4a40227' ]; then
             echo 'Refusing to publish: APK must use the existing fork signing certificate' >&2
             exit 1
           fi
