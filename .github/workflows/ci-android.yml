@@ -15,11 +15,6 @@ on:
       - '.github/scripts/android_ci_metadata.py'
   workflow_dispatch:
     inputs:
-      branch:
-        description: Branch or commit to build
-        type: string
-        required: true
-        default: main
       publish_release:
         description: Publish a signed GitHub prerelease (requires fork signing secrets)
         type: boolean
@@ -45,8 +40,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
+          fetch-depth: 0
           persist-credentials: false
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.branch || github.ref }}
+          ref: ${{ github.ref }}
       - name: Validate build and release metadata
         id: metadata
         env:
@@ -98,9 +94,52 @@ jobs:
           cmake -S android/tools/native-owned-fdk-tests -B "$build" -G Ninja -DCMAKE_BUILD_TYPE=Debug
           cmake --build "$build" --parallel 2
           ctest --test-dir "$build" --output-on-failure --timeout 60
+      - name: Prepare existing fork signing
+        if: >-
+          github.repository == 'Ripthulhu/librepods' &&
+          steps.metadata.outputs.sign_artifacts == 'true' &&
+          ((github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+           (github.event_name == 'push' &&
+            (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))))
+        env:
+          RELEASE_KEYSTORE_FILE: ${{ secrets.RELEASE_KEYSTORE_FILE }}
+          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        run: |
+          python3 - <<'PY'
+          import base64, os, pathlib
+          names = ('RELEASE_KEYSTORE_FILE', 'RELEASE_STORE_PASSWORD', 'RELEASE_KEY_ALIAS', 'RELEASE_KEY_PASSWORD')
+          missing = [name for name in names if not os.environ.get(name)]
+          if missing:
+              raise SystemExit('Trusted builds require the existing fork signing secrets: ' + ', '.join(missing))
+          os.umask(0o077)
+          keystore = base64.b64decode(''.join(os.environ['RELEASE_KEYSTORE_FILE'].split()), validate=True)
+          if not keystore:
+              raise SystemExit('Release keystore is empty')
+          pathlib.Path('android/release.keystore').write_bytes(keystore)
+          values = {'RELEASE_STORE_FILE': '../release.keystore', **{name: os.environ[name] for name in names[1:]}}
+          def escape(value):
+              data = value.encode('utf-16-be').hex()
+              return ''.join('\\u' + data[index:index+4] for index in range(0, len(data), 4))
+          pathlib.Path('android/local.properties').write_text(''.join(f'{name}={escape(value)}\n' for name, value in values.items()))
+          PY
+          keytool -list -keystore android/release.keystore -storepass:env RELEASE_STORE_PASSWORD -alias "$RELEASE_KEY_ALIAS" >/dev/null
       - name: Test, lint and build Android APKs
         working-directory: android
         run: ./gradlew --no-daemon :core:lintDebug :app:verifyPixel
+      - name: Verify trusted APK signatures
+        if: steps.metadata.outputs.sign_artifacts == 'true'
+        run: |
+          for apk in android/app/build/outputs/apk/debug/app-debug.apk android/app/build/outputs/apk/release/app-release.apk; do
+            signing_details=$("$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs "$apk")
+            printf '%s\n' "$signing_details"
+            signer_sha256=$(printf '%s\n' "$signing_details" | awk '/^Signer #[0-9]+ certificate SHA-256 digest: / {print $NF}')
+            if [ "$signer_sha256" != 'df20046be1ac11bd7feb5e8d8158fe59c5627210652776f9f974b204191907e2' ]; then
+              echo 'Refusing to upload: trusted APKs must use the existing fork signing certificate' >&2
+              exit 1
+            fi
+          done
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -118,36 +157,6 @@ jobs:
           name: apk-debug
           path: android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
-      - name: Prepare fork release signing
-        if: steps.metadata.outputs.publish_release == 'true'
-        env:
-          RELEASE_KEYSTORE_FILE: ${{ secrets.RELEASE_KEYSTORE_FILE }}
-          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
-          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
-          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
-        run: |
-          python3 - <<'PY'
-          import base64, os, pathlib
-          names = ('RELEASE_KEYSTORE_FILE', 'RELEASE_STORE_PASSWORD', 'RELEASE_KEY_ALIAS', 'RELEASE_KEY_PASSWORD')
-          missing = [name for name in names if not os.environ.get(name)]
-          if missing:
-              raise SystemExit('Signed release requires fork secrets: ' + ', '.join(missing))
-          os.umask(0o077)
-          keystore = base64.b64decode(''.join(os.environ['RELEASE_KEYSTORE_FILE'].split()), validate=True)
-          if not keystore:
-              raise SystemExit('Release keystore is empty')
-          pathlib.Path('android/release.keystore').write_bytes(keystore)
-          values = {'RELEASE_STORE_FILE': '../release.keystore', **{name: os.environ[name] for name in names[1:]}}
-          def escape(value):
-              data = value.encode('utf-16-be').hex()
-              return ''.join('\\u' + data[index:index+4] for index in range(0, len(data), 4))
-          pathlib.Path('android/local.properties').write_text(''.join(f'{name}={escape(value)}\n' for name, value in values.items()))
-          PY
-          keytool -list -keystore android/release.keystore -storepass:env RELEASE_STORE_PASSWORD -alias "$RELEASE_KEY_ALIAS" >/dev/null
-      - name: Build signed GitHub release APK
-        if: steps.metadata.outputs.publish_release == 'true'
-        working-directory: android
-        run: ./gradlew --no-daemon assembleRelease
       - name: Verify and checksum release APK
         if: steps.metadata.outputs.publish_release == 'true'
         env:

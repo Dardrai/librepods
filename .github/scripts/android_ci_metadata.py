@@ -30,7 +30,22 @@ def release_request(event, ref, requested, tag):
     return publish, tag if publish else ""
 
 
+def signing_candidate(repository, event, ref):
+    return repository == "Ripthulhu/librepods" and (
+        event == "workflow_dispatch" and ref == "refs/heads/main" or
+        event == "push" and (ref == "refs/heads/main" or ref.startswith("refs/tags/")))
+
+
+def trusted_signing_source(repository, event, ref, commit, main_commit, on_main):
+    if not signing_candidate(repository, event, ref):
+        return False
+    return commit == main_commit if event == "workflow_dispatch" else on_main
+
+
 def self_test():
+    workflow = (Path(__file__).resolve().parents[1] / "workflows/ci-android.yml").read_text()
+    assert "inputs.branch" not in workflow, "Source overrides can bypass the workflow ref's signing trust"
+    assert "ref: ${{ github.ref }}" in workflow, "Checkout must use the same ref as the trusted workflow"
     properties = "major=2\nminor=0\npatch=0\nstage=alpha\nbuild=1\n"
     source = 'val appVersionName = (rootProject.extra["appVersionName"] as String) + "-pixel11"\n'
     assert app_version(properties, source) == "2.0.0-alpha.1-pixel11"
@@ -55,6 +70,19 @@ def self_test():
             pass
         else:
             raise AssertionError("Invalid release tag accepted")
+    repository = "Ripthulhu/librepods"
+    assert trusted_signing_source(repository, "push", "refs/heads/main", "old", "tip", True)
+    assert trusted_signing_source(repository, "push", "refs/tags/pixel-114", "old", "tip", True)
+    assert trusted_signing_source(repository, "workflow_dispatch", "refs/heads/main", "tip", "tip", True)
+    assert not trusted_signing_source(repository, "workflow_dispatch", "refs/heads/main", "old", "tip", True)
+    assert not trusted_signing_source(repository, "workflow_dispatch", "refs/heads/main", "other", "tip", False)
+    assert not trusted_signing_source(repository, "push", "refs/tags/pixel-114", "other", "tip", False)
+    for owner, event, ref in (("someone/librepods", "push", "refs/heads/main"),
+                              (repository, "pull_request", "refs/heads/main"),
+                              (repository, "workflow_call", "refs/heads/main"),
+                              (repository, "workflow_dispatch", "refs/heads/feature"),
+                              (repository, "push", "refs/heads/feature")):
+        assert not trusted_signing_source(owner, event, ref, "tip", "tip", True)
     print("Android CI metadata checks passed")
 
 
@@ -64,11 +92,25 @@ if __name__ == "__main__":
     elif sys.argv[1:]:
         raise SystemExit("Usage: android_ci_metadata.py [--self-test]")
     else:
-        publish, tag = release_request(os.environ["GITHUB_EVENT_NAME"], os.environ["GITHUB_REF"],
+        event, ref = os.environ["GITHUB_EVENT_NAME"], os.environ["GITHUB_REF"]
+        publish, tag = release_request(event, ref,
                                        os.environ.get("REQUEST_RELEASE", "false"), os.environ.get("REQUEST_TAG", ""))
         if publish:
             subprocess.run(["git", "check-ref-format", f"refs/tags/{tag}"], check=True)
         version = app_version(Path("android/version.properties").read_text(), Path("android/app/build.gradle.kts").read_text())
         commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+        repository = os.environ["GITHUB_REPOSITORY"]
+        sign = False
+        if signing_candidate(repository, event, ref):
+            subprocess.run(["git", "fetch", "--no-tags", "origin", "main:refs/remotes/origin/main"], check=True)
+            main_commit = subprocess.check_output(["git", "rev-parse", "refs/remotes/origin/main"], text=True).strip()
+            ancestry = subprocess.run(["git", "merge-base", "--is-ancestor", commit, main_commit]).returncode
+            if ancestry not in (0, 1):
+                raise RuntimeError("Cannot verify signing source against main")
+            sign = trusted_signing_source(repository, event, ref, commit, main_commit, ancestry == 0)
+            if event == "push" and not sign:
+                raise ValueError("Signed push builds must belong to main history")
+        if publish and not sign:
+            raise ValueError("Publishing requires a trusted main signing source; dispatch must build the current main commit")
         with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-            output.write(f"commit={commit}\napp_version={version}\npublish_release={str(publish).lower()}\nrelease_tag={tag}\n")
+            output.write(f"commit={commit}\napp_version={version}\npublish_release={str(publish).lower()}\nrelease_tag={tag}\nsign_artifacts={str(sign).lower()}\n")

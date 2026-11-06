@@ -144,9 +144,14 @@ APK as a system app or grant global permissions.
 
 The [Android CI workflow](https://github.com/Ripthulhu/librepods/actions/workflows/ci-android.yml)
 checks Android changes on pushes and pull requests. Successful runs provide an
-`apk-debug` artifact containing `app-debug.apk`; these use a development
-certificate and are not upgrades for the signed release APK. Installable updates
-come from the signed APK attached to a GitHub release.
+`apk-debug` artifact containing `app-debug.apk`. Builds from this fork's `main`
+and release tags in its history use the existing fork signing certificate, so
+they update the installed fork in place. Manual builds check out the workflow's
+selected ref, with no separate source-ref override. They use that certificate
+only when the workflow runs on `main` and checks out its current tip. Pull requests, other
+branches and untrusted manual refs use a development certificate and cannot
+update the installed signed app. CI verifies the certificate before uploading
+trusted APKs. Signing does not enable the optional AAC-ELD encoder backend.
 
 From `android/`, run `./gradlew :app:verifyPixel` with JDK 21 and the SDK/NDK
 versions declared in the project. This runs core and app unit tests, Android
@@ -161,9 +166,11 @@ APK is unsigned. Keep signing material out of the repository.
 
 To publish a signed GitHub prerelease, run the workflow against `main`
 with its `publish_release` and `release_tag` inputs, or push a `v*` or `pixel-*`
-tag. Publishing requires the fork's `RELEASE_KEYSTORE_FILE` (base64 keystore), `RELEASE_STORE_PASSWORD`,
-`RELEASE_KEY_ALIAS` and `RELEASE_KEY_PASSWORD` secrets. Signing happens only in
-the release path, after tests and builds pass.
+tag on `main` history. Trusted CI builds require the fork's existing
+`RELEASE_KEYSTORE_FILE` (base64 keystore), `RELEASE_STORE_PASSWORD`,
+`RELEASE_KEY_ALIAS` and `RELEASE_KEY_PASSWORD` secrets. The same key signs debug
+and release APKs; no new key is generated. Publishing from a manual workflow
+requires the current `main` commit. Signing material is removed after the job.
 
 Detailed call, packet, sensor and Game Mode logs are off by default, including in
 debug APKs. For a targeted investigation, enable only the required log tag with
