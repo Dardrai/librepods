@@ -15,6 +15,11 @@ import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import com.topjohnwu.superuser.Shell
 import rikka.shizuku.Shizuku
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [37], application = Application::class)
@@ -51,6 +56,34 @@ class ShizukuAudioClientLifecycleTest {
         } finally { client.close(); shadowOf(Looper.getMainLooper()).idle() }
     }
 
+    @Test fun mediaInspectionReportsMissingBridgeAndSettingsBusyWithoutCallingTheHelper() = runBlocking<Unit> {
+        val client = ShizukuAudioClient(context)
+        try {
+            val absent = client.inspectCompanionMedia("AA:BB:CC:DD:EE:FF")
+            assertEquals(MediaInspectionReason.BRIDGE_UNAVAILABLE, CompanionMediaInspection.reason(absent))
+            assertFalse(absent.getBoolean("known"))
+            val remote = Bridge(); accept.invoke(client, remote.binder, 0, true)
+            ShizukuAudioClient::class.java.getDeclaredField("settingsRefresh").apply { isAccessible = true }.set(client, true)
+            val busy = client.inspectCompanionMedia("AA:BB:CC:DD:EE:FF")
+            assertEquals(MediaInspectionReason.SETTINGS_BUSY, CompanionMediaInspection.reason(busy))
+            assertFalse(busy.getBoolean("known"))
+            verify(remote.remote, never()).inspectCompanionMedia(anyString())
+        } finally { client.close(); shadowOf(Looper.getMainLooper()).idle() }
+    }
+
+    @Test fun mediaBinderFailuresAreFailClosedAndDoNotExposeExceptionMessages() = runBlocking {
+        val client = ShizukuAudioClient(context)
+        try {
+            val remote = Bridge(); accept.invoke(client, remote.binder, 0, true)
+            `when`(remote.remote.inspectCompanionMedia(anyString())).thenThrow(SecurityException("private.player/title/key"))
+            val value = client.inspectCompanionMedia("AA:BB:CC:DD:EE:FF")
+            assertEquals(MediaInspectionStage.CLIENT, CompanionMediaInspection.stage(value))
+            assertEquals(MediaInspectionReason.SECURITY, CompanionMediaInspection.reason(value))
+            assertFalse(value.getBoolean("known")); assertFalse(value.getBoolean("eligible"))
+            assertFalse(value.toString().contains("private.player"))
+        } finally { client.close(); shadowOf(Looper.getMainLooper()).idle() }
+    }
+
     @Test fun rootUidShizukuStillUsesShizukuTransportLifecycle() {
         val client = ShizukuAudioClient(context)
         try {
@@ -78,6 +111,55 @@ class ShizukuAudioClientLifecycleTest {
                 .apply { isAccessible = true }.get(client) as Shizuku.OnRequestPermissionResultListener
             listener.onRequestPermissionResult(18570, PackageManager.PERMISSION_GRANTED)
         }
+    }
+
+    @Test fun cancelledUsbOpenClosesABinderThatReturnsAfterCancellation() = runBlocking<Unit> {
+        val client = ShizukuAudioClient(context)
+        val bridge = Bridge()
+        val hid = mock(IUsbHidConnection::class.java)
+        val entered = CountDownLatch(1); val finish = CountDownLatch(1)
+        `when`(bridge.remote.openDongleHid(eq("/dev/bus/usb/001/002"), eq("board"), eq(5), any()))
+            .thenAnswer { entered.countDown(); check(finish.await(5, TimeUnit.SECONDS)); hid }
+        accept.invoke(client, bridge.binder, 0, true)
+        val pending = launch(Dispatchers.IO) {
+            runCatching { client.openDongleHid("/dev/bus/usb/001/002", "board", 5) { true } }
+        }
+        try {
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            pending.cancel(); finish.countDown(); pending.join()
+            verify(hid).close()
+        } finally { finish.countDown(); pending.cancel(); client.close(); shadowOf(Looper.getMainLooper()).idle() }
+    }
+
+    @Test fun closingTheRootClientClosesItsUsbControlLinksWithoutAnAudioRouteChange() = runBlocking<Unit> {
+        val client = ShizukuAudioClient(context)
+        val bridge = Bridge(); val hid = mock(IUsbHidConnection::class.java)
+        `when`(bridge.remote.openDongleHid(eq("/dev/bus/usb/001/002"), eq("board"), eq(5), any())).thenReturn(hid)
+        accept.invoke(client, bridge.binder, 0, true)
+        try {
+            assertNotNull(client.openDongleHid("/dev/bus/usb/001/002", "board", 5) { true })
+            client.close()
+            verify(hid).close()
+            verify(bridge.remote, never()).connectNativePlayback(anyString(), any())
+            verify(bridge.remote, never()).releaseNativePlayback(anyString(), any())
+        } finally { client.close(); shadowOf(Looper.getMainLooper()).idle() }
+    }
+
+    @Test fun usbGenerationCallbacksRunOutsideClientLockAndLateSelectionIsClosed() = runBlocking<Unit> {
+        val client = ShizukuAudioClient(context)
+        val bridge = Bridge(); val hid = mock(IUsbHidConnection::class.java)
+        val lock = ShizukuAudioClient::class.java.getDeclaredField("lock").apply { isAccessible = true }.get(client)
+        `when`(bridge.remote.openDongleHid(eq("/dev/bus/usb/001/002"), eq("board"), eq(5), any())).thenReturn(hid)
+        accept.invoke(client, bridge.binder, 0, true)
+        var checks = 0
+        try {
+            val result = runCatching { client.openDongleHid("/dev/bus/usb/001/002", "board", 5) {
+                assertFalse("Controller lifecycle callback must not run under client lock", Thread.holdsLock(lock))
+                ++checks < 2
+            } }
+            assertTrue(result.isFailure); assertEquals(2, checks)
+            verify(hid).close()
+        } finally { client.close(); shadowOf(Looper.getMainLooper()).idle() }
     }
 
     private fun assertShizukuFallback(action: (ShizukuAudioClient) -> Unit) {

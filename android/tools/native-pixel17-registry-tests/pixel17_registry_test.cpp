@@ -520,6 +520,16 @@ int main() {
     table[2] = reinterpret_cast<uintptr_t>(&destruct); table[3] = reinterpret_cast<uintptr_t>(&deleting_destruct);
     table[6] = reinterpret_cast<uintptr_t>(&classification);
     check(pixel17_codec_prepare({allocate, release, construct, table.data() + 2, lock, unlock, assign_short}));
+    {
+        Fixture fixture;
+        fixture.stock(11,1000,true); fixture.stock(12,1000,false);
+        auto current=bindings(); current.source_max=11;
+        Pixel17RegistryCounts counts;
+        check(pixel17_registry_validate(fixture.bytes.data(),current,&counts) && counts.source==1 && counts.sink==1);
+        check(!pixel17_registry_validate(fixture.bytes.data(),bindings()));
+        current.source_max=12;
+        check(!pixel17_registry_validate(fixture.bytes.data(),current));
+    }
     empty_registration_and_idempotence();
     ordered_tree_and_list_insertion_preserves_stock();
     collisions_and_provider_changes_do_not_publish();

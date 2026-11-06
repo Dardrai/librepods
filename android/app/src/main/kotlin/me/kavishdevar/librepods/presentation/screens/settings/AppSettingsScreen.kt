@@ -118,11 +118,11 @@ fun AppSettingsScreen(
 
             Spacer(modifier = Modifier.height(20.dp))
 
+            CompanionSettingsSection()
+            Spacer(modifier = Modifier.height(16.dp))
             PcControlsVisibilitySetting()
             Spacer(modifier = Modifier.height(16.dp))
             PrivilegedAccessSetting()
-            Spacer(modifier = Modifier.height(16.dp))
-            CompanionSettingsSection()
             Spacer(modifier = Modifier.height(16.dp))
 
             StyledListItem(contentText = stringResource(R.string.dongle_title), onClick = navigateToDongleSettings)

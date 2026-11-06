@@ -1,10 +1,14 @@
 package me.kavishdevar.librepods.core.bluetooth.aacp
 
 import me.kavishdevar.librepods.core.bluetooth.aacp.rtbuddy.proto.SensorDataWX
+import me.kavishdevar.librepods.core.data.apple.MotionReport
 
 /** Device-supplied service numbers are accepted only with an exact supported HID layout. */
 internal class SensorReports {
-    data class Motion(val horizontal: Int, val vertical: Int)
+    data class Motion(val horizontal: Int, val vertical: Int) {
+        var report: MotionReport? = null
+            internal set
+    }
     data class HeartRate(val bpm: Int, val confidence: Int)
     data class Batch(val mappingChanged: Boolean, val motion: Motion?, val heartRate: HeartRate?)
     var motionService: Int? = null
@@ -61,7 +65,7 @@ internal class SensorReports {
         if (bytes.size !in setOf(56, 58) || (bytes.size == 56 && (motionService == null || bytes[0] != 1.toByte()))) return null
         fun signed(offset: Int) = ((bytes[offset].toInt() and 255) or
             ((bytes[offset + 1].toInt() and 255) shl 8)).toShort().toInt()
-        return Motion(signed(28), signed(30))
+        return Motion(signed(28), signed(30)).also { it.report = MotionReport.parse(bytes) }
     }
 
     private fun heartRate(data: SensorDataWX): HeartRate? {

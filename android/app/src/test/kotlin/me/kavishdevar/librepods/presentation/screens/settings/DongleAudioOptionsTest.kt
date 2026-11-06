@@ -2,8 +2,16 @@ package me.kavishdevar.librepods.presentation.screens.settings
 
 import org.junit.Assert.assertEquals
 import org.junit.Test
+import java.util.Locale
 
 class DongleAudioOptionsTest {
+    @Test fun encoder_bitrate_limit_keeps_bit_precision_and_uses_the_locale_decimal_separator() {
+        assertEquals("255.2", formatDongleEncoderBitrateLimit(255200, Locale.US))
+        assertEquals("255,2", formatDongleEncoderBitrateLimit(255200, Locale.GERMANY))
+        assertEquals("255.201", formatDongleEncoderBitrateLimit(255201, Locale.US))
+        assertEquals("256", formatDongleEncoderBitrateLimit(256000, Locale.US))
+    }
+
     @Test fun offered_combinations_match_the_firmware_matrix() {
         val expectedBitrates = listOf(listOf(0L), listOf(0L),
             listOf(0L, 96000L, 128000L, 174000L, 192000L, 220000L),

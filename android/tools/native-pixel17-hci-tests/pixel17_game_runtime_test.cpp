@@ -5,6 +5,8 @@
 #include <functional>
 #include <string>
 namespace {
+constexpr bool keep_flush_baseline=ELD_KEEP_GAME_FLUSH_BASELINE!=0;
+constexpr uint16_t target_slots(uint16_t baseline) { return keep_flush_baseline?baseline:96; }
 eld::Pixel17GameHostState route;
 size_t refreshes=0;
 std::function<void()> during_refresh;
@@ -14,6 +16,19 @@ size_t clock_begins=0,clock_cancels=0;
 size_t clock_attempts=0;
 eld::EncoderClockRejection clock_rejection=eld::EncoderClockRejection::None;
 std::function<void()> during_clock_begin;
+Pixel17PacketPolicy packet_policy;
+std::vector<uint16_t> packet_commands;
+bool cancel_packet_send=false;
+void send_packet_type(uint16_t handle,uint16_t mask) {
+    packet_commands.push_back(mask); packet_policy.command(handle,mask,true);
+    if(cancel_packet_send) { cancel_packet_send=false; pixel17_game_cancel_owner(42); }
+}
+void packet_event(std::initializer_list<uint8_t> bytes) {
+    packet_policy.event(bytes.begin(),bytes.size()); pixel17_game_packet_changed();
+}
+void packet_changed(uint16_t mask) {
+    packet_event({0x1d,5,0,uint8_t(route.acl_handle),uint8_t(route.acl_handle>>8),uint8_t(mask),uint8_t(mask>>8)});
+}
 void init_route() {
     const auto expected=owner();
     std::memcpy(route.peer,expected.peer,6);
@@ -33,7 +48,7 @@ Pixel17HciOwner expected() {
 }
 }
 namespace eld {
-EncoderClockStatus encoder_clock_status() {
+EncoderClockStatus encoder_clock_status(bool) {
     // Reentrant pure snapshot proves callers never retain RuntimeMutex while
     // entering the real encoder's independent mutex.
     (void)pixel17_game_status();
@@ -77,22 +92,95 @@ int main(int argc,char** argv) {
     assert(argc==2);
     dispatcher_tests(); decoder_tests(); hci_tests();
     Loop loop; Radio radio; init_route();
-    const auto bindings=Pixel17MainBindings{&loop,Loop::construct,Loop::post,Loop::destroy,now,nullptr};
-    assert(pixel17_game_runtime_prepare(bindings,radio.bindings()));
-    assert(!pixel17_game_runtime_prepare(bindings,radio.bindings()));
     const std::string scenario=argv[1];
+    const bool with_packets=scenario.rfind("packets-",0)==0;
+    if(with_packets) {
+        const auto o=expected();
+        packet_event({3,11,0,uint8_t(o.acl_handle),uint8_t(o.acl_handle>>8),
+            o.peer[5],o.peer[4],o.peer[3],o.peer[2],o.peer[1],o.peer[0],1,0});
+        if(scenario!="packets-no-baseline") packet_changed(scenario=="packets-no-change"?0xee1c:0xcc18);
+    }
+    const auto bindings=Pixel17MainBindings{&loop,Loop::construct,Loop::post,Loop::destroy,now,nullptr};
+    assert(pixel17_game_runtime_prepare(bindings,radio.bindings(),
+        with_packets?&packet_policy:nullptr,with_packets?send_packet_type:nullptr));
+    assert(!pixel17_game_runtime_prepare(bindings,radio.bindings()));
     const auto submit=[&](Pixel17GameOperation op) {
         return pixel17_game_submit(op,42,expected(),(clock_us+5000000)*1000);
     };
     assert(pixel17_game_status().supported);
     assert(pixel17_game_refresh()); loop.run(); assert(refreshes==1);
+    if(with_packets) {
+        const auto tick=[&] { pixel17_game_runtime_monitor_for_test(); loop.run(); };
+        const auto accepted=[&] { packet_event({0x0f,4,0,1,0x0f,4}); tick(); };
+        const auto restored=[&] {
+            if(keep_flush_baseline) assert(radio.transmissions==3 && radio.command[8]==0x27);
+            else {
+                assert(radio.command[8]==0x28 && radio.command[13]==0);
+                radio.reply(write_event()); loop.run();
+                assert(radio.command[8]==0x27);
+                radio.reply(read_event(0)); loop.run();
+            }
+            const auto done=pixel17_game_status();
+            assert(!done.holding && !done.busy && !done.restore_pending);
+            assert(!done.packets.dirty && !done.packets.pending && done.current_slots==0);
+        };
+        const auto serial=submit(Pixel17GameOperation::Prepare); assert(serial); loop.run();
+        radio.reply(read_event(0)); loop.run();
+        radio.reply(write_event()); loop.run();
+        if(scenario=="packets-cancel-send") cancel_packet_send=true;
+        radio.reply(read_event(target_slots(0))); loop.run();
+        if(scenario=="packets-no-baseline") {
+            assert(packet_commands.empty() && !pixel17_game_status().holding);
+            restored(); return 0;
+        }
+        if(scenario!="packets-no-change") {
+            assert(packet_commands==std::vector<uint16_t>{0xee1c});
+            assert(!pixel17_game_status().holding && pixel17_game_status().packets.pending);
+            if(scenario=="packets-status-error") {
+                packet_event({0x0f,4,0x0c,1,0x0f,4}); tick(); restored(); return 0;
+            }
+            accepted();
+            assert(!pixel17_game_status().holding); // Command Status is not readback.
+            if(scenario=="packets-timeout" || scenario=="packets-cancel-send") {
+                if(scenario=="packets-timeout") clock_us+=1000001;
+                tick();
+                assert(!pixel17_game_status().holding && pixel17_game_status().restore_pending);
+                assert(radio.transmissions==3 && packet_commands.size()==1);
+                packet_changed(0xee1c); tick(); // Late event unlocks bounded same-owner restoration.
+            } else if(scenario=="packets-mismatch") {
+                packet_changed(0xcc18); tick(); restored(); return 0;
+            } else {
+                packet_changed(0xee1c); tick();
+                assert(pixel17_game_status().holding && pixel17_game_status().packets.current==0xee1c);
+            }
+        } else {
+            assert(packet_commands.empty() && pixel17_game_status().holding);
+        }
+        if(scenario=="packets-owner") {
+            ++route.media_generation; tick();
+            assert(!pixel17_game_status().holding && pixel17_game_status().restore_pending);
+            assert(packet_commands.size()==1 && radio.transmissions==3);
+            return 0;
+        }
+        if(scenario=="packets-clock-conflict") {
+            packet_policy.command(route.acl_handle,0xcc18,false);
+            assert(pixel17_game_clock_begin(42,serial,expected(),9,10)); loop.run();
+            assert(clock_begins==0 && !pixel17_game_status().holding && pixel17_game_status().restore_pending);
+            return 0;
+        }
+        if(scenario=="packets-expiry") { clock_us+=3000001; tick(); }
+        else if(scenario!="packets-timeout" && scenario!="packets-cancel-send") { assert(pixel17_game_restore(42,serial)); loop.run(); }
+        if(scenario!="packets-no-change") {
+            assert(packet_commands.size()==2 && packet_commands.back()==0xcc18);
+            accepted(); assert(pixel17_game_status().restore_pending);
+            if(scenario=="packets-late-restore") { clock_us+=1000001; tick(); }
+            packet_changed(0xcc18); tick();
+        }
+        restored(); return 0;
+    }
     if(scenario.rfind("flush",0)==0) {
         const uint16_t original=scenario=="flush320" ? 320 : 0;
-#if ELD_KEEP_GAME_FLUSH_BASELINE
-        const uint16_t target=original;
-#else
-        const uint16_t target=96;
-#endif
+        const uint16_t target=target_slots(original);
         const auto serial=submit(Pixel17GameOperation::Prepare); assert(serial); loop.run();
         assert(!pixel17_game_status().baseline_known && radio.transmissions==1 && radio.command[8]==0x27);
         if(scenario=="flush-unknown") {
@@ -175,10 +263,11 @@ int main(int argc,char** argv) {
         const uint16_t original=scenario=="hold320" ? 320 : scenario.rfind("hold96",0)==0 ? 96 : 0;
         const auto held=submit(Pixel17GameOperation::Prepare); assert(held); loop.run();
         radio.reply(read_event(original)); loop.run(); radio.reply(write_event()); loop.run();
-        radio.reply(read_event(96)); loop.run();
+        const auto target=target_slots(original);
+        radio.reply(read_event(target)); loop.run();
         auto status=pixel17_game_status();
-        assert(status.holding && !status.busy && status.restore_pending==(original!=96) && status.phase==Pixel17GamePhase::Holding);
-        assert(status.baseline_slots==original && status.current_slots==96 && radio.transmissions==3);
+        assert(status.holding && !status.busy && status.restore_pending==(original!=target) && status.phase==Pixel17GamePhase::Holding);
+        assert(status.baseline_slots==original && status.current_slots==target && radio.transmissions==3);
         if(scenario=="hold96" || scenario=="hold96-expiry") {
             assert(pixel17_game_heartbeat(42,held));
             if(scenario=="hold96") assert(pixel17_game_restore(42,held));
@@ -191,6 +280,13 @@ int main(int argc,char** argv) {
         }
         const auto finish_restore=[&](Pixel17HciStatus error,bool quarantined=false) {
             pixel17_game_runtime_tick_for_test(); loop.run();
+            if(keep_flush_baseline) {
+                const auto done=pixel17_game_status();
+                assert(!done.holding && !done.busy && !done.restore_pending && done.error==error);
+                assert(done.current_known && done.current_slots==original && radio.transmissions==3);
+                assert(done.phase==(error==Pixel17HciStatus::Ok?Pixel17GamePhase::Complete:Pixel17GamePhase::Failed));
+                return;
+            }
             if(quarantined) {
                 const auto failed=pixel17_game_status();
                 assert(!failed.holding && !failed.busy && failed.restore_pending && failed.phase==Pixel17GamePhase::Quarantined);
@@ -370,7 +466,7 @@ int main(int argc,char** argv) {
     assert(submit(Pixel17GameOperation::Roundtrip));
     assert(!submit(Pixel17GameOperation::Roundtrip)); loop.run();
     if(scenario=="cancel-at-write") {
-        // This refresh is the normal target96 admission, after the baseline READ
+        // This refresh is the selected target admission, after the baseline READ
         // completes. It must not inherit the relaxed restoration-only gate.
         const auto invalidate_at=refreshes+2;
         during_refresh=[&] {
@@ -381,7 +477,7 @@ int main(int argc,char** argv) {
             }
         };
         radio.reply(read_event(baseline)); loop.run(); during_refresh={};
-        assert(radio.transmissions==1); // No experiment96 command was submitted.
+        assert(radio.transmissions==1); // No target command was submitted.
         pixel17_game_runtime_tick_for_test(); loop.run();
         assert(radio.transmissions==2 && radio.command[8]==0x28 && radio.command[13]==baseline);
         radio.reply(write_event()); loop.run(); radio.reply(read_event(baseline)); loop.run();
@@ -389,7 +485,8 @@ int main(int argc,char** argv) {
         assert(!status.busy && !status.restore_pending && status.phase==Pixel17GamePhase::Failed); return 0;
     }
     radio.reply(read_event(baseline)); loop.run();
-    assert(radio.command[8]==0x28 && radio.command[13]==96 && radio.transmissions==2);
+    assert(radio.command[8]==0x28 && radio.command[13]==uint8_t(target_slots(baseline)) &&
+        radio.command[14]==uint8_t(target_slots(baseline)>>8) && radio.transmissions==2);
     if(scenario=="late-target") {
         clock_us+=1100000; pixel17_game_runtime_tick_for_test(); loop.run();
         assert(pixel17_game_status().restore_pending);
@@ -440,7 +537,16 @@ int main(int argc,char** argv) {
     radio.reply(write_event()); loop.run();
     assert(radio.command[8]==0x27 && radio.transmissions==3);
     if(scenario=="restore-allocation") radio.allocation_fails=true;
-    radio.reply(read_event(96)); loop.run();
+    const bool dirty_readback=keep_flush_baseline && (scenario=="restore-allocation" || scenario=="late-restore");
+    // Even an unchanged target needs cleanup if controller readback disagrees with its captured baseline.
+    radio.reply(read_event(uint16_t(target_slots(baseline)+(dirty_readback?1:0)))); loop.run();
+    if(keep_flush_baseline && !dirty_readback) {
+        const auto done=pixel17_game_status();
+        assert(!done.busy && !done.holding && !done.restore_pending && done.phase==Pixel17GamePhase::Complete);
+        assert(done.baseline_known && done.current_known && done.baseline_slots==baseline && done.current_slots==baseline);
+        assert(radio.transmissions==3); // Matching readback removes an unnecessary restoration allocation.
+        return 0;
+    }
     if(scenario=="restore-allocation") {
         const auto status=pixel17_game_status();
         assert(!status.busy && status.restore_pending && status.phase==Pixel17GamePhase::Quarantined);
@@ -461,7 +567,8 @@ int main(int argc,char** argv) {
         assert(radio.transmissions==before+1 && radio.command[8]==0x27);
         radio.reply(read_event(baseline)); loop.run();
         const auto status=pixel17_game_status();
-        assert(!status.busy && !status.restore_pending && status.error==Pixel17HciStatus::Timeout); return 0;
+        assert(!status.busy && !status.restore_pending &&
+            status.error==(dirty_readback?Pixel17HciStatus::Malformed:Pixel17HciStatus::Timeout)); return 0;
     }
     radio.reply(write_event()); loop.run();
     assert(radio.command[8]==0x27 && radio.transmissions==5);

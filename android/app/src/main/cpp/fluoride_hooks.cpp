@@ -232,13 +232,13 @@ Java_me_kavishdevar_librepods_utils_NativeBridge_getEldEncoderPeer(JNIEnv* env, 
 }
 
 namespace {
-// Version1 matches NativeGameSnapshot. Fixed scalars only: no native pointers cross JNI.
+// Version2 appends packet-policy readback to the existing scalar snapshot.
 jlongArray game_snapshot(JNIEnv* env, uint64_t submitted = 0) {
     const auto s = eld::pixel17_game_status();
     const auto c = eld::encoder_clock_status();
     const auto& h = s.host;
-    jlong values[79] = {
-        1, s.supported, s.busy, static_cast<jlong>(s.phase), static_cast<jlong>(s.operation),
+    jlong values[86] = {
+        2, s.supported, s.busy, static_cast<jlong>(s.phase), static_cast<jlong>(s.operation),
         static_cast<jlong>(s.serial), static_cast<jlong>(s.lease_owner), static_cast<jlong>(s.error),
         static_cast<jlong>(s.deadline_ns), s.baseline_known, s.baseline_slots,
         s.current_known, s.current_slots, s.restore_pending, s.cancelled,
@@ -262,13 +262,15 @@ jlongArray game_snapshot(JNIEnv* env, uint64_t submitted = 0) {
         static_cast<jlong>(s.clock.encoder_generation), 0,0,0,0,0,0,
         s.clock.requested_interval_tenths, s.clock.effective_interval_tenths, s.clock.target_drift_ms,
         static_cast<jlong>(s.clock.actual_frames), static_cast<jlong>(s.clock.nominal_frames),
-        s.clock.signed_progress_frames, static_cast<jlong>(s.clock.started_us), static_cast<jlong>(s.clock.deadline_us)
+        s.clock.signed_progress_frames, static_cast<jlong>(s.clock.started_us), static_cast<jlong>(s.clock.deadline_us),
+        s.packets.known,s.packets.baseline,s.packets.current,s.packets.pending,s.packets.dirty,
+        s.packets.ready,static_cast<jlong>(s.packets.error)
     };
     for (size_t i = 0; i < 6; ++i) {
         values[18+i] = s.owner.peer[i]; values[36+i] = h.peer[i]; values[65+i] = s.clock.peer[i];
     }
-    auto out = env->NewLongArray(79);
-    if (out) env->SetLongArrayRegion(out, 0, 79, values);
+    auto out = env->NewLongArray(86);
+    if (out) env->SetLongArrayRegion(out, 0, 86, values);
     return out;
 }
 bool game_owner(JNIEnv* env,jbyteArray peer,jlong media,jlong encoder,jint acl,eld::Pixel17HciOwner* out) {

@@ -143,15 +143,19 @@ class AirPodsMicrophoneLiveTest {
     }
 
     @Test fun recorderStillCreatesPcmWaveAndStopsAfterSixtySeconds() {
-        Fixture().use { fixture ->
+        Fixture(realTime = false).use { fixture ->
             assertTrue(fixture.microphone.start())
             assertTrue(fixture.starts.await(1, TimeUnit.SECONDS))
             repeat(60) { index ->
-                fixture.packet(1)
+                // All PCM arrives before the wall deadline; clock expiry is a separate event.
+                fixture.packet(if (index < 59) 1 else 0)
                 await { fixture.microphone.state.value.decodedFrames == (index + 1) * 480L }
             }
+            assertEquals(MicrophonePhase.CAPTURING, fixture.microphone.state.value.phase)
+            fixture.time.addAndGet(1_000_000_000)
             fixture.awaitFinished()
             assertEquals(MicrophonePhase.IDLE, fixture.microphone.state.value.phase)
+            assertEquals(60_000L, fixture.microphone.state.value.wallDurationMs)
             val file = checkNotNull(fixture.microphone.state.value.file)
             assertTrue(file.exists())
             val bytes = file.readBytes()

@@ -27,7 +27,7 @@ void* at(void* bytes, size_t offset) { return static_cast<uint8_t*>(bytes) + off
 const void* at(const void* bytes, size_t offset) { return static_cast<const uint8_t*>(bytes) + offset; }
 bool complete(const Pixel17RegistryBindings& b) {
     return b.allocate && b.release && b.lock && b.unlock && b.balance_after_insert &&
-        b.readable && b.provider_supports;
+        b.readable && b.provider_supports && (b.source_max==7 || b.source_max==11);
 }
 struct RegistryLock {
     const Pixel17RegistryBindings& bindings;
@@ -112,7 +112,7 @@ struct State {
         for (size_t i = 0; i < used; ++i)
             if (entries[i].object == object || entries[i].index == index) return fail(Pixel17RegistryIssue::TreeCycle);
         entries[used++] = {node, object, index, priority, load<uint64_t>(object, 0x38),
-                            active, index <= 7, false, tail_byte};
+                             active, index <= bindings.source_max, false, tail_byte};
         const auto* left = load<const void*>(node, 0);
         const auto* right = load<const void*>(node, 8);
         size_t left_height = 0, right_height = 0;

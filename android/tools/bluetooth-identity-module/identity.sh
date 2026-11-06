@@ -36,6 +36,11 @@ for candidate in /data/adb/ksu/bin/resetprop /data/adb/magisk/resetprop /debug_r
     if [ -x "$candidate" ]; then RESET=$candidate; break; fi
 done
 [ -n "$BUSYBOX" ] && [ -n "$RESET" ] || exit 1
+# Android mksh closes extra descriptors in child processes; ash preserves the flock/lease descriptors.
+if [ "${LIBREPODS_IDENTITY_ASH:-}" != 1 ]; then
+    export LIBREPODS_IDENTITY_ASH=1
+    exec "$BUSYBOX" sh "$0" "$@"
+fi
 exec 9>"$STATE_DIR/lock"
 attempt=0
 until "$BUSYBOX" flock -x -n 9; do

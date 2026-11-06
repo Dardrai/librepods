@@ -117,6 +117,7 @@ class NearbyDeviceConnectionTest {
     private val devices = field("_devices").get(service) as MutableStateFlow<Map<MacAddress, Device<*, *, *>>>
 
     init {
+        ShadowLog.setLoggable("NearbyTakeover", android.util.Log.DEBUG)
         shadowOf(RuntimeEnvironment.getApplication()).grantPermissions(
             Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_SCAN)
         ReflectionHelpers.setField(service, "mApplication", app)
@@ -239,14 +240,16 @@ class NearbyDeviceConnectionTest {
         } finally { Dispatchers.resetMain() }
     }
 
-    @Test fun aRestoredHoldBlocksPassiveControlUntilAnExplicitConnectClearsOnlyThatPair() = runBlocking<Unit> {
+    @Test fun aRestoredHoldAllowsExistingRouteControlButOnlyAnExplicitConnectClearsThatPair() = runBlocking<Unit> {
         val other = "00:11:22:33:44:66"
         holdStore.save(setOf(address.value, other))
         LibrePodsService::class.java.getDeclaredMethod("restoreCompanionHolds").apply { isAccessible = true }.invoke(service)
         connectionState.value = ConnectionState.AVAILABLE
         publishOutput()
         attachNativeAudio()
-        verify(device, never()).connect(anyCurrent())
+        verify(device).connect(anyCurrent())
+        assertEquals(setOf(address.value, other), CompanionHoldStore(heldFile).load())
+        verifyNoInteractions(bridge)
         `when`(device.connect(anyCurrent(), anyPending())).thenAnswer { connectionState.value = ConnectionState.CONNECTED; true }
         assertTrue(service.connectNearbyDevice(device))
         assertEquals(setOf(other), CompanionHoldStore(heldFile).load())

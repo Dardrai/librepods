@@ -1,0 +1,19 @@
+<resources>
+    <string name="dongle_attach_or_pair">USB 동글을 연결하거나 Android Bluetooth 설정에서 AirPods Dongle을 페어링하세요.</string>
+    <string name="dongle_usb_permission">USB 연결됨 · 제어 접근을 허용하세요</string>
+    <string name="dongle_usb_controls_only">USB 제어 연결됨 · 헤드폰 사용 불가</string>
+    <string name="dongle_usb_audio_available">USB 제어 연결됨 · 헤드폰 사용 가능</string>
+    <string name="dongle_reconnect_airpods">AirPods 다시 연결</string>
+    <string name="dongle_pair_airpods">AirPods 페어링</string>
+    <string name="dongle_pair_airpods_description">재생과 마이크 사용을 일시 중지한 후 AirPods를 페어링 모드로 전환하세요. 동글이 기기를 검색합니다.</string>
+    <string name="dongle_pair_phone">Bluetooth 전화 페어링 허용</string>
+    <string name="dongle_profile_idle">출력 프로필을 변경하기 전에 재생과 마이크 사용을 일시 중지하세요.</string>
+    <string name="dongle_phone_pairing">Bluetooth 페어링 가능</string>
+    <string name="dongle_hardware_volume">하드웨어 음량</string>
+    <string name="dongle_hardware_volume_unavailable">루트 권한과 동글의 USB 오디오 경로 선택이 필요합니다.</string>
+    <string name="dongle_volume_failed">하드웨어 음량 제어가 중지되었습니다. 제어 연결을 다시 연결한 후 재시도하세요.</string>
+    <string name="dongle_volume_restore_failed">하드웨어 음량을 복원하지 못했습니다. 재생을 일시 중지한 상태로 제어를 다시 연결하세요.</string>
+    <string name="dongle_hold_initialize_title">양쪽 AirPods 설정</string>
+    <string name="dongle_hold_initialize_description">각 AirPod의 동작을 선택하세요. 양쪽 설정이 함께 업데이트됩니다.</string>
+    <string name="dongle_assistant_requires_direct">어시스턴트를 사용하려면 AirPods에 직접 연결해야 합니다.</string>
+</resources>

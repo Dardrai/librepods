@@ -23,6 +23,23 @@ import java.time.OffsetDateTime
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [37], application = Application::class, shadows = [ProtocolReportSocketShadow::class])
 class AacpHostClockTest {
+    @Test fun failedClockWriteCanRetryOnTheNextFreshIdentityReport() {
+        val device = device()
+        val socket = socket()
+        bind(device.aacp, socket)
+        val writer = Shadow.extract<ProtocolReportSocketShadow>(socket).output
+        try {
+            writer.failWrites = true
+            device.aacp.processPacket(information("A3063"), socket)
+            assertTrue(output(socket).isEmpty())
+            writer.failWrites = false
+            device.aacp.processPacket(information("A3063"), socket)
+            assertClock(output(socket))
+            device.aacp.processPacket(information("A3063"), socket)
+            assertEquals(41, output(socket).size)
+        } finally { device.aacp.disconnect(); socket.close() }
+    }
+
     @Test fun hearingIdentitySendsOneClockPerControlSessionAndRetiredReportsCannotSend() {
         val device = device()
         val manager = device.aacp

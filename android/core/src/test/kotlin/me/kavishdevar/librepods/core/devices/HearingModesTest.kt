@@ -58,6 +58,23 @@ class HearingModesTest {
         assertFalse(unknownGate.canChange(HearingMode.MEDIA_ASSIST, true))
     }
 
+    @Test fun hearingAidMayClearAndRestoreOnlyInactiveLegacyCurves() {
+        val original = fixture(pmeEnrollment = 0)
+        val on = original.plan(HearingMode.HEARING_AID, true)!!
+        val cleared = freshReport(on).withReport(original.pmeReport!!.copyOf().also { it.fill(0, 12) })
+        assertTrue(cleared.confirmsFreshSession(on))
+        val off = cleared.plan(HearingMode.HEARING_AID, false)!!
+        val restored = freshReport(off).withReport(original.pmeReport!!)
+        assertTrue(restored.confirmsFreshSession(off))
+        val changed = freshReport(on).withReport(original.pmeReport!!.copyOf().also { it[12] = (it[12].toInt() xor 1).toByte() })
+        assertFalse(changed.confirmsFreshSession(on))
+        val media = original.plan(HearingMode.MEDIA_ASSIST, true)!!
+        assertFalse(freshReport(media).withReport(freshReport(media).pmeReport!!.copyOf().also { it.fill(0, 12) }).confirmsFreshSession(media))
+        val shared = fixture(media = true).plan(HearingMode.HEARING_AID, true)!!
+        assertFalse(freshReport(shared).withReport(freshReport(shared).pmeReport!!.copyOf().also { it.fill(0, 12) }).confirmsFreshSession(shared))
+        assertFalse(cleared.withReport(cleared.pmeReport!!.copyOf().also { it[9] = 1 }).confirmsFreshSession(on))
+    }
+
     @Test fun completeUnenrolledUnsetEnabledReportIsOffButCannotEnrollTheDevice() {
         val modes = fixture(enrollment = 2).withReport(byteArrayOf(4, 0, 4, 0, 9, 0, 0x2c, 2, 0, 0, 0))
         assertEquals(false, modes.hearingAidEnabled)

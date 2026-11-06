@@ -13,6 +13,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import me.kavishdevar.librepods.core.bluetooth.aacp.AACPManager
+import me.kavishdevar.librepods.core.bluetooth.MacAddress
+import me.kavishdevar.librepods.core.bluetooth.aacp.types.ConnectedDevice
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommandIdentifier
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.MagicKeyType
 import me.kavishdevar.librepods.core.data.apple.BuddyState
@@ -258,18 +260,21 @@ class AacpSettingsRefreshTest {
         val accommodation = packet(0x53).copyOf(140).apply {
             this[6] = 0x84.toByte(); this[8] = 2; this[9] = 1; this[10] = 1; this[11] = 1
         }
+        val routing = "040004001100ab8967452301620001e54a6c6f63616c73636f7265306446726561736f6e4848696a61636b763251617564696f526f7574696e6753636f7265312d015f617564696f526f7574696e675365744f776e657273686970546f46616c7365014b72656d6f746573636f7265a5".hexToByteArray()
         val reports = listOf(
             packet(8, 2, 0, 0, 0), packet(2, 1, 1, 1), packet(4, 1, 2, 1, 72, 2, 1),
             packet(0x23).copyOf(31).apply { this[6] = 3; this[18] = 1; this[19] = 'X'.code.toByte() },
             packet(9, 0x0d, 4, 0, 0, 0), packet(6, 0, 1), packet(0x4b, 0, 0, 0, 1),
             packet(0x19, 5, 1), packet(0x0e, 1, 2, 3, 4, 5, 6, 2),
             packet(0x2e, 0, 0, 1, 1, 2, 3, 4, 5, 6, 0, 0),
-            packet(0x11, 6, 5, 4, 3, 2, 1) + "ShowNearbyUI SetOwnershipToFalse".toByteArray(),
+            routing,
             accommodation, information, packet(0x63, 5, 0, 1, 2, 80, 30, 65),
             packet(0x58, 1, 0).copyOf(22) + byteArrayOf(1, 0, 0, 0, 1, 0x55), packet(0x7e, 1)
         )
         for (report in reports) {
             val device = createDevice()
+            if (report === routing) device.loadInitialState(AppleState(connectedDevices = listOf(
+                ConnectedDevice(MacAddress("01:23:45:67:89:AB"), 0, 0, null))), AppleSettings(), fixtureMetadata())
             val manager = device.aacp
             val original = socket(connected = true)
             val replacement = socket(connected = true)

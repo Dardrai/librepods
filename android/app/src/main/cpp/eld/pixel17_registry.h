@@ -41,6 +41,7 @@ struct Pixel17RegistryBindings {
     // It is used while deriving saved insertion contexts after fallible callbacks are complete.
     bool (*readable)(const void*, size_t);
     bool (*provider_supports)(int32_t source_index);
+    int32_t source_max = 7;
 };
 
 // Uses no NDK container objects to interpret or mutate the host containers.

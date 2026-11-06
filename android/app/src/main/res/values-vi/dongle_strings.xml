@@ -78,7 +78,7 @@
     <string name="dongle_constant">Tốc độ bit không đổi</string>
     <string name="dongle_variable">Tốc độ bit thay đổi</string>
     <string name="dongle_bitrate">Tốc độ bit hoặc giới hạn</string>
-    <string name="dongle_active_codec">Đầu ra đang dùng: %1$s · giới hạn đã thỏa thuận %2$d kbps</string>
+    <string name="dongle_active_codec">Đầu ra đang dùng: %1$s · giới hạn tốc độ bit của bộ mã hóa %2$s kbps</string>
     <string name="dongle_game_mode">Chế độ trò chơi</string>
     <string name="dongle_game_pending">Đang chờ kết nối truyền âm thanh</string>
     <string name="dongle_game_failed">Yêu cầu thất bại</string>
@@ -107,4 +107,21 @@
     <string name="dongle_weaker">yếu hơn</string>
     <string name="dongle_trend_unknown">chưa có xu hướng</string>
     <string name="dongle_finder_description">Chỉ sử dụng gói quảng bá đã được xác minh là của cặp tai nghe đã chọn. Cường độ tín hiệu không cho biết khoảng cách hay hướng.</string>
+    <string name="dongle_attach_or_pair">Kết nối dongle USB hoặc ghép đôi AirPods Dongle trong cài đặt Bluetooth của Android.</string>
+    <string name="dongle_usb_permission">Đã kết nối USB · cho phép truy cập điều khiển</string>
+    <string name="dongle_usb_controls_only">Đã kết nối điều khiển USB · tai nghe chưa khả dụng</string>
+    <string name="dongle_usb_audio_available">Đã kết nối điều khiển USB · tai nghe khả dụng</string>
+    <string name="dongle_reconnect_airpods">Kết nối lại AirPods</string>
+    <string name="dongle_pair_airpods">Ghép đôi AirPods</string>
+    <string name="dongle_pair_airpods_description">Tạm dừng phát và sử dụng micrô, rồi chuyển AirPods sang chế độ ghép đôi. Dongle sẽ tìm một cặp tai nghe.</string>
+    <string name="dongle_pair_phone">Cho phép ghép đôi điện thoại qua Bluetooth</string>
+    <string name="dongle_profile_idle">Tạm dừng phát và sử dụng micrô trước khi đổi cấu hình đầu ra.</string>
+    <string name="dongle_phone_pairing">Có thể ghép đôi Bluetooth</string>
+    <string name="dongle_hardware_volume">Âm lượng phần cứng</string>
+    <string name="dongle_hardware_volume_unavailable">Cần root và chọn tuyến âm thanh USB của dongle.</string>
+    <string name="dongle_volume_failed">Điều khiển âm lượng phần cứng đã dừng. Kết nối lại điều khiển trước khi thử lại.</string>
+    <string name="dongle_volume_restore_failed">Không thể khôi phục âm lượng phần cứng. Giữ phát nhạc tạm dừng và kết nối lại điều khiển.</string>
+    <string name="dongle_hold_initialize_title">Thiết lập cả hai AirPod</string>
+    <string name="dongle_hold_initialize_description">Chọn thao tác cho từng AirPod. Cả hai được cập nhật cùng lúc.</string>
+    <string name="dongle_assistant_requires_direct">Trợ lý cần kết nối trực tiếp với AirPods.</string>
 </resources>

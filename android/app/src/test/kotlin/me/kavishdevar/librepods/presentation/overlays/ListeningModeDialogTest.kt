@@ -68,6 +68,7 @@ class ListeningModeDialogTest {
     private lateinit var dialogContext: Context
     private lateinit var app: LibrePodsApplication
     private lateinit var island: IslandWindow
+    private lateinit var dongle: DongleListeningFixture
 
     @Before fun setUp() {
         app = LibrePodsApplication()
@@ -81,6 +82,7 @@ class ListeningModeDialogTest {
         shadowOf(context).grantPermissions(Manifest.permission.BLUETOOTH_CONNECT)
         shadowOf(context.getSystemService(BluetoothManager::class.java).adapter).setState(BluetoothAdapter.STATE_ON)
         service = Robolectric.buildService(LibrePodsService::class.java).get()
+        dongle = DongleListeningFixture(service)
         @Suppress("UNCHECKED_CAST")
         devices = LibrePodsService::class.java.getDeclaredField("_devices").apply { isAccessible = true }
             .get(service) as MutableStateFlow<Map<MacAddress, Device<*, *, *>>>
@@ -365,6 +367,80 @@ class ListeningModeDialogTest {
         assertFalse(popup.writeControl(ControlCommandIdentifier.LISTENING_MODE, 2))
         assertEquals(0, output(target).available())
         assertEquals(0, output(other).available())
+    }
+
+    @Test fun donglePickerUsesTheSharedLiveEditorsWithoutANativeBluetoothDevice() {
+        dongle.connect(modeValue = 4)
+        val popup = openDongle()
+        assertTrue(popup.isShowing)
+        assertTrue(dongle.writes.isEmpty())
+        assertTrue(popup.writeControl(ControlCommandIdentifier.AUTO_ANC_STRENGTH, 72))
+        assertTrue(popup.writeControl(ControlCommandIdentifier.LISTENING_MODE, 2))
+        idle()
+        assertEquals(listOf(0x2e to 72L, 0x0d to 2L), dongle.writes)
+        val current = requireNotNull(ReflectionHelpers.callInstanceMethod<ListeningModeSnapshot?>(popup, "getSnapshot"))
+        assertEquals(2, current.mode)
+        assertEquals(4L, dongle.state.value.settings[0x0d]?.value)
+        assertTrue(current.pending)
+        assertFalse("Adaptive strength must not use a prior mode while a new mode is requested",
+            popup.writeControl(ControlCommandIdentifier.AUTO_ANC_STRENGTH, 20))
+    }
+
+    @Test fun dongleSessionChangesRejectWritesImmediatelyAndCloseTheOldPicker() {
+        val changes: List<(me.kavishdevar.librepods.dongle.DongleState) -> me.kavishdevar.librepods.dongle.DongleState> = listOf(
+            { it.copy(controlSession = it.controlSession + 1) },
+            { it.copy(status = it.status!!.copy(generation = it.status!!.generation + 1)) },
+            { it.copy(status = it.status!!.copy(address = listOf(0, 1, 2, 3, 4, 6))) },
+            { it.copy(connected = false) },
+        )
+        for (change in changes) {
+            dongle.connect()
+            val popup = openDongle()
+            dongle.state.value = change(dongle.state.value)
+            assertFalse(popup.writeControl(ControlCommandIdentifier.LISTENING_MODE, 2))
+            assertTrue(dongle.writes.isEmpty())
+            idle()
+            assertFalse(popup.isShowing)
+        }
+    }
+
+    @Test fun aDonglePickerCannotBindToAReplacementControllerWithTheSameDeviceAddress() {
+        dongle.connect()
+        val target = requireNotNull(DongleListeningTarget.capture(dongle.controller))
+        val replacement = DongleListeningFixture(service).apply { connect() }
+        val popup = ListeningModeDialog(dialogContext, target).also { dialog = it }
+        popup.show(); idle()
+        assertFalse(popup.isShowing)
+        assertFalse(popup.writeControl(ControlCommandIdentifier.LISTENING_MODE, 2))
+        assertTrue(dongle.writes.isEmpty())
+        assertTrue(replacement.writes.isEmpty())
+    }
+
+    @Test fun changingToDongleModeRetiresAnAlreadyOpenNativePicker() {
+        val native = device()
+        devices.value = mapOf(native.macAddress to native)
+        val popup = open(native)
+        assertTrue(popup.isShowing)
+        dongle.connect(); idle()
+        assertFalse(popup.isShowing)
+        assertFalse(popup.writeControl(ControlCommandIdentifier.LISTENING_MODE, 2))
+        assertEquals(0, output(native).available())
+    }
+
+    @Test fun donglePickerReleasesOnlyItsOwnVisibilityToken() {
+        dongle.connect()
+        val popup = openDongle()
+        popup.dismiss(); idle()
+        val calls = mockingDetails(dongle.controller).invocations.filter { it.method.name == "controlsVisible" }
+        assertEquals(listOf(true, false), calls.map { it.arguments[0] })
+        assertSame(calls.first().arguments[1], calls.last().arguments[1])
+    }
+
+    private fun openDongle(): ListeningModeDialog = ListeningModeDialog(dialogContext,
+        requireNotNull(DongleListeningTarget.capture(dongle.controller))).also {
+        dialog = it
+        it.show()
+        idle()
     }
 
     private fun open(target: AppleDevice): ListeningModeDialog {

@@ -25,7 +25,13 @@ bool use_debug_callback = false, block_debug = false, debug_entered = false, let
 std::atomic<size_t> debug_calls{0};
 std::atomic<int> debug_fd{0};
 std::atomic<const void*> debug_object{nullptr};
-constexpr size_t config_offsets[] = {0x60, 0xa0, 0xe0, 0x120, 0x160};
+size_t config_size=64, object_size=kPixel17CodecObjectSize, source_offset=0x227;
+size_t config_offsets[] = {0x60, 0xa0, 0xe0, 0x120, 0x160};
+void check_extensions(const void* object) {
+    if(config_size!=80) return;
+    for(auto offset:config_offsets) for(size_t i=64;i<80;++i)
+        if(static_cast<const uint8_t*>(object)[offset+i]!=0xa5) std::abort();
+}
 
 void check(bool condition, const char* text = "Pixel object assertion failed") {
     if (!condition) { std::fprintf(stderr, "%s\n", text); std::abort(); }
@@ -39,13 +45,13 @@ template<class T> void put(void* bytes, size_t offset, const T& value) {
     std::memcpy(static_cast<uint8_t*>(bytes) + offset, &value, sizeof(value));
 }
 void* allocate(size_t bytes) {
-    check(bytes == kPixel17CodecObjectSize);
+    check(bytes == object_size);
     if (fail_allocation) return nullptr;
     ++allocations;
     return new uint8_t[bytes]{};
 }
 void release(void* bytes, size_t size) {
-    check(size == kPixel17CodecObjectSize);
+    check(size == object_size);
     ++releases;
     delete[] static_cast<uint8_t*>(bytes);
 }
@@ -57,7 +63,7 @@ void destructor(void* object) {
 void deleting_destructor(void* object) {
     destructor(object);
     ++deletions;
-    release(object, kPixel17CodecObjectSize);
+    release(object, object_size);
 }
 bool local_software(const void*) { return false; }
 void no_op() {}
@@ -74,8 +80,9 @@ void construct(void* object, int32_t priority) {
         Pixel17NativeConfig config{1, priority, 0, 0, 0, 0x12345678,
             {INT64_C(0x123456789abcdef), -2, INT64_MIN, INT64_MAX}, UINT64_C(0xfedcba9876543210)};
         put(object, offset, config);
+        if(config_size==80) std::memset(static_cast<uint8_t*>(object)+offset+64,0xa5,16);
     }
-    static_cast<uint8_t*>(object)[0x227] = 1;
+    static_cast<uint8_t*>(object)[source_offset] = 1;
 }
 void lock(void*) {
     std::unique_lock<std::mutex> guard(block_mutex);
@@ -111,6 +118,7 @@ void* assign_short(void* object, const char* text, size_t size) {
 Pixel17CodecBindings bindings() {
     Pixel17CodecBindings result{allocate, release, construct, original_table.data() + 2, lock, unlock, assign_short};
     if (use_debug_callback) result.debug = debug_callback;
+    result.config_size=config_size;
     return result;
 }
 void dispose(void* object, size_t slot = 1) {
@@ -154,11 +162,12 @@ void creation_and_layout() {
         auto config = get<Pixel17NativeConfig>(object, config_offsets[i]);
         check(config.codec_type == 5 && config.opaque_tail == 0 && config.padding == 0);
         for (auto value : config.codec_specific) check(value == 0);
-        check(config.sample_rate == (i < 3 ? 2u : 0u));
-        check(config.bits_per_sample == (i < 3 ? kPixel17PcmMask : 0u));
-        check(config.channel_mode == (i < 3 ? 2u : 0u));
+        check(config.sample_rate == (i < 2 ? 2u : 0u));
+        check(config.bits_per_sample == (i < 2 ? kPixel17PcmMask : 0u));
+        check(config.channel_mode == (i < 2 ? 2u : 0u));
     }
-    check(get<uint8_t>(object, 0x227) == 1);
+    check(get<uint8_t>(object, source_offset) == 1);
+    check_extensions(object);
     check(method<int (*)(const void*)>(object, 2)(object) == 256000);
     check(!method<bool (*)(const void*)>(object, 3)(object));
     check(get<const uintptr_t*>(object, 0)[4] == original_table[6]);
@@ -180,7 +189,7 @@ void creation_and_layout() {
     check(object && get<int32_t>(object, 0x58) == 1234);
     dispose(object, 0);
     check(pixel17_codec_active_objects() == 0);
-    release(object, kPixel17CodecObjectSize); // A non-deleting host destructor retains caller-owned storage.
+    release(object, object_size); // A non-deleting host destructor retains caller-owned storage.
 }
 
 void constructor_failure_cleanup() {
@@ -213,36 +222,71 @@ void negotiation_and_status() {
     check(method<ConfigFn>(object, 5)(object, peer.data(), false, result.data()) == 0);
     check(bitrate(result.data(), result.size()) == 128000);
     check(method<int (*)(const void*)>(object, 2)(object) == 128000);
-    std::array<uint8_t, kPixel17CodecObjectSize> saved{};
+    check_extensions(object);
+    std::vector<uint8_t> saved(object_size);
     std::memcpy(saved.data(), object, saved.size());
     peer[10] = 0;
     result.fill(0x5a);
     check(method<ConfigFn>(object, 5)(object, peer.data(), false, result.data()) != 0);
     check(std::memcmp(saved.data(), object, saved.size()) == 0 && result[0] == 0x5a);
     check(!method<PeerFn>(object, 6)(object, peer.data()));
+    check(std::memcmp(saved.data(), object, saved.size()) == 0,
+          "Rejecting peer capabilities must preserve the previous valid selection");
     check(make_capabilities(peer.data(), peer.size()));
     Pixel17NativeConfig user{5, 0, 2, kPixel17PcmMask, 2, 0x12345678, {0, 0, 0, 0}, UINT64_C(0xfedcba9876543210)};
     Pixel17NativeConfig audio{0, 0, 2, kPixel17PcmMask, 2, 0xaabbccdd, {0, 0, 0, 0}, UINT64_MAX};
-    put(object, 0x120, user); put(object, 0x160, audio);
+    put(object, config_offsets[3], user); put(object, config_offsets[4], audio);
     check(pixel17_codec_set_config(object, peer.data(), peer.size(), true, result.data(), result.size()) == 0);
-    check(std::memcmp(static_cast<uint8_t*>(object) + 0x120, &user, sizeof(user)) == 0);
-    check(std::memcmp(static_cast<uint8_t*>(object) + 0x160, &audio, sizeof(audio)) == 0);
+    check(std::memcmp(static_cast<uint8_t*>(object) + config_offsets[3], &user, sizeof(user)) == 0);
+    check(std::memcmp(static_cast<uint8_t*>(object) + config_offsets[4], &audio, sizeof(audio)) == 0);
+    check_extensions(object);
     check(pixel17_codec_set_peer(object, peer.data(), peer.size()));
     check(get<Pixel17NativeConfig>(object, 0x60).opaque_tail == 0);
     check(bitrate(result.data(), result.size()) == 256000);
-    check(std::memcmp(static_cast<uint8_t*>(object) + 0x1cd, peer.data(), peer.size()) == 0);
+    check(std::memcmp(static_cast<uint8_t*>(object) + source_offset-90, peer.data(), peer.size()) == 0);
     for (int invalid : {0, 1, 2, 3}) {
         auto bad = user;
         if (invalid == 0) bad.bits_per_sample = 2;
         if (invalid == 1) bad.sample_rate = 1;
         if (invalid == 2) bad.codec_specific[3] = INT64_MIN;
         if (invalid == 3) bad.bits_per_sample = kPixel17PcmMask == 4 ? 1 : 4;
-        put(object, 0x120, bad);
+        put(object, config_offsets[3], bad);
         std::memcpy(saved.data(), object, saved.size());
         result.fill(0x5a);
         check(pixel17_codec_set_config(object, peer.data(), peer.size(), true, result.data(), result.size()) != 0);
         check(std::memcmp(saved.data(), object, saved.size()) == 0 && result[0] == 0x5a);
     }
+    dispose(object);
+}
+
+void selectable_requires_peer_capabilities() {
+    void* object = pixel17_codec_create(5, 10001);
+    check(object);
+    const auto selectable = [&] { return get<Pixel17NativeConfig>(object, config_offsets[2]); };
+    auto before = selectable();
+    check(before.codec_type == 5 && before.codec_priority == 10001);
+    check(!before.sample_rate && !before.bits_per_sample && !before.channel_mode,
+          "A local codec must not be selectable before this peer advertises it");
+    std::array<uint8_t, 45> peer{};
+    peer[0] = 6; // A non-Apple codec cannot make ELD selectable.
+    check(!pixel17_codec_set_peer(object, peer.data(), peer.size()));
+    auto rejected = selectable();
+    check(!rejected.sample_rate && !rejected.bits_per_sample && !rejected.channel_mode);
+    check(make_capabilities(peer.data(), peer.size()));
+    check(pixel17_codec_set_peer(object, peer.data(), peer.size()));
+    auto accepted = selectable();
+    check(accepted.sample_rate == 2 && accepted.bits_per_sample == kPixel17PcmMask &&
+          accepted.channel_mode == 2);
+    dispose(object);
+
+    object = pixel17_codec_create(5, 10001);
+    check(object);
+    std::array<uint8_t, 45> result{};
+    check(make_configuration(peer.data(), peer.size(), 128000));
+    check(pixel17_codec_set_config(object, peer.data(), peer.size(), false, result.data(), result.size()) == 0);
+    accepted = selectable();
+    check(accepted.sample_rate == 2 && accepted.bits_per_sample == kPixel17PcmMask &&
+          accepted.channel_mode == 2);
     dispose(object);
 }
 
@@ -369,11 +413,17 @@ void quarantine_preserves_destruction() {
 }
 
 int main(int argc, char** argv) {
-    check(argc == 1 || (argc == 2 && std::strcmp(argv[1], "--debug") == 0));
-    use_debug_callback = argc == 2;
+    const bool current=argc==2 && (!std::strcmp(argv[1],"--current") || !std::strcmp(argv[1],"--current-debug"));
+    use_debug_callback=argc==2 && (!std::strcmp(argv[1],"--debug") || !std::strcmp(argv[1],"--current-debug"));
+    check(argc==1 || (argc==2 && (current || use_debug_callback)));
+    if(current) {
+        config_size=80; object_size=0x278; source_offset=0x277;
+        for(size_t i=0;i<5;++i) config_offsets[i]=0x60+i*config_size;
+    }
     creation_and_layout();
     constructor_failure_cleanup();
     negotiation_and_status();
+    selectable_requires_peer_capabilities();
     bounds_and_lossless_copies();
     destruction_waits_for_reader_and_slots_are_bounded();
     debug_lifetime();

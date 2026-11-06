@@ -3,7 +3,7 @@
 <resources>
     <string name="call_control_unsupported_layout">Call settings aren’t available for this AirPods configuration.</string>
     <string name="call_control_update_failed">Couldn’t update call controls. Reconnect your AirPods and try again.</string>
-    <string name="dongle_active_codec">Active output: %1$s · negotiated limit %2$d kbps</string>
+    <string name="dongle_active_codec">現在の出力：%1$s · エンコーダーのビットレート上限 %2$s kbps</string>
     <string name="dongle_adaptive">Adaptive</string>
     <string name="dongle_adaptive_strength">Adaptive strength</string>
     <string name="dongle_allow_off">Allow Off mode</string>

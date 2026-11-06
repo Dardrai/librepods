@@ -580,19 +580,32 @@ class AacpHearingModesTest {
         }
     }
 
-    @Test fun silentAcceptedModeWriteConfirmsOnlyFromCompleteReplacementStartupWithoutRepeatingWrites() = runBlocking<Unit> {
+    @Test fun silentAcceptedModeWriteWaitsForReplacementSettingsStartupWithoutRepeatingWrites() = runBlocking<Unit> {
         for (enabled in listOf(false, true)) {
             val att = AccommodationsAtt()
             val replacement = Shadow.newInstanceOf(BluetoothSocket::class.java)
-            mockConstruction(ATTManager::class.java, withSettings().defaultAnswer(att::answer)).use {
+            var reportsOnReplacement = false
+            var manager: AACPManager? = null
+            mockConstruction(ATTManager::class.java, withSettings().defaultAnswer { call ->
+                val startup = manager?.let { AACPManager::class.java.getDeclaredField("settingsStartup")
+                    .apply { isAccessible = true }.get(it) }
+                val ready = startup?.let { it.javaClass.getDeclaredField("sent").apply { isAccessible = true }.getBoolean(it) } == true
+                if (reportsOnReplacement && call.method.name.substringBefore('$') == "readCharacteristic" && !ready) null
+                else att.answer(call)
+            }).use {
                 withFixture(replacement) { fixture ->
+                    manager = fixture.device.aacp
                     fixture.report(hearing = !enabled, media = false)
+                    if (!enabled) fixture.device.aacp.processPacket(pme(false).also { it.fill(0, 12) }, fixture.socket)
                     val startup = AtomicBoolean()
                     val next = Shadow.extract<HearingModeSocketShadow>(replacement)
                     next.output.onPacket = {
                         if (it.getOrNull(4) == 0x4d.toByte() && startup.compareAndSet(false, true)) {
                             assertEquals(HearingMode.HEARING_AID, fixture.device.state.value.hearingModes.uncertain)
+                            fixture.device.aacp.processPacket(byteArrayOf(1, 0, 4, 0, 0, 0, 1, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0), replacement)
+                            reportsOnReplacement = true
                             fixture.report(hearing = enabled, media = false, source = replacement)
+                            if (enabled) fixture.device.aacp.processPacket(pme(false).also { it.fill(0, 12) }, replacement)
                         }
                     }
                     assertEquals(true, fixture.device.setHearingAidEnabled(enabled))

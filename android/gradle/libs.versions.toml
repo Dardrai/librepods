@@ -64,6 +64,7 @@ androidx-navigationevent = { module = "androidx.navigationevent:navigationevent"
 androidx-room3-runtime = { group = "androidx.room3", name = "room3-runtime", version.ref = "room" }
 androidx-room3-compiler = { group = "androidx.room3", name = "room3-compiler", version.ref = "room" }
 kotlinx-serialization-cbor = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-cbor", version.ref = "ktxSerialization" }
+kotlinx-serialization-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-json", version.ref = "ktxSerialization" }
 protobuf-kotlin = { group = "com.google.protobuf", name = "protobuf-kotlin", version.ref = "protobuf" }
 protobuf-protoc = { group = "com.google.protobuf", name = "protoc", version.ref = "protobuf" }
 androidx-healthconnect-client = { group = "androidx.health.connect", name = "connect-client", version.ref = "healthConnect" }

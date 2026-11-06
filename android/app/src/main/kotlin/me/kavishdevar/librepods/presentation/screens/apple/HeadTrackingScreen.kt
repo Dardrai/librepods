@@ -73,6 +73,7 @@ import com.kyant.backdrop.backdrops.layerBackdrop
 import com.kyant.backdrop.backdrops.rememberLayerBackdrop
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
 import me.kavishdevar.librepods.R
 import me.kavishdevar.librepods.core.data.apple.BuddyState
@@ -263,6 +264,7 @@ fun HeadTrackingScreen(
 
                 LaunchedEffect(sliderValue) {
                     snapshotFlow { sliderValue.floatValue }
+                        .drop(1)
                         .debounce(100.milliseconds)
                         .collect { value ->
                             viewModel.setHeadTrackingInterval(value.toInt().milliseconds)
@@ -273,10 +275,10 @@ fun HeadTrackingScreen(
                     label = "[debug] head tracking interval",
                     value = sliderValue.floatValue,
                     onValueChange = { sliderValue.floatValue = it },
-                    valueRange = 10f..200f,
+                    valueRange = 20f..200f,
                     snapPoints = listOf(40f),
                     independent = true,
-                    description = "how often airpods report sensor information",
+                    description = "Requested interval; legacy reports are limited to 40 ms or slower.",
                 )
             }
 
@@ -287,7 +289,7 @@ fun HeadTrackingScreen(
 
 @Composable
 private fun Plot() {
-    val acceleration by HeadTracking.acceleration.collectAsState()
+    val acceleration by HeadTracking.angularVelocity.collectAsState()
     val maxPoints = 100
     val points = remember { mutableStateListOf<Pair<Float, Float>>() }
 

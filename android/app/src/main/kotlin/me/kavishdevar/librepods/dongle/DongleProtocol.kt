@@ -63,7 +63,8 @@ internal object DongleProtocol {
     data class Status(val generation: Long, val address: List<Int>, val flags: Int, val anc: Int,
         val batteries: List<Int?>, val codec: Int, val capabilities: Int,
         val batteryAgeMs: List<Long?> = List(3) { null }, val batteryPresent: Int = 0,
-        val batteryCaseSource: Int = 0, val charging: Int = 0) {
+        val batteryCaseSource: Int = 0, val charging: Int = 0,
+        val lastSequence: Long = 0, val lastResult: Int = 0, val lastOpcode: Int = 0) {
         fun sameConnection(other: Status) = generation == other.generation && address == other.address
         val connected get() = flags and 1 != 0
         val controlsReady get() = flags and 2 != 0
@@ -96,9 +97,35 @@ internal object DongleProtocol {
             else bytes[44] == 0.toByte() && bytes[45] == 0.toByte())
         return Status(u32(bytes, 8), bytes.sliceArray(12..17).map { it.toInt() and 255 },
             bytes[7].toInt() and 255, bytes[18].toInt(), levels.map { it.takeIf { it <= 100 } },
-            bytes[23].toInt(), capabilities, ages, present, caseSource, bytes[22].toInt())
+            bytes[23].toInt(), capabilities, ages, present, caseSource, bytes[22].toInt(),
+            u32(bytes, 36), bytes[40].toInt(), bytes[41].toInt())
     }
     data class Setting(val value: Long, val ageMs: Long, val revision: Long)
+    data class PhysicalVolume(val confirmed: Int?, val desired: Int?, val observationRevision: Long,
+        val pending: Boolean, val inflight: Boolean, val authorityActive: Boolean, val ownToken: Long?,
+        val remainingMs: Long, val usbGeneration: Long, val usbScopeReady: Boolean)
+    fun physicalVolume(bytes: ByteArray): PhysicalVolume {
+        require(bytes.size == 24 && bytes[0] == 1.toByte() && bytes[1].toInt() and 0xe0 == 0 && u32(bytes, 20) == 0L)
+        val flags = bytes[1].toInt()
+        val confirmed = (bytes[2].toInt() and 255).takeUnless { it == 255 }
+        val desired = (bytes[3].toInt() and 255).takeUnless { it == 255 }
+        val active = flags and 8 != 0
+        val token = u32(bytes, 8).takeUnless { it == 0L }
+        val ttl = u32(bytes, 12)
+        val usbGeneration = u32(bytes, 16)
+        require(confirmed == null || confirmed in 0..127)
+        require(desired == null || desired in 0..127)
+        require((confirmed != null) == (flags and 1 != 0) && (desired != null) == (flags and 6 != 0))
+        require(if (active) ttl in 1..5_000 && flags and 16 != 0 && usbGeneration and 1L != 0L else token == null && ttl == 0L)
+        return PhysicalVolume(confirmed, desired, u32(bytes, 4), flags and 2 != 0, flags and 4 != 0,
+            active, token, ttl, usbGeneration, flags and 16 != 0)
+    }
+
+    fun volumeAuthorityRequest(action: Int, token: Long = 0, level: Int = 0): ByteArray {
+        require(action in 0..3 && token in 0..0xffff_ffffL && level in 0..127 &&
+            (action == 3 || level == 0) && (if (action == 0) token == 0L else token != 0L))
+        return ByteArray(7).also { it[0] = 17; it[1] = action.toByte(); put32(it, 2, token); it[6] = level.toByte() }
+    }
     fun settings(bytes: ByteArray): Map<Int, Setting> {
         require(bytes.size >= 2 && bytes[0] == 1.toByte()) { "Unsupported settings response" }
         val count = bytes[1].toInt() and 255
@@ -167,21 +194,86 @@ internal class DongleSession(private val io: suspend (Int, Int, ByteArray) -> By
     private val now: () -> Long = { System.nanoTime() / 1_000_000 },
     private val wait: suspend () -> Unit = { delay(40) },
     val controlEpoch: Long = 0L,
-    private val closeTransport: () -> Unit = {}) {
+    private val closeTransport: () -> Unit = {}, private val resumeSequences: Boolean = false,
+    private val boundedIo: (suspend (Int, Int, ByteArray, Long) -> ByteArray)? = null) {
     private var sequence = 0L
     private var actionTarget: DongleProtocol.Status? = null
     private var leaseAttempted = false
     private var leaseFailed = false
     private var leaseToken: Long? = null
     private var transportBroken = false
+    private var rpcCheckpoint: (suspend () -> Long?)? = null
+    private var checkingVolume = false
+    private var volumeDeadline: Long? = null
+    private var rpcIoDeadline: Long? = null
+    private var checkpointIoDeadline: Long? = null
+    private var cleanupIoDeadline: Long? = null
     var status: DongleProtocol.Status? = null
         private set
+
+    /** The caller still owns the whole workflow. Checkpoints run only between complete RPCs. */
+    suspend fun <T> withRpcCheckpoints(checkpoint: suspend () -> Long?, block: suspend () -> T): T {
+        check(rpcCheckpoint == null)
+        rpcCheckpoint = checkpoint
+        return try { block() } finally { rpcCheckpoint = null; volumeDeadline = null }
+    }
+
+    private suspend fun checkpointVolume() {
+        val checkpoint = rpcCheckpoint ?: return
+        if (checkingVolume) return
+        checkingVolume = true
+        checkpointIoDeadline = now() + 1_000
+        try {
+            // The coordinator returns remaining time, independently of this session's clock.
+            volumeDeadline = checkpoint()?.let { remaining ->
+                check(now() < checkNotNull(checkpointIoDeadline)) { "Volume checkpoint exceeded its budget" }
+                check(remaining > 1_600) { "Not enough volume lease remains for settings" }
+                now() + remaining - 1_500 // Reserve confirmed Cancel and a subsequent renewal.
+            }
+        } finally { checkingVolume = false; checkpointIoDeadline = null }
+    }
+
+    private suspend fun exchangeIo(operation: Int, report: Int, data: ByteArray): ByteArray {
+        val end = cleanupIoDeadline ?: minOf(rpcIoDeadline ?: Long.MAX_VALUE,
+            if (checkingVolume) checkpointIoDeadline ?: Long.MAX_VALUE else volumeDeadline ?: Long.MAX_VALUE)
+        if (end == Long.MAX_VALUE) return io(operation, report, data)
+        val remaining = end - now()
+        if (remaining <= 0) throw IOException("Dongle I/O exceeded its volume lease budget")
+        val result = if (boundedIo != null) boundedIo.invoke(operation, report, data, remaining)
+            else withTimeout(remaining) { io(operation, report, data) }
+        if (now() >= end) throw IOException("Dongle I/O exceeded its volume lease budget")
+        return result
+    }
     suspend fun refresh(): DongleProtocol.Status {
         check(!transportBroken) { "Reconnect the dongle before another request" }
-        return DongleProtocol.status(io(1, 2, byteArrayOf())).also { current ->
+        return DongleProtocol.status(exchangeIo(1, 2, byteArrayOf())).also { current ->
             check(actionTarget?.sameConnection(current) != false) { "AirPods connection changed; read the settings again" }
             status = current
         }
+    }
+
+    suspend fun command(opcode: Int): DongleProtocol.Status {
+        require(opcode in listOf(1, 2, 4))
+        val target = refresh()
+        check(target.capabilities and (if (opcode == 4) 4 else 1) != 0) { "This dongle does not support pairing controls" }
+        val token = ((target.lastSequence + 1) and 0xffff_ffffL).takeIf { it != 0L } ?: 1L
+        val request = DongleProtocol.header(2).also {
+            it[7] = opcode.toByte(); DongleProtocol.put32(it, 8, target.generation)
+            target.address.forEachIndexed { index, value -> it[12 + index] = value.toByte() }
+            DongleProtocol.put32(it, 18, token)
+        }
+        exchangeIo(2, 2, request)
+        val deadline = now() + 2_000
+        while (now() < deadline) {
+            val current = refresh()
+            if (current.lastSequence == token && current.lastOpcode == opcode) {
+                if (current.lastResult == 2) throw DongleBusyException()
+                check(current.lastResult == 1) { "The dongle did not accept the request" }
+                return current
+            }
+            wait()
+        }
+        throw IOException("Dongle request timed out; it was not retried")
     }
 
     suspend fun <T> withTarget(target: DongleProtocol.Status, block: suspend () -> T): T {
@@ -190,7 +282,7 @@ internal class DongleSession(private val io: suspend (Int, Int, ByteArray) -> By
         return try { refresh(); block() } finally {
             try {
                 leaseToken?.takeUnless { transportBroken }?.let { token -> cleanup {
-                    val current = DongleProtocol.status(io(1, 2, byteArrayOf()))
+                    val current = DongleProtocol.status(exchangeIo(1, 2, byteArrayOf()))
                     if (current.sameConnection(target))
                         check(transactRpc(7, leaseRequest(2, token), current).isEmpty())
                 } }
@@ -213,6 +305,7 @@ internal class DongleSession(private val io: suspend (Int, Int, ByteArray) -> By
         val target = refresh()
         check(target.capabilities and 0x20 != 0) { "Update the dongle firmware before editing hearing settings" }
         check(!leaseFailed) { "The settings lease was lost; read the settings again" }
+        checkpointVolume()
         val acquiring = !leaseAttempted
         leaseAttempted = true
         try {
@@ -230,32 +323,55 @@ internal class DongleSession(private val io: suspend (Int, Int, ByteArray) -> By
             }
             throw error
         }
+        checkpointVolume()
     }
 
     private suspend fun cleanup(block: suspend () -> Unit) = withContext(NonCancellable) {
+        val previous = cleanupIoDeadline
+        cleanupIoDeadline = now() + 1_000
         coroutineScope {
             // Coroutine cancellation alone cannot interrupt BluetoothSocket's blocking I/O.
             val watchdog = launch(start = CoroutineStart.UNDISPATCHED) { delay(1_000); runCatching { closeTransport() } }
             try { withTimeout(1_000) { block() } }
             catch (_: Exception) { transportBroken = true; runCatching { closeTransport() } }
-            finally { watchdog.cancel() }
+            finally { watchdog.cancel(); cleanupIoDeadline = previous }
         }
     }
 
     suspend fun transact(operation: Int, data: ByteArray, beforeCommit: () -> Unit = {}): ByteArray {
         require(operation in listOf(1, 2, 3, 7) && data.size in 1..512)
         check(!leaseFailed) { "The settings lease was lost; read the settings again" }
-        if (operation == 1 || operation == 2 || leaseToken != null) acquireSettingsLease()
+        checkpointVolume()
+        if (operation == 1 || operation == 2 || leaseToken != null) {
+            acquireSettingsLease()
+        }
         val target = refresh()
         check(operation == 7 || target.controlsReady) { "Connect the AirPods to the dongle first" }
-        return transactRpc(operation, data, target, beforeCommit)
+        val response = transactRpc(operation, data, target, beforeCommit)
+        checkpointVolume()
+        return response
     }
 
     private suspend fun transactRpc(operation: Int, data: ByteArray, target: DongleProtocol.Status,
         beforeCommit: () -> Unit = {}): ByteArray {
+        val previous = rpcIoDeadline
+        val deadline = if (checkingVolume) checkNotNull(checkpointIoDeadline)
+            else minOf(now() + 6_000, volumeDeadline ?: Long.MAX_VALUE)
+        rpcIoDeadline = deadline
+        return try { transactBeforeDeadline(operation, data, target, beforeCommit, deadline) }
+        finally { rpcIoDeadline = previous }
+    }
+
+    private suspend fun transactBeforeDeadline(operation: Int, data: ByteArray, target: DongleProtocol.Status,
+        beforeCommit: () -> Unit, deadline: Long): ByteArray {
+        if (resumeSequences && sequence == 0L) {
+            val previous = exchangeIo(1, 3, byteArrayOf())
+            DongleProtocol.checkReport(previous, 3)
+            if (previous[21].toInt() in 1..2) throw DongleBusyException()
+            sequence = DongleProtocol.u32(previous, 12)
+        }
         sequence = (sequence + 1).and(0xffff_ffffL).takeIf { it != 0L } ?: 1L
         val token = sequence
-        val deadline = now() + 6_000
         fun request(op: Int, total: Int = 0, offset: Int = 0, chunk: ByteArray = byteArrayOf()) =
             DongleProtocol.header(3).also {
                 it[7] = op.toByte(); DongleProtocol.put32(it, 8, target.generation)
@@ -266,7 +382,7 @@ internal class DongleSession(private val io: suspend (Int, Int, ByteArray) -> By
             }
         suspend fun await(accept: (ByteArray) -> Boolean): ByteArray {
             while (now() < deadline) {
-                val reply = io(1, 3, byteArrayOf())
+                val reply = exchangeIo(1, 3, byteArrayOf())
                 DongleProtocol.checkReport(reply, 3)
                 if (DongleProtocol.u32(reply, 8) != target.generation) throw IOException("AirPods connection changed")
                 if (DongleProtocol.u32(reply, 12) == token) {
@@ -288,12 +404,12 @@ internal class DongleSession(private val io: suspend (Int, Int, ByteArray) -> By
             var sent = 0
             while (sent < data.size) {
                 val next = minOf(sent + 42, data.size)
-                io(2, 3, request(operation, data.size, sent, data.copyOfRange(sent, next)))
+                exchangeIo(2, 3, request(operation, data.size, sent, data.copyOfRange(sent, next)))
                 sent = next
                 await { it[21] == 1.toByte() && DongleProtocol.u16(it, 18) == sent }
             }
             beforeCommit()
-            io(2, 3, request(6))
+            exchangeIo(2, 3, request(6))
             var reply = await { it[21] == 3.toByte() }
             val size = DongleProtocol.u16(reply, 16)
             require(size <= 512)
@@ -306,7 +422,7 @@ internal class DongleSession(private val io: suspend (Int, Int, ByteArray) -> By
                 reply.copyInto(result, read, 22, 22 + count)
                 read += count
                 if (read < size) {
-                    io(2, 3, request(4, offset = read))
+                    exchangeIo(2, 3, request(4, offset = read))
                     reply = await { it[21] == 3.toByte() && DongleProtocol.u16(it, 18) == read }
                 }
             }
@@ -321,11 +437,11 @@ internal class DongleSession(private val io: suspend (Int, Int, ByteArray) -> By
         } finally {
             if (!completed) cleanup {
                 // A write acknowledgement only queues Cancel. Confirm it before another PDU.
-                io(2, 3, request(5))
+                exchangeIo(2, 3, request(5))
                 val cancelDeadline = now() + 1_000
                 var cancelled = false
                 while (now() < cancelDeadline) {
-                    val reply = io(1, 3, byteArrayOf())
+                    val reply = exchangeIo(1, 3, byteArrayOf())
                     DongleProtocol.checkReport(reply, 3)
                     if (DongleProtocol.u32(reply, 8) != target.generation ||
                         DongleProtocol.u32(reply, 12) == token && reply[21] == 4.toByte() && reply[22] == 8.toByte()) {
@@ -339,9 +455,35 @@ internal class DongleSession(private val io: suspend (Int, Int, ByteArray) -> By
     }
     suspend fun cached(slot: Int) = DongleProtocol.cached(transact(3, byteArrayOf(slot.toByte())))
     suspend fun settings() = DongleProtocol.settings(transact(7, byteArrayOf(2)))
-    suspend fun setting(id: Int, value: Long) = transact(7, ByteArray(6).also {
+    suspend fun readPhysicalVolume(): DongleProtocol.PhysicalVolume {
+        check(refresh().capabilities and 128 != 0) { "The dongle does not support exclusive USB volume control" }
+        return DongleProtocol.physicalVolume(transact(7, byteArrayOf(16)))
+    }
+    suspend fun volumeAuthority(action: Int, expectedUsbGeneration: Long, token: Long = 0, level: Int = 0,
+        beforePhysicalCommit: (DongleProtocol.PhysicalVolume) -> Unit = {},
+        beforeCommit: () -> Unit = {}): DongleProtocol.PhysicalVolume {
+        check(resumeSequences) { "Volume authority requires the USB control transport" }
+        check(actionTarget != null) { "Volume authority requires a target-bound action" }
+        val request = DongleProtocol.volumeAuthorityRequest(action, token, level)
+        val before = readPhysicalVolume()
+        check(before.usbGeneration == expectedUsbGeneration && before.usbScopeReady) { "USB audio connection changed" }
+        if (action != 0) check(before.ownToken == token && before.authorityActive) { "USB volume authority was lost" }
+        return DongleProtocol.physicalVolume(transact(7, request) {
+            beforePhysicalCommit(before)
+            beforeCommit()
+        }).also {
+            check(it.usbGeneration == expectedUsbGeneration) { "USB audio connection changed" }
+            check(when (action) {
+                0 -> it.authorityActive && it.ownToken != null
+                2 -> !it.authorityActive && it.ownToken == null
+                else -> it.authorityActive && it.ownToken == token
+            })
+            // A successful SET is only admission; the caller still needs a newer physical observation.
+        }
+    }
+    suspend fun setting(id: Int, value: Long, beforeCommit: () -> Unit = {}) = transact(7, ByteArray(6).also {
         it[0] = 1; it[1] = id.toByte(); DongleProtocol.put32(it, 2, value)
-    })
+    }, beforeCommit)
     suspend fun requestAudio(codec: Int, rateMode: Int, bitrate: Long,
         expected: DongleProtocol.Status? = null): DongleProtocol.AudioProfile {
         val target = expected ?: refresh()

@@ -7,6 +7,7 @@ import java.io.InputStream
 import java.io.OutputStream
 import java.nio.ByteBuffer
 import java.nio.charset.CodingErrorAction
+import java.nio.charset.CharacterCodingException
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.UUID
@@ -29,7 +30,7 @@ internal object CompanionProtocol {
         return ByteArray(size) { value.substring(it * 2, it * 2 + 2).toInt(16).toByte() }
     }
     fun nonce(size: Int = 32): String = hex(ByteArray(size).also { SecureRandom().nextBytes(it) })
-    const val CAPS = "03"
+    const val CAPS = "07"
     fun transcript(device: String, clientNonce: String, serverNonce: String,
         clientCaps: String = CAPS, serverCaps: String = CAPS): ByteArray {
         address(device); hexBytes(clientNonce, 32); hexBytes(serverNonce, 32)
@@ -63,8 +64,11 @@ internal object CompanionProtocol {
             "auth" -> setOf("proof")
             "authenticated", "ping", "release", "acquire" -> emptySet()
             "status" -> setOf("connected", "busy", "can_release", "can_acquire")
+            "media_query" -> setOf("probe")
+            "media_state" -> setOf("probe", "generation", "event", "known", "playing", "connected", "available")
             "switch" -> setOf("target")
-            "prepare" -> setOf("target", "purpose", "episode", "call_gen", "origin_token")
+            "prepare" -> setOf("target", "purpose", "episode", "call_gen", "origin_token") +
+                if (frame.optString("purpose") == "media") setOf("media_gen") else emptySet()
             "pref" -> setOf("key", "rev", "origin") + CompanionPreferences.payloadKeys(frame.getString("key"))
             "pref_ack" -> setOf("key", "rev", "origin", "code")
             "call_origin" -> setOf("origin_token", "ready")
@@ -79,7 +83,7 @@ internal object CompanionProtocol {
             if (frame.getString("type") == "hello") emptySet() else setOf("sid")
         require(frame.keys().asSequence().toSet() == expected) { "Unexpected companion fields" }
         frame.keys().forEach { key ->
-            if (key in setOf("connected", "busy", "can_release", "can_acquire", "ok", "ready", "hfp_ready", "all_idle", "pause_media") ||
+            if (key in setOf("connected", "busy", "can_release", "can_acquire", "ok", "ready", "hfp_ready", "all_idle", "pause_media", "known", "playing", "available") ||
                 key == "value" && frame.optString("key") in CompanionPreferences.boolKeys) require(frame.get(key) is Boolean)
             else if (key != "v") require(frame.get(key) is String)
         }
@@ -88,6 +92,19 @@ internal object CompanionProtocol {
         if (frame.has("proof")) hexBytes(frame.getString("proof"), 32)
         if (frame.has("caps")) capabilities(frame.getString("caps"))
         val type = frame.getString("type")
+        if (type in setOf("media_query", "media_state")) {
+            hexBytes(frame.getString("probe"), 8)
+            require(frame.getString("probe") != HANDSHAKE_TX)
+            if (type == "media_state") {
+                hexBytes(frame.getString("generation"), 8); hexBytes(frame.getString("event"), 8)
+                require(frame.getString("generation") != HANDSHAKE_TX)
+                require(frame.getBoolean("known") || !frame.getBoolean("available"))
+            }
+        }
+        if (frame.has("media_gen")) {
+            hexBytes(frame.getString("media_gen"), 8)
+            require(frame.getString("media_gen") != HANDSHAKE_TX)
+        }
         if (type == "pref") CompanionPreferences.decode(frame)
         if (type == "pref_ack") {
             require(frame.getString("key") in CompanionPreferences.keys)
@@ -97,7 +114,7 @@ internal object CompanionProtocol {
         }
         if (frame.has("episode")) {
             hexBytes(frame.getString("episode"), 16); hexBytes(frame.getString("call_gen"), 8)
-            val manual = type == "prepare" && frame.getString("purpose") == "manual"
+            val manual = type == "prepare" && frame.getString("purpose") in setOf("manual", "media")
             require((frame.getString("episode") == "0".repeat(32)) == manual)
             require((frame.getString("call_gen") == HANDSHAKE_TX) == manual)
         }
@@ -105,11 +122,11 @@ internal object CompanionProtocol {
             hexBytes(frame.getString("origin_token"), 16)
             val zeroToken = frame.getString("origin_token") == "0".repeat(32)
             require(zeroToken == (type == "call_origin" && !frame.getBoolean("ready") ||
-                type == "prepare" && frame.getString("purpose") == "manual"))
+                type == "prepare" && frame.getString("purpose") in setOf("manual", "media")))
         }
         if (type == "prepare") {
             val purpose = frame.getString("purpose")
-            require(purpose in setOf("manual", "call_takeover", "call_return"))
+            require(purpose in setOf("manual", "media", "call_takeover", "call_return"))
             require(purpose != "call_takeover" || frame.getString("target") == "android")
             require(purpose != "call_return" || frame.getString("target") == "pc")
         }
@@ -132,10 +149,10 @@ internal object CompanionProtocol {
             else require(frame.getString("code") in setOf("busy", "unavailable", "invalid_state", "superseded", "timeout", "failed"))
         }
         val zero = frame.getString("tx") == HANDSHAKE_TX
-        require(zero == (type in setOf("hello", "challenge", "auth", "authenticated", "ping", "status", "pref", "pref_ack", "call_origin", "call_state", "call_end")))
+        require(zero == (type in setOf("hello", "challenge", "auth", "authenticated", "ping", "status", "media_query", "media_state", "pref", "pref_ack", "call_origin", "call_state", "call_end")))
     }
 
-    fun capabilities(value: String): Int = hexBytes(value, 1)[0].toInt().also { require(it in 0..3) }
+    fun capabilities(value: String): Int = hexBytes(value, 1)[0].toInt().also { require(it in 0..7) }
 
     fun read(input: InputStream): JSONObject {
         val bytes = ByteArrayOutputStream()
@@ -149,7 +166,9 @@ internal object CompanionProtocol {
         require(bytes.size() > 0) { "Empty companion frame" }
         val decoder = Charsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
             .onUnmappableCharacter(CodingErrorAction.REPORT)
-        return parse(decoder.decode(ByteBuffer.wrap(bytes.toByteArray())).toString())
+        val text = try { decoder.decode(ByteBuffer.wrap(bytes.toByteArray())).toString() }
+        catch (invalid: CharacterCodingException) { throw IllegalArgumentException("Invalid companion UTF-8", invalid) }
+        return parse(text)
     }
 
     // The protocol is deliberately flat. Parsing each primitive prevents duplicate-key overwrite and JSON extensions.

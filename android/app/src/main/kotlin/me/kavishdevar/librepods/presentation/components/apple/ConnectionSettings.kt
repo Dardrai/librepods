@@ -46,19 +46,26 @@ fun ConnectionSettings(
     onTakeoverWhenRingingCallChanged: (Boolean) -> Unit,
     takeoverWhenMediaStart: Boolean,
     onTakeoverWhenMediaStartChanged: (Boolean) -> Unit,
+    earDetectionEnabled: Boolean = true,
+    showAutomaticConnection: Boolean = true,
+    automaticConnectionWritable: Boolean = true,
+    earDetectionDescription: String? = null,
 
 ) {
     StyledList {
         styledToggle(
             label = stringResource(R.string.ear_detection),
             checked = automaticEarDetectionEnabled,
+            enabled = earDetectionEnabled,
+            description = earDetectionDescription,
             onCheckedChange = onAutomaticEarDetectionChanged
         )
 
-        styledToggle(
+        if (showAutomaticConnection) styledToggle(
             label = stringResource(R.string.automatically_connect),
             description = stringResource(R.string.automatically_connect_description),
             checked = automaticConnectionEnabled,
+            enabled = automaticConnectionWritable,
             onCheckedChange = onAutomaticConnectionChanged
         )
 

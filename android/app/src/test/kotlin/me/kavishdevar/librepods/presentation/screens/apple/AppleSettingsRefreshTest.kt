@@ -51,6 +51,21 @@ import java.io.File
 class AppleSettingsRefreshTest {
     @get:Rule val compose = createComposeRule()
 
+    @GraphicsMode(GraphicsMode.Mode.LEGACY)
+    @Test fun hearingAidRemainsReachableWithoutAnAvailableSettingsTransport() {
+        var opened = 0
+        var writes = 0
+        compose.setContent {
+            LibrePodsTheme(designSystem = DesignSystem.Apple) {
+                SettingsScreen(navigateToHearingAid = { opened++ }, setBoolean = { _, _ -> writes++ })
+            }
+        }
+        val label = text(R.string.hearing_aid)
+        compose.onNode(hasScrollToIndexAction()).performScrollToNode(hasText(label))
+        compose.onNodeWithText(label).assertIsDisplayed().assertIsEnabled().performTouchInput { click() }
+        compose.runOnIdle { assertEquals(1, opened); assertEquals(0, writes) }
+    }
+
     // Apple backdrop AGSL is incomplete in Robolectric; test its actual input and semantics separately.
     @GraphicsMode(GraphicsMode.Mode.LEGACY)
     @Test fun settingsHaveNoManualRefreshAndOpeningDoesNotDisconnectOrWrite() {
@@ -199,6 +214,7 @@ class AppleSettingsRefreshTest {
         setBoolean: (ControlCommandIdentifier, Boolean) -> Unit = { _, _ -> },
         state: AppleState = AppleState(),
         settings: AppleSettings = AppleSettings(),
+        navigateToHearingAid: () -> Unit = {},
     ) {
         AppleSettingsScreen(
             uiState = AppleUiState(state = state, settings = settings, metadata = AppleMetadata(name = "AirPods Pro 3",
@@ -213,7 +229,7 @@ class AppleSettingsRefreshTest {
             navigateBack = null,
             navigateToRename = {},
             navigateToHearingProtection = {},
-            navigateToHearingAid = {},
+            navigateToHearingAid = navigateToHearingAid,
             navigateToLeftLongPress = {},
             navigateToRightLongPress = {},
             navigateToEqualizer = {},

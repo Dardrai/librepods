@@ -7,7 +7,7 @@ import me.kavishdevar.librepods.core.devices.DeviceComponent
 import me.kavishdevar.librepods.core.devices.DeviceComponentState
 import me.kavishdevar.librepods.core.devices.PacketDestination
 
-private const val TAG = "EarDetectionResponsePacket"
+private const val TAG = "EarDetection"
 
 data class EarDetectionResponsePacket(
     val componentStates: Set<DeviceComponentState>,

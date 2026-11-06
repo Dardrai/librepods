@@ -42,7 +42,11 @@ fun VersionScreen(
 ) {
     val uiState by viewModel.uiState.collectAsState()
 
-    val metadata = uiState.metadata
+    VersionContent(uiState.metadata, navigateBack)
+}
+
+@Composable
+internal fun VersionContent(metadata: me.kavishdevar.librepods.core.devices.AppleMetadata, navigateBack: (() -> Unit)?) {
 
     StyledScaffold(
         title = stringResource(R.string.version),

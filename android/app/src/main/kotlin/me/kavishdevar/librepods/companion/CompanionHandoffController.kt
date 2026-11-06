@@ -24,6 +24,8 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
+import java.io.IOException
+import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 
 data class CompanionState(
@@ -52,6 +54,8 @@ class CompanionHandoffController internal constructor(
     private val callReceipt: suspend (String, () -> Boolean) -> Int = { _, _ -> 0 },
     private val phoneQuiet: suspend (String, () -> Boolean) -> Boolean = { _, _ -> false },
     private val allCallsIdle: () -> Boolean = { false },
+    private val media: suspend (String) -> CompanionMediaSample = { CompanionMediaSample() },
+    private val retryWait: suspend (Long) -> Unit = { delay(it) },
 ) : AutoCloseable {
     private val store = CompanionLinkStore(context)
     private val mutableState = MutableStateFlow(CompanionState())
@@ -67,34 +71,100 @@ class CompanionHandoffController internal constructor(
     private var pendingSwitch: PendingSwitch? = null
     private val writeLock = Any()
     private val storage = Mutex()
+    internal val pairing = CompanionPairingClient(scope, CompanionLinkStore(context, pending = true),
+        socketFactory = ::createPairingSocket,
+        bonded = ::hasPairingBonds,
+        fence = { synchronized(this) {
+            val observedIntent = intentGeneration
+            val observedEpoch = epoch
+            val binding = link
+            val valid: () -> Boolean = { !closed && observedIntent == intentGeneration && observedEpoch == epoch &&
+                link === binding && call == null && session?.transaction == null && pendingSwitch == null }
+            valid
+        } },
+        authenticate = { socket, candidate -> authenticate(socket, candidate); Unit },
+        promote = ::promotePairingLink)
+
+    private fun createPairingSocket(peer: String, service: UUID): BluetoothSocket {
+        if (context.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED)
+            throw IOException("Nearby devices permission is unavailable")
+        return try {
+            context.getSystemService(BluetoothManager::class.java).adapter
+                .bondedDevices.single { it.address == peer }.createRfcommSocketToServiceRecord(service)
+        } catch (denied: SecurityException) { throw IOException("Bluetooth permission changed", denied) }
+    }
+
+    private fun hasPairingBonds(peer: String, device: String): Boolean {
+        if (context.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) return false
+        return try {
+            context.getSystemService(BluetoothManager::class.java).adapter.let { adapter ->
+                adapter.isEnabled && adapter.bondedDevices.map { it.address }.toSet().containsAll(setOf(peer, device))
+            }
+        } catch (_: SecurityException) { false } catch (_: Exception) { false }
+    }
+
+    private suspend fun promotePairingLink(candidate: CompanionLink, current: () -> Boolean,
+        commit: (() -> Boolean) -> Boolean): Boolean = storage.withLock {
+        withContext(Dispatchers.IO) {
+            commit {
+                synchronized(this@CompanionHandoffController) {
+                    if (!current() || closed) return@synchronized false
+                    val selected = candidate.copy(key = candidate.key.copyOf())
+                    try { store.save(selected) } catch (_: Exception) { selected.key.fill(0); return@synchronized false }
+                    disconnect("PC link changed")
+                    link?.key?.fill(0)
+                    link = selected
+                    mutableState.value = CompanionState(linked = true, detail = "Connecting to NTPods…")
+                    reconnect()
+                    true
+                }
+            }
+        }
+    }
 
     private class Transaction(val id: String, val target: String, val generation: Long,
-        val call: CompanionCallContext = CompanionCallContext()) {
+        val call: CompanionCallContext = CompanionCallContext(), val mediaGeneration: String? = null) {
         val live = AtomicBoolean(true)
         @Volatile var stage = "preparing"
         val started = SystemClock.elapsedRealtime()
         @Volatile var phaseStarted = started
         var work: Job? = null
+        var mediaWatch: Job? = null
+        @Volatile var sourceGeneration: Long? = null
     }
     private class Session(val socket: BluetoothSocket, val link: CompanionLink, val sid: String, val caps: Int = 3) {
         val live = AtomicBoolean(true)
+        @Volatile var transportStopped = false
+        @Volatile var protocolStopped = false
         @Volatile var transaction: Transaction? = null
         var lastReceived = SystemClock.elapsedRealtime()
         val transactions = mutableSetOf<String>()
         val offeredWinners = mutableSetOf<String>()
         val failedPreferences = mutableSetOf<String>()
-        var callOrigin: String? = null
+        @Volatile var callOrigin: String? = null
+        val media = CompanionMedia()
+        val mediaLock = Mutex()
+        @Volatile var mediaSampling = false
+        @Volatile var mediaObservedAt = 0L
     }
-    private class Call(val active: Session, val context: CompanionCallContext, val intent: Long) {
+    private class Incoming(val active: Session, val intent: Long, val deadline: Long) {
+        var state = "ringing"
+        val origins = mutableSetOf<String>()
+        var retryReady = false
+    }
+    @Volatile private var incoming: Incoming? = null
+    private class Call(val active: Session, val context: CompanionCallContext, val intent: Long, val incoming: Incoming) {
         @Volatile var state = "ringing"
         @Volatile var ended = false
         var lastStatus = ""
         var lastSent = 0L
         @Volatile var checking = false
         var flags = 0
-        var hadHfp = false
-        var hadSco = false
+        @Volatile var hadHfp = false
+        @Volatile var hadSco = false
         var sampling = false
+        @Volatile var acquireStarted = false
+        @Volatile var rejectedBeforePrepare = false
     }
     @Volatile private var call: Call? = null
     private var callGeneration = 0L
@@ -118,6 +188,8 @@ class CompanionHandoffController internal constructor(
     }
 
     @Synchronized fun onCallState(value: String, freshIncoming: Boolean) {
+        if (value !in setOf("ringing", "active")) incoming = null
+        else incoming?.state = value
         val existing = call
         if (existing != null) {
             if (value == "unknown" || value == "ringing" && existing.state != "ringing") { invalidate(); return }
@@ -125,14 +197,33 @@ class CompanionHandoffController internal constructor(
             if (value == "idle") endCall(existing) else scope.launch { updateCall(existing) }
             return
         }
-        if (!freshIncoming || value != "ringing") return
         val active = session ?: return
+        if (!active.live.get() || active.caps and 2 == 0 || !callAllowed(active.link.device)) return
+        if (freshIncoming && value == "ringing") incoming = Incoming(active, intentGeneration, SystemClock.elapsedRealtime() + 5000)
+        incoming?.let(::admitIncoming)
+    }
+
+    private fun incomingCurrent(event: Incoming) = !closed && incoming === event && session === event.active &&
+        event.active.live.get() && event.intent == intentGeneration && SystemClock.elapsedRealtime() < event.deadline &&
+        event.state in setOf("ringing", "active") && event.active.caps and 2 != 0 && callAllowed(event.active.link.device)
+
+    @Synchronized private fun admitIncoming(event: Incoming) {
+        if (!incomingCurrent(event)) { if (incoming === event) incoming = null; return }
+        val active = event.active
         val token = active.callOrigin ?: return
-        if (!active.live.get() || active.caps and 2 == 0 || !callAllowed(active.link.device) ||
-            active.transaction != null || pendingSwitch != null) return
+        if (call != null || token in event.origins || event.origins.size >= 2 || event.origins.isNotEmpty() && !event.retryReady) return
+        if (active.transaction?.call?.purpose == "media") {
+            val retired = retire(active)
+            if (retired != null) scope.launch {
+                send(active, CompanionProtocol.frame("cancel", active.link.device, retired, active.sid).put("reason", "superseded"))
+            }
+        }
+        if (active.transaction != null || pendingSwitch != null) return
         val context = CompanionCallContext("call_takeover", CompanionProtocol.nonce(16),
             (++callGeneration).toString(16).padStart(16, '0'), token)
-        val lease = Call(active, context, intentGeneration)
+        val lease = Call(active, context, intentGeneration, event).also { it.state = event.state }
+        event.origins += token
+        event.retryReady = false
         call = lease
         val id = CompanionProtocol.nonce(8)
         if (id == CompanionProtocol.HANDSHAKE_TX || active.transactions.size >= 128) { call = null; return }
@@ -150,6 +241,15 @@ class CompanionHandoffController internal constructor(
 
     private fun callCurrent(lease: Call) = !closed && call === lease && session === lease.active &&
         lease.active.live.get() && intentGeneration == lease.intent && callAllowed(lease.active.link.device)
+
+    @Synchronized private fun retryRejectedIncoming(lease: Call) {
+        if (!lease.rejectedBeforePrepare || !callCurrent(lease) || !incomingCurrent(lease.incoming) ||
+            lease.acquireStarted || lease.hadHfp || lease.hadSco || lease.flags and 8 == 0 ||
+            lease.incoming.origins.size != 1) return
+        call = null
+        lease.incoming.retryReady = true
+        admitIncoming(lease.incoming)
+    }
 
     private fun callFrame(type: String, lease: Call, tx: String = CompanionProtocol.HANDSHAKE_TX) =
         CompanionProtocol.frame(type, lease.active.link.device, tx, lease.active.sid)
@@ -197,7 +297,7 @@ class CompanionHandoffController internal constructor(
         lease.lastStatus = status; lease.lastSent = now
         send(lease.active, callFrame("call_state", lease).put("state", lease.state)
             .put("hfp_ready", flags and 3 == 3).put("sco", sco).put("all_idle", idle))
-        } finally { lease.sampling = false }
+        } finally { lease.sampling = false; retryRejectedIncoming(lease) }
     }
 
     fun callRouteChanged() {
@@ -232,6 +332,7 @@ class CompanionHandoffController internal constructor(
         require(adapter.bondedDevices.any { it.address == peer } && adapter.bondedDevices.any { it.address == device }) {
             "Pair both devices in Bluetooth settings first"
         }
+        pairing.discardPending()
         disconnect("PC link changed")
         val generation = ++epoch
         scope.launch {
@@ -256,6 +357,7 @@ class CompanionHandoffController internal constructor(
     }
 
     fun unlink() {
+        pairing.discardPending()
         ++epoch
         disconnect("PC unlinked")
         link?.key?.fill(0)
@@ -264,95 +366,144 @@ class CompanionHandoffController internal constructor(
         mutableState.value = CompanionState()
     }
 
-    fun reconnect() {
-        if (closed || connection?.isActive == true) return
+    @Synchronized fun reconnect() {
+        if (closed) return
         val selected = link ?: return
-        val generation = ++epoch
+        disconnect("Connecting to NTPods…")
+        val generation = epoch
         connection = scope.launch {
-            mutableState.value = CompanionState(linked = true, detail = "Connecting to NTPods…")
-            var captured: BluetoothSocket? = null
-            var authenticated: Session? = null
-            var heartbeat: Job? = null
-            try {
-                if (context.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED)
-                    throw SecurityException("Nearby devices permission is unavailable")
-                val adapter = context.getSystemService(BluetoothManager::class.java).adapter
-                check(adapter.isEnabled)
-                val peer = adapter.bondedDevices.singleOrNull { it.address == selected.peer } ?: error("Peer no longer paired")
-                captured = peer.createRfcommSocketToServiceRecord(CompanionProtocol.SERVICE)
-                socket = captured
-                val liveSocket = captured
-                val timeout = scope.launch { delay(18_000); if (session == null && socket === liveSocket) liveSocket.close() }
-                try { withContext(Dispatchers.IO) { liveSocket.connect() } } finally { timeout.cancel() }
-                check(generation == epoch && peer.bondState == BluetoothDevice.BOND_BONDED &&
-                    liveSocket.remoteDevice.address == selected.peer)
-                val authTimeout = scope.launch { delay(10_000); if (session == null && socket === liveSocket) liveSocket.close() }
-                val authenticatedPeer = try { withContext(Dispatchers.IO) { authenticate(liveSocket, selected) } } finally { authTimeout.cancel() }
-                val sid = authenticatedPeer.first
-                check(generation == epoch && peer.bondState == BluetoothDevice.BOND_BONDED)
-                val active = Session(liveSocket, selected, sid, authenticatedPeer.second)
-                authenticated = active
-                session = active
-                mutableState.value = CompanionState(linked = true, connected = true, detail = "PC linked. Choose where to listen.")
-                sendStatus(active)
-                if (active.caps and 1 != 0) {
-                    val records = try { preferences?.snapshot(selected.device).orEmpty() }
-                    catch (cancelled: CancellationException) { throw cancelled }
-                    catch (_: Exception) { mutableState.value = state.value.copy(settingsIssue = true); emptyList() }
-                    records.forEach { send(active, it.frame(selected.device, sid)) }
-                }
-                heartbeat = scope.launch {
-                    var lastPing = SystemClock.elapsedRealtime()
-                    var ping: Job? = null
-                    while (isActive && active.live.get()) {
-                        delay(250)
-                        val now = SystemClock.elapsedRealtime()
-                        if (now - active.lastReceived >= 45_000) {
-                            active.live.set(false)
-                            runCatching { liveSocket.close() }
-                            break
-                        }
-                        if (now - lastPing >= 10_000 && ping?.isActive != true) {
-                            lastPing = now
-                            // A blocked RFCOMM writer must not suspend the silence/phase watchdog.
-                            ping = launch {
-                                send(active, CompanionProtocol.frame("ping", selected.device, sid = sid))
-                                call?.takeIf { it.active === active }?.let { updateCall(it) }
-                            }
-                        }
-                        val tx = active.transaction
-                        if (tx != null && (SystemClock.elapsedRealtime() - tx.phaseStarted >= 30_000 ||
-                                SystemClock.elapsedRealtime() - tx.started >= 75_000)) launch { cancel(active, "timeout") }
+            var failures = 0
+            while (currentCoroutineContext().isActive && connectionCurrent(selected, generation)) {
+                val observedIntent = intentGeneration
+                var retry = false
+                var authenticating = false
+                connectionDetail(selected, generation, "Connecting to NTPods…")
+                var captured: BluetoothSocket? = null
+                var authenticated: Session? = null
+                var heartbeat: Job? = null
+                try {
+                    if (context.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED)
+                        throw SecurityException("Nearby devices permission is unavailable")
+                    val adapter = context.getSystemService(BluetoothManager::class.java).adapter
+                    check(hasPairingBonds(selected.peer, selected.device))
+                    val peer = adapter.bondedDevices.singleOrNull { it.address == selected.peer } ?: error("Peer no longer paired")
+                    captured = peer.createRfcommSocketToServiceRecord(CompanionProtocol.SERVICE)
+                    val liveSocket = captured
+                    synchronized(this@CompanionHandoffController) {
+                        check(connectionCurrent(selected, generation) && observedIntent == intentGeneration)
+                        socket = liveSocket
                     }
+                    val timeout = scope.launch { delay(18_000); if (session == null && socket === liveSocket) liveSocket.close() }
+                    try { withContext(Dispatchers.IO) { liveSocket.connect() } } finally { timeout.cancel() }
+                    check(connectionCurrent(selected, generation) && observedIntent == intentGeneration &&
+                        peer.bondState == BluetoothDevice.BOND_BONDED &&
+                        liveSocket.remoteDevice.address == selected.peer)
+                    authenticating = true
+                    val authTimeout = scope.launch { delay(10_000); if (session == null && socket === liveSocket) liveSocket.close() }
+                    val authenticatedPeer = try { withContext(Dispatchers.IO) { authenticate(liveSocket, selected) } } finally { authTimeout.cancel() }
+                    val sid = authenticatedPeer.first
+                    val active = Session(liveSocket, selected, sid, authenticatedPeer.second)
+                    synchronized(this@CompanionHandoffController) {
+                        check(connectionCurrent(selected, generation) && observedIntent == intentGeneration &&
+                            hasPairingBonds(selected.peer, selected.device))
+                        authenticated = active
+                        session = active
+                        mutableState.value = CompanionState(linked = true, connected = true, detail = "PC linked. Choose where to listen.")
+                    }
+                    failures = 0
+                    sendStatus(active)
+                    if (active.caps and 1 != 0) {
+                        val records = try { preferences?.snapshot(selected.device).orEmpty() }
+                        catch (cancelled: CancellationException) { throw cancelled }
+                        catch (_: Exception) { mutableState.value = state.value.copy(settingsIssue = true); emptyList() }
+                        records.forEach { send(active, it.frame(selected.device, sid)) }
+                    }
+                    heartbeat = scope.launch {
+                        var lastPing = SystemClock.elapsedRealtime()
+                        var ping: Job? = null
+                        while (isActive && active.live.get()) {
+                            delay(250)
+                            val now = SystemClock.elapsedRealtime()
+                            incoming?.takeIf { it.active === active && !incomingCurrent(it) }?.let { if (incoming === it) incoming = null }
+                            if (now - active.lastReceived >= 45_000) {
+                                active.transportStopped = true
+                                active.live.set(false)
+                                runCatching { liveSocket.close() }
+                                break
+                            }
+                            if (now - lastPing >= 10_000 && ping?.isActive != true) {
+                                lastPing = now
+                                // A blocked RFCOMM writer must not suspend the silence/phase watchdog.
+                                ping = launch {
+                                    send(active, CompanionProtocol.frame("ping", selected.device, sid = sid))
+                                    call?.takeIf { it.active === active }?.let { updateCall(it) }
+                                }
+                            }
+                            val tx = active.transaction
+                            if (tx != null && (SystemClock.elapsedRealtime() - tx.phaseStarted >= 30_000 ||
+                                    SystemClock.elapsedRealtime() - tx.started >= 75_000)) launch { cancel(active, "timeout") }
+                        }
+                    }
+                    while (currentCoroutineContext().isActive && active.live.get()) {
+                        val frame = withContext(Dispatchers.IO) { CompanionProtocol.read(liveSocket.inputStream) }
+                        CompanionProtocol.validate(frame, selected.device, sid)
+                        active.lastReceived = SystemClock.elapsedRealtime()
+                        handle(active, frame)
+                    }
+                    if (active.protocolStopped) error("Invalid companion writer")
+                    if (active.transportStopped) throw IOException("Companion transport stopped")
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: IOException) {
+                    retry = authenticated?.protocolStopped != true
+                    connectionDetail(selected, generation,
+                        if (retry) "PC connection lost. Reconnecting to NTPods…" else "PC link could not be verified. Link your PC again.")
+                } catch (_: SecurityException) {
+                    connectionDetail(selected, generation, "Allow Nearby devices access, then tap Reconnect.")
+                } catch (_: Exception) {
+                    connectionDetail(selected, generation,
+                        if (authenticating) "PC link could not be verified. Link your PC again." else
+                            "Bluetooth is unavailable. Pair both devices, then tap Reconnect.")
+                } finally {
+                    heartbeat?.cancel()
+                    synchronized(this@CompanionHandoffController) {
+                        authenticated?.let { active ->
+                            if (call?.active === active) call = null
+                            if (incoming?.active === active) incoming = null
+                            active.live.set(false)
+                            active.transaction?.let { it.live.set(false); it.work?.cancel(); it.mediaWatch?.cancel() }
+                            if (session === active) session = null
+                        }
+                        if (socket === captured) socket = null
+                        if (generation == epoch) pendingSwitch = null
+                    }
+                    runCatching { captured?.close() }
                 }
-                while (currentCoroutineContext().isActive && active.live.get()) {
-                    val frame = withContext(Dispatchers.IO) { CompanionProtocol.read(liveSocket.inputStream) }
-                    CompanionProtocol.validate(frame, selected.device, sid)
-                    active.lastReceived = SystemClock.elapsedRealtime()
-                    handle(active, frame)
+                if (!retry || !connectionCurrent(selected, generation)) break
+                // Closing the reader can finish before an admitted writer reports its protocol failure.
+                val protocolStopped = withContext(Dispatchers.IO) { synchronized(writeLock) {
+                    authenticated?.protocolStopped == true
+                } }
+                if (protocolStopped) {
+                    connectionDetail(selected, generation, "PC link could not be verified. Link your PC again.")
+                    break
                 }
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (_: SecurityException) {
-                if (!closed && generation == epoch) mutableState.value = CompanionState(linked = true,
-                    detail = "Allow Nearby devices access, then tap Reconnect.")
-            } catch (_: Exception) {
-                if (!closed && generation == epoch) mutableState.value = CompanionState(linked = true,
-                    detail = "PC connection stopped. Open NTPods and tap Reconnect. Check where your audio is playing before trying again.")
-            } finally {
-                heartbeat?.cancel()
-                authenticated?.let { active ->
-                    if (call?.active === active) call = null
-                    active.live.set(false)
-                    active.transaction?.let { it.live.set(false); it.work?.cancel() }
-                    if (session === active) session = null
-                }
-                runCatching { captured?.close() }
-                if (socket === captured) socket = null
-                if (generation == epoch) pendingSwitch = null
+                val waitingIntent = intentGeneration
+                retryWait(controlRetryDelay(failures++))
+                if (waitingIntent != intentGeneration) break
             }
         }
     }
+
+    private fun connectionCurrent(selected: CompanionLink, generation: Long) =
+        !closed && generation == epoch && link === selected
+
+    @Synchronized private fun connectionDetail(selected: CompanionLink, generation: Long, detail: String) {
+        if (connectionCurrent(selected, generation)) mutableState.value = CompanionState(linked = true, detail = detail)
+    }
+
+    internal fun controlRetryDelay(failures: Int): Long =
+        longArrayOf(1000, 2000, 4000, 8000, 15000, 30000)[failures.coerceIn(0, 5)]
 
     private fun authenticate(socket: BluetoothSocket, selected: CompanionLink): Pair<String, Int> {
         val nonce = CompanionProtocol.nonce()
@@ -429,12 +580,32 @@ class CompanionHandoffController internal constructor(
             "call_origin" -> {
                 require(active.caps and 2 != 0)
                 active.callOrigin = frame.getString("origin_token").takeIf { frame.getBoolean("ready") }
+                incoming?.takeIf { it.active === active }?.let(::admitIncoming)
+            }
+            "media_query" -> {
+                require(active.caps and 4 != 0) { "Media transfer was not negotiated" }
+                if (active.mediaSampling) return
+                active.mediaSampling = true
+                scope.launch {
+                    try {
+                        val value = sampleMedia(active)
+                        if (session !== active || !active.live.get()) return@launch
+                        send(active, CompanionProtocol.frame("media_state", active.link.device, sid = active.sid)
+                            .put("probe", frame.getString("probe")).put("generation", value.generation.toString(16).padStart(16, '0'))
+                            .put("event", value.event.toString(16).padStart(16, '0')).put("known", value.sample.known)
+                            .put("playing", value.sample.playing).put("connected", value.sample.connected)
+                            .put("available", value.sample.available && (!value.sample.playing || value.sample.eligible)))
+                    } finally { active.mediaSampling = false }
+                }
             }
             "prepare" -> {
                 val context = CompanionCallContext(frame.getString("purpose"), frame.getString("episode"),
                     frame.getString("call_gen"), frame.getString("origin_token"))
                 val lease = call
-                if (context.purpose != "manual" && (active.caps and 2 == 0 || lease == null || !callCurrent(lease) ||
+                if (context.purpose == "media" && (active.caps and 4 == 0 || lease != null)) {
+                    result(active, id, "prepare", "superseded"); return
+                }
+                if (context.purpose !in setOf("manual", "media") && (active.caps and 2 == 0 || lease == null || !callCurrent(lease) ||
                     context.copy(purpose = "call_takeover") != lease.context ||
                     context.purpose == "call_takeover" && (lease.ended || lease.checking || lease.state !in setOf("ringing", "active")) ||
                     context.purpose == "call_return" && (!lease.ended || lease.state != "idle" || !callReturnAllowed(active.link.device)))) {
@@ -458,20 +629,33 @@ class CompanionHandoffController internal constructor(
                 pendingSwitch = null
                 val tx = synchronized(this) {
                     if (observedGeneration != intentGeneration || active.transaction != null) null
-                    else Transaction(id, frame.getString("target"), observedGeneration, context).also { active.transaction = it }
+                    else Transaction(id, frame.getString("target"), observedGeneration, context,
+                        frame.optString("media_gen").takeIf { it.isNotEmpty() }).also { active.transaction = it }
                 }
                 if (tx == null) { result(active, id, "prepare", "superseded"); return }
+                if (tx.call.purpose == "media") tx.mediaWatch = scope.launch {
+                    while (reservationCurrent(active, tx)) {
+                        sampleMedia(active)
+                        if (!reservationCurrent(active, tx)) break
+                        if (tx.stage in setOf("ready", "release", "acquire", "done") && !current(active, tx)) {
+                            tx.mediaWatch = null
+                            cancel(active, "superseded", tx); break
+                        }
+                        delay(250)
+                    }
+                }
                 mutableState.value = state.value.copy(busy = true, detail = "Preparing audio transfer…")
                 Log.i("CompanionHandoff", "phase=prepare event=start")
                 tx.work = scope.launch {
                     val available = try {
-                        if (context.purpose == "call_takeover") callStatus(active.link.device) { current(active, tx) }
+                        if (context.purpose == "media" && !mediaPermits(active, tx)) CompanionStatus(false, true, false)
+                        else if (context.purpose == "call_takeover") callStatus(active.link.device) { current(active, tx) }
                         else if (context.purpose == "call_return" && !phoneQuiet(active.link.device) { current(active, tx) }) CompanionStatus(false, true, false)
                         else status(active.link.device) { current(active, tx) }
                     }
                     catch (cancelled: CancellationException) { throw cancelled }
                     catch (_: Exception) { CompanionStatus(false, false, false) }
-                    if (!current(active, tx)) return@launch
+                    if (!reservationCurrent(active, tx)) return@launch
                     val code = if (available.busy) "busy" else if (!available.available) "unavailable" else "ready"
                     tx.stage = if (code == "ready") "ready" else "failed"
                     tx.phaseStarted = SystemClock.elapsedRealtime()
@@ -486,21 +670,24 @@ class CompanionHandoffController internal constructor(
                     result(active, id, phase, "invalid_state"); return
                 }
                 tx.stage = phase
+                if (phase == "acquire" && tx.call.purpose == "call_takeover") call?.acquireStarted = true
                 tx.phaseStarted = SystemClock.elapsedRealtime()
                 Log.i("CompanionHandoff", "phase=$phase event=start")
                 mutableState.value = state.value.copy(detail = if (phase == "release") "Releasing phone audio…" else "Connecting phone audio…")
                 tx.work = scope.launch {
                     val code = try {
                         withTimeoutOrNull(30_000) {
-                            if (tx.call.purpose == "call_takeover" && phase == "acquire")
+                            if (tx.call.purpose == "media" && !mediaPermits(active, tx)) "superseded"
+                            else if (tx.call.purpose == "call_takeover" && phase == "acquire")
                                 callOperation(active.link.device) { current(active, tx) }
                             else operation(phase, active.link.device) { current(active, tx) }
                         } ?: "timeout"
                     } catch (cancelled: CancellationException) { throw cancelled }
                     catch (_: Exception) { "failed" }
-                    if (!current(active, tx)) return@launch
-                    tx.stage = if (code in setOf("released", "acquired", "hfp_ready")) "done" else "failed"
-                    result(active, id, phase, code)
+                    if (!reservationCurrent(active, tx)) return@launch
+                    val confirmed = if (code in setOf("released", "acquired", "hfp_ready") && !current(active, tx)) "superseded" else code
+                    tx.stage = if (confirmed in setOf("released", "acquired", "hfp_ready")) "done" else "failed"
+                    result(active, id, phase, confirmed)
                 }
             }
             "cancel" -> {
@@ -511,18 +698,25 @@ class CompanionHandoffController internal constructor(
                 mutableState.value = state.value.copy(busy = false, detail = "Transfer cancelled. Choose where to listen to try again.")
             }
             "result" -> {
-                require(frame.getString("phase") == "complete") { "Unexpected PC result" }
-                if (active.transaction?.id != id && pendingSwitch?.id != id) return
-                val tx = active.transaction
-                val expected = if (tx?.call?.purpose == "call_takeover") "hfp_ready" else "acquired"
-                val ok = frame.getBoolean("ok") && frame.getString("code") == expected
-                require(!frame.getBoolean("ok") || frame.getString("code") == expected)
-                require(!ok || active.transaction?.stage == "done") { "Premature completion" }
-                if (ok && tx?.call?.purpose == "call_takeover") call?.hadHfp = true
-                retire(active)
-                if (tx?.call?.purpose == "call_return") call = null
-                mutableState.value = state.value.copy(busy = false,
-                    detail = if (ok) "Audio transfer complete." else "Audio transfer stopped. Choose where to listen to try again.")
+                synchronized(this) {
+                    require(frame.getString("phase") == "complete") { "Unexpected PC result" }
+                    if (active.transaction?.id != id && pendingSwitch?.id != id) return
+                    val tx = active.transaction
+                    val lease = call
+                    val expected = if (tx?.call?.purpose == "call_takeover") "hfp_ready" else "acquired"
+                    val ok = frame.getBoolean("ok") && frame.getString("code") == expected
+                    require(!frame.getBoolean("ok") || frame.getString("code") == expected)
+                    require(!ok || active.transaction?.stage == "done") { "Premature completion" }
+                    if (ok && tx?.call?.purpose == "call_takeover") call?.hadHfp = true
+                    val retryIncoming = !ok && tx == null && pendingSwitch?.id == id && lease != null &&
+                        lease.active === active && !lease.acquireStarted && !lease.hadHfp && !lease.hadSco &&
+                        incomingCurrent(lease.incoming) && lease.incoming.origins.size == 1
+                    retire(active)
+                    if (retryIncoming && call === lease) lease.rejectedBeforePrepare = true
+                    if (tx?.call?.purpose == "call_return") call = null
+                    mutableState.value = state.value.copy(busy = false,
+                        detail = if (ok) "Audio transfer complete." else "Audio transfer stopped. Choose where to listen to try again.")
+                }
                 sendStatus(active)
                 call?.let { updateCall(it) }
             }
@@ -530,11 +724,35 @@ class CompanionHandoffController internal constructor(
         }
     }
 
-    private fun current(active: Session, tx: Transaction): Boolean = !closed && session === active && active.live.get() &&
+    private fun reservationCurrent(active: Session, tx: Transaction): Boolean = !closed && session === active && active.live.get() &&
         active.transaction === tx && tx.generation == intentGeneration && tx.live.get() && SystemClock.elapsedRealtime() - tx.started < 75_000 &&
-        SystemClock.elapsedRealtime() - tx.phaseStarted < 30_000 && (tx.call.purpose == "manual" ||
+        SystemClock.elapsedRealtime() - tx.phaseStarted < 30_000 && (tx.call.purpose in setOf("manual", "media") ||
             call?.let { callCurrent(it) && if (tx.call.purpose == "call_takeover") !it.ended && !it.checking && it.state in setOf("ringing", "active")
                 else it.ended && it.state == "idle" } == true)
+
+    private fun current(active: Session, tx: Transaction): Boolean = reservationCurrent(active, tx) &&
+        (tx.call.purpose != "media" || SystemClock.elapsedRealtime() - active.mediaObservedAt < 1000 && active.media.latest?.let { value ->
+                value.sample.known && if (tx.target == "android") value.sample.playing &&
+                    value.generation.toString(16).padStart(16, '0') == tx.mediaGeneration
+                else (tx.sourceGeneration == null || tx.sourceGeneration == value.generation) &&
+                    (!value.sample.playing || !value.sample.connected)
+            } == true)
+
+    private suspend fun sampleMedia(active: Session) = active.mediaLock.withLock {
+        val value = try { withTimeoutOrNull(1200) { media(active.link.device) } ?: CompanionMediaSample() }
+        catch (cancelled: CancellationException) { throw cancelled }
+        catch (_: Exception) { CompanionMediaSample() }
+        active.media.observe(value).also { active.mediaObservedAt = SystemClock.elapsedRealtime() }
+    }
+
+    private suspend fun mediaPermits(active: Session, tx: Transaction): Boolean {
+        val value = sampleMedia(active)
+        if (tx.target == "pc" && tx.sourceGeneration == null && value.sample.known &&
+            (!value.sample.playing || !value.sample.connected)) tx.sourceGeneration = value.generation
+        return current(active, tx) && value.sample.known && if (tx.target == "android")
+            value.sample.playing && value.sample.available && value.sample.eligible && value.generation.toString(16).padStart(16, '0') == tx.mediaGeneration
+        else tx.sourceGeneration == value.generation && (!value.sample.playing || !value.sample.connected)
+    }
 
     private suspend fun result(active: Session, id: String, phase: String, code: String) {
         Log.i("CompanionHandoff", "phase=$phase event=result code=$code")
@@ -552,32 +770,49 @@ class CompanionHandoffController internal constructor(
 
     private suspend fun send(active: Session, frame: JSONObject) {
         if (!active.live.get()) return
-        try { withContext(Dispatchers.IO) { synchronized(writeLock) {
-            if (active.live.get()) CompanionProtocol.write(active.socket.outputStream, frame)
-        } } } catch (error: Exception) {
-            active.live.set(false)
-            runCatching { active.socket.close() }
+        withContext(Dispatchers.IO) {
+            val failed = synchronized(writeLock) {
+                if (!active.live.get()) false else try {
+                    CompanionProtocol.write(active.socket.outputStream, frame)
+                    false
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Exception) {
+                    if (error is IOException) active.transportStopped = true else active.protocolStopped = true
+                    active.live.set(false)
+                    true
+                }
+            }
+            if (failed) runCatching { active.socket.close() }
         }
     }
 
     @Synchronized private fun retire(active: Session): String? {
         val id = active.transaction?.id ?: pendingSwitch?.id
-        active.transaction?.let { it.live.set(false); it.work?.cancel() }
+        active.transaction?.let { it.live.set(false); it.work?.cancel(); it.mediaWatch?.cancel() }
         active.transaction = null
         pendingSwitch = null
         return id
     }
 
-    private suspend fun cancel(active: Session, reason: String) {
-        val id = retire(active) ?: return
+    private suspend fun cancel(active: Session, reason: String, expected: Transaction? = null) {
+        val id = synchronized(this) {
+            if (expected != null && active.transaction !== expected) null else retire(active)?.also {
+                mutableState.value = state.value.copy(busy = false, detail = "Transfer stopped. Choose where to listen to try again.")
+            }
+        } ?: return
         Log.i("CompanionHandoff", "event=cancel reason=$reason")
         send(active, CompanionProtocol.frame("cancel", active.link.device, id, active.sid).put("reason", reason))
-        mutableState.value = state.value.copy(busy = false, detail = "Transfer stopped. Choose where to listen to try again.")
     }
 
     /** A local route action invalidates the remote operation before that action can start. */
     @Synchronized fun invalidate() {
         intentGeneration++
+        if (session == null && connection?.isActive == true) {
+            disconnect("PC connection superseded by a phone action.")
+            reconnect()
+        }
+        incoming = null
         val previousCall = call.also { call = null }
         previousCall?.let { scope.launch { send(it.active, callFrame("call_end", it).put("reason", "invalidated")) } }
         val active = session ?: return
@@ -594,6 +829,7 @@ class CompanionHandoffController internal constructor(
     }
 
     fun bluetoothChanged() {
+        pairing.bluetoothChanged()
         val selected = link ?: return
         if (context.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
             disconnect("Allow Nearby devices access, then tap Reconnect.")
@@ -607,8 +843,9 @@ class CompanionHandoffController internal constructor(
         if (!valid) disconnect("Bluetooth is unavailable. Pair both devices, then tap Reconnect.")
     }
 
-    private fun disconnect(detail: String) {
+    @Synchronized private fun disconnect(detail: String) {
         ++epoch
+        incoming = null
         call = null
         session?.let { it.live.set(false); retire(it) }
         session = null
@@ -621,6 +858,7 @@ class CompanionHandoffController internal constructor(
 
     override fun close() {
         closed = true
+        pairing.close()
         disconnect("PC link stopped")
         link?.key?.fill(0)
     }

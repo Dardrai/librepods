@@ -64,6 +64,7 @@ import me.kavishdevar.librepods.core.devices.AppleState
 import me.kavishdevar.librepods.core.devices.BaseCapability
 import me.kavishdevar.librepods.core.devices.ConnectionState
 import me.kavishdevar.librepods.core.devices.effectiveAllowOff
+import me.kavishdevar.librepods.dongle.DongleController
 import me.kavishdevar.librepods.presentation.components.apple.NoiseControlSettings
 import me.kavishdevar.librepods.presentation.design.DesignSystem
 import me.kavishdevar.librepods.presentation.design.LibrePodsTheme
@@ -72,6 +73,12 @@ import me.kavishdevar.librepods.services.LibrePodsService
 /** Uses the clicked tile's dialog token, without starting an app task or requesting overlay access. */
 class ListeningModeDialog(context: Context, private val address: MacAddress) :
     ComponentDialog(context, R.style.Theme_LibrePods_ListeningMode) {
+    internal constructor(context: Context, target: DongleListeningTarget) : this(context, target.macAddress) {
+        dongleTarget = target
+    }
+
+    private var dongleTarget: DongleListeningTarget? = null
+    private var observedDongle: DongleController? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var connection: ServiceConnection? = null
     private var bound = false
@@ -148,13 +155,30 @@ class ListeningModeDialog(context: Context, private val address: MacAddress) :
                 val connected = (binder as? LibrePodsService.LocalBinder)?.getService()
                 if (connected == null) { close(); return }
                 service = connected
+                val dongle = dongleTarget
+                if (dongle != null) {
+                    val controller = connected.dongleControls
+                    if (!dongle.isCurrent(controller)) { close(); return }
+                    observedDongle = controller
+                    controller.controlsVisible(true, owner = pickerToken)
+                    observation = scope.launch {
+                        combine(controller.state, controller.liveSettingEditor(0x0d).state,
+                            controller.liveSettingEditor(0x2e).state) { _, _, _ -> dongle.snapshot() }
+                            .collect { current ->
+                                snapshot = current
+                                if (current == null) close()
+                            }
+                    }
+                    return
+                }
                 observation = scope.launch {
                     connected.devices.collectLatest { devices ->
                         val device = devices[address] as? AppleDevice
                         if (device == null || (owner != null && owner !== device)) { close(); return@collectLatest }
                         owner = device
-                        combine(device.connectionState, device.state, device.settings, device.metadata) { connection, state, settings, metadata ->
-                            if (connection != ConnectionState.CONNECTED || !supportsListening(metadata)) null
+                        combine(device.connectionState, device.state, device.settings, device.metadata,
+                            connected.dongleControls.state) { connection, state, settings, metadata, dongleState ->
+                            if (dongleState.usesDongleListeningControls || connection != ConnectionState.CONNECTED || !supportsListening(metadata)) null
                             else ListeningModeSnapshot(metadata, state, settings)
                         }.collect { current ->
                             snapshot = current
@@ -175,22 +199,35 @@ class ListeningModeDialog(context: Context, private val address: MacAddress) :
 
     /** Recheck the current map and exact instance at dispatch, including before collectors run. */
     internal fun writeControl(identifier: ControlCommandIdentifier, value: Int): Boolean {
+        if (!isShowing || !bound || context.getSystemService(KeyguardManager::class.java).isKeyguardLocked) return false
+        dongleTarget?.let { target ->
+            val controller = service?.dongleControls ?: return false
+            if (!target.isCurrent(controller)) return false
+            val current = target.snapshot() ?: return false
+            if (!validSelection(current, identifier, value)) return false
+            return reportWrite(target.write(identifier, value))
+        }
         val device = owner ?: return false
         val targetAddress = address
         val current = service?.devices?.value?.get(targetAddress)
-        if (!isShowing || !bound || current !== device || device.connectionState.value != ConnectionState.CONNECTED ||
-            !supportsListening(device.metadata.value) || context.getSystemService(KeyguardManager::class.java).isKeyguardLocked) return false
+        if (current !== device || device.connectionState.value != ConnectionState.CONNECTED ||
+            !supportsListening(device.metadata.value) || service?.dongleControls?.state?.value?.usesDongleListeningControls == true) return false
         val state = ListeningModeSnapshot(device.metadata.value, device.state.value, device.settings.value)
-        if (state.mode == null || when (identifier) {
-                ControlCommandIdentifier.LISTENING_MODE -> value !in state.modes
-                ControlCommandIdentifier.AUTO_ANC_STRENGTH -> !state.adaptive || state.mode != 4 || value !in 0..100
-                else -> true
-            }) return false
-        return (if (identifier == ControlCommandIdentifier.LISTENING_MODE) device.setListeningModeFromUi(value)
-            else device.setControlCommand(identifier, value)).also {
-            commandFailed = !it
-            if (!it) Toast.makeText(context, R.string.listening_mode_failed, Toast.LENGTH_SHORT).show()
+        if (!validSelection(state, identifier, value)) return false
+        return reportWrite(if (identifier == ControlCommandIdentifier.LISTENING_MODE) device.setListeningModeFromUi(value)
+            else device.setControlCommand(identifier, value))
+    }
+
+    private fun validSelection(state: ListeningModeSnapshot, identifier: ControlCommandIdentifier, value: Int) =
+        state.mode != null && when (identifier) {
+            ControlCommandIdentifier.LISTENING_MODE -> value in state.modes
+            ControlCommandIdentifier.AUTO_ANC_STRENGTH -> state.adaptive && state.mode == 4 && value in 0..100
+            else -> false
         }
+
+    private fun reportWrite(success: Boolean): Boolean = success.also {
+        commandFailed = !it
+        if (!it) Toast.makeText(context, R.string.listening_mode_failed, Toast.LENGTH_SHORT).show()
     }
 
     override fun onStop() {
@@ -253,6 +290,8 @@ class ListeningModeDialog(context: Context, private val address: MacAddress) :
         connection = null
         observation?.cancel()
         observation = null
+        observedDongle?.controlsVisible(false, owner = pickerToken)
+        observedDongle = null
         service = null
         snapshot = null
         if (bound && previous != null) runCatching { context.unbindService(previous) }

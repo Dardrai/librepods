@@ -15,7 +15,7 @@ constexpr const char* lifecycle_contexts[] = {
 };
 uint32_t word(const uint8_t* p) { uint32_t v; std::memcpy(&v,p,4); return v; }
 bool code(const SymbolImage& image,const char* name,ImageSymbol* symbol,const uint8_t** bytes) {
-    return image.resolve(name,true,symbol) && symbol->size>=4 && symbol->size<=65536 &&
+    return pixel17_resolve_context(image,name,symbol) && symbol->size>=4 && symbol->size<=65536 &&
         symbol->size%4==0 && (*bytes=image.bytes(symbol->address,symbol->size,5));
 }
 bool branch(uint32_t ins,uint64_t at,uint64_t* target) {
@@ -127,16 +127,20 @@ bool pixel17_source_list_contract(const uint8_t* p,size_t size,uint64_t address)
     const uint32_t source[]={0xf9403e68,0xd10103a3,0xaa1603e1,0xa9005808,0xf9000500,0xf9003e60};
     const uint32_t sink[]={0xf9404a68,0xf94013e1,0xd10103a3,0xa9000408,0xf9000500,0xf9004a60};
     size_t matches=0;
+    const uint32_t source80[]={0xf9403e68,0x9101e269,0x9101e261,0xa9002408,0xf9000500,0xf9003e60};
+    const uint32_t sink80[]={0xf9404a68,0x91024269,0x91024261,0xa9002408,0xf9000500,0xf9004a60};
     for(size_t at=0;at+12+sizeof(source)<=size;at+=4) {
         const auto conditional=word(p+at+8);
-        if(word(p+at)!=0x71001eff || word(p+at+4)!=0xf900081c ||
+        const bool current=word(p+at)==0x71002ebf && word(p+at+4)==0xf900081a;
+        if((!current && (word(p+at)!=0x71001eff || word(p+at+4)!=0xf900081c)) ||
             (conditional&0xff00001f)!=0x54000008) continue;
         const int64_t displacement=static_cast<int64_t>(static_cast<int32_t>((conditional&0x00ffffe0)<<8))>>11;
         const int64_t destination=static_cast<int64_t>(at+8)+displacement;
         if(destination<0 || static_cast<uint64_t>(destination)>size || sizeof(sink)>size-destination) continue;
         bool same=true;
         for(size_t i=0;i<sizeof(source)/sizeof(source[0]);++i)
-            same=same && word(p+at+12+i*4)==source[i] && word(p+destination+i*4)==sink[i];
+            same=same && word(p+at+12+i*4)==(current?source80[i]:source[i]) &&
+                word(p+destination+i*4)==(current?sink80[i]:sink[i]);
         if(same) ++matches;
     }
     return matches==1;
@@ -152,11 +156,14 @@ bool pixel17_contract(const SymbolImage& image,Pixel17Contract* out) {
        !code(image,kPixel17ActivePeer,&peer,&p) || !pixel17_active_peer_contract(p,peer.size) ||
        !code(image,"_ZN15A2dpCodecConfigC2E23btav_a2dp_codec_index_tN9bluetooth4a2dp7CodecIdERKNSt3__112basic_stringIcNS4_11char_traitsIcEENS4_9allocatorIcEEEE26btav_a2dp_codec_priority_t",&base,&q)) return false;
     // The nothrow wrapper forwards only x0 to the platform allocation function; it never reads its tag.
-    if(allocation.size!=48 || word(n)!=0xd503233f || word(n+4)!=0xa9bf7bfd ||
+    if((allocation.size!=48 && allocation.size!=56) || word(n)!=0xd503233f || word(n+4)!=0xa9bf7bfd ||
        word(n+8)!=0x910003fd || !branch(word(n+12),allocation.address+12,&out->raw_allocate) ||
        word(n+16)!=0xa8c17bfd || word(n+20)!=0xd50323bf || word(n+24)!=0xd65f03c0) return false;
     size_t ctor_at=0;
-    if(calls(a,init,ctor.address,&ctor_at)!=1 || ctor_at<16 || word(a+ctor_at-16)!=0x52804500) return false;
+    if(calls(a,init,ctor.address,&ctor_at)!=1 || ctor_at<16) return false;
+    const bool current_layout=word(a+ctor_at-16)==0x52804f00;
+    if(!current_layout && word(a+ctor_at-16)!=0x52804500) return false;
+    out->config_size=current_layout?80:64;
     uint64_t alloc_call;
     if(!branch(word(a+ctor_at-12),init.address+ctor_at-12,&alloc_call) || alloc_call!=out->raw_allocate) return false;
     // Constructor and five native records: numeric index, distinct 64-bit CodecId and 64-byte stride.
@@ -164,8 +171,18 @@ bool pixel17_contract(const SymbolImage& image,Pixel17Contract* out) {
     const uint32_t current[]={0xad030260,0xad040260,0x290c2274};
     const uint32_t other[]={0xad050260,0x290b5668,0xad060260,0xad070260,0x29142274};
     const uint32_t source[]={0x39089e75};
-    if(!contains(q,base.size,identity,2) || !contains(q,base.size,current,3) ||
-       !contains(q,base.size,other,5) || !contains(c,ctor.size,source,1)) return false;
+    const uint32_t current80[]={0xad030260,0x290b5668,0xad040260,0xad050260,0x290c2274};
+    const uint32_t other80[]={0xad060260,0xad070260,0xad080260,0x29162274,0xad090260,
+        0xb9010274,0xad0a0260,0xb9010668,0xad0b0260,0xad0c0260,0xb9015274,
+        0xad0d0260,0xb901567f,0xad0e0260,0xad0f0260,0xad100260,0xad110260,0xad120260,
+        0xb901a274,0xb901a67f};
+    const uint32_t source80[]={0x3909de75}, ota80[]={0x9107c269,0x1a950108,0x3d809a60,0xf807f13f};
+    if(!contains(q,base.size,identity,2)) return false;
+    if(current_layout) {
+        if(!contains(q,base.size,current80,5) || !contains(q,base.size,other80,20) ||
+           !contains(c,ctor.size,source80,1) || !contains(q,base.size,ota80,4)) return false;
+    } else if(!contains(q,base.size,current,3) || !contains(q,base.size,other,5) ||
+              !contains(c,ctor.size,source,1)) return false;
     size_t first=0,last=0,lock_at=0,unlock_at=0;
     out->registry_count=calls(b,cache,init.address,&first,&last);
     // Each observed registry is initialized once under the outer recursive mutex. Reject a changed cohort.
@@ -175,31 +192,62 @@ bool pixel17_contract(const SymbolImage& image,Pixel17Contract* out) {
        !lifecycle(image,init,out->raw_allocate)) return false;
     // Registry containers are independently walked and checked before mutation. Confirm this init's offsets.
     const uint32_t containers[]={0x9100e279,0x91014278,0x91024269,0x9101e276,0x9101a268};
-    if(!contains(a,init.size,containers,5) || !pixel17_source_list_contract(a,init.size,init.address)) return false;
+    const uint32_t active80[]={0x91014268,0x91014279,0x9101427b,0xf9400108};
+    const uint32_t disabled80[]={0x9101a268,0x9101a279,0x9101a27b,0xf9400108};
+    const uint32_t priority80[]={0x9100e268,0xb9000fff,0xf9400108};
+    if((current_layout ? (!contains(a,init.size,active80,4) || !contains(a,init.size,disabled80,4) ||
+                         !contains(a,init.size,priority80,3)) : !contains(a,init.size,containers,5)) ||
+       !pixel17_source_list_contract(a,init.size,init.address)) return false;
     // Stock AIDL chooses software PCM when neither provider offload nor standard codec conversion accepts it.
     ImageSymbol setup,hal,pcm,support; const uint8_t *s,*h,*m,*v;
     if(!code(image,"_ZN9bluetooth5audio4aidl4a2dp11setup_codecERKNS0_4a2dp24ahal_codec_configurationE",&setup,&s) ||
        !code(image,"_ZN9bluetooth5audio4aidl4a2dp5codec24getHalCodecConfigurationERKNS0_4a2dp24ahal_codec_configurationEPN4aidl7android8hardware9bluetooth5audio18CodecConfigurationE",&hal,&h) ||
-       !code(image,"_ZN9bluetooth5audio4aidl4a2dp5codec22getHalPcmConfigurationERKNS0_4a2dp24ahal_codec_configurationEPN4aidl7android8hardware9bluetooth5audio16PcmConfigurationE",&pcm,&m) ||
-       !code(image,"_ZNK9bluetooth5audio4aidl4a2dp12ProviderInfo13SupportsCodecE23btav_a2dp_codec_index_t",&support,&v)) return false;
+       !code(image,"_ZN9bluetooth5audio4aidl4a2dp5codec22getHalPcmConfigurationERKNS0_4a2dp24ahal_codec_configurationEPN4aidl7android8hardware9bluetooth5audio16PcmConfigurationE",&pcm,&m)) return false;
     size_t provider_at=0,hal_at=0,pcm_at=0;
-    if(calls(s,setup,support.address,&provider_at)!=1 || calls(s,setup,hal.address,&hal_at)!=1 ||
-       calls(s,setup,pcm.address,&pcm_at)!=1 || provider_at>=hal_at || hal_at>=pcm_at) return false;
+    if(calls(s,setup,hal.address,&hal_at)!=1 || calls(s,setup,pcm.address,&pcm_at)!=1 || hal_at>=pcm_at) return false;
+    if(current_layout) {
+        ImageSymbol getter; const uint8_t* g;
+        if(!code(image,kPixel17HardwareManager,&getter,&g) || getter.size!=160 ||
+           !code(image,kPixel17HardwareSupports,&support,&v) || support.size!=240) return false;
+        const uint32_t inputs[]={0x2a0103f3,0xaa0003f4};
+        const uint32_t map[]={0xf9403688,0xaa1403e0,0x2a1f03f4};
+        const uint32_t result[]={0x2a1403e0,0xa9414ff4,0xa8c27bfd,0xf85f8e5e,0xd50323bf,0xd65f03c0};
+        const uint32_t getter_return[]={0xa8c17bfd,0xf85f8e5e,0xd50323bf,0xd65f03c0};
+        uint64_t lock_target=0,unlock_target=0;
+        ImageSymbol manager_lock,manager_unlock; const uint8_t *ml,*mu;
+        if(word(g)!=0xd503233f || word(g+24)!=0x08dffd08 ||
+           (word(g+32)&0x9f00001f)!=0x90000000 || (word(g+36)&0xffc003ff)!=0x91000000 ||
+           !contains(g+40,16,getter_return,4) ||
+           !code(image,"_ZNSt3__15mutex4lockEv",&manager_lock,&ml) ||
+           !code(image,"_ZNSt3__15mutex6unlockEv",&manager_unlock,&mu) ||
+           !branch(word(v+28),support.address+28,&lock_target) || lock_target!=manager_lock.address ||
+           !branch(word(v+120),support.address+120,&unlock_target) || unlock_target!=manager_unlock.address ||
+           !contains(v,support.size,inputs,2) ||
+           !contains(v,support.size,map,3) || !contains(v,support.size,result,6)) return false;
+        // A failed standard codec conversion must branch directly to software PCM.
+        if(hal_at+8>setup.size || pcm_at<8 || (word(s+hal_at+4)&0xfff8001f)!=0x36000000) return false;
+        const int32_t delta=static_cast<int32_t>((word(s+hal_at+4)&0x7ffe0)<<13)>>16;
+        if(static_cast<int64_t>(hal_at+4)+delta!=static_cast<int64_t>(pcm_at-8) ||
+           word(s+pcm_at-4)!=0xaa1403e0) return false;
+    } else if(!code(image,"_ZNK9bluetooth5audio4aidl4a2dp12ProviderInfo13SupportsCodecE23btav_a2dp_codec_index_t",&support,&v) ||
+              calls(s,setup,support.address,&provider_at)!=1 || provider_at>=hal_at) return false;
     // Exact numeric-dispatch shape excludes slot 5. Addresses of its local targets remain relocatable.
     const uint32_t zero_and_index[]={0x2a1f03e8,0xb9404009,0x71000d3f};
-    if(!contains(h,hal.size,zero_and_index,3)) return false;
+    const uint32_t zero_and_index80[]={0xb9404008,0x2a1f03e0,0x71000d1f};
+    if(current_layout ? !contains(h,hal.size,zero_and_index80,3) : !contains(h,hal.size,zero_and_index,3)) return false;
     bool rejected_five=false;
     for(size_t i=0;i+16<=hal.size;i+=4) {
-        if(word(h+i)!=0x7100113f || (word(h+i+4)&0xff00001f)!=0x54000000 ||
-           word(h+i+8)!=0x7100193f || (word(h+i+12)&0xff00001f)!=0x54000001) continue;
+        if(word(h+i)!=(current_layout?0x7100111fU:0x7100113fU) || (word(h+i+4)&0xff00001f)!=0x54000000 ||
+           word(h+i+8)!=(current_layout?0x7100191fU:0x7100193fU) || (word(h+i+12)&0xff00001f)!=0x54000001) continue;
         const int64_t displacement=static_cast<int64_t>(static_cast<int32_t>((word(h+i+12)&0x00ffffe0)<<8))>>11;
         const int64_t destination=static_cast<int64_t>(i+12)+displacement;
         if(destination<4 || static_cast<uint64_t>(destination+20)>hal.size) continue;
         // Canary loads/compare leave w8 untouched; return is its low bit (zero on this path).
         const auto* tail=h+destination;
-        rejected_five=word(tail)==0xf9401669 && word(tail+4)==0xf85f83aa &&
-            word(tail+8)==0xeb0a013f && (word(tail+12)&0xff00001f)==0x54000001 &&
-            word(tail+16)==0x12000100;
+        rejected_five=word(tail)==(current_layout?0xf9401668U:0xf9401669U) &&
+            word(tail+4)==(current_layout?0xf85f83a9U:0xf85f83aaU) &&
+            word(tail+8)==(current_layout?0xeb09011fU:0xeb0a013fU) &&
+            (word(tail+12)&0xff00001f)==0x54000001 && word(tail+16)==(current_layout?0x12000000U:0x12000100U);
     }
     return rejected_five;
 }

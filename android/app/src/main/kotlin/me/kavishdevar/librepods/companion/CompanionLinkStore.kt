@@ -14,10 +14,16 @@ import javax.crypto.spec.GCMParameterSpec
 
 internal data class CompanionLink(val peer: String, val device: String, val key: ByteArray)
 
+internal interface CompanionLinkStorage {
+    fun load(): CompanionLink?
+    fun save(link: CompanionLink)
+    fun clear()
+}
+
 /** The peer allowlist and its secret are encrypted together and excluded from Android backup. */
-internal class CompanionLinkStore(context: Context) {
-    private val file = AtomicFile(File(context.noBackupFilesDir, "companion-link"))
-    private val alias = "librepods.companion.link.v1"
+internal class CompanionLinkStore(context: Context, pending: Boolean = false) : CompanionLinkStorage {
+    private val file = AtomicFile(File(context.noBackupFilesDir, if (pending) "companion-link-pending" else "companion-link"))
+    private val alias = if (pending) "librepods.companion.pending.v1" else "librepods.companion.link.v1"
     private fun key(): SecretKey {
         val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
         (store.getKey(alias, null) as? SecretKey)?.let { return it }
@@ -28,7 +34,7 @@ internal class CompanionLinkStore(context: Context) {
         }.generateKey()
     }
 
-    fun load(): CompanionLink? {
+    override fun load(): CompanionLink? {
         if (!file.baseFile.exists()) return null
         val bytes = file.readFully()
         require(bytes.size in 29..1024) { "Invalid saved companion link" }
@@ -39,7 +45,7 @@ internal class CompanionLinkStore(context: Context) {
             CompanionProtocol.address(json.getString("device")), CompanionProtocol.hexBytes(json.getString("key"), 32))
     }
 
-    fun save(link: CompanionLink) {
+    override fun save(link: CompanionLink) {
         require(link.key.size == 32)
         val json = JSONObject().put("peer", CompanionProtocol.address(link.peer))
             .put("device", CompanionProtocol.address(link.device)).put("key", CompanionProtocol.hex(link.key))
@@ -56,5 +62,5 @@ internal class CompanionLinkStore(context: Context) {
         }
     }
 
-    fun clear() = file.delete()
+    override fun clear() = file.delete()
 }

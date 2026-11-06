@@ -31,6 +31,7 @@ data class ConnectedDevicesPacket(
             var offset = 3
 
             for (i in 0 until deviceCount) {
+                require(validRoutingAddress(payload.copyOfRange(offset, offset + 6))) { "Invalid connected-host identity" }
                 val macAddress = MacAddress(payload.sliceArray(offset until offset + 6).toHexString(HexFormat{ upperCase = true }).chunked(2).joinToString(":"))
 
                 val info1 = payload[offset + 6]

@@ -177,6 +177,9 @@ fun AppleSettingsScreen(
     navigateToHeartRateScreen: () -> Unit,
     navigateToDebugScreen: () -> Unit,
     gameMode: NativeGameModeController.State = NativeGameModeController.State(),
+    dongle: Boolean = false,
+    canWriteControl: (ControlCommandIdentifier) -> Boolean = { true },
+    navigateToDongleSettings: (() -> Unit)? = null,
 ) {
     val state = uiState.state
     val settings = uiState.settings
@@ -207,6 +210,7 @@ fun AppleSettingsScreen(
                 )
             }
 
+            if (!dongle) {
             item(key = "spacer_name") { Spacer(modifier = Modifier.height(16.dp)) }
             item(key = "name") {
                 StyledListItem(
@@ -216,20 +220,25 @@ fun AppleSettingsScreen(
                 )
             }
 
+            }
+
+            navigateToDongleSettings?.let { open ->
+                item(key = "dongle_settings") {
+                    StyledListItem(contentText = stringResource(R.string.dongle_title), onClick = open)
+                }
+            }
+
             val hasHearingAidCapability = baseCapabilities.contains(BaseCapability.HEARING_AID)
-            val hasPPECapability = baseCapabilities.contains(BaseCapability.PPE)
+            val hasPPECapability = !dongle && baseCapabilities.contains(BaseCapability.PPE)
 
             if (hasHearingAidCapability || hasPPECapability) {
-                if (hasPPECapability || uiState.vendorIdHook) {
-                    item(key = "spacer_hearing_health") {
-                        Spacer(modifier = Modifier.height(24.dp))
-                    }
+                item(key = "spacer_hearing_health") {
+                    Spacer(modifier = Modifier.height(24.dp))
                 }
                 item(key = "hearing_health") {
                     HearingHealthSettings(
                         hasPPECapability = hasPPECapability,
                         hasHearingAidCapability = hasHearingAidCapability,
-                        vendorIdHook = uiState.vendorIdHook,
                         navigateToHearingProtection = navigateToHearingProtection,
                         navigateToHearingAid = navigateToHearingAid
                     )
@@ -241,8 +250,11 @@ fun AppleSettingsScreen(
                     Spacer(modifier = Modifier.height(16.dp))
                 }
                 item(key = "noise_control") {
-                    NoiseControlSettings(
+                    if (dongle && state.effectiveControl(ControlCommandIdentifier.LISTENING_MODE, settings) == null)
+                        Text(stringResource(R.string.dongle_unknown), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    else NoiseControlSettings(
                         modifier = Modifier.heightIn(min = 108.dp),
+                        enabled = canWriteControl(ControlCommandIdentifier.LISTENING_MODE),
                         showOffListeningMode = state.effectiveAllowOff(settings, metadata.modelNumber) == true,
                         showAdaptiveMode = BaseCapability.ADAPTIVE_AUDIO in baseCapabilities,
                         noiseControlModeValue = (state.requestedControls[ControlCommandIdentifier.LISTENING_MODE]
@@ -279,7 +291,7 @@ fun AppleSettingsScreen(
                                 onAdaptiveStrengthChanged = {
                                     setControlCommandInt(ControlCommandIdentifier.AUTO_ANC_STRENGTH, it)
                                 },
-                                enabled = true
+                                enabled = canWriteControl(ControlCommandIdentifier.AUTO_ANC_STRENGTH)
                             )
 
                             Spacer(modifier = Modifier.height(16.dp))
@@ -288,7 +300,7 @@ fun AppleSettingsScreen(
                 }
             }
 
-            if ((metadata.firmwareMajor ?: 0) >= 8) {
+            if (!dongle && (metadata.firmwareMajor ?: 0) >= 8) {
                 item(key = "spacer_recording") {
                     Spacer(modifier = Modifier.height(16.dp))
                 }
@@ -302,7 +314,7 @@ fun AppleSettingsScreen(
                 }
             }
 
-            if (baseCapabilities.contains(BaseCapability.HRM)) {
+            if (!dongle && baseCapabilities.contains(BaseCapability.HRM)) {
                 val showAlertDisabledMessage = state.hrmState != BuddyState.ACTIVE && settings.hrmAlertEnabled
                 item(key = "spacer_heart_rate") {
                     Spacer(modifier = Modifier.height(16.dp))
@@ -361,16 +373,16 @@ fun AppleSettingsScreen(
             item(key = "audio") {
                 val adaptiveVolumeCapability = baseCapabilities.contains(BaseCapability.ADAPTIVE_VOLUME)
                 val conversationAwarenessCapability = baseCapabilities.contains(BaseCapability.CONVERSATION_AWARENESS)
-                val loudSoundReductionCapability = baseCapabilities.contains(BaseCapability.LOUD_SOUND_REDUCTION)
+                val loudSoundReductionCapability = !dongle && baseCapabilities.contains(BaseCapability.LOUD_SOUND_REDUCTION)
 
-                val adaptiveVolumeChecked = state.controlStates[ControlCommandIdentifier.ADAPTIVE_VOLUME_CONFIG]?.getOrNull(0) == 0x01.toByte()
-                val conversationAwarenessChecked = state.controlStates[ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG]?.getOrNull(0) == 0x01.toByte()
+                val adaptiveVolumeChecked = state.effectiveControl(ControlCommandIdentifier.ADAPTIVE_VOLUME_CONFIG, settings)?.getOrNull(0) == 0x01.toByte()
+                val conversationAwarenessChecked = state.effectiveControl(ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG, settings)?.getOrNull(0) == 0x01.toByte()
 
                 AudioSettings(
                     adaptiveVolumeCapability = adaptiveVolumeCapability,
                     conversationAwarenessCapability = conversationAwarenessCapability,
                     loudSoundReductionCapability = loudSoundReductionCapability,
-                    customEqCapability = metadata.model == me.kavishdevar.librepods.core.devices.AirPodsModel.AIRPODS_PRO_3 && (metadata.firmwareMajor ?: 0) >= 9,
+                    customEqCapability = !dongle && metadata.model == me.kavishdevar.librepods.core.devices.AirPodsModel.AIRPODS_PRO_3 && (metadata.firmwareMajor ?: 0) >= 9,
                     adaptiveVolumeChecked = adaptiveVolumeChecked,
                     onAdaptiveVolumeCheckedChange = { checked ->
                         setControlCommandBoolean(
@@ -399,15 +411,22 @@ fun AppleSettingsScreen(
                     gameModeChecked = settings.nativeGameModeEnabled,
                     gameModeDescription = stringResource(nativeGameModeDescription(gameMode, settings.nativeGameModeEnabled)),
                     onGameModeChanged = { enabled -> updateSettings { it.copy(nativeGameModeEnabled = enabled) } },
+                    adaptiveVolumeEnabled = canWriteControl(ControlCommandIdentifier.ADAPTIVE_VOLUME_CONFIG),
+                    conversationAwarenessEnabled = canWriteControl(ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG),
                 )
             }
 
             item(key = "spacer_connection") { Spacer(modifier = Modifier.height(16.dp)) }
             item(key = "connection") {
                 ConnectionSettings(
+                    earDetectionEnabled = canWriteControl(ControlCommandIdentifier.EAR_DETECTION_CONFIG),
+                    showAutomaticConnection = !dongle || ControlCommandIdentifier.SMART_ROUTING_MODE in state.controlStates,
+                    automaticConnectionWritable = canWriteControl(ControlCommandIdentifier.SMART_ROUTING_MODE),
+                    earDetectionDescription = if (dongle && state.effectiveControl(ControlCommandIdentifier.EAR_DETECTION_CONFIG, settings) == null)
+                        stringResource(R.string.dongle_unknown) else null,
                     automaticEarDetectionEnabled = state.effectiveEarDetection(settings),
                     onAutomaticEarDetectionChanged = { enabled -> setControlCommandBoolean(ControlCommandIdentifier.EAR_DETECTION_CONFIG, enabled); updateSettings { it.copy(earDetectionEnabled = enabled) } },
-                    automaticConnectionEnabled = state.controlStates[ControlCommandIdentifier.SMART_ROUTING_MODE]?.getOrNull(0) == 0x01.toByte(),
+                    automaticConnectionEnabled = state.effectiveControl(ControlCommandIdentifier.SMART_ROUTING_MODE, settings)?.getOrNull(0) == 0x01.toByte(),
                     onAutomaticConnectionChanged = { setControlCommandBoolean(ControlCommandIdentifier.SMART_ROUTING_MODE, it) },
                     takeoverWhenDisconnected = settings.takeoverWhenDisconnected,
                     onTakeoverWhenDisconnectedChanged = { enabled -> updateSettings { it.copy(takeoverWhenDisconnected = enabled) } },
@@ -430,7 +449,8 @@ fun AppleSettingsScreen(
                 val id = ControlCommandIdentifier.MIC_MODE
 
                 val selectedModeText =
-                    when (state.effectiveControl(id, settings)?.getOrNull(0) ?: 0x00.toByte()) {
+                    when (state.effectiveControl(id, settings)?.getOrNull(0) ?: if (dongle) null else 0x00.toByte()) {
+                        null -> stringResource(R.string.dongle_unknown)
                         0x00.toByte() -> stringResource(R.string.microphone_automatic)
                         0x01.toByte() -> stringResource(R.string.microphone_always_right)
                         0x02.toByte() -> stringResource(R.string.microphone_always_left)
@@ -440,7 +460,8 @@ fun AppleSettingsScreen(
                 StyledListItem(
                     contentText = stringResource(R.string.microphone_mode),
                     supportingText = selectedModeText,
-                    onClick = navigateToMicrophoneSettings
+                    onClick = navigateToMicrophoneSettings,
+                    enabled = !dongle || canWriteControl(id),
                 )
             }
 
@@ -450,13 +471,14 @@ fun AppleSettingsScreen(
                     val id = ControlCommandIdentifier.SLEEP_DETECTION_CONFIG
                     StyledToggle(
                         label = stringResource(R.string.sleep_detection),
-                        checked = state.controlStates[id]?.getOrNull(0) == 0x01.toByte(),
+                        checked = state.effectiveControl(id, settings)?.getOrNull(0) == 0x01.toByte(),
+                        enabled = canWriteControl(id),
                         onCheckedChange = { setControlCommandBoolean(id, it) },
                     )
                 }
             }
 
-            if (baseCapabilities.contains(BaseCapability.HEAD_GESTURES)) {
+            if (!dongle && baseCapabilities.contains(BaseCapability.HEAD_GESTURES)) {
                 item(key = "spacer_head_tracking") { Spacer(modifier = Modifier.height(16.dp)) }
                 item(key = "head_tracking") {
                     StyledListItem(
@@ -467,14 +489,18 @@ fun AppleSettingsScreen(
                 }
             }
 
+            if (!dongle || ControlCommandIdentifier.DYNAMIC_END_OF_CHARGE in state.controlStates) {
             item(key = "spacer_dynamic_end_of_charge") { Spacer(modifier = Modifier.height(16.dp)) }
             item(key = "dynamic_end_of_charge") {
                 StyledToggle(
                     label = stringResource(R.string.optimized_charging),
                     description = stringResource(R.string.optimized_charging_description),
-                    checked = state.controlStates[ControlCommandIdentifier.DYNAMIC_END_OF_CHARGE]?.getOrNull(0) == 0x01.toByte(),
+                    enabled = canWriteControl(ControlCommandIdentifier.DYNAMIC_END_OF_CHARGE),
+                    checked = state.effectiveControl(ControlCommandIdentifier.DYNAMIC_END_OF_CHARGE, settings)?.getOrNull(0) == 0x01.toByte(),
                     onCheckedChange = { setControlCommandBoolean(ControlCommandIdentifier.DYNAMIC_END_OF_CHARGE, it) }
                 )
+            }
+
             }
 
             item(key = "spacer_accessibility") { Spacer(modifier = Modifier.height(16.dp)) }
@@ -492,6 +518,7 @@ fun AppleSettingsScreen(
                         label = stringResource(R.string.off_listening_mode),
                         description = stringResource(R.string.off_listening_mode_description),
                         checked = state.effectiveAllowOff(settings, metadata.modelNumber) == true,
+                        enabled = canWriteControl(id),
                         onCheckedChange = { setControlCommandBoolean(id, it) }
                     )
                 }
@@ -508,6 +535,7 @@ fun AppleSettingsScreen(
                 )
             }
 
+            if (!dongle) {
             item(key = "spacer_disconnect") { Spacer(modifier = Modifier.height(16.dp)) }
             item(key = "disconnect_button") {
                 StyledButton(
@@ -545,6 +573,8 @@ fun AppleSettingsScreen(
                         onClick = navigateToDebugScreen
                     )
                 }
+            }
+
             }
 
             item(key = "bottom_padding") { Spacer(modifier = Modifier.height(bottomPadding)) }

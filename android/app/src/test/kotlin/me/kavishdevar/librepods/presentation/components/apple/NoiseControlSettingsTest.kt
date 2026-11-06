@@ -685,7 +685,7 @@ class NoiseControlSettingsTest {
         }
         settle()
         compose.onNodeWithTag("noise-control-thumb").performTouchInput {
-            // Adaptive expands during the gesture, moving ANC toward the far end of the rail.
+            // The rail stays fixed during the gesture; release uses the selected mode's resting geometry.
             swipe(center, Offset(399f, center.y), durationMillis = 480)
         }
         settle()
@@ -697,6 +697,129 @@ class NoiseControlSettingsTest {
         settle()
         assertEquals("A fresh Adaptive mode report becomes authoritative", 160f, thumbLeft(), 1.5f)
         assertEquals("Following a report must never issue a mode command", count, writes.size)
+    }
+
+    @GraphicsMode(GraphicsMode.Mode.LEGACY)
+    @Test fun enteringAdaptiveKeepsGestureGeometryAndDoesNotEditItsStrength() {
+        val mode = mutableStateOf(3)
+        val writes = mutableListOf<Int>()
+        val strengths = mutableListOf<Int>()
+        compose.setContent {
+            LibrePodsTheme(designSystem = DesignSystem.Apple) {
+                NoiseControlSettings(modifier = Modifier.width(400.dp).height(64.dp),
+                    showOffListeningMode = true, noiseControlModeValue = mode.value,
+                    onNoiseControlModeChanged = { writes += it; mode.value = it },
+                    adaptiveStrength = 60, onAdaptiveStrengthChanged = { strengths += it }, showLabels = false)
+            }
+        }
+        settle()
+        val thumb = compose.onNodeWithTag("noise-control-thumb")
+        val originalWidth = thumb.fetchSemanticsNode().boundsInRoot.width
+        thumb.performTouchInput { down(center); moveBy(Offset(110f, 0f)) }
+        compose.mainClock.advanceTimeBy(250)
+        compose.waitForIdle()
+        assertEquals("The finger must select Adaptive immediately", 4, mode.value)
+        assertEquals("The Adaptive echo cannot resize a held thumb", originalWidth,
+            thumb.fetchSemanticsNode().boundsInRoot.width, 1.5f)
+        val heldLeft = thumbLeft()
+        val count = writes.size
+        thumb.performTouchInput { moveBy(Offset(1f, 0f)) }
+        compose.mainClock.advanceTimeBy(250)
+        compose.waitForIdle()
+        assertEquals("A tiny move after an echo must follow the finger", heldLeft + 1f, thumbLeft(), 1.5f)
+        assertEquals("A mode echo cannot generate another mode request", count, writes.size)
+        thumb.performTouchInput { up() }
+        settle()
+        assertEquals(listOf(4), writes)
+        assertTrue("Entering Adaptive must preserve its existing strength", strengths.isEmpty())
+        assertEquals("Release may expand Adaptive using its existing strength", 176f, thumbLeft(), 1.5f)
+    }
+
+    @GraphicsMode(GraphicsMode.Mode.LEGACY)
+    @Test fun leavingAdaptiveKeepsGestureGeometryAndCancellationFollowsTheLatestReport() {
+        val mode = mutableStateOf(4)
+        val writes = mutableListOf<Int>()
+        val strengths = mutableListOf<Int>()
+        compose.setContent {
+            LibrePodsTheme(designSystem = DesignSystem.Apple) {
+                NoiseControlSettings(modifier = Modifier.width(400.dp).height(64.dp),
+                    showOffListeningMode = false, noiseControlModeValue = mode.value,
+                    onNoiseControlModeChanged = { writes += it; mode.value = it },
+                    adaptiveStrength = 50, onAdaptiveStrengthChanged = { strengths += it }, showLabels = false)
+            }
+        }
+        settle()
+        val thumb = compose.onNodeWithTag("noise-control-thumb")
+        val originalWidth = thumb.fetchSemanticsNode().boundsInRoot.width
+        // Enter the drag inside the rail before continuing beyond its Adaptive detent.
+        thumb.performTouchInput { down(center); moveBy(Offset(140f, 0f)) }
+        compose.mainClock.advanceTimeBy(100)
+        compose.waitForIdle()
+        thumb.performTouchInput { moveBy(Offset(100f, 0f)) }
+        compose.mainClock.advanceTimeBy(250)
+        compose.waitForIdle()
+        assertEquals("The continued pull must request ANC: writes=$writes, left=${thumbLeft()}", 2, mode.value)
+        assertEquals("The neighboring mode echo cannot resize a held Adaptive thumb", originalWidth,
+            thumb.fetchSemanticsNode().boundsInRoot.width, 1.5f)
+        val heldLeft = thumbLeft()
+        val count = writes.size
+        thumb.performTouchInput { moveBy(Offset(1f, 0f)) }
+        compose.mainClock.advanceTimeBy(250)
+        compose.waitForIdle()
+        assertEquals("The held thumb stays at the rail's endpoint", heldLeft, thumbLeft(), 1.5f)
+        assertEquals(count, writes.size)
+        compose.runOnIdle { mode.value = 3 }
+        thumb.performTouchInput { cancel() }
+        settle()
+        assertEquals("Cancellation follows the current report rather than an old release animation", 0f, thumbLeft(), 1.5f)
+        assertEquals("Report-driven animation must not issue another mode request", count, writes.size)
+        assertTrue("An endpoint strength must not be repeatedly emitted", strengths.zipWithNext().all { (a, b) -> a != b })
+    }
+
+    @GraphicsMode(GraphicsMode.Mode.LEGACY)
+    @Test fun disablingOrRemovingAdaptiveDuringAHeldDragReleasesFrozenGeometry() {
+        val mode = mutableStateOf(4)
+        val enabled = mutableStateOf(true)
+        val adaptive = mutableStateOf(true)
+        val requested = mutableStateOf<Int?>(null)
+        val modes = mutableListOf<Int>()
+        val strengths = mutableListOf<Int>()
+        compose.setContent {
+            LibrePodsTheme(designSystem = DesignSystem.Apple) {
+                NoiseControlSettings(modifier = Modifier.width(400.dp).height(64.dp),
+                    showOffListeningMode = false, showAdaptiveMode = adaptive.value,
+                    noiseControlModeValue = mode.value,
+                    onNoiseControlModeChanged = { modes += it; mode.value = it },
+                    adaptiveStrength = 50, requestedAdaptiveStrength = requested.value,
+                    onAdaptiveStrengthChanged = { strengths += it; requested.value = it },
+                    showLabels = false, enabled = enabled.value)
+            }
+        }
+        for (disable in listOf(true, false)) {
+            compose.runOnIdle { enabled.value = true; adaptive.value = true; mode.value = 4; requested.value = null }
+            settle()
+            val thumb = compose.onNodeWithTag("noise-control-thumb")
+            thumb.performTouchInput { down(center); moveBy(Offset(45f, 0f)) }
+            compose.mainClock.advanceTimeBy(100)
+            compose.waitForIdle()
+            assertTrue("The gesture must move before its owner changes", thumbLeft() > 160f)
+            val modeCount = modes.size
+            val strengthCount = strengths.size
+            compose.runOnIdle {
+                mode.value = 3
+                if (disable) enabled.value = false else adaptive.value = false
+            }
+            settle()
+            assertEquals("A canceled pointer scope must follow the new report even while the pointer stays down", 0f, thumbLeft(), 1.5f)
+            assertEquals(if (disable) 400f / 3f else 200f, thumb.fetchSemanticsNode().boundsInRoot.width, 1.5f)
+            assertEquals("Canceling its owner cannot repeat a mode request", modeCount, modes.size)
+            assertEquals("Canceling its owner cannot repeat a strength request", strengthCount, strengths.size)
+            thumb.performTouchInput { cancel() }
+            compose.runOnIdle { enabled.value = true }
+            compose.onNodeWithContentDescription("Noise Cancellation").performClick()
+            settle()
+            assertEquals("The next deliberate interaction must remain usable", 2, mode.value)
+        }
     }
 
     @GraphicsMode(GraphicsMode.Mode.LEGACY)

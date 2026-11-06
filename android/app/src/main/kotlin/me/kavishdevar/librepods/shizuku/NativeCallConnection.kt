@@ -64,7 +64,8 @@ internal class NativeCallConnection(private val context: Context, address: Strin
             val active = serviceType.getMethod("getActiveDevice", AttributionSource::class.java)
             fun available() = current() && adapter.isEnabled && device.bondState == BluetoothDevice.BOND_BONDED &&
                 synchronized(gate) { !closed && headset === proxy } && serviceGetter.invoke(proxy) === service &&
-                binder.isBinderAlive && binder.pingBinder() && policy.invoke(service, device, source) in setOf(0, 100)
+                binder.isBinderAlive && binder.pingBinder() && policy.invoke(service, device, source) in setOf(0, 100) &&
+                serviceGetter.invoke(proxy) === service && binder.isBinderAlive && current()
             fun selectedActive() = active.invoke(service, source) as? BluetoothDevice
             fun snapshot(): Int {
                 if (!available()) return 0
@@ -77,7 +78,7 @@ internal class NativeCallConnection(private val context: Context, address: Strin
             if (proxy.connectedDevices.any { it.address != address } || selectedActive()?.let { it.address != address } == true) return 0
             if (!connect) return snapshot()
             fun mayConnect() = available() && context.getSystemService(TelecomManager::class.java).isInCall &&
-                proxy.connectedDevices.none { it.address != address } && selectedActive()?.let { it.address == address } != false
+                proxy.connectedDevices.none { it.address != address } && selectedActive()?.let { it.address == address } != false && current()
             val connected = connectSelected({ proxy.getConnectionState(device) }, ::mayConnect,
                 { BluetoothHeadset::class.java.getDeclaredMethod("connect", BluetoothDevice::class.java)
                     .apply { isAccessible = true }.invoke(proxy, device) == true })
@@ -89,6 +90,7 @@ internal class NativeCallConnection(private val context: Context, address: Strin
             val deadline = SystemClock.elapsedRealtime() + 1500
             while (mayConnect() && SystemClock.elapsedRealtime() < deadline) {
                 val value = snapshot()
+                if (!mayConnect() || SystemClock.elapsedRealtime() >= deadline) return 0
                 if (value and READY == READY) return value
                 Thread.sleep(40)
             }
@@ -118,16 +120,24 @@ internal class NativeCallConnection(private val context: Context, address: Strin
         internal fun connectSelected(state: () -> Int, current: () -> Boolean, connect: () -> Boolean,
             now: () -> Long = { SystemClock.elapsedRealtime() }, pause: () -> Unit = { Thread.sleep(40) }): Boolean {
             val deadline = now() + 18_000
+            fun live() = now() < deadline && current() && now() < deadline
             var issued = false
             var progressing = false
-            while (now() < deadline && current()) {
-                when (state()) {
-                    BluetoothProfile.STATE_CONNECTED -> return current()
+            while (live()) {
+                val value = state()
+                if (!live()) return false
+                when (value) {
+                    BluetoothProfile.STATE_CONNECTED -> return live()
                     BluetoothProfile.STATE_CONNECTING -> progressing = true
                     BluetoothProfile.STATE_DISCONNECTED -> {
-                        if (progressing || issued || !current()) return false
+                        if (progressing || issued || !live()) return false
                         issued = true
-                        if (!connect() && state() !in setOf(BluetoothProfile.STATE_CONNECTING, BluetoothProfile.STATE_CONNECTED)) return false
+                        val accepted = connect()
+                        if (!live()) return false
+                        if (!accepted) {
+                            val after = state()
+                            if (!live() || after !in setOf(BluetoothProfile.STATE_CONNECTING, BluetoothProfile.STATE_CONNECTED)) return false
+                        }
                     }
                     BluetoothProfile.STATE_DISCONNECTING -> if (issued || progressing) return false
                     else -> return false

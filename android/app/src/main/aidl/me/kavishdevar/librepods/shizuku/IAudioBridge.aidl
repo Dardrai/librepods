@@ -2,6 +2,9 @@ package me.kavishdevar.librepods.shizuku;
 
 import me.kavishdevar.librepods.shizuku.IPlaybackRecoveryOwner;
 import me.kavishdevar.librepods.shizuku.IHfpCallControl;
+import me.kavishdevar.librepods.shizuku.IUsbAbsoluteVolumePolicy;
+import me.kavishdevar.librepods.shizuku.IUsbAbsoluteVolumeEvents;
+import me.kavishdevar.librepods.shizuku.IUsbHidConnection;
 import android.os.Bundle;
 import android.os.ParcelFileDescriptor;
 
@@ -30,5 +33,16 @@ interface IAudioBridge {
     Bundle communicationState(IPlaybackRecoveryOwner owner) = 21;
     Bundle finishCommunication(IPlaybackRecoveryOwner owner, boolean inputQuiet) = 22;
     Bundle inspectCallMedia(String address) = 23;
+    Bundle inspectUsbAbsoluteVolume(int audioDeviceId, String boardSerial) = 24;
+    Bundle startUsbAbsoluteVolume(IPlaybackRecoveryOwner owner, IUsbAbsoluteVolumePolicy policy,
+        IUsbAbsoluteVolumeEvents events, in Bundle proof) = 25;
+    Bundle renewUsbAbsoluteVolume(IPlaybackRecoveryOwner owner, in Bundle proof) = 26;
+    Bundle notifyUsbAbsoluteVolume(IPlaybackRecoveryOwner owner, in Bundle proof, long acknowledgedRequestSequence) = 27;
+    Bundle releaseUsbAbsoluteVolume(IPlaybackRecoveryOwner owner) = 28;
+    Bundle inspectUsbAbsoluteVolumePolicy(IUsbAbsoluteVolumePolicy policy, int audioDeviceId,
+        String boardSerial) = 29;
+    IUsbHidConnection openDongleHid(String deviceName, String boardSerial, int interfaceId,
+        IPlaybackRecoveryOwner owner) = 30;
+    Bundle inspectCompanionMedia(String address) = 31;
     void destroy() = 16777114;
 }

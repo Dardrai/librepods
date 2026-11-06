@@ -26,7 +26,7 @@ const char* const contexts[]={
 uint32_t word(const uint8_t* p) { uint32_t value; std::memcpy(&value,p,4); return value; }
 uint64_t wide(const uint8_t* p) { uint64_t value; std::memcpy(&value,p,8); return value; }
 bool function(const SymbolImage& image,const char* name,ImageSymbol* symbol,const uint8_t** bytes) {
-    return image.resolve(name,true,symbol) && symbol->size>=4 && symbol->size<=65536 &&
+    return pixel17_resolve_context(image,name,symbol) && symbol->size>=4 && symbol->size<=65536 &&
         symbol->size%4==0 && (*bytes=image.bytes(symbol->address,symbol->size,5));
 }
 bool function_at(const SymbolImage& image,uint64_t address,ImageSymbol* symbol,const uint8_t** bytes) {
@@ -82,11 +82,29 @@ bool destructor_contract(const SymbolImage& image,uint64_t nondeleting,uint64_t 
     uint64_t target;
     if(!branch(word(a+4),first.address+4,false,&target) || target!=base.address) return false;
     const std::array<uint32_t,6> prefix{0xd503233f,0xf800865e,0xa9be7bfd,0xf9000bf3,0x910003fd,0xaa0003f3};
-    const std::array<uint32_t,6> tail{0xaa1303e0,0x52804501,0xf9400bf3,0xa8c27bfd,0xf85f8e5e,0xd50323bf};
+    ImageSymbol ctor; const uint8_t* c;
+    if(!function(image,kPixel17AacCtor,&ctor,&c)) return false;
+    const std::array<uint32_t,1> source80{0x3909de75};
+    const bool current=occurrences(c,ctor.size,source80)==1;
+    const std::array<uint32_t,6> tail{0xaa1303e0,current?0x52804f01U:0x52804501U,0xf9400bf3,0xa8c27bfd,0xf85f8e5e,0xd50323bf};
     if(occurrences(b,24,prefix)!=1 || !branch(word(b+24),second.address+24,true,&target) || target!=base.address ||
        occurrences(b+28,24,tail)!=1 || !branch(word(b+52),second.address+52,false,&target) || target!=release.address)
         return false;
     return true;
+}
+template<size_t N> bool current_lookup_dispatch(const SymbolImage& image,const char* name,unsigned reg,
+                                               const std::array<uint32_t,N>& dispatch) {
+    ImageSymbol symbol,unlock; const uint8_t *p,*u;
+    if(!function(image,name,&symbol,&p) || !function(image,kPixel17Unlock,&unlock,&u)) return false;
+    size_t matches=0;
+    for(size_t i=16;i+N*4<=symbol.size;i+=4) {
+        uint64_t target;
+        if(word(p+i-16)!=(0xf9401500U|reg) || word(p+i-12)!=0xaa1303e0 ||
+           !branch(word(p+i-8),symbol.address+i-8,true,&target) || target!=unlock.address ||
+           (word(p+i-4)&0xff00001f)!=(0xb4000000U|reg)) continue;
+        if(occurrences(p+i,N*4,dispatch)==1) ++matches;
+    }
+    return matches==1;
 }
 bool consumers(const SymbolImage& image) {
     // The complete return-to-dispatch spans contain no vcall CFI/range/type check. A changed
@@ -94,8 +112,13 @@ bool consumers(const SymbolImage& image) {
     const std::array<uint32_t,9> set_config{0xf9400008,0x12000302,0xaa1703e1,0xaa1603e3,
         0xaa0003f5,0xf9401508,0xd63f0100,0x72001c1f,0x1a9f17f6};
     const std::array<uint32_t,5> set_peer{0xf9400008,0xaa1403e1,0xf9401908,0xd63f0100,0x2a0003f4};
-    if(!lookup_dispatch(image,"_ZN10A2dpCodecs14setCodecConfigEPKhbPhb",set_config) ||
-       !lookup_dispatch(image,"_ZN10A2dpCodecs28setPeerSinkCodecCapabilitiesEPKh",set_peer)) return false;
+    const std::array<uint32_t,9> set_config80{0xf9400308,0x120002e2,0xaa1803e0,0xaa1603e1,
+        0xaa1503e3,0xf9401508,0xd63f0100,0x72001c1f,0x1a9f17f5};
+    const std::array<uint32_t,6> set_peer80{0xf94002a8,0xaa1503e0,0xaa1403e1,0xf9401908,0xd63f0100,0x2a0003f4};
+    const bool current=current_lookup_dispatch(image,"_ZN10A2dpCodecs14setCodecConfigEPKhbPhb",24,set_config80) &&
+        current_lookup_dispatch(image,"_ZN10A2dpCodecs28setPeerSinkCodecCapabilitiesEPKh",21,set_peer80);
+    if(!current && (!lookup_dispatch(image,"_ZN10A2dpCodecs14setCodecConfigEPKhbPhb",set_config) ||
+       !lookup_dispatch(image,"_ZN10A2dpCodecs28setPeerSinkCodecCapabilitiesEPKh",set_peer))) return false;
     ImageSymbol user,destruct,init,debug,start,marker; const uint8_t *u,*d,*i,*g,*s,*m;
     if(!function(image,"_ZN15A2dpCodecConfig18setCodecUserConfigERK24btav_a2dp_codec_config_tS2_PK30tA2DP_ENCODER_INIT_PEER_PARAMSPKhbPhPbS9_S9_",&user,&u) ||
        !function(image,"_ZN10A2dpCodecsD1Ev",&destruct,&d) || !function(image,kPixel17Init,&init,&i) ||
@@ -104,6 +127,7 @@ bool consumers(const SymbolImage& image) {
        !function(image,"_Z15bta_av_start_okP11tBTA_AV_SCBP12tBTA_AV_DATA",&marker,&m)) return false;
     const std::array<uint32_t,5> destruction{0xf94016a0,0xb4000080,0xf9400008,0xf9400508,0xd63f0100};
     const std::array<uint32_t,4> initialization{0xf9400388,0xaa1c03e0,0xf9401d08,0xd63f0100};
+    const std::array<uint32_t,4> initialization80{0xf9400348,0xaa1a03e0,0xf9401d08,0xd63f0100};
     const std::array<uint32_t,5> debugging{0xf9400aa0,0x2a1403e1,0xf9400008,0xf9402108,0xd63f0100};
     const std::array<uint32_t,5> rate{0xaa1503e0,0xf94002a8,0xf9400908,0xd63f0100,0x6f00e400};
     const std::array<uint32_t,5> mark{0xf9400008,0xf9400d08,0xd63f0100,0x12000008,0x391b1668};
@@ -112,9 +136,15 @@ bool consumers(const SymbolImage& image) {
         0xad0a0662,0xad090263,0xad4b0261,0xad410f22,0xad401325,0xad0083e1,
         0xad4c0660,0xad0c0e62,0xad0b1265,0xf9401508,0xad0187e0,0xd63f0100,
         0x2a0003fb,0x72001c1f};
-    return occurrences(d,destruct.size,destruction)==2 && occurrences(i,init.size,initialization)==1 &&
+    const std::array<uint32_t,25> user80{
+        0xf9400268,0xad048be1,0xad418742,0x3d802fe0,0xad408345,0xad0c0662,0x3dc05a61,0x3dc07a62,
+        0xad0b0265,0x3dc00320,0xad0387e3,0x3d801be2,0x3d806a60,0xad4e0261,0xad408b23,0xad0203e1,
+        0xad418321,0xad0e8261,0x3dc06e60,0xad0d8a63,0xf9401508,0xad0103e4,0xd63f0100,0x2a0003f5,0x72001c1f};
+    return occurrences(d,destruct.size,destruction)==2 &&
+        (current?occurrences(i,init.size,initialization80):occurrences(i,init.size,initialization))==1 &&
         occurrences(g,debug.size,debugging)==1 && occurrences(s,start.size,rate)==1 &&
-        occurrences(m,marker.size,mark)==1 && occurrences(u,user.size,user_dispatch)==1;
+        occurrences(m,marker.size,mark)==1 &&
+        (current?occurrences(u,user.size,user80):occurrences(u,user.size,user_dispatch))==1;
 }
 }
 

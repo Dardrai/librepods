@@ -20,13 +20,22 @@ package me.kavishdevar.librepods.core.utils
 
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import me.kavishdevar.librepods.core.data.apple.MotionReport
 
 data class Acceleration(val vertical: Float = 0f, val horizontal: Float = 0f)
 
-// TODO: remove
 object HeadTracking {
     private val _acceleration = MutableStateFlow(Acceleration())
     val acceleration = _acceleration.asStateFlow()
+    // Historical acceleration consumers receive gyro channels; preserve their thresholds.
+    val angularVelocity = acceleration
+    private val _motion = MutableStateFlow<MotionReport?>(null)
+    val motion = _motion.asStateFlow()
+
+    fun addMotion(report: MotionReport?, vert: Float, horiz: Float) {
+        _motion.value = report
+        addAccel(vert, horiz)
+    }
 
     fun addAccel(vert: Float, horiz: Float) {
         _acceleration.value = Acceleration(vert, horiz)
@@ -34,5 +43,6 @@ object HeadTracking {
 
     fun reset() {
         _acceleration.value = Acceleration()
+        _motion.value = null
     }
 }

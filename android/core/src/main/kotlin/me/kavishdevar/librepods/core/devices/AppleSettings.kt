@@ -16,6 +16,8 @@ data class AppleSettings(
     // Host playback automation is independent of the accessory's ear-detection configuration.
     val hostAutoPause: Boolean = true,
     val nativeGameModeEnabled: Boolean = false,
+    val experimentalHearingCapability: Boolean = false,
+    val experimentalMacSourceAnnouncement: Boolean = false,
     val callTakeoverEnabled: Boolean = false,
     val callReturnEnabled: Boolean = true,
     // Permission and consent are local; a synced desired policy cannot enable call monitoring.
@@ -30,6 +32,8 @@ data class AppleSettings(
     val headGesturesVerticalOffset: Int = 30,
     val headGesturesHorizontalOffset: Int = 28,
     val headTrackingInterval: Duration = 40.milliseconds,
+    // Old saved values were never sent to the accessory; keep captured defaults until explicitly changed.
+    val headTrackingIntervalConfigured: Boolean = false,
 
     val leftLongPressAction: StemAction = StemAction.CYCLE_NOISE_CONTROL_MODES, // left_long_press_action
     val rightLongPressAction: StemAction = StemAction.CYCLE_NOISE_CONTROL_MODES, // right_long_press_action

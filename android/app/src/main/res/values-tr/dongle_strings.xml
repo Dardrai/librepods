@@ -78,7 +78,7 @@
     <string name="dongle_constant">Sabit bit hızı</string>
     <string name="dongle_variable">Değişken bit hızı</string>
     <string name="dongle_bitrate">Bit hızı veya sınırı</string>
-    <string name="dongle_active_codec">Etkin çıkış: %1$s · kararlaştırılan sınır %2$d kbps</string>
+    <string name="dongle_active_codec">Etkin çıkış: %1$s · kodlayıcı bit hızı sınırı %2$s kbps</string>
     <string name="dongle_game_mode">Oyun modu</string>
     <string name="dongle_game_pending">Ses aktarımı bekleniyor</string>
     <string name="dongle_game_failed">İstek başarısız oldu</string>
@@ -108,4 +108,21 @@
     <string name="dongle_weaker">daha zayıf</string>
     <string name="dongle_trend_unknown">eğilim bilgisi yok</string>
     <string name="dongle_finder_description">Yalnızca seçili kulaklık çiftine ait olduğu doğrulanan yayınları kullanır. Sinyal gücü mesafeyi veya yönü belirtmez.</string>
+    <string name="dongle_attach_or_pair">Bir USB dongle bağlayın veya Android Bluetooth ayarlarında AirPods Dongle ile eşleştirin.</string>
+    <string name="dongle_usb_permission">USB bağlı · kontroller için erişime izin verin</string>
+    <string name="dongle_usb_controls_only">USB kontrolleri bağlı · kulaklıklar kullanılamıyor</string>
+    <string name="dongle_usb_audio_available">USB kontrolleri bağlı · kulaklıklar kullanılabilir</string>
+    <string name="dongle_reconnect_airpods">AirPods’u yeniden bağla</string>
+    <string name="dongle_pair_airpods">AirPods’u eşleştir</string>
+    <string name="dongle_pair_airpods_description">Oynatmayı ve mikrofonu duraklatıp AirPods’u eşleştirme moduna alın. Dongle bir çift arayacak.</string>
+    <string name="dongle_pair_phone">Bluetooth telefon eşleştirmesine izin ver</string>
+    <string name="dongle_profile_idle">Çıkış profilini değiştirmeden önce oynatmayı ve mikrofonu duraklatın.</string>
+    <string name="dongle_phone_pairing">Bluetooth eşleştirmesi kullanılabilir</string>
+    <string name="dongle_hardware_volume">Donanım ses düzeyi</string>
+    <string name="dongle_hardware_volume_unavailable">Root ve dongle’ın seçili USB ses çıkışı gerekir.</string>
+    <string name="dongle_volume_failed">Donanım ses denetimi durdu. Tekrar denemeden önce kontrolleri yeniden bağlayın.</string>
+    <string name="dongle_volume_restore_failed">Donanım ses denetimi geri yüklenemedi. Oynatmayı duraklatılmış halde tutup kontrolleri yeniden bağlayın.</string>
+    <string name="dongle_hold_initialize_title">İki AirPod’u da ayarla</string>
+    <string name="dongle_hold_initialize_description">Her AirPod için bir eylem seçin. İki ayar birlikte güncellenir.</string>
+    <string name="dongle_assistant_requires_direct">Asistan için AirPods’a doğrudan bağlantı gerekir.</string>
 </resources>

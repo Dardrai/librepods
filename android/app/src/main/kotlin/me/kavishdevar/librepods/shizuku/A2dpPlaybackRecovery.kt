@@ -99,24 +99,31 @@ internal class A2dpPlaybackRecovery(
     internal fun connectProfile(profile: BluetoothA2dp, device: BluetoothDevice, deadline: Long,
         now: () -> Long = { SystemClock.elapsedRealtime() }, pause: () -> Unit = { Thread.sleep(40) }): Boolean {
         val started = now()
-        fun eligible(): Boolean {
+        fun eligible(until: Long = deadline): Boolean {
+            if (now() >= until) return false
             refreshOwner()
-            return guard.mayReconnect(profile.connectedDevices.any { it.address != guard.address }) &&
-                device.bondState == BluetoothDevice.BOND_BONDED
+            if (now() >= until || !guard.mayReconnect(false)) return false
+            val competing = profile.connectedDevices.any { it.address != guard.address }
+            val bonded = device.bondState == BluetoothDevice.BOND_BONDED
+            if (now() >= until) return false
+            refreshOwner()
+            return now() < until && guard.mayReconnect(competing) && bonded
         }
         fun awaitState(state: Int, until: Long): Boolean {
-            while (now() < until) {
-                if (!eligible()) return false
-                if (profile.getConnectionState(device) == state) return true
+            while (eligible(until)) {
+                val value = profile.getConnectionState(device)
+                if (!eligible(until)) return false
+                if (value == state) return true
                 pause()
             }
             return false
         }
         fun awaitConnection(alreadyConnecting: Boolean): Boolean {
             var progressing = alreadyConnecting
-            while (now() < deadline) {
+            while (eligible()) {
+                val value = profile.getConnectionState(device)
                 if (!eligible()) return false
-                when (profile.getConnectionState(device)) {
+                when (value) {
                     BluetoothProfile.STATE_CONNECTED -> return true
                     BluetoothProfile.STATE_CONNECTING -> progressing = true
                     BluetoothProfile.STATE_DISCONNECTED -> if (progressing) return false
@@ -126,18 +133,21 @@ internal class A2dpPlaybackRecovery(
             }
             return false
         }
+        if (!eligible()) return false
         var initial = profile.getConnectionState(device)
-        while (initial == BluetoothProfile.STATE_DISCONNECTING && now() < deadline) {
-            if (!eligible()) return false
+        if (!eligible()) return false
+        while (initial == BluetoothProfile.STATE_DISCONNECTING) {
             pause()
+            if (!eligible()) return false
             initial = profile.getConnectionState(device)
+            if (!eligible()) return false
         }
         guard.begin(initial == BluetoothProfile.STATE_CONNECTED)
-        if (!eligible() || now() >= deadline) return false
+        if (!eligible()) return false
         Log.i("NearbyTakeover", "A2DP start: connectOnly=$connectOnly state=$initial")
         val result = when (initial) {
             BluetoothProfile.STATE_CONNECTED -> if (connectOnly) true else {
-                if (!guard.mayDisconnect(profile.connectedDevices.any { it.address != guard.address }) ||
+                if (!guard.mayDisconnect(profile.connectedDevices.any { it.address != guard.address }) || !eligible() ||
                     !invokeProfile(profile, "disconnect", device)) false else {
                     guard.disconnectedByUs()
                     if (!awaitState(BluetoothProfile.STATE_DISCONNECTED, minOf(deadline, now() + 1500)) || !eligible()) false
@@ -149,19 +159,23 @@ internal class A2dpPlaybackRecovery(
             }
             BluetoothProfile.STATE_CONNECTING -> awaitConnection(true)
             BluetoothProfile.STATE_DISCONNECTED -> {
-                if (!eligible() || now() >= deadline) false else {
+                if (!eligible()) false else {
                     connectIssued = invokeProfile(profile, "connect", device)
-                    if (connectIssued) awaitConnection(false)
-                    else when (profile.getConnectionState(device)) {
-                        BluetoothProfile.STATE_CONNECTED -> eligible()
-                        BluetoothProfile.STATE_CONNECTING -> awaitConnection(true)
-                        else -> false
+                    if (!eligible()) false else if (connectIssued) awaitConnection(false)
+                    else {
+                        val after = profile.getConnectionState(device)
+                        if (!eligible()) false else when (after) {
+                            BluetoothProfile.STATE_CONNECTED -> true
+                            BluetoothProfile.STATE_CONNECTING -> awaitConnection(true)
+                            else -> false
+                        }
                     }
                 }
             }
             else -> false
         }
-        Log.i("NearbyTakeover", "A2DP complete: connected=$result elapsedMs=${now() - started}")
-        return result
+        val connected = result && eligible()
+        Log.i("NearbyTakeover", "A2DP complete: connected=$connected elapsedMs=${now() - started}")
+        return connected && now() < deadline
     }
 }

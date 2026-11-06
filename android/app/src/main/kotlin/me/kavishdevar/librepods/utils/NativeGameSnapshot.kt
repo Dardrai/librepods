@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 package me.kavishdevar.librepods.utils
 
-/** Version1 fixed scalar layout shared with fluoride_hooks.cpp; contains no native addresses. */
+/** Version2 appends controller packet policy; version1 remains readable for installed backends. */
 internal class NativeGameSnapshot private constructor(private val values: LongArray) {
     val supported get() = values[1] == 1L
     val busy get() = values[2] == 1L
@@ -14,7 +14,8 @@ internal class NativeGameSnapshot private constructor(private val values: LongAr
     val baselineSlots get() = values[10].toInt()
     val currentKnown get() = values[11] == 1L
     val currentSlots get() = values[12].toInt()
-    val restorePending get() = values[13] == 1L
+    val restorePending get() = values[13] == 1L || packetPending || packetRestorePending ||
+        (packetBaselineKnown && packetBaseline != packetCurrent)
     val cancelled get() = values[14] == 1L
     val requestMediaGeneration get() = values[15]
     val requestEncoderGeneration get() = values[16]
@@ -57,8 +58,14 @@ internal class NativeGameSnapshot private constructor(private val values: LongAr
     val clockRequestedInterval get() = values[71].toInt()
     val clockInterval get() = values[72].toInt()
     val clockDriftMs get() = values[73].toInt()
+    val packetBaselineKnown get() = values.size == 86 && values[79] == 1L
+    val packetBaseline get() = if (values.size == 86) values[80].toInt() else 0
+    val packetCurrent get() = if (values.size == 86) values[81].toInt() else 0
+    val packetPending get() = values.size == 86 && values[82] == 1L
+    val packetRestorePending get() = values.size == 86 && values[83] == 1L
     val restored get() = !holding && !busy && !restorePending && !clockPending && clockInterval == 10 && baselineKnown && currentKnown &&
-        baselineSlots == currentSlots
+        baselineSlots == currentSlots && !packetPending && !packetRestorePending &&
+        (!packetBaselineKnown || packetBaseline == packetCurrent)
     // Runtime resets each accepted Prepare, checks its owner before the first HCI read,
     // and records a captured baseline plus restore debt before any controller write.
     val noControllerMutation get() = supported && operation == 3 && phase == 9 && error == 3 &&
@@ -77,13 +84,16 @@ internal class NativeGameSnapshot private constructor(private val values: LongAr
         "baselineKnown=$baselineKnown baseline=$baselineSlots currentKnown=$currentKnown " +
         "current=$currentSlots restorePending=$restorePending restored=$restored noControllerMutation=$noControllerMutation " +
         "opcode=$lastOpcode controllerStatus=$controllerStatus holding=$holding " +
+        "packetBaseline=$packetBaseline packetCurrent=$packetCurrent packetPending=$packetPending packetRestorePending=$packetRestorePending " +
         "clockRequest=$clockRequestSerial clockPending=$clockPending clockPhase=$clockPhase " +
         "clockSerial=$clockSerial clockInterval=$clockInterval clockDrift=$clockDriftMs " +
         "clockActualFrames=${values[74]} clockNominalFrames=${values[75]} clockProgressFrames=${values[76]}"
 
     companion object {
         fun parse(input: LongArray): NativeGameSnapshot? {
-            if (input.size != 79 || input[0] != 1L || input[61] != 1L) return null
+            if (!((input.size == 79 && input[0] == 1L) || (input.size == 86 && input[0] == 2L)) || input[61] != 1L) return null
+            if (input.size == 86 && (listOf(79, 82, 83, 84).any { input[it] !in 0L..1L } ||
+                    input[80] !in 0L..65535L || input[81] !in 0L..65535L || input[85] !in 0L..7L)) return null
             if (input.indices.any { it != 47 && it != 76 && input[it] < 0 }) return null
             if (listOf(1, 2, 9, 11, 13, 14, 56, 57).any { input[it] !in 0L..1L } ||
                 input[3] !in 0L..11L || input[4] !in 1L..3L || input[7] !in 0L..7L ||

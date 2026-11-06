@@ -77,7 +77,7 @@
     <string name="dongle_constant">固定位元率</string>
     <string name="dongle_variable">可變位元率</string>
     <string name="dongle_bitrate">位元率或上限</string>
-    <string name="dongle_active_codec">目前輸出：%1$s · 協商上限 %2$d kbps</string>
+    <string name="dongle_active_codec">目前輸出：%1$s · 編碼器位元率上限 %2$s kbps</string>
     <string name="dongle_game_mode">遊戲模式</string>
     <string name="dongle_game_pending">正在等待音訊傳輸連線</string>
     <string name="dongle_game_failed">要求失敗</string>
@@ -106,4 +106,21 @@
     <string name="dongle_weaker">減弱</string>
     <string name="dongle_trend_unknown">趨勢無法使用</string>
     <string name="dongle_finder_description">僅使用已核實與選定耳機相符的廣播。訊號強度不代表距離或方向。</string>
+    <string name="dongle_attach_or_pair">連接 USB 轉接器，或在 Android 藍牙設定中配對 AirPods Dongle。</string>
+    <string name="dongle_usb_permission">USB 已連接 · 請允許控制存取</string>
+    <string name="dongle_usb_controls_only">USB 控制已連接 · 耳機無法使用</string>
+    <string name="dongle_usb_audio_available">USB 控制已連接 · 耳機可用</string>
+    <string name="dongle_reconnect_airpods">重新連接 AirPods</string>
+    <string name="dongle_pair_airpods">配對 AirPods</string>
+    <string name="dongle_pair_airpods_description">暫停播放和麥克風使用，然後將 AirPods 置於配對模式。轉接器將搜尋耳機。</string>
+    <string name="dongle_pair_phone">允許藍牙手機配對</string>
+    <string name="dongle_profile_idle">變更輸出設定前，請暫停播放和麥克風使用。</string>
+    <string name="dongle_phone_pairing">可進行藍牙配對</string>
+    <string name="dongle_hardware_volume">硬體音量</string>
+    <string name="dongle_hardware_volume_unavailable">需要 root 權限並選取轉接器的 USB 音訊路由。</string>
+    <string name="dongle_volume_failed">硬體音量控制已停止。請重新連接控制後再試。</string>
+    <string name="dongle_volume_restore_failed">無法還原硬體音量。請保持暫停播放並重新連接控制。</string>
+    <string name="dongle_hold_initialize_title">設定兩隻 AirPods</string>
+    <string name="dongle_hold_initialize_description">為每隻 AirPod 選擇動作。兩側設定會同時更新。</string>
+    <string name="dongle_assistant_requires_direct">使用助理需要直接連接 AirPods。</string>
 </resources>

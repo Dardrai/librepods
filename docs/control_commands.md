@@ -94,7 +94,15 @@ Format: Single value (1 byte)
 
 ### 0x16 - ClickHoldMode
 Format: Two values (2 bytes; First byte = right bud, Second byte = left bud).  
-Values: `0x01` = Noise control, `0x05` = Siri.  
+Values: `0x01` = Siri/Assistant, `0x05` = Noise control.
+
+Tahoe `25G241` `bluetoothd` packs left into bits 8–15 and right into bits 0–7
+without translating the values before sending control `0x16`. Its action-name
+table identifies `1` as Siri and `5` as NoiseManagement. The sender is at
+`0x10008EDC9`–`0x10008EE7C`, with the table at `0x100AA90F0` (x86_64 preferred
+addresses; binary SHA-256 `93f3afbf2bb7d84855ae1f2b24c9a222250f33c2808a7b80094bae15c0f62f65`).
+Incoming reports can include previous right/left actions in the upper two bytes;
+preserve those raw bytes but send only the current pair in commands.
 
 ### 0x17 - DoubleClickInterval
 Format: Single value (1 byte)

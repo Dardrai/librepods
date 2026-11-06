@@ -21,15 +21,15 @@ data class AudioSourcePacket(
         fun parse(
             packet: ByteArray,
         ): AudioSourcePacket {
-            if (packet.size < 13) {
-                throw IllegalArgumentException("Data array too short to parse Audio Source Response")
-            }
+            require(packet.size == 13 && packet.copyOfRange(0, 6).contentEquals(byteArrayOf(4, 0, 4, 0, 0x0e, 0))) { "Invalid audio-source report" }
 
             val payload = packet.copyOfRange(6, packet.size)
-            val macAddress = MacAddress(payload.sliceArray(0..5).toHexString(HexFormat{ upperCase = true }).chunked(2).joinToString(":"))
+            val address = payload.copyOfRange(0, 6).reversedArray()
+            val macAddress = MacAddress(address.toHexString(HexFormat{ upperCase = true }).chunked(2).joinToString(":"))
 
             val typeByte = payload[6]
             val type = AudioSourceType.fromByte(typeByte)
+            require(type != AudioSourceType.UNKNOWN && (type == AudioSourceType.NONE || validRoutingAddress(address))) { "Invalid audio-source identity or type" }
 
             val audioSource = AudioSource(macAddress, type)
 

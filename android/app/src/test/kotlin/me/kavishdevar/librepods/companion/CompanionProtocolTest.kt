@@ -41,6 +41,13 @@ class CompanionProtocolTest {
         }
     }
 
+    @Test fun malformedUtf8IsAProtocolFailureWhileEofRemainsATransportFailure() {
+        assertThrows(IllegalArgumentException::class.java) {
+            CompanionProtocol.read(ByteArrayInputStream(byteArrayOf(0xc0.toByte(), 0xaf.toByte(), 10)))
+        }
+        assertThrows(java.io.EOFException::class.java) { CompanionProtocol.read(ByteArrayInputStream(byteArrayOf())) }
+    }
+
     @Test fun receiptsMustMatchTheirExactPhaseAndBooleanType() {
         val result = CompanionProtocol.frame("result", device, tx, sid).put("phase", "release").put("ok", true).put("code", "released")
         CompanionProtocol.validate(result, device, sid)
@@ -60,5 +67,26 @@ class CompanionProtocolTest {
         assertThrows(IllegalArgumentException::class.java) { CompanionProtocol.validate(ping, device, sid) }
         val acquire = CompanionProtocol.frame("acquire", device, sid = sid)
         assertThrows(IllegalArgumentException::class.java) { CompanionProtocol.validate(acquire, device, sid) }
+    }
+
+    @Test fun mediaFramesRequireExactEvidenceAndPurposeBoundGeneration() {
+        val query = CompanionProtocol.frame("media_query", device, sid = sid).put("probe", tx)
+        CompanionProtocol.validate(query, device, sid)
+        val sample = CompanionProtocol.frame("media_state", device, sid = sid).put("probe", tx)
+            .put("generation", tx).put("event", CompanionProtocol.HANDSHAKE_TX)
+            .put("known", true).put("playing", false).put("connected", true).put("available", true)
+        CompanionProtocol.validate(sample, device, sid)
+        sample.put("known", false)
+        assertThrows(IllegalArgumentException::class.java) { CompanionProtocol.validate(sample, device, sid) }
+        val prepare = CompanionProtocol.frame("prepare", device, tx, sid).put("target", "android")
+            .put("purpose", "media").put("episode", "0".repeat(32)).put("call_gen", CompanionProtocol.HANDSHAKE_TX)
+            .put("origin_token", "0".repeat(32)).put("media_gen", tx)
+        CompanionProtocol.validate(prepare, device, sid)
+        prepare.remove("media_gen")
+        assertThrows(IllegalArgumentException::class.java) { CompanionProtocol.validate(prepare, device, sid) }
+        prepare.put("media_gen", tx).put("purpose", "manual")
+        assertThrows(IllegalArgumentException::class.java) { CompanionProtocol.validate(prepare, device, sid) }
+        assertEquals(7, CompanionProtocol.capabilities("07"))
+        assertThrows(IllegalArgumentException::class.java) { CompanionProtocol.capabilities("08") }
     }
 }

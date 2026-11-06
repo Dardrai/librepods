@@ -10,6 +10,7 @@
 #include "pixel17_hci.h"
 #include "pixel17_game_host.h"
 #include "pixel17_game_runtime.h"
+#include "pixel17_packet_policy.h"
 #include "encoder_interface.h"
 #include "hook_transaction.h"
 #include <atomic>
@@ -108,7 +109,7 @@ struct Image {
     }
     void* function(const char* name,ImageSymbol* found=nullptr) const {
         ImageSymbol symbol;
-        if(!symbols.resolve(name,true,&symbol)) return nullptr;
+        if(!pixel17_resolve_context(symbols,name,&symbol)) return nullptr;
         auto* target=function(symbol);
         if(target && found) *found=symbol;
         return target;
@@ -157,6 +158,12 @@ void* (*packet_allocate)(size_t)=nullptr;
 void (*packet_release)(void*)=nullptr;
 void (*construct)(void*,int32_t)=nullptr;
 bool (*provider)(int32_t)=nullptr;
+void* (*hardware_manager)()=nullptr;
+bool (*hardware_supports)(const void*,int32_t)=nullptr;
+bool current_provider(int32_t index) {
+    const auto* manager=hardware_manager();
+    return !manager || hardware_supports(manager,index);
+}
 struct Peer { uint8_t bytes[6]; };
 Peer (*active_peer)(void*)=nullptr;
 void (*on_registered)()=nullptr;
@@ -203,12 +210,19 @@ bool game_encoder(Pixel17GameEncoder* out) noexcept {
     out->generation=status.generation; out->active=status.active; out->failed=status.failed;
     std::memcpy(out->peer,status.peer,6); return true;
 }
+void (*packet_type_command)(const void*,uint16_t,uint16_t)=nullptr;
+void game_packet_send(uint16_t handle,uint16_t mask) {
+    // The admitted complete leaf does not dereference its InterfaceImpl receiver.
+    packet_type_command(nullptr,handle,mask);
+}
 bool prepare_game(const Image& image,RuntimeHook install,RuntimeUnhook remove) {
     Pixel17HciSymbols symbols; Pixel17GameLayout layout;
-    if(!pixel17_hci_contract(image.symbols,&symbols) || !pixel17_game_host_contract(image.symbols,&layout)) return false;
+    Pixel17PacketSymbols packets;
+    if(!pixel17_hci_contract(image.symbols,&symbols) || !pixel17_game_host_contract(image.symbols,&layout) ||
+       !pixel17_packet_contract(image.symbols,&packets)) return false;
     const ImageSymbol complete_contexts[]={symbols.construct,symbols.post,symbols.destroy_callback,
         symbols.main_wrapper,symbols.transmit,symbols.complete_adapter,symbols.view_byte,
-        symbols.view_payload,symbols.view_size};
+        symbols.view_payload,symbols.view_size,packets.command,packets.event,packets.allocate,packets.enqueue};
     for(const auto& context:complete_contexts) if(!image.function(context)) return false;
     size_t context_count=0;
     const auto* contexts=pixel17_game_host_context_names(&context_count);
@@ -237,18 +251,29 @@ bool prepare_game(const Image& image,RuntimeHook install,RuntimeUnhook remove) {
     hci.allocate=packet_allocate; hci.release=packet_release; hci.now=game_now;
     hci.view_size=reinterpret_cast<decltype(hci.view_size)>(image.function(symbols.view_size));
     hci.view_byte=reinterpret_cast<decltype(hci.view_byte)>(image.function(symbols.view_byte));
-    if(!pixel17_game_host_prepare(host,layout) || !pixel17_game_runtime_prepare(main,hci)) return false;
+    packet_type_command=reinterpret_cast<decltype(packet_type_command)>(image.function(packets.command));
+    Pixel17PacketBindings packet_bindings{hci.view_size,hci.view_byte,game_packet_send,
+        pixel17_game_packet_changed,packets.event_name};
+    if(!pixel17_packet_prepare(packet_bindings) || !pixel17_game_host_prepare(host,layout) ||
+       !pixel17_game_runtime_prepare(main,hci,&pixel17_packet_policy(),pixel17_packet_send)) return false;
     size_t count=0; const auto* specs=pixel17_game_host_hook_specs(&count);
     if(!specs || !count || count>7) { pixel17_game_runtime_disable(); pixel17_game_host_disable(); return false; }
-    ResolvedHook hooks[7]{};
+    ResolvedHook hooks[9]{};
     for(size_t i=0;i<count;++i) {
         auto* target=image.function(specs[i].symbol);
         if(!target) { pixel17_game_runtime_disable(); pixel17_game_host_disable(); return false; }
         hooks[i]={target,specs[i].replacement,specs[i].original};
     }
+    size_t packet_count=0; const auto* packet_specs=pixel17_packet_hook_specs(&packet_count);
+    if(!packet_specs || packet_count!=2) { pixel17_game_runtime_disable(); pixel17_game_host_disable(); return false; }
+    for(size_t i=0;i<packet_count;++i) {
+        auto* target=image.function(packet_specs[i].symbol);
+        if(!target) { pixel17_game_runtime_disable(); pixel17_game_host_disable(); return false; }
+        hooks[count+i]={target,packet_specs[i].replacement,packet_specs[i].original};
+    }
     // Game is an independent, optional hook transaction. A rejected Game boundary
     // never poisons the working ELD codec or changes its audio route.
-    if(!hook_transaction(hooks,count,install,remove)) {
+    if(!hook_transaction(hooks,count+packet_count,install,remove)) {
         pixel17_game_runtime_disable(); pixel17_game_host_disable(); return false;
     }
     return true;
@@ -316,9 +341,11 @@ bool codec_init(void* self,int32_t rate) { return cohort->registry_init(self,rat
 template<class T> T field(const void* object,size_t offset) {
     T value; std::memcpy(&value,static_cast<const uint8_t*>(object)+offset,sizeof(value)); return value;
 }
-const uintptr_t* probe(const Image& image) {
-    void* object=allocate(kPixel17CodecObjectSize); if(!object) return nullptr;
-    try { construct(object,10001); } catch(...) { release(object,kPixel17CodecObjectSize); return nullptr; }
+const uintptr_t* probe(const Image& image,size_t config_size) {
+    const size_t source=0x60+5*config_size+3*kPixel17CodecStorage;
+    const size_t object_size=(source+8)&~size_t(7);
+    void* object=allocate(object_size); if(!object) return nullptr;
+    try { construct(object,10001); } catch(...) { release(object,object_size); return nullptr; }
     const auto* table=field<const uintptr_t*>(object,0);
     // Never dispatch a destructor until its entire address point and targets are validated.
     if(!image.vtable(table) || !pixel17_vtable_contract(image.symbols,image.loaded.base,
@@ -328,9 +355,8 @@ const uintptr_t* probe(const Image& image) {
     bool valid=field<int32_t>(object,0x30)==1 && field<uint64_t>(object,0x38)==2 &&
         field<uint8_t>(object,0x40)==6 && !std::memcmp(static_cast<uint8_t*>(object)+0x41,"AAC\0",4) &&
         field<int32_t>(object,0x58)==10001 && field<int32_t>(object,0x5c)==10001 &&
-        field<uint8_t>(object,0x227)==1;
-    for(size_t offset:{size_t(0x60),size_t(0xa0),size_t(0xe0),size_t(0x120),size_t(0x160)})
-        valid=valid && field<int32_t>(object,offset)==1;
+        field<uint8_t>(object,source)==1;
+    for(size_t i=0;i<5;++i) valid=valid && field<int32_t>(object,0x60+i*config_size)==1;
     reinterpret_cast<void (*)(void*)>(table[1])(object);
     return valid?table:nullptr;
 }
@@ -394,8 +420,7 @@ bool pixel17_runtime_prepare(void* module,RuntimeHook install,RuntimeUnhook remo
             "_ZN15A2dpCodecConfigC2E23btav_a2dp_codec_index_tN9bluetooth4a2dp7CodecIdERKNSt3__112basic_stringIcNS4_11char_traitsIcEENS4_9allocatorIcEEEE26btav_a2dp_codec_priority_t",
             "_ZN9bluetooth5audio4aidl4a2dp11setup_codecERKNS0_4a2dp24ahal_codec_configurationE",
             "_ZN9bluetooth5audio4aidl4a2dp5codec24getHalCodecConfigurationERKNS0_4a2dp24ahal_codec_configurationEPN4aidl7android8hardware9bluetooth5audio18CodecConfigurationE",
-            "_ZN9bluetooth5audio4aidl4a2dp5codec22getHalPcmConfigurationERKNS0_4a2dp24ahal_codec_configurationEPN4aidl7android8hardware9bluetooth5audio16PcmConfigurationE",
-            "_ZNK9bluetooth5audio4aidl4a2dp12ProviderInfo13SupportsCodecE23btav_a2dp_codec_index_t"};
+            "_ZN9bluetooth5audio4aidl4a2dp5codec22getHalPcmConfigurationERKNS0_4a2dp24ahal_codec_configurationEPN4aidl7android8hardware9bluetooth5audio16PcmConfigurationE"};
         for(const auto* name:contexts) if(!image.function(name)) { log("software route/read instruction context rejected"); return false; }
         size_t vtable_count=0; const auto* vtable_contexts=pixel17_vtable_context_names(&vtable_count);
         if(!vtable_contexts || !vtable_count || vtable_count>32) return false;
@@ -415,7 +440,15 @@ bool pixel17_runtime_prepare(void* module,RuntimeHook install,RuntimeUnhook remo
         native_allocate=reinterpret_cast<Allocate>(image.function(kPixel17Allocate));
         native_release=reinterpret_cast<void (*)(void*,size_t)>(image.function(kPixel17Release));
         construct=reinterpret_cast<void (*)(void*,int32_t)>(image.function(kPixel17AacCtor));
-        provider=reinterpret_cast<bool (*)(int32_t)>(image.function(kPixel17Provider));
+        if(contract.config_size==80) {
+            hardware_manager=reinterpret_cast<decltype(hardware_manager)>(image.function(kPixel17HardwareManager));
+            hardware_supports=reinterpret_cast<decltype(hardware_supports)>(image.function(kPixel17HardwareSupports));
+            if(!hardware_manager || !hardware_supports) return false;
+            provider=current_provider;
+        } else {
+            if(!image.function("_ZNK9bluetooth5audio4aidl4a2dp12ProviderInfo13SupportsCodecE23btav_a2dp_codec_index_t")) return false;
+            provider=reinterpret_cast<bool (*)(int32_t)>(image.function(kPixel17Provider));
+        }
         active_peer=reinterpret_cast<Peer (*)(void*)>(image.function(kPixel17ActivePeer));
         packet_allocate=reinterpret_cast<void* (*)(size_t)>(image.function("_Z10osi_mallocm"));
         packet_release=reinterpret_cast<void (*)(void*)>(image.function("_Z8osi_freePv"));
@@ -427,8 +460,8 @@ bool pixel17_runtime_prepare(void* module,RuntimeHook install,RuntimeUnhook remo
            !packet_allocate || !packet_release || !lock || !unlock || !assign || !balance) {
             log("complete native binding contexts rejected"); return false;
         }
-        const auto* table=probe(image);
-        if(!table || !pixel17_codec_prepare({allocate,release,construct,table,lock,unlock,assign,debug_codec})) {
+        const auto* table=probe(image,contract.config_size);
+        if(!table || !pixel17_codec_prepare({allocate,release,construct,table,lock,unlock,assign,debug_codec,contract.config_size})) {
             log("AAC host object ABI probe failed"); return false;
         }
         const auto api=eld_owned_fdk_api();
@@ -443,7 +476,7 @@ bool pixel17_runtime_prepare(void* module,RuntimeHook install,RuntimeUnhook remo
         EncoderHost encoder{api,packet_allocate,packet_release,encoder_failed,actual_peer,pixel17_codec_info,peer_mtu,
             kPixel17CatchUpExperiment,boottime_us,pixel17_game_clock_opportunity,kPixel17PcmBits/8};
         if(!encoder_prepare(encoder) || !pixel17_wire_prepare({wire_active,quarantined,selected_encoder,5})) return false;
-        registries={allocate,release,lock,unlock,balance,readable,provider};
+        registries={allocate,release,lock,unlock,balance,readable,provider,contract.config_size==80?11:7};
         // Actual trampoline addresses are populated transactionally before any Bluetooth init executes.
         // Cohort callbacks dereference the stable pointer slots, never a replacement entry point.
         on_registered=registered;

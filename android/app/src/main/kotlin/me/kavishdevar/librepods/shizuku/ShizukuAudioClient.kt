@@ -69,6 +69,7 @@ class ShizukuAudioClient(context: Context) : Closeable {
     private var volumeRequest: Pair<Any, PlaybackRequest>? = null
     private var microphoneProbeRequest: PlaybackRequest? = null
     private var communicationRequest: PlaybackRequest? = null
+    private val usbHidConnections = mutableSetOf<IUsbHidConnection>()
     @Volatile private var bridge: IAudioBridge? = null
     @Volatile private var backendUid: Int? = null
     @Volatile private var rootBackend = false
@@ -398,6 +399,68 @@ class ShizukuAudioClient(context: Context) : Closeable {
         return runCatching { !closed && remote.ensureOwnBackgroundAudio() && bridge === remote }.getOrDefault(false)
     }
 
+    internal suspend fun inspectUsbAbsoluteVolumePolicy(policy: IUsbAbsoluteVolumePolicy, deviceId: Int,
+        serial: String): Bundle? = usbVolumeCall { it.inspectUsbAbsoluteVolumePolicy(policy, deviceId, serial) }
+
+    internal suspend fun openDongleHid(deviceName: String, serial: String, interfaceId: Int,
+        stillCurrent: () -> Boolean): IUsbHidConnection? {
+        val job = currentCoroutineContext()[Job]
+        var opened: IUsbHidConnection? = null
+        var request: PlaybackRequest? = null
+        try { return withContext(Dispatchers.IO) { ipc.withLock {
+            val remote = bridge
+            if (closed || backendUid != 0 || remote == null) return@withLock null
+            val lease = PlaybackRequest(remote, serial, stillCurrent, job, 0).also { request = it }
+            val hid = remote.openDongleHid(deviceName, serial, interfaceId, lease.owner).also { opened = it }
+            check(!closed && bridge === remote && backendUid == 0 && job?.isActive != false && stillCurrent()) {
+                "USB dongle selection changed"
+            }
+            val guarded = object : IUsbHidConnection.Stub() {
+                private val ended = AtomicBoolean(false)
+                override fun descriptor(): ByteArray = hid.descriptor()
+                override fun exchange(operation: Int, report: Int, payload: ByteArray): ByteArray =
+                    hid.exchange(operation, report, payload)
+                override fun close() {
+                    if (!ended.compareAndSet(false, true)) return
+                    lease.active.set(false)
+                    runCatching { hid.close() }
+                    synchronized(lock) { usbHidConnections -= this }
+                }
+            }
+            opened = guarded
+            synchronized(lock) {
+                check(!closed && bridge === remote && job?.isActive != false)
+                usbHidConnections += guarded
+            }
+            check(stillCurrent()) { "USB dongle selection changed" }
+            guarded
+        } } } catch (error: Exception) {
+            // Blocking Binder can return after cancellation, before withContext delivers its result.
+            request?.active?.set(false)
+            runCatching { opened?.close() }
+            throw error
+        }
+    }
+    internal suspend fun startUsbAbsoluteVolume(owner: IPlaybackRecoveryOwner, policy: IUsbAbsoluteVolumePolicy,
+        events: IUsbAbsoluteVolumeEvents, proof: Bundle): Bundle? = usbVolumeCall {
+        it.startUsbAbsoluteVolume(owner, policy, events, proof)
+    }
+    internal suspend fun renewUsbAbsoluteVolume(owner: IPlaybackRecoveryOwner, proof: Bundle): Bundle? =
+        usbVolumeCall { it.renewUsbAbsoluteVolume(owner, proof) }
+    internal suspend fun notifyUsbAbsoluteVolume(owner: IPlaybackRecoveryOwner, proof: Bundle,
+        acknowledgedRequestSequence: Long = 0): Bundle? =
+        usbVolumeCall { it.notifyUsbAbsoluteVolume(owner, proof, acknowledgedRequestSequence) }
+    internal suspend fun releaseUsbAbsoluteVolume(owner: IPlaybackRecoveryOwner): Bundle? =
+        usbVolumeCall { it.releaseUsbAbsoluteVolume(owner) }
+    private suspend fun usbVolumeCall(action: (IAudioBridge) -> Bundle): Bundle? = withContext(Dispatchers.IO) {
+        ipc.withLock {
+            val remote = bridge
+            if (closed || backendUid != 0 || remote == null) return@withLock null
+            try { action(remote).takeIf { !closed && bridge === remote && backendUid == 0 } }
+            catch (_: Exception) { null }
+        }
+    }
+
     @androidx.annotation.WorkerThread
     fun checkVolumeSync(address: String, owner: Any, stillCurrent: () -> Boolean): Boolean {
         val selected = runCatching { A2dpRecoveryGuard(address).address }.getOrNull() ?: return false
@@ -561,6 +624,24 @@ class ShizukuAudioClient(context: Context) : Closeable {
         synchronized(lock) { if (communicationRequest === request) communicationRequest = null }
     }
 
+    internal suspend fun inspectCompanionMedia(address: String): Bundle = withContext(Dispatchers.IO) {
+        // Read-only evidence must remain available while a profile operation awaits its receipt.
+        val remote = bridge
+        val unavailable = when {
+            closed || remote == null -> MediaInspectionReason.BRIDGE_UNAVAILABLE
+            settingsRefresh -> MediaInspectionReason.SETTINGS_BUSY
+            communicationRequest != null -> MediaInspectionReason.COMMUNICATION_BUSY
+            else -> null
+        }
+        if (unavailable != null) return@withContext CompanionMediaInspection.failure(MediaInspectionStage.CLIENT, unavailable)
+        try {
+            val value = checkNotNull(remote).inspectCompanionMedia(A2dpRecoveryGuard(address).address)
+            if (closed || bridge !== remote) CompanionMediaInspection.failure(MediaInspectionStage.CLIENT, MediaInspectionReason.BRIDGE_REPLACED)
+            else value
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (error: Exception) { CompanionMediaInspection.failure(MediaInspectionStage.CLIENT, CompanionMediaInspection.failureReason(error)) }
+    }
+
     internal suspend fun inspectCallMedia(address: String): Bundle = withContext(Dispatchers.IO) {
         check(hasRootPrivileges) { "Root audio service is unavailable" }
         checkNotNull(bridge).inspectCallMedia(A2dpRecoveryGuard(address).address)
@@ -617,6 +698,8 @@ class ShizukuAudioClient(context: Context) : Closeable {
             microphoneProbeRequest = null
             communicationRequest?.active?.set(false)
             communicationRequest = null
+            usbHidConnections.toList().forEach { runCatching { it.close() } }
+            usbHidConnections.clear()
             bridgeDeath?.let { death -> bridge?.asBinder()?.let { runCatching { it.unlinkToDeath(death, 0) } } }
             bridgeDeath = null
             bridge = null
@@ -644,6 +727,8 @@ class ShizukuAudioClient(context: Context) : Closeable {
             microphoneProbeRequest = null
             communicationRequest?.also { it.active.set(false); retiring += it }
             communicationRequest = null
+            usbHidConnections.toList().forEach { runCatching { it.close() } }
+            usbHidConnections.clear()
             bridgeDeath?.let { death -> bridge?.asBinder()?.let { runCatching { it.unlinkToDeath(death, 0) } } }
             bridgeDeath = null
             // The tag is unique to this foreground-service instance; a late close cannot kill its replacement.

@@ -23,6 +23,7 @@ import me.kavishdevar.librepods.presentation.screens.DeviceListScreen
 import me.kavishdevar.librepods.presentation.screens.OpenSourceLicensesScreen
 import me.kavishdevar.librepods.presentation.screens.ReleaseNotesScreen
 import me.kavishdevar.librepods.presentation.screens.apple.HeadphoneAccommodationsScreen
+import me.kavishdevar.librepods.presentation.screens.apple.DongleAppleSettings
 import me.kavishdevar.librepods.presentation.screens.apple.DongleAccommodationsScreen
 import me.kavishdevar.librepods.presentation.screens.apple.DongleTransparencyScreen
 import me.kavishdevar.librepods.presentation.screens.apple.AccessibilitySettingsScreen
@@ -120,7 +121,7 @@ fun RenderScreenContent(
             DeviceListScreen(
                 devices = devices,
                 navigateToAppSettings = { navigate(Screen.AppSettings) },
-                navigateToDongleSettings = { navigate(Screen.DongleSettings) },
+                navigateToDongleSettings = { navigate(Screen.DongleAirPods()) },
                 navigateToDevice = { macAddress ->
                     when (devices[macAddress]) {
                         is AppleDevice -> navigate(Screen.AppleScreen(macAddress))
@@ -204,7 +205,16 @@ fun RenderScreenContent(
             }
         }
 
-        Screen.DongleSettings -> DongleSettingsScreen(navigateBack, { navigate(Screen.DongleAccommodations) })
+        is Screen.DongleAirPods -> DongleAppleSettings(screen.page, screen.argument, navigateBack,
+            navigate = { page, argument -> navigate(Screen.DongleAirPods(page, argument)) },
+            navigateToDongleSettings = {
+                if (backStack.getOrNull(backStack.lastIndex - 1) == Screen.DongleSettings) navigateBack?.invoke()
+                else navigate(Screen.DongleSettings)
+            })
+        Screen.DongleSettings -> DongleSettingsScreen(navigateBack, {
+            if (backStack.getOrNull(backStack.lastIndex - 1) == Screen.DongleAirPods()) navigateBack?.invoke()
+            else navigate(Screen.DongleAirPods())
+        })
         Screen.DongleAccommodations -> DongleAccommodationsScreen(navigateBack) { navigate(Screen.DongleTransparency) }
         Screen.DongleTransparency -> DongleTransparencyScreen(navigateBack)
 

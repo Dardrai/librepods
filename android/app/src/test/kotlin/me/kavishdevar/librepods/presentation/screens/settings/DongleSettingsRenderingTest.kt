@@ -38,6 +38,9 @@ import me.kavishdevar.librepods.dongle.DongleProtocol
 import me.kavishdevar.librepods.dongle.DongleState
 import me.kavishdevar.librepods.presentation.design.DesignSystem
 import me.kavishdevar.librepods.presentation.design.LibrePodsTheme
+import kotlinx.coroutines.flow.MutableStateFlow
+import org.mockito.Mockito.mock
+import org.mockito.Mockito.`when`
 import org.junit.Assert.assertTrue
 import org.junit.After
 import org.junit.Rule
@@ -57,6 +60,20 @@ class DongleSettingsRenderingTest {
     @get:Rule val compose = createComposeRule()
     private val editors = mutableListOf<DongleControlTestEditors>()
     @After fun closeEditors() { editors.forEach { it.close() } }
+
+    @Test fun aRememberedHardwareVolumeRequestCanBeCancelledWhileDisconnected() {
+        val controller = mock(DongleController::class.java)
+        `when`(controller.state).thenReturn(MutableStateFlow(DongleState(selected = true, usb = true, usbVolumeRequested = true)))
+        compose.setContent {
+            LibrePodsTheme(darkTheme = true, designSystem = DesignSystem.Apple) {
+                Column(Modifier.requiredSize(448.dp, 998.dp).verticalScroll(rememberScrollState())) {
+                    DongleSettingsSection(controller = controller)
+                }
+            }
+        }
+        compose.onNodeWithText("Hardware volume").performScrollTo().assertIsEnabled().performClick()
+        org.mockito.Mockito.verify(controller).usbHardwareVolume(false)
+    }
 
     @Test fun settings_remain_readable_without_routine_confirmation_commentary() {
         data class Profile(val theme: DesignSystem, val dark: Boolean, val width: Int, val scale: Float)
@@ -85,23 +102,11 @@ class DongleSettingsRenderingTest {
         }
         for (profile in profiles) {
             compose.runOnIdle { layout.value = profile; current.value = current.value.copy(finderOpen = true, nearby = nearby) }
-            compose.onNodeWithText("Listening").performScrollTo().assertIsDisplayed()
-            compose.onNodeWithText("On").assertIsDisplayed()
+            for (label in listOf("Listening", "Preferred microphone", "Charging case sounds", "Tone volume", "Amplification"))
+                compose.onAllNodesWithText(label).assertCountEquals(0)
             compose.onAllNodesWithText("Your choice", substring = true).assertCountEquals(0)
             compose.onAllNodesWithText("Startup priming", substring = true).assertCountEquals(0)
             capture("settings-${profile.theme}-${profile.dark}-${profile.width}")
-            compose.onNodeWithText("Preferred microphone").performScrollTo().performClick()
-            compose.onNodeWithText("Automatic").assertIsDisplayed()
-            compose.onNodeWithText("Right").assertIsDisplayed()
-            compose.onNodeWithText("Left").assertIsDisplayed()
-            compose.onNodeWithText("Close").performClick()
-            compose.onNodeWithText("Charging case sounds").performScrollTo().assertIsDisplayed().assertIsEnabled()
-            compose.onNodeWithText("Charging case volume").performScrollTo().assertIsDisplayed()
-            compose.onAllNodesWithText("Your choice", substring = true).assertCountEquals(0)
-            capture("ranges-${profile.theme}-${profile.dark}-${profile.width}")
-            for (label in listOf("Tone volume", "Adaptive strength", "Amplification", "Balance", "Tone"))
-                compose.onNodeWithText(label).performScrollTo().assertIsDisplayed()
-            capture("hearing-${profile.theme}-${profile.dark}-${profile.width}")
             compose.onNodeWithText("Game Mode").performScrollTo().assertIsDisplayed()
             compose.onNodeWithText("Request sent; AirPods confirmation pending").assertDoesNotExist()
             compose.onNodeWithText("Confirmed by a fresh delay report").assertDoesNotExist()
@@ -126,7 +131,7 @@ class DongleSettingsRenderingTest {
             compose.onNodeWithText("Start finding").assertIsDisplayed()
         }
         compose.runOnIdle { current.value = current.value.copy(busy = true) }
-        compose.onNodeWithText("Preferred microphone").performScrollTo().assertIsEnabled()
+        compose.onNodeWithText("Game Mode").performScrollTo().assertIsEnabled()
     }
 
     @Test fun finderNumbersFollowTheAppLocaleAndElapsedTimeUsesPlurals() {
@@ -155,6 +160,34 @@ class DongleSettingsRenderingTest {
         compose.runOnIdle { locales.value = LocaleList("fr-FR") }
         compose.onNodeWithText("-52,5 dBm", substring = true).performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("-52.5 dBm", substring = true).assertDoesNotExist()
+    }
+
+    @Test fun usbSummarySeparatesControlsFromHeadphonePresenceInBothAppearances() {
+        val dark = mutableStateOf(false)
+        val state = MutableStateFlow(DongleState(selected = true, usb = true, attached = true, connected = true,
+            status = DongleProtocol.Status(3, listOf(1, 2, 3, 4, 5, 6), 0, 0, listOf(91, 92, 70), 0, 0)))
+        val controller = mock(DongleController::class.java)
+        `when`(controller.state).thenReturn(state)
+        compose.setContent {
+            LibrePodsTheme(darkTheme = dark.value, designSystem = DesignSystem.Apple) {
+                Column(Modifier.requiredSize(320.dp, 998.dp).background(MaterialTheme.colorScheme.surfaceContainer)
+                    .padding(16.dp).testTag("dongle-controls")) {
+                    DongleSettingsSection(onManage = {}, controller = controller)
+                }
+            }
+        }
+        for (appearance in listOf(false, true)) {
+            compose.runOnIdle { dark.value = appearance; state.value = state.value.copy(usbAudioAvailable = false, status = state.value.status?.copy(flags = 0)) }
+            compose.onNodeWithText("Waiting for the dongle’s AirPods connection").assertIsDisplayed()
+            compose.onNodeWithText("USB controls connected · headphones unavailable").assertIsDisplayed()
+            compose.onNodeWithText("70%", substring = true).assertIsDisplayed()
+            capture("usb-controls-only-$appearance")
+            compose.runOnIdle { state.value = state.value.copy(usbAudioAvailable = true,
+                status = state.value.status?.copy(flags = 3)) }
+            compose.onNodeWithText("AirPods controls ready").assertIsDisplayed()
+            compose.onNodeWithText("USB controls connected · headphones available").assertIsDisplayed()
+            capture("usb-audio-$appearance")
+        }
     }
 
     private fun capture(name: String) {

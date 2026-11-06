@@ -24,6 +24,113 @@ The [AAC-ELD/Xposed design](AAC-ELD-XPOSED.md) tracks that separate native route
 
 ## SDK37 Pixel validation stage
 
+### November 5 packet-policy port
+
+The native prepare/restore transaction now includes the dongle's packet-type
+policy. It captures the selected Classic ACL's controller-confirmed normal mask
+from Connection Packet Type Changed (`1D`), then ORs `2204` to exclude only the
+3-Mbit EDR packet types. These permission bits have negative polarity. The saved
+macOS transition `CC18 -> EE1C` is an example, not a universal normal baseline.
+Other BR/EDR permissions, including 2-Mbit EDR, remain as captured.
+
+The validated native InterfaceImpl command builder retains platform ownership of
+its command and status callbacks. The observer copies bounded scalar events
+before forwarding the borrowed native view exactly once. Command Status for
+`040F` is admission only: the matching same-incarnation `1D` event must report
+the exact requested mask before prepare can hold. Cleanup restores that ACL's
+captured mask and waits for the matching event before restoring flush timeout.
+No baseline means no packet-policy write. A timeout keeps the physical command
+fence and restoration obligation; a late event can wake bounded cleanup. A
+competing packet-policy command fails closed rather than confirming another
+owner's operation. An unresolved conflict requires a Bluetooth restart.
+
+Host tests cover controller errors, wrong masks, timeout/late completion,
+same-handle reconnection, owner loss, lease expiry and exact restoration. The
+packet callback guard admits both the retained Android 17 image and the Pixel's
+current const-reference event callback, with mutation checks. This does not
+by itself extend the older flush/host/encoder ABI guards. The subsequent Pixel98
+update admits the current firmware's command-completion and main-thread wrapper,
+media-state readers, codec lookup and virtual consumers. It selects the verified
+80-byte configuration stride and 632-byte codec object together; the older
+64-byte/552-byte layout remains supported. New trailing configuration bytes are
+preserved without interpreting them. The current hardware-codec manager replaces
+the older provider query, retaining software-only admission. No new acoustic
+latency result is claimed for this port. Version2 native
+snapshots include packet baseline, current mask and pending restoration; the app
+continues to read version1 snapshots from previously installed backends.
+
+Pixel98 was installed on the current Pixel 10 Pro XL firmware. After a
+Bluetooth-only restart, all six native codec registries committed and published
+the codec identity; the diagnostic query reported native Game Mode support with
+no pending controller restoration. All 80 native sanitizer checks, 113 Android
+ELD/Game Mode tests and 12 shipped-image contract suites passed across the old
+and current Bluetooth images. Playback, negotiated ELD and a complete Game Mode
+On/Off cycle still need verification on this firmware; backend activation alone
+does not establish those results.
+
+Pixel98's local private APK paired a baseline-preserving native library with
+the app's fixed-96-slot policy. The app rejected the native hold and restored
+it before sending the receiver target. Pixel99 corrects that packaging mismatch:
+build the app with `-PprivateGameKeepFlushBaseline=true` when using the private
+native library built with `ELD_KEEP_GAME_FLUSH_BASELINE=ON`. The local packager
+checks both values before replacing the library. The November 6 protocol merge
+promotes baseline preservation to ordinary Debug and Release builds: both the
+app policy and native backend retain the captured timeout. The historical build
+field name remains for compatibility. Do not bypass hold verification to mask
+an app/backend mismatch.
+Pixel99 passed all 69 Game Mode Android tests and was installed. Pixel98's
+failure capture independently confirmed active, non-failed 48kHz/256kbps ELD
+encoding and a valid 150ms DelayReport; the refusal was after native preparation,
+not codec negotiation. Pixel99 then reached app `active=true`, issue `NONE`,
+with an owned native hold, error0, confirmed `CC18 -> EE1C` packet policy and
+completed clock request1 (phase4, interval normalized to10). The corrected Off
+restoration check remains pending; this is not an acoustic latency measurement.
+
+### November 5 timing recovery and playback investigation
+
+The listener subsequently reported short glitches and pitch fluctuations in both
+Game Mode and normal playback. These remain unresolved. One current session
+negotiated reporting but never received an initial DelayReport. Pixel102 permits
+owned preparation only for that entirely unreported state; invalid received
+reports, wrong owners, SCO and missing negotiated reporting still refuse entry.
+The target write still needs the complete native hold, and activation or any
+clock adjustment still requires a fresh post-write report. Missing post-write
+timing times out and restores instead of claiming Game Mode is active.
+
+On-device target checks also refused proofs 560–603 ms old despite matching
+ownership. Pixel103 gives both explicit control broadcasts foreground delivery
+priority. The 100 ms write fence and signature, UID, nonce and lease checks remain
+unchanged. All 74 Game Mode tests passed, including three timing-recovery cases.
+This control-path change is not yet a verified cure for audible glitches.
+
+Before a Bluetooth-only restart, the inactive mode had no current timing report.
+An explicit 150 ms receiver request obtained an 80 ms report, without a clock
+adjustment. After restarting Bluetooth, a new normal session independently
+reported 150 ms and no clock operation. Its first 26 s sample had no underruns,
+discards or clock rebases and an 11.5 ms maximum callback gap. An earlier 26 s sample
+also had no new underruns or discards; the prior92ms maximum was cumulative.
+These windows do not establish an audible improvement or the source of the
+reported instability. Controller history also contained A2DP Choppy reports;
+those do not by themselves identify encoder, radio or receiver-buffer causality.
+After roughly three minutes of normal playback following that restart, the
+listener reported that it sounded good at that moment. The capture still had no
+underruns, discards or rebases and a maximum callback gap of 11.764 ms. A controlled
+Game Mode entry/exit comparison is separate from this normal-playback result;
+the restart changed process and connection state as well as loading Pixel103.
+
+The subsequent Pixel103 comparison passed: the listener reported smooth active
+Game Mode and smooth normal playback after Off. Entry accepted clock request1
+on its first attempt and completed the 92 ms slow-clock budget. Exit briefly
+refused a late clock opportunity, accepted the next real-AU opportunity, and
+completed request2's 72 ms fast-clock budget. Both returned to interval10.
+Final native state was Complete/error0, no hold or pending restoration, original
+packet mask `CC18` restored from `EE1C`, and original flush timeout0 restored.
+The encoder's three underruns and two host discards predated entry and did not
+increase during the captured On/Off comparison. This establishes one successful
+cycle, not long-run stability or a uniquely isolated pre-restart glitch cause.
+
+### Existing native boundary
+
 The private Pixel implementation resolves named functions and validates their
 instruction roles and complete loaded bodies before installing an independent
 Game Mode hook transaction. Unsupported Game Mode contexts leave the working

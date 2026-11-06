@@ -9,7 +9,7 @@
 #include <new>
 #include <thread>
 #ifndef ELD_KEEP_GAME_FLUSH_BASELINE
-#define ELD_KEEP_GAME_FLUSH_BASELINE 0
+#define ELD_KEEP_GAME_FLUSH_BASELINE 1
 #endif
 static_assert(ELD_KEEP_GAME_FLUSH_BASELINE==0 || ELD_KEEP_GAME_FLUSH_BASELINE==1);
 #ifdef __ANDROID__
@@ -34,6 +34,9 @@ struct Runtime {
     std::shared_ptr<Pixel17MainDispatcher> main;
     std::unique_ptr<Pixel17Hci> hci;
     Pixel17FlushBaseline baseline;
+    Pixel17PacketPolicy* packets = nullptr;
+    void (*send_packets)(uint16_t,uint16_t) = nullptr;
+    bool packet_started = false, packet_entering = false, packet_restoring = false, packet_restore_attempted = false;
     uint64_t next = 0, hci_serial = 0, command_epoch = 0, monitor_deadline_ns = 0;
     uint64_t next_clock_request = 0, clock_epoch = 0, owned_clock = 0;
     bool tick_queued = false, restore_attempted = false, finishing = false;
@@ -45,6 +48,66 @@ struct Runtime {
     bool late_reclaimed = false, late_verification_attempted = false;
     Pixel17GamePhase command_phase = Pixel17GamePhase::Idle;
     uint16_t original_cid = 0;
+    bool dirty_locked() const { return baseline.needs_restore() || status.packets.dirty || status.packets.pending; }
+    void sample_packets() {
+        if(!packets || !packet_started) return;
+        const auto actual=packets->status(clock.now(clock.clock_context));
+        std::lock_guard<std::mutex> lock(mutex);
+        status.packets=actual; status.restore_pending=dirty_locked();
+    }
+    void verified() {
+        bool held=false;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if(status.operation==Pixel17GameOperation::Prepare && !status.cancelled &&
+               status.error==Pixel17HciStatus::Ok && now_ns()<status.deadline_ns) {
+                status.holding=true; status.busy=false; status.phase=Pixel17GamePhase::Holding;
+                status.lease_deadline_ns=grace(now_ns()); monitor_deadline_ns=0; held=true;
+            }
+        }
+        if(held) wake.notify_one(); else restore();
+    }
+    void packet_progress() {
+        if(!packets || !packet_started) return;
+        sample_packets();
+        bool ready=false, cleanup=false, failed=false;
+        uint64_t lease=0,serial=0;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if(!status.serial) return;
+            if(status.packets.error!=Pixel17HciStatus::Ok && !finishing) {
+                if(status.error==Pixel17HciStatus::Ok) status.error=status.packets.error;
+                lease=status.lease_owner; serial=status.serial; failed=true;
+            }
+            if(!status.packets.pending) {
+                if(packet_entering && status.packets.ready && !failed) { packet_entering=false; ready=true; }
+                if(packet_restoring) {
+                    packet_restoring=false; cleanup=true;
+                    if(status.packets.dirty && status.error==Pixel17HciStatus::Ok) status.error=Pixel17HciStatus::Malformed;
+                }
+            }
+        }
+        if(failed) { end_for(lease,serial,Pixel17HciStatus::ControllerError); restore(); }
+        else if(cleanup) restore();
+        else if(ready) verified();
+    }
+    void begin_packets() {
+        if(!packets) { verified(); return; }
+        Pixel17HciOwner owner; uint64_t deadline;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            owner=status.owner; packet_entering=true; packet_started=true;
+            // Cancellation can arrive through Binder while the native send runs.
+            status.packets.pending=true; status.packets.dirty=true; status.restore_pending=true;
+            deadline=std::min(status.deadline_ns/1000,clock.now(clock.clock_context)+1000000);
+        }
+        if(!owner_current(this,owner) || !packets->begin(owner,deadline,clock.now(clock.clock_context),send_packets)) {
+            { std::lock_guard<std::mutex> lock(mutex);
+              packet_entering=false; if(status.error==Pixel17HciStatus::Ok) status.error=Pixel17HciStatus::StaleOwner; }
+            restore(); return;
+        }
+        packet_progress();
+    }
     bool target_slots(const Pixel17HciOwner& owner,uint16_t* slots) const {
         if(!baseline.restore_value(owner,slots)) return false;
 #if !ELD_KEEP_GAME_FLUSH_BASELINE
@@ -134,7 +197,7 @@ struct Runtime {
             if(status.holding) { lease=status.lease_owner; serial=status.serial; }
             else {
                 if(status.error==Pixel17HciStatus::Ok) status.error=error;
-                status.restore_pending=baseline.needs_restore();
+                status.restore_pending=dirty_locked();
                 status.phase=status.restore_pending ? Pixel17GamePhase::Quarantined : Pixel17GamePhase::Failed;
                 status.busy=status.restore_pending && (hci->outstanding() || !restore_attempted);
             }
@@ -165,10 +228,31 @@ struct Runtime {
         if(!serial) publish_failure(hci->quarantined()?Pixel17HciStatus::Timeout:Pixel17HciStatus::StaleOwner);
     }
     void restore() {
+        sample_packets();
         Pixel17HciOwner owner; uint16_t value;
+        bool packet_cleanup=false;
         {
             std::lock_guard<std::mutex> lock(mutex);
-            status.restore_pending=baseline.needs_restore(); owner=status.owner;
+            finishing=true; packet_entering=false; owner=status.owner;
+            if(packets && (status.packets.dirty || status.packets.pending)) {
+                command_phase=Pixel17GamePhase::Restoring;
+                status.phase=Pixel17GamePhase::Restoring; status.restore_pending=true;
+                if(status.packets.pending) { status.phase=Pixel17GamePhase::Quarantined; return; }
+                if(packet_restore_attempted) { status.phase=Pixel17GamePhase::Quarantined; status.busy=false; return; }
+                packet_restore_attempted=true; packet_restoring=true; packet_cleanup=true;
+            }
+        }
+        if(packet_cleanup) {
+            const auto now=clock.now(clock.clock_context);
+            if(!owner_current(this,owner) || !packets->restore(owner,now+1000000,now,send_packets)) {
+                std::lock_guard<std::mutex> lock(mutex);
+                packet_restoring=false; status.phase=Pixel17GamePhase::Quarantined; status.busy=false;
+            }
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            status.restore_pending=dirty_locked(); owner=status.owner;
             finishing=true;
             if(!status.restore_pending) {
                 status.busy=false;
@@ -228,7 +312,7 @@ struct Runtime {
                 std::lock_guard<std::mutex> lock(r.mutex);
                 marked=r.target_slots(owner,&target) && r.baseline.will_write(owner,target);
                 if(!marked && r.status.error==Pixel17HciStatus::Ok) { r.status.error=Pixel17HciStatus::Malformed; }
-                r.status.restore_pending=r.baseline.needs_restore();
+                r.status.restore_pending=r.dirty_locked();
             }
             if(!marked) { r.restore(); return; }
             r.command(Pixel17GamePhase::Writing,true,target); return;
@@ -238,23 +322,20 @@ struct Runtime {
             return;
         }
         if(phase==Pixel17GamePhase::Verifying) {
-            bool held=false;
+            bool verified=false;
             { std::lock_guard<std::mutex> lock(r.mutex);
               uint16_t target=0;
-              const bool verified=r.target_slots(owner,&target) && result.slots==target;
+              verified=r.target_slots(owner,&target) && result.slots==target;
               if(!verified && r.status.error==Pixel17HciStatus::Ok) r.status.error=Pixel17HciStatus::Malformed;
-              if(operation==Pixel17GameOperation::Prepare && verified && !r.status.cancelled &&
-                 r.status.error==Pixel17HciStatus::Ok && r.now_ns()<r.status.deadline_ns) {
+              if(verified) {
                   // The captured controller baseline may already match. Exact
                   // readback then discharges write uncertainty without inventing
                   // a different "normal" timeout or forcing an unnecessary reset.
                   r.baseline.observe(owner,result);
-                  r.status.restore_pending=r.baseline.needs_restore();
-                  r.status.holding=true; r.status.busy=false; r.status.phase=Pixel17GamePhase::Holding;
-                  r.status.lease_deadline_ns=grace(r.now_ns()); held=true;
+                  r.status.restore_pending=r.dirty_locked();
               } }
-            if(held) { r.wake.notify_one(); return; }
-            r.restore(); return;
+            if(verified && !cancelled) r.begin_packets(); else r.restore();
+            return;
         }
         if(phase==Pixel17GamePhase::Restoring) {
             r.command(Pixel17GamePhase::VerifyingRestore,false); return;
@@ -264,7 +345,7 @@ struct Runtime {
                 std::lock_guard<std::mutex> lock(r.mutex);
                 if((!r.baseline.observe(owner,result) || r.baseline.needs_restore()) && r.status.error==Pixel17HciStatus::Ok)
                     r.status.error=Pixel17HciStatus::Malformed;
-                r.status.restore_pending=r.baseline.needs_restore();
+                r.status.restore_pending=r.dirty_locked();
             }
             r.restore(); return;
         }
@@ -273,6 +354,7 @@ struct Runtime {
     void tick() {
         if(!pixel17_game_host_is_event_thread()) { publish_failure(Pixel17HciStatus::DispatchFailed); return; }
         hci->poll_on_main();
+        packet_progress();
         Pixel17HciOwner held_owner; uint64_t held_lease=0,held_serial=0;
         { std::lock_guard<std::mutex> lock(mutex);
           if(status.holding) { held_owner=status.owner; held_lease=status.lease_owner; held_serial=status.serial; } }
@@ -292,11 +374,12 @@ struct Runtime {
             else restore();
             return;
         }
-        bool busy,cancelled,dirty,cleanup; uint64_t deadline,serial;
+        bool busy,cancelled,dirty,cleanup,entering; uint64_t deadline,serial;
         {
             std::lock_guard<std::mutex> lock(mutex);
             busy=status.busy; cancelled=status.cancelled; dirty=status.restore_pending;
             cleanup=finishing;
+            entering=packet_entering;
             deadline=status.deadline_ns; serial=hci_serial;
             if(busy && now_ns()>=deadline && !finishing && !cancelled) {
                 status.cancelled=true;
@@ -305,6 +388,7 @@ struct Runtime {
             }
         }
         if(!busy) return;
+        if(entering && !cancelled) return;
         if(cancelled && serial && !cleanup) hci->cancel_on_main(serial);
         if(dirty && !hci->outstanding()) restore();
         else if(cancelled && !dirty && !hci->outstanding()) restore();
@@ -415,6 +499,7 @@ struct Runtime {
     static void clock_task(void* opaque) {
         auto& task=*static_cast<ClockBegin*>(opaque); task.ran=true;
         auto& r=*task.runtime;
+        r.packet_progress();
         {
             std::lock_guard<std::mutex> lock(r.mutex);
             if(task.epoch!=r.clock_epoch || task.request!=r.status.clock_request_serial ||
@@ -508,14 +593,16 @@ std::mutex setup_mutex;
 Runtime* runtime=nullptr;
 Runtime* get() { std::lock_guard<std::mutex> lock(setup_mutex); return runtime; }
 }
-bool pixel17_game_runtime_prepare(Pixel17MainBindings main,Pixel17HciBindings hci) {
+bool pixel17_game_runtime_prepare(Pixel17MainBindings main,Pixel17HciBindings hci,
+                                 Pixel17PacketPolicy* packets,void (*send_packets)(uint16_t,uint16_t)) {
     std::lock_guard<std::mutex> lock(setup_mutex);
     if(runtime || !main.now || !main.main_thread || !main.construct || !main.post ||
        !main.destroy_callback || !hci.transmit || !hci.allocate || !hci.release ||
-       !hci.view_size || !hci.view_byte || !hci.now) return false;
+       !hci.view_size || !hci.view_byte || !hci.now || (bool(packets)!=bool(send_packets))) return false;
     try {
         auto candidate=std::make_unique<Runtime>();
         candidate->clock=main; candidate->main=std::make_shared<Pixel17MainDispatcher>(main);
+        candidate->packets=packets; candidate->send_packets=send_packets;
         hci.is_main=Runtime::on_main; hci.owner_current=Runtime::owner_current;
         hci.owner_context=candidate.get();
         hci.reclaimed=Runtime::reclaimed;
@@ -563,6 +650,7 @@ uint64_t pixel17_game_submit(Pixel17GameOperation operation,uint64_t lease,
         r->restore_attempted=false; r->finishing=false; r->hci_serial=0;
         r->monitor_deadline_ns=0; r->late_reclaimed=false; r->late_verification_attempted=false;
         r->graceful_restore=false;
+        r->packet_started=false; r->packet_entering=false; r->packet_restoring=false; r->packet_restore_attempted=false;
     }
     auto* start=new(std::nothrow) Runtime::Start{r,serial};
     if(!start || !r->main->post(Runtime::start_task,start,Runtime::delete_start,deadline/1000)) {
@@ -661,6 +749,17 @@ void pixel17_game_runtime_disable() {
 void pixel17_game_clock_opportunity() {
     if(!opportunity_pending.load(std::memory_order_acquire)) return;
     if(auto* r=get()) r->opportunity();
+}
+void pixel17_game_packet_changed() {
+    auto* r=get(); if(!r) return;
+    {
+        std::lock_guard<std::mutex> lock(r->mutex);
+        if(!r->status.serial || !r->packets || (!r->status.restore_pending && !r->status.busy && !r->status.holding)) return;
+        if(!r->status.busy && !r->status.holding && r->status.restore_pending) {
+            r->status.busy=true; r->monitor_deadline_ns=r->now_ns()+2000000000ULL;
+        }
+    }
+    r->wake.notify_one();
 }
 #ifdef ELD_PIXEL17_GAME_RUNTIME_TESTING
 void pixel17_game_runtime_tick_for_test() { if(auto* r=get()) r->queue_tick(); }

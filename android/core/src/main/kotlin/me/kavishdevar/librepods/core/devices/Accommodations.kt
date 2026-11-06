@@ -93,7 +93,7 @@ class AccommodationsPlan private constructor(
         requested[11] == 1.toByte(), stockPreset(requested))
     fun packet(): ByteArray = requested.copyOf().also { it[9] = 2 }
 
-    internal fun followup(phone: Boolean?, media: Boolean?, preset: AccommodationsPreset?): AccommodationsPlan =
+    fun followup(phone: Boolean?, media: Boolean?, preset: AccommodationsPreset?): AccommodationsPlan =
         AccommodationsPlan(original, requested.copyOf().also {
             phone?.let { value -> it[10] = if (value) 1 else 2 }
             media?.let { value -> it[11] = if (value) 1 else 2 }

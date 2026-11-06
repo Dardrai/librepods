@@ -22,7 +22,7 @@ void check_image(const char* path) {
     assert(contexts && context_count==16);
     for(size_t i=0;i<context_count;++i) {
         eld::ImageSymbol context;
-        assert(image.resolve(contexts[i],true,&context));
+        assert(eld::pixel17_resolve_context(image,contexts[i],&context));
         assert(image.bytes(context.address,context.size,5));
         for(size_t j=0;j<i;++j) assert(std::strcmp(contexts[i],contexts[j]));
     }
@@ -73,12 +73,13 @@ void check_image(const char* path) {
     size_t mutations=0;
     for(const auto& consumer:consumers) {
         eld::ImageSymbol symbol;
-        assert(image.resolve(consumer.name,true,&symbol));
+        assert(eld::pixel17_resolve_context(image,consumer.name,&symbol));
         const uint8_t* code=image.bytes(symbol.address,symbol.size,5); assert(code);
         // Every connected virtual BLR must retain its direct dispatch. Inserting a CFI/type
         // trap or changing the call register is rejected with the retained metadata unchanged.
         for(size_t at=4;at<symbol.size;at+=4) if(value<uint32_t>(code+at)==0xd63f0100 &&
-            value<uint32_t>(code+at-4)==consumer.preceding) {
+            (value<uint32_t>(code+at-4)==consumer.preceding ||
+             (consumer.preceding==0xad0187e0 && value<uint32_t>(code+at-4)==0xad0103e4))) {
             changed(static_cast<size_t>(code-bytes.data())+at,0xd4200000); ++mutations;
         }
     }

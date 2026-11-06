@@ -153,6 +153,7 @@ internal class NativeGameTransportClient private constructor(private val context
             if (drift != 0) putInt("drift", drift)
         }
         return Intent(NativeGameTransportRules.REQUEST).setPackage(bluetoothPackage)
+            .addFlags(Intent.FLAG_RECEIVER_FOREGROUND)
             .putExtras(extras)
     }
 

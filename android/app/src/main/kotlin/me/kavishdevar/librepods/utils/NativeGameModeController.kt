@@ -54,7 +54,7 @@ class NativeGameModeController(
     private val effectMutex = Mutex()
     private val wakeup = Channel<Unit>(Channel.CONFLATED)
     private val ports = AndroidPorts()
-    private val keepFlushBaseline = BuildConfig.DEBUG && BuildConfig.PRIVATE_GAME_KEEP_FLUSH_BASELINE
+    private val keepFlushBaseline = BuildConfig.PRIVATE_GAME_KEEP_FLUSH_BASELINE
     private val engine = NativeGameModeEngine(ports, keepFlushBaseline)
     private val runner = scope.launch {
         while (isActive) {
@@ -71,7 +71,7 @@ class NativeGameModeController(
                     remoteRestorePending = engine.remoteRestorePending) }
             }
             val interval = if (desired.value || engine.holdSerial > 0 || engine.remoteRestorePending) 100L else 1000L
-            withTimeoutOrNull(interval) { wakeup.receive() }
+            if (withTimeoutOrNull(interval) { wakeup.receiveCatching().isClosed } == true) break
         }
     }
     private val parentCompletion = parentScope.coroutineContext[Job]?.invokeOnCompletion { close() }
@@ -108,6 +108,28 @@ class NativeGameModeController(
     }
 
     fun resumeAfterMicrophone() { microphoneBlocked.set(false); wakeup.trySend(Unit) }
+
+    /** A profile release needs both local and remote cleanup confirmed before closing AACP. */
+    suspend fun suspendForHandover(): Boolean {
+        if (closed.get()) return false
+        microphoneBlocked.set(true)
+        cancellationEpoch.incrementAndGet()
+        return try {
+            withTimeoutOrNull(3000) {
+                engineMutex.withLock { engine.shutdown(captureControl()) }
+                var quiet = false
+                while (!quiet) {
+                    quiet = engineMutex.withLock {
+                        val next = engine.tick(false, eligible(), true, captureControl())
+                        mutableState.value = next.copy(desiredOn = desired.value, active = false)
+                        engine.holdSerial == 0L && !engine.remoteRestorePending
+                    }
+                    if (!quiet) delay(20)
+                }
+                true
+            } == true
+        } catch (cancelled: CancellationException) { throw cancelled } catch (_: Exception) { false }
+    }
 
     override fun close() {
         if (!closed.compareAndSet(false, true)) return

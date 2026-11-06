@@ -106,10 +106,10 @@ class ATTManager internal constructor(
 
     fun disconnect() { session?.let { retire(it, retryable = false) } }
 
-    /** One fresh ATT bearer may recover transport loss; rejected settings and uncertain writes stay quarantined. */
+    /** Three bounded read attempts; rejected settings and uncertain writes stay quarantined. */
     fun canRetryRead(): Boolean {
         val owner = captureOwner() ?: return false
-        return owner.same(attemptOwner) && !owner.same(failedOwner) && connectionAttempts < 2 && currentSession() == null
+        return owner.same(attemptOwner) && !owner.same(failedOwner) && connectionAttempts < 3 && currentSession() == null
     }
 
     private fun currentSession(): Session? = session?.takeIf {
@@ -132,7 +132,7 @@ class ATTManager internal constructor(
         val owner = captureOwner() ?: return null
         session?.let { retire(it) }
         if (!owner.same(attemptOwner)) { attemptOwner = owner; connectionAttempts = 0 }
-        if (owner.same(failedOwner) || connectionAttempts >= 2) return null
+        if (owner.same(failedOwner) || connectionAttempts >= 3) return null
         connectionAttempts++
         val active = try { Session(owner, socketFactory()) } catch (error: Exception) {
             if (error !is IOException) failedOwner = owner

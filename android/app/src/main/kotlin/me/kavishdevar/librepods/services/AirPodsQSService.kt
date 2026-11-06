@@ -45,6 +45,9 @@ import me.kavishdevar.librepods.core.devices.AppleDevice
 import me.kavishdevar.librepods.core.devices.BaseCapability
 import me.kavishdevar.librepods.core.devices.ConnectionState
 import me.kavishdevar.librepods.core.devices.NoiseControlMode
+import me.kavishdevar.librepods.dongle.DongleController
+import me.kavishdevar.librepods.presentation.overlays.DongleListeningTarget
+import me.kavishdevar.librepods.presentation.overlays.usesDongleListeningControls
 import me.kavishdevar.librepods.presentation.overlays.ListeningModeDialog
 
 class AirPodsQSService : TileService() {
@@ -53,9 +56,12 @@ class AirPodsQSService : TileService() {
     private var bound = false
     private var observation: Job? = null
     private var selected: AppleDevice? = null
+    private var selectedDongle: DongleListeningTarget? = null
+    private var observedDongle: DongleController? = null
+    private val visibilityOwner = Any()
     private var source: LibrePodsService? = null
     private var picker: ListeningModeDialog? = null
-    private var pickerOwner: AppleDevice? = null
+    private var pickerOwner: Any? = null
     private var destroyed = false
     private var listening = false
     private var pendingClick: Job? = null
@@ -81,15 +87,20 @@ class AirPodsQSService : TileService() {
                 }
                 Log.d("AirPodsQSService", "Device controls bound")
                 source = service
+                val dongle = service.dongleControls
+                observedDongle = dongle
+                dongle.controlsVisible(true, owner = visibilityOwner)
                 observation?.cancel()
                 observation = scope.launch {
                     service.devices.collectLatest { devices ->
                         coroutineScope {
                             val pods = devices.values.filterIsInstance<AppleDevice>()
                             fun refresh() {
-                                selected = pods.firstOrNull(::canControl)
+                                val dongleState = dongle.state.value
+                                selectedDongle = DongleListeningTarget.capture(dongle, dongleState)
+                                selected = if (dongleState.usesDongleListeningControls) null else pods.firstOrNull(::canControl)
                                 updateTile()
-                                if (pendingClick?.isActive == true) {
+                                if (pendingClick?.isActive == true && (selected != null || selectedDongle != null)) {
                                     cancelPendingClick()
                                     Log.d("AirPodsQSService", "Pending click resolved")
                                     openPicker(pickerGeneration)
@@ -97,6 +108,11 @@ class AirPodsQSService : TileService() {
                                 }
                             }
                             refresh()
+                            launch {
+                                combine(dongle.state, dongle.liveSettingEditor(0x0d).state,
+                                    dongle.liveSettingEditor(0x2e).state) { _, _, _ -> Unit }
+                                    .collect { refresh() }
+                            }
                             pods.forEach { device ->
                                 launch {
                                     combine(device.connectionState, device.state, device.settings, device.metadata) { _, _, _, _ -> Unit }
@@ -115,6 +131,9 @@ class AirPodsQSService : TileService() {
                 observation?.cancel()
                 observation = null
                 selected = null
+                selectedDongle = null
+                observedDongle?.controlsVisible(false, owner = visibilityOwner)
+                observedDongle = null
                 source = null
                 updateTile()
             }
@@ -176,6 +195,9 @@ class AirPodsQSService : TileService() {
         observation?.cancel()
         observation = null
         selected = null
+        selectedDongle = null
+        observedDongle?.controlsVisible(false, owner = visibilityOwner)
+        observedDongle = null
         source = null
         if (bound && old != null) runCatching { unbindService(old) }
         bound = false
@@ -211,21 +233,29 @@ class AirPodsQSService : TileService() {
     }
 
     private fun openPicker(generation: Long) {
-        val device = selected?.takeIf(::canControl) ?: run {
+        val dongle = selectedDongle?.takeIf { target -> source?.dongleControls?.let { target.isCurrent(it) } == true }
+        val device = selected?.takeIf(::canControl)
+        if (dongle == null && device == null) {
             Log.d("AirPodsQSService", "Click skipped: no connected supported device")
             return
         }
-        val devices = source?.devices ?: return
+        val currentSource = source ?: return
+        val devices = currentSource.devices
+        val owner: Any = dongle ?: checkNotNull(device)
         val openPicker = Runnable {
             // Unlocking/collapsing may stop tile listening; the clicked pair must still be current.
             if (!destroyed && generation == pickerGeneration && !isLocked &&
-                devices.value[device.macAddress] === device && canControl(device)) {
+                (dongle?.isCurrent(currentSource.dongleControls) == true ||
+                    device != null && !currentSource.dongleControls.state.value.usesDongleListeningControls &&
+                    devices.value[device.macAddress] === device && canControl(device))) {
                 val current = picker
-                val dialog = if (pickerOwner === device && current?.isShowing == true) current else {
+                val sameOwner = if (dongle != null) pickerOwner == dongle else pickerOwner === device
+                val dialog = if (sameOwner && current?.isShowing == true) current else {
                     dismissPicker()
-                    ListeningModeDialog(this, device.macAddress).also { next ->
+                    (if (dongle != null) ListeningModeDialog(this, dongle)
+                        else ListeningModeDialog(this, checkNotNull(device).macAddress)).also { next ->
                         picker = next
-                        pickerOwner = device
+                        pickerOwner = owner
                         next.setOnDismissListener {
                             if (picker === next) {
                                 picker = null
@@ -248,7 +278,8 @@ class AirPodsQSService : TileService() {
     private fun updateTile() {
         val tile = qsTile ?: return
         val device = selected?.takeIf(::canControl)
-        val available = device != null
+        val dongle = selectedDongle?.takeIf { target -> source?.dongleControls?.let { target.isCurrent(it) } == true }?.snapshot()
+        val available = device != null || dongle != null
         if (publishedAvailable != available) {
             val pods = source?.devices?.value?.values?.filterIsInstance<AppleDevice>().orEmpty()
             val states = pods.joinToString { pod ->
@@ -258,7 +289,7 @@ class AirPodsQSService : TileService() {
             Log.d("AirPodsQSService", "Tile available=$available bound=$bound service=${source != null} devices=${pods.size} states=[$states]")
             publishedAvailable = available
         }
-        val mode = device?.state?.value?.controlStates?.get(ControlCommandIdentifier.LISTENING_MODE)?.firstOrNull()?.toInt()
+        val mode = dongle?.mode ?: device?.state?.value?.controlStates?.get(ControlCommandIdentifier.LISTENING_MODE)?.firstOrNull()?.toInt()
         tile.state = if (available) Tile.STATE_ACTIVE else Tile.STATE_UNAVAILABLE
         tile.label = getString(when (mode) {
             NoiseControlMode.OFF.ordinal + 1 -> R.string.off
@@ -267,7 +298,8 @@ class AirPodsQSService : TileService() {
             NoiseControlMode.NOISE_CANCELLATION.ordinal + 1 -> R.string.noise_cancellation
             else -> R.string.noise_control
         })
-        tile.subtitle = device?.metadata?.value?.name?.ifBlank { "AirPods" } ?: getString(R.string.takeover_disconnected)
+        tile.subtitle = dongle?.metadata?.name ?: device?.metadata?.value?.name?.ifBlank { "AirPods" }
+            ?: getString(R.string.takeover_disconnected)
         tile.icon = Icon.createWithResource(this, when (mode) {
             NoiseControlMode.OFF.ordinal + 1, NoiseControlMode.NOISE_CANCELLATION.ordinal + 1 -> R.drawable.ic_noise_cancellation
             NoiseControlMode.TRANSPARENCY.ordinal + 1 -> R.drawable.ic_transparency

@@ -48,6 +48,8 @@ struct Pixel17CodecBindings {
     void* (*assign_short)(void* host_string, const char*, size_t);
     // Diagnostics hold an object lease, without holding its codec or registry mutex.
     void (*debug)(const void* codec, int fd) = nullptr;
+    // The first64 bytes retain their layout; newer native records have16 opaque trailing bytes.
+    size_t config_size = 64;
 };
 
 bool pixel17_codec_prepare(const Pixel17CodecBindings& bindings);

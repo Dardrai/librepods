@@ -5,6 +5,22 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class NativeGameSnapshotTest {
+    @Test fun packetAcknowledgementDoesNotProveRestoration() {
+        val source = snapshot().copyOf(86).apply {
+            this[0] = 2; this[9] = 1; this[11] = 1
+            this[79] = 1; this[80] = 0xcc18; this[81] = 0xee1c
+        }
+        assertFalse(NativeGameSnapshot.parse(source)!!.restored)
+        source[81] = source[80]; source[82] = 1
+        assertFalse(NativeGameSnapshot.parse(source)!!.restored)
+        source[82] = 0; source[83] = 1
+        assertFalse(NativeGameSnapshot.parse(source)!!.restored)
+        source[83] = 0
+        assertTrue(NativeGameSnapshot.parse(source)!!.restored)
+        for (index in listOf(79, 82, 83, 84)) assertNull(NativeGameSnapshot.parse(source.copyOf().apply { this[index] = 2 }))
+        source[80] = 65536
+        assertNull(NativeGameSnapshot.parse(source))
+    }
     private fun snapshot() = LongArray(79).apply {
         this[0] = 1; this[4] = 1; this[17] = 65535; this[31] = 65535; this[45] = 10
         this[61] = 1; this[71] = 10; this[72] = 10

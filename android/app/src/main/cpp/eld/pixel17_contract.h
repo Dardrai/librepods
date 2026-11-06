@@ -3,6 +3,7 @@
 #include "symbol_image.h"
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 
 namespace eld {
 inline constexpr char kPixel17Init[] = "_ZN10A2dpCodecs4initE29btav_a2dp_codec_sample_rate_t";
@@ -11,14 +12,29 @@ inline constexpr char kPixel17AacCtor[] = "_ZN24A2dpCodecConfigAacSourceC1E26bta
 inline constexpr char kPixel17Lock[] = "_ZNSt3__115recursive_mutex4lockEv";
 inline constexpr char kPixel17Unlock[] = "_ZNSt3__115recursive_mutex6unlockEv";
 inline constexpr char kPixel17Provider[] = "_ZN9bluetooth5audio4a2dp8provider14supports_codecE23btav_a2dp_codec_index_t";
+inline constexpr char kPixel17HardwareManager[] = "_ZN9bluetooth4a2dp20HardwareCodecManager11GetInstanceEv";
+inline constexpr char kPixel17HardwareSupports[] = "_ZNK9bluetooth4a2dp20HardwareCodecManager13SupportsCodecE23btav_a2dp_codec_index_t";
 inline constexpr char kPixel17ActivePeer[] = "_ZN9bluetooth5avrcp17A2dpInterfaceImpl11active_peerEv";
 inline constexpr char kPixel17Allocate[] = "_ZnwmRKSt9nothrow_t";
 inline constexpr char kPixel17Release[] = "_ZdlPvm";
 inline constexpr char kPixel17Assign[] = "_ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE17__assign_no_aliasILb1EEERS5_PKcm";
 inline constexpr char kPixel17Balance[] = "_ZNSt3__127__tree_balance_after_insertB8nn220000IPNS_16__tree_node_baseIPvEEEEvT_S5_";
+inline constexpr char kPixel17SourceStart[] = "_ZL38btif_a2dp_source_start_session_delayedRK10RawAddressNSt3__17promiseIvEE";
+inline constexpr char kPixel17SourceStartStatus[] = "_ZL38btif_a2dp_source_start_session_delayedRK10RawAddressNSt3__17promiseI20A2dpTransitionStatusEE";
+// This context is inspected, never invoked: the promise value type changed.
+inline bool pixel17_resolve_context(const SymbolImage& image,const char* name,ImageSymbol* out) {
+    if(!name || !out) return false;
+    if(std::strcmp(name,kPixel17SourceStart)) return image.resolve(name,true,out);
+    ImageSymbol old,current;
+    const bool has_old=image.resolve(kPixel17SourceStart,true,&old);
+    const bool has_current=image.resolve(kPixel17SourceStartStatus,true,&current);
+    if(has_old==has_current) return false;
+    *out=has_current?current:old; return true;
+}
 struct Pixel17Contract {
     size_t registry_count = 0;
     uint64_t raw_allocate = 0;
+    size_t config_size = 64;
 };
 // Exact symbol names + instruction semantics, independent of ASLR and link-time addresses.
 // This checks the known SDK37 ABI, not arbitrary Android versions or an image hash.

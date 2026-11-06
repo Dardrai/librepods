@@ -37,6 +37,68 @@ class A2dpPlaybackRecoveryTest {
         stub("disconnect") { disconnects++; state = BluetoothProfile.STATE_DISCONNECTED; true }
     }
 
+    @Test fun aSlowCompetingDeviceReadCannotDisconnectAfterTheRecoveryDeadline() {
+        state = BluetoothProfile.STATE_CONNECTED
+        var reads = 0
+        `when`(profile.connectedDevices).thenAnswer {
+            if (++reads == 2) elapsed = 5500
+            emptyList<BluetoothDevice>()
+        }
+        assertFalse(run(connectOnly = false))
+        assertEquals(0, disconnects); assertEquals(0, connects)
+    }
+
+    @Test fun aLateDisconnectedReplyCannotStartReconnectAfterItsWaitBudget() {
+        state = BluetoothProfile.STATE_CONNECTED
+        `when`(profile.getConnectionState(device)).thenAnswer {
+            if (disconnects > 0) elapsed = 1500
+            state
+        }
+        assertFalse(run(connectOnly = false))
+        assertEquals(1, disconnects); assertEquals(0, connects)
+        assertEquals(1500L, elapsed)
+    }
+
+    @Test fun aConnectedReplyAfterTheDeadlineCannotProduceASuccessReceipt() {
+        `when`(profile.getConnectionState(device)).thenAnswer {
+            if (connects > 0) { elapsed = 18_000; BluetoothProfile.STATE_CONNECTED } else state
+        }
+        assertFalse(run())
+        assertEquals(1, connects); assertEquals(0, disconnects)
+    }
+
+    @Test fun aRejectedConnectCannotUseALateFallbackStateAsSuccess() {
+        stub("connect") { connects++; false }
+        `when`(profile.getConnectionState(device)).thenAnswer {
+            if (connects > 0) { elapsed = 18_000; BluetoothProfile.STATE_CONNECTED } else state
+        }
+        assertFalse(run())
+        assertEquals(1, connects); assertEquals(0, disconnects)
+    }
+
+    @Test fun aSlowOwnerCallbackCannotAuthorizeARecoveryWriteAfterExpiry() {
+        state = BluetoothProfile.STATE_CONNECTED
+        var checks = 0
+        `when`(owner.isCurrent).thenAnswer { if (++checks == 2) elapsed = 5500; true }
+        assertFalse(run(connectOnly = false))
+        assertEquals(0, connects); assertEquals(0, disconnects)
+    }
+
+    @Test fun aPauseReturningAfterExpiryDoesNotReadOrConnectTheProfileAgain() {
+        state = BluetoothProfile.STATE_DISCONNECTING
+        tick = { elapsed = 18_000; state = BluetoothProfile.STATE_DISCONNECTED }
+        assertFalse(run())
+        verify(profile, times(1)).getConnectionState(device)
+        assertEquals(0, connects); assertEquals(0, disconnects)
+    }
+
+    @Test fun anAlreadyExpiredRequestDoesNotReadOrMutateAProfile() {
+        elapsed = 18_000
+        assertFalse(run())
+        verify(profile, never()).getConnectionState(device)
+        assertEquals(0, connects); assertEquals(0, disconnects)
+    }
+
     @Test fun explicitConnectNeverCyclesAnAlreadyConnectedMediaProfile() {
         state = BluetoothProfile.STATE_CONNECTED
         assertTrue(run())

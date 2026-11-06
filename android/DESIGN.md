@@ -29,6 +29,13 @@ movement still accumulates before snapping and cancellation keeps its existing
 ownership guards. EQ graph controls retain their 18 dp visible dots inside 48 dp
 touch targets, with labeled range actions and keyboard adjustment in both themes.
 
+The listening-mode control keeps its segment geometry fixed for each drag, so
+mode echoes cannot move boundaries beneath the finger. Dongle screens and the
+Quick Settings picker display the same queued editor intent while received
+reports remain separate. Each visible screen, tile and picker owns its polling
+token; closing the shade must not stop an open picker's updates. A remembered
+but unplugged dongle does not hide a connected native device from the tile.
+
 Received records and requested values remain separate. A successful silent PME
 send can supply the next same-session edit baseline, but is not device
 confirmation. Fresh received records take precedence. Audiogram selection needs

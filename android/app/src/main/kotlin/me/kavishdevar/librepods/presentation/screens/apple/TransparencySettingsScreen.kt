@@ -70,8 +70,9 @@ fun TransparencySettingsScreen(viewModel: AppleViewModel, navigateBack: (() -> U
 }
 
 @Composable
-internal fun DongleTransparencyScreen(navigateBack: (() -> Unit)?) {
-    val controller = rememberLibrePodsService()?.dongleControls ?: return
+internal fun DongleTransparencyScreen(navigateBack: (() -> Unit)?,
+    controller: me.kavishdevar.librepods.dongle.DongleController? = rememberLibrePodsService()?.dongleControls) {
+    if (controller == null) return
     val state by controller.state.collectAsState()
     ObserveDongleControls(controller)
     val editor = remember(controller) { controller.liveTransparencyEditor() }
@@ -82,7 +83,8 @@ internal fun DongleTransparencyScreen(navigateBack: (() -> Unit)?) {
             canEnable = state.hearingModes.customTransparencyAllowed,
             transportAvailable = true, result = state.transparencyResult,
             onEdit = { editor.edit(live.revision, it) }, onFinished = { editor.flush() },
-            onCanceled = { editor.cancel(live.revision) }, pending = live.pending, error = state.error)
+            onCanceled = { editor.cancel(live.revision) }, pending = live.pending, error = state.error,
+            readStatus = state.transparencyReadStatus, connected = state.connected)
     }
 }
 

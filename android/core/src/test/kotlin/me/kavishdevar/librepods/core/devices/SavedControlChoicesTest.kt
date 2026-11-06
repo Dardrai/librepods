@@ -18,14 +18,15 @@ class SavedControlChoicesTest {
         assertArrayEquals(byteArrayOf(0), reported.controlStates[id])
     }
 
-    @Test fun sharedSwipeChoicesAdaptTheExistingAndroidOneBasedWireValues() {
+    @Test fun sharedSwipeChoicesPreserveTheCapturedZeroBasedWireValues() {
         val id = ControlCommandIdentifier.VOLUME_SWIPE_INTERVAL
         for (index in 0..2) {
-            assertEquals(index.toString(), savedControlChoice(id, byteArrayOf((index + 1).toByte())))
-            assertArrayEquals(byteArrayOf((index + 1).toByte()), savedControlValue(id,
+            assertEquals(index.toString(), savedControlChoice(id, byteArrayOf(index.toByte())))
+            assertArrayEquals(byteArrayOf(index.toByte()), savedControlValue(id,
                 AppleSettings(savedUnconfirmedChoices = mapOf("desired_swipe_duration" to index.toString()))))
         }
-        assertNull(savedControlChoice(id, byteArrayOf(0)))
+        assertNull(savedControlChoice(id, byteArrayOf(3)))
+        assertNull(savedControlValue(id, AppleSettings(savedUnconfirmedChoices = mapOf("desired_swipe_duration" to "3"))))
     }
 
     @Test fun disablingTheCacheDoesNotKeepAnOmittedUnavailableComponent() {

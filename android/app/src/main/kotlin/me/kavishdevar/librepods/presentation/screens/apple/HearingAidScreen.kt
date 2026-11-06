@@ -60,10 +60,19 @@ fun HearingAidScreen(
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val connection by viewModel.connectionState.collectAsState()
+    HearingAidContent(uiState, connection == ConnectionState.CONNECTED, viewModel.transparencyTransportAvailable,
+        navigateBack, navigateToHearingAidAdjustments, navigateToHearingTest, setHearingMode = viewModel::setHearingMode)
+}
+
+@Composable
+internal fun HearingAidContent(uiState: me.kavishdevar.librepods.presentation.viewmodel.AppleUiState,
+    connected: Boolean, transportAvailable: Boolean, navigateBack: (() -> Unit)?,
+    navigateToHearingAidAdjustments: () -> Unit, navigateToHearingTest: () -> Unit = {},
+    showHearingTest: Boolean = true, writable: Boolean = true, setHearingMode: (HearingMode, Boolean) -> Unit) {
     val state = uiState.state
     val modes = state.hearingModes
-    val canReadProfile = viewModel.transparencyTransportAvailable && uiState.metadata.model != AirPodsModel.UNKNOWN &&
-        connection == ConnectionState.CONNECTED && parseHearingAidSettingsResponse(state.hearingAidData) != null &&
+    val canReadProfile = transportAvailable && uiState.metadata.model != AirPodsModel.UNKNOWN &&
+        connected && parseHearingAidSettingsResponse(state.hearingAidData) != null &&
         parseTransparencySettingsResponse(state.transparencyData)?.enabled == false
     StyledScaffold(title = stringResource(R.string.hearing_aid), navigateBack = navigateBack) { top, bottom ->
         Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceContainer)
@@ -73,7 +82,7 @@ fun HearingAidScreen(
             val status = when {
                 modes.pending != null -> R.string.hearing_mode_pending
                 modes.uncertain != null -> R.string.hearing_mode_unconfirmed
-                connection != ConnectionState.CONNECTED -> R.string.settings_connect_airpods
+                !connected -> R.string.settings_connect_airpods
                 state.hearingAidReadStatus == SettingsReadStatus.UNAVAILABLE ||
                     state.transparencyReadStatus == SettingsReadStatus.UNAVAILABLE -> R.string.accommodations_unavailable
                 modes.hearingAidEnabled == null || modes.mediaAssistEnabled == null -> R.string.hearing_modes_unknown
@@ -82,13 +91,13 @@ fun HearingAidScreen(
                 else -> null
             }
             status?.let { Text(stringResource(it), style = MaterialTheme.typography.bodySmall) }
-            StyledList(title = stringResource(R.string.hearing_aid), key = Triple(modes, connection, canReadProfile)) {
-                HearingModeRows(modes, connection == ConnectionState.CONNECTED, canReadProfile,
-                    onEnable = { mode -> viewModel.setHearingMode(mode, true) },
-                    onDisable = { mode -> viewModel.setHearingMode(mode, false) })
+            StyledList(title = stringResource(R.string.hearing_aid), key = Triple(modes, connected, canReadProfile)) {
+                HearingModeRows(modes, connected && writable, canReadProfile,
+                    onEnable = { mode -> setHearingMode(mode, true) },
+                    onDisable = { mode -> setHearingMode(mode, false) })
                 styledListItem(contentText = stringResource(R.string.adjustments), onClick = navigateToHearingAidAdjustments)
             }
-            StyledListItem(contentText = stringResource(R.string.update_hearing_test), onClick = navigateToHearingTest)
+            if (showHearingTest) StyledListItem(contentText = stringResource(R.string.update_hearing_test), onClick = navigateToHearingTest)
             Spacer(Modifier.height(bottom))
         }
     }

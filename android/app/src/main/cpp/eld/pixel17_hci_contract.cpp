@@ -51,9 +51,11 @@ bool pixel17_hci_contract(const SymbolImage& image,Pixel17HciSymbols* out) {
     if(!code(image,"_ZN4base8internal13BindStateBaseC2EPFvvEPFvPKS1_E",32,&found.construct,&ctor) ||
        !code(image,"_ZN9bluetooth6common17MessageLoopThread10DoInThreadEN4base12OnceCallbackIFvvEEE",136,&found.post,&post) ||
        !code(image,"_ZN4base8internal12CallbackBaseD2Ev",96,&found.destroy_callback,&dtor) ||
-       !code(image,"_Z17do_in_main_threadN4base12OnceCallbackIFvvEEE",240,&found.main_wrapper,&main) ||
+       (!code(image,"_Z17do_in_main_threadN4base12OnceCallbackIFvvEEE",240,&found.main_wrapper,&main) &&
+        !code(image,"_Z17do_in_main_threadN4base12OnceCallbackIFvvEEE",216,&found.main_wrapper,&main)) ||
        !code(image,"_ZL16transmit_commandPK6BT_HDRPFvN9bluetooth3hci19CommandCompleteViewEPvEPFvhPS_S5_ES5_",1028,&found.transmit,&tx) ||
-       !code(image,"_ZN3cppL31OnTransmitPacketCommandCompleteEPFvN9bluetooth3hci19CommandCompleteViewEPvES3_S2_",572,&found.complete_adapter,&complete) ||
+       (!code(image,"_ZN3cppL31OnTransmitPacketCommandCompleteEPFvN9bluetooth3hci19CommandCompleteViewEPvES3_S2_",572,&found.complete_adapter,&complete) &&
+        !code(image,"_ZN3cppL31OnTransmitPacketCommandCompleteEPFvN9bluetooth3hci19CommandCompleteViewEPvES3_RKS2_",572,&found.complete_adapter,&complete)) ||
        !code(image,"_ZNK9bluetooth6packet10PacketViewILb1EEixEm",144,&found.view_byte,&byte) ||
        !code(image,"_ZNK9bluetooth3hci19CommandCompleteView10GetPayloadEv",368,&found.view_payload,&payload)) return false;
     // BindStateBase is native refcount32 + padding, invoke, destroy, cancellation
@@ -74,10 +76,12 @@ bool pixel17_hci_contract(const SymbolImage& image,Pixel17HciSymbols* out) {
        !calls(post,found.post,84,found.destroy_callback.address) || word(post+104) != 0x52000280) return false;
     // Derive the actual main MessageLoopThread from the named wrapper, not a
     // process-global address pin or the distinct btif/JNI message loop.
-    if(!at(main,240,48,{0xf9400008,0xf900001f}) ||
-       !page_address(word(main+56),word(main+60),found.main_wrapper.address+56,&found.main_thread) ||
-       !at(main,240,64,{0xf90003e8}) || !calls(main,found.main_wrapper,68,found.post.address) ||
-       !calls(main,found.main_wrapper,80,found.destroy_callback.address) || !found.main_thread) return false;
+    const size_t main_load=found.main_wrapper.size==216 ? 40 : 48;
+    if(!at(main,found.main_wrapper.size,main_load,{0xf9400008,0xf900001f}) ||
+       !page_address(word(main+main_load+8),word(main+main_load+12),found.main_wrapper.address+main_load+8,&found.main_thread) ||
+       !at(main,found.main_wrapper.size,main_load+16,{0xf90003e8}) ||
+       !calls(main,found.main_wrapper,main_load+20,found.post.address) ||
+       !calls(main,found.main_wrapper,main_load+32,found.destroy_callback.address) || !found.main_thread) return false;
     // The main object is in zero-filled native BSS, so it has no file byte range.
     // Runtime must check its PT_LOAD/mapped writable bounds after applying bias.
     // Native command ABI reads BT_HDR len/offset and copies command parameters

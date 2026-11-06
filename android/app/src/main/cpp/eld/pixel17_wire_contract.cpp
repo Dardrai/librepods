@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "pixel17_wire_contract.h"
 #include "pixel17_wire_hooks.h"
+#include "pixel17_contract.h"
 #include <cstring>
 
 namespace eld {
@@ -42,7 +43,7 @@ uint32_t word(const uint8_t* p) { uint32_t value; std::memcpy(&value,p,4); retur
 uint64_t wide(const uint8_t* p) { uint64_t value; std::memcpy(&value,p,8); return value; }
 struct Code { ImageSymbol symbol{}; const uint8_t* bytes=nullptr; };
 bool code(const SymbolImage& image,const char* name,Code* out) {
-    return image.resolve(name,true,&out->symbol) && out->symbol.size>=4 &&
+    return pixel17_resolve_context(image,name,&out->symbol) && out->symbol.size>=4 &&
         out->symbol.size<=65536 && !(out->symbol.size&3) &&
         (out->bytes=image.bytes(out->symbol.address,out->symbol.size,5));
 }
@@ -52,6 +53,9 @@ bool at(const Code& code,size_t offset,uint32_t value) {
 bool has(const Code& code,uint32_t value) {
     for(size_t p=0;p<code.symbol.size;p+=4) if(at(code,p,value)) return true;
     return false;
+}
+bool invalid_source_index(const Code& code) {
+    return has(code,0x52800260) || (has(code,0x52800273) && has(code,0x2a1303e0));
 }
 template<size_t N> bool pattern(const Code& code,const uint32_t (&values)[N]) {
     for(size_t p=0;p+sizeof(values)<=code.symbol.size;p+=4) {
@@ -96,6 +100,21 @@ bool table_address(uint32_t adrp,uint32_t add,uint64_t pc,uint64_t* out) {
     if(low>UINT64_MAX-base) return false;
     *out=base+low; return true;
 }
+bool sample_rate_table(const SymbolImage& image,const Code& rate) {
+    const uint32_t lookup[]={0x5ac00108,0x5ac01108,0x71003d1f};
+    const int32_t expected[]={44100,32000,24000,22050,16000,12000,11025,8000,-1,-1,-1,-1,96000,88200,64000,48000};
+    for(size_t i=0;i+28<=rate.symbol.size;i+=4) {
+        if(!at(rate,i,lookup[0]) || !at(rate,i+4,lookup[1]) || !at(rate,i+8,lookup[2]) ||
+           !at(rate,i+12,0x540000a8) || !at(rate,i+24,0xb8685920)) continue;
+        const auto page=word(rate.bytes+i+16),add=word(rate.bytes+i+20);
+        if((page&0x9f00001f)!=0x90000009 || (add&0xffc003ff)!=0x91000129) return false;
+        uint64_t address;
+        if(!table_address(page&~31U,add&~0x3ffU,rate.symbol.address+i+16,&address)) return false;
+        const auto* values=image.bytes(address,sizeof(expected),4);
+        return values && !std::memcmp(values,expected,sizeof(expected));
+    }
+    return false;
+}
 bool initializer(const SymbolImage& image) {
     Code generic,vendor,copy;
     if(!code(image,generic_init,&generic) || !code(image,vendor_init,&vendor) ||
@@ -105,8 +124,10 @@ bool initializer(const SymbolImage& image) {
     const uint32_t clear_tail[]={0x3902227f,0x3900b67f}; // SEP[136]=SEP[45]=0.
     // Native OTA copy is 32 bytes plus an overlapping 16-byte tail at +29: exactly 45 bytes.
     const uint32_t copy_ota[]={0xad4006a2,0x3cc1d2a0,0x3c81d280,0xad000682};
+    const uint32_t copy_ota80[]={0x9107c268,0xad4f8662,0x3cc1d100,0x3c81d280,0xad000682};
     if(!pattern(generic,keep_rate_and_sep) || !pattern(generic,clear_tail) ||
-       !pattern(copy,copy_ota) || !has(generic,0x2a0003f5) || !has(generic,0x12000000)) return false;
+       (!pattern(copy,copy_ota) && !pattern(copy,copy_ota80)) ||
+       !has(generic,0x2a0003f5) || !has(generic,0x12000000)) return false;
     size_t p=0;
     // Native generic signature (index,SEP,rate) delegates to vendor (rate,index,SEP).
     if(!call(generic,vendor.symbol.address,&p) || p<12 ||
@@ -138,7 +159,22 @@ bool encoder_table(const SymbolImage& image) {
 bool source_lookup(const SymbolImage& image) {
     Code vendor,find,ota;
     if(!code(image,vendor_index,&vendor) || !code(image,find_source,&find) || !code(image,set_ota,&ota)) return false;
+    const uint32_t invalid[]={0x52800268,0x1a880120};
+    if(!has(vendor,0xb8403013) || !pattern(vendor,invalid)) return false;
     size_t p=0;
+    Code index;
+    if(!code(image,"_Z21A2DP_SourceCodecIndexPKh",&index)) return false;
+    size_t lookup_call=0,ota_call=0;
+    if(call(find,index.symbol.address,&lookup_call) && call(ota,index.symbol.address,&ota_call)) {
+        const uint32_t map[]={0xaa1303e9,0xf8450d28};
+        return lookup_call>=4 && ota_call>=4 &&
+            at(find,lookup_call-4,0xaa1403e0) && at(ota,ota_call-4,0xaa1403e0) &&
+            at(find,lookup_call+4,0x71004c1f) && (word(find.bytes+lookup_call+8)&0xff00001f)==0x54000000 &&
+            at(ota,ota_call+4,0x71004c1f) && (word(ota.bytes+ota_call+8)&0xff00001f)==0x54000000 &&
+            at(find,lookup_call+12,map[0]) && at(find,lookup_call+16,map[1]) &&
+            at(ota,ota_call+12,map[0]) && at(ota,ota_call+16,map[1]) &&
+            has(find,0xf9401514) && has(ota,0xf9401519) && invalid_source_index(index);
+    }
     // Incoming source OTA selection calls the factory lookup. That lookup inlines the generic
     // dispatcher, then calls the vendor index directly: detouring only the global helper misses it.
     if(!call(ota,find.symbol.address,&p) || p<8 || p+8>ota.symbol.size || !at(ota,p-8,0xaa1303e0) ||
@@ -147,7 +183,6 @@ bool source_lookup(const SymbolImage& image) {
        !at(find,p+4,0x71004c1f) || (word(find.bytes+p+8)&0xff00001f)!=0x54000000) return false;
     // The stock vendor helper decodes the vendor word, returns a 32-bit source enum and uses
     // the same sentinel19 as the global helper. It is not the peer-source/sink decoder API.
-    const uint32_t invalid[]={0x52800268,0x1a880120};
     return has(vendor,0xb8403013) && pattern(vendor,invalid);
 }
 bool enqueue_contract(const SymbolImage& image) {
@@ -178,16 +213,17 @@ bool enqueue_contract(const SymbolImage& image) {
     const uint64_t flag_offset=(word(callback.bytes+0x48)>>10)&4095;
     if(queue_a>UINT64_MAX-8 || flag_page>UINT64_MAX-flag_offset || flag_page+flag_offset!=queue_a+8) return false;
     size_t p;
+    const bool current_stats=at(callback,0xbc,0xa916d688);
     if(!call(callback,flush.symbol.address,&p) || p!=0xc0 ||
        !call(callback,push.symbol.address,&p) || p!=0x250 ||
-       !call(callback,pop.symbol.address,&p) || p!=0x1cc || !at(callback,0xbc,0xa917d688) ||
+       !call(callback,pop.symbol.address,&p) || p!=0x1cc || (!current_stats && !at(callback,0xbc,0xa917d688)) ||
        !at(callback,0xb8,0xf9400280) || !at(callback,0xc4,0xaa1303e0)) return false;
     uint64_t freed_current,freed_backlog;
     if(!target(word(callback.bytes+0xc8),callback.symbol.address+0xc8,true,&freed_current) ||
        !target(word(callback.bytes+0x1e4),callback.symbol.address+0x1e4,true,&freed_backlog) ||
        freed_current!=release || freed_backlog!=release) return false;
     // No intervening instruction replaces the packet/flag, and normal enqueue still consumes x19.
-    const uint32_t push_args[]={0xaa1303e1,0xf9400340,0xeb09029f,0x8b140108,0x9a898289,0xa914a748};
+    const uint32_t push_args[]={0xaa1303e1,0xf9400340,0xeb09029f,0x8b140108,0x9a898289,current_stats?0xa913a748U:0xa914a748U};
     for(size_t i=0;i<6;++i) if(!at(callback,0x238+i*4,push_args[i])) return false;
     const uint32_t epilogue[]={0xa94d4ff4,0xf9404bfb,0xa94c57f6,0xa94b5ff8,0xa94a67fa,
         0xa9487bfd,0x910383ff,0xf85f8e5e,0xd50323bf,0xd65f03c0};
@@ -275,7 +311,7 @@ bool consumers(const SymbolImage& image) {
     return init && pattern(begin,peer_zero) && pattern(end,cleanup_slot) && pattern(tx,reset_slot) &&
         pattern(tx,interval_slot) && code(image,"_Z23A2DP_GetPacketTimestampPKhS0_Pj",&stamp) &&
         pattern(stamp,timestamp) && code(image,"_Z21A2DP_SourceCodecIndexPKh",&index) &&
-        has(index,0x52800260); // Exact invalid native source index 19.
+        invalid_source_index(index); // Exact invalid native source index 19.
 }
 }
 
@@ -301,7 +337,7 @@ bool pixel17_wire_contract(const SymbolImage& image) {
     }
     Code rate,bits,channels;
     // Return units are numeric Hz, signed integer bits/channel count; not native bit masks.
-    return code(image,contexts[18],&rate) && has(rate,0x52977000) &&
+    return code(image,contexts[18],&rate) && (has(rate,0x52977000) || sample_rate_table(image,rate)) &&
         code(image,contexts[19],&bits) && has(bits,0x52800200) &&
         code(image,contexts[20],&channels) && has(channels,0x52800049);
 }

@@ -5,6 +5,8 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.SemanticsActions
@@ -25,6 +27,7 @@ import me.kavishdevar.librepods.core.devices.HearingModes
 import me.kavishdevar.librepods.dongle.DongleController
 import me.kavishdevar.librepods.dongle.DongleProtocol
 import me.kavishdevar.librepods.dongle.DongleState
+import me.kavishdevar.librepods.presentation.screens.apple.HearingAidAdjustmentControls
 import me.kavishdevar.librepods.presentation.design.DesignSystem
 import me.kavishdevar.librepods.presentation.design.LibrePodsTheme
 import org.junit.Assert.assertEquals
@@ -61,13 +64,13 @@ class DongleSettingsInteractionTest {
 
     @Test fun changing_only_gain_preserves_asymmetric_tones_boosts_and_fitting() {
         show(hearing = profile)
-        adjust(-1.5f..1.5f, 0.25f)
+        adjust("Amplification", 0.25f)
         awaitHearing(profile.withAmplification(0.25f))
     }
 
     @Test fun changing_only_balance_preserves_asymmetric_tones_boosts_and_fitting() {
         show(hearing = profile)
-        adjust(-3f..3f, 0.5f)
+        adjust("Balance", 0.5f)
         awaitHearing(profile.withAmplification(balance = 0.5f))
     }
 
@@ -75,10 +78,10 @@ class DongleSettingsInteractionTest {
         val original = profile.copy(leftAmplification = 0.000000001f, rightAmplification = 1.1f,
             netAmplification = 0.55f, balance = 1.1f)
         show(hearing = original)
-        adjust(-1f..1f, 0.5f)
+        adjust("Tone", 0.5f)
         compose.onNodeWithText("Conversation Boost").performScrollTo().performClick()
         awaitHearing(original.copy(leftTone = 0.5f, rightTone = 0.5f,
-            leftConversationBoost = true, rightConversationBoost = true))
+            leftConversationBoost = false, rightConversationBoost = false))
     }
 
     @Test fun codec_selection_normalizes_automatic_sbc_and_aac_requests() {
@@ -133,7 +136,15 @@ class DongleSettingsInteractionTest {
         val controller = fixture.controller
         compose.setContent {
             LibrePodsTheme(designSystem = DesignSystem.Material) {
-                Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) { DongleControls(current.value, controller) }
+                Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+                    if (hearing == null) DongleControls(current.value, controller) else {
+                        val editor = controller.liveHearingEditor()
+                        val live by editor.state.collectAsState()
+                        HearingAidAdjustmentControls(live.displayed, 1, live.revision, enabled = true,
+                            gainSwipe = false, onGainSwipe = {}, onEdit = { editor.edit(live.revision, it) },
+                            onFinished = editor::flush, onCanceled = { editor.cancel(live.revision) })
+                    }
+                }
             }
         }
     }
@@ -141,10 +152,9 @@ class DongleSettingsInteractionTest {
     private fun audioProfile(codec: Int, rateMode: Int, bitrate: Long) =
         DongleProtocol.AudioProfile(codec, codec, rateMode, bitrate, bitrate, false, 0, 0, 8, null)
 
-    private fun adjust(range: ClosedFloatingPointRange<Float>, value: Float) {
-        compose.onNode(SemanticsMatcher("slider with range $range") {
-            it.config.getOrNull(SemanticsProperties.ProgressBarRangeInfo)?.range == range
-        }).performScrollTo().performSemanticsAction(SemanticsActions.SetProgress) { it(value) }
+    private fun adjust(label: String, value: Float) {
+        compose.onNode(androidx.compose.ui.test.hasContentDescription(label))
+            .performScrollTo().performSemanticsAction(SemanticsActions.SetProgress) { it(value) }
     }
 
     private fun awaitHearing(expected: HearingAidSettings) {

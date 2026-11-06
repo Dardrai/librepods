@@ -82,6 +82,11 @@ The PC link is optional. With the PC offline, choose **Phone** or tap your
 AirPods' device card to connect locally. If phone audio already works, LibrePods
 reconnects its controls without restarting the audio connection.
 
+If Android independently reconnects the selected AirPods' audio, LibrePods can
+reattach their controls even while a saved PC handover hold remains. This does
+not clear the hold or request an audio connection. Missing local audio or an
+active transfer still blocks passive control attachment.
+
 Companion v2 shares a fixed 15-key whitelist: host auto-pause, theme,
 conversation policy, popup and disconnected-battery preferences, call options,
 and supported saved, unconfirmed accessory choices. Synced choices do not become

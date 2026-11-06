@@ -5,6 +5,33 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class NativeCallConnectionTest {
+    @Test fun aStateReadPastTheCallDeadlineCannotConnectOrClaimReadiness() {
+        for (state in listOf(BluetoothProfile.STATE_DISCONNECTED, BluetoothProfile.STATE_CONNECTED)) {
+            var elapsed = 0L
+            var connects = 0
+            assertFalse(NativeCallConnection.connectSelected({ elapsed = 18_000; state }, { true },
+                { connects++; true }, { elapsed }, {}))
+            assertEquals(0, connects)
+        }
+    }
+
+    @Test fun aSlowCallPermissionProofCannotAuthorizeALateConnect() {
+        var elapsed = 0L
+        var connects = 0
+        assertFalse(NativeCallConnection.connectSelected({ BluetoothProfile.STATE_DISCONNECTED },
+            { elapsed = 18_000; true }, { connects++; true }, { elapsed }, {}))
+        assertEquals(0, connects)
+    }
+
+    @Test fun aConnectAcknowledgedAfterTheDeadlineCannotBeFollowedByAnotherReadOrReceipt() {
+        var elapsed = 0L
+        var reads = 0
+        var connects = 0
+        assertFalse(NativeCallConnection.connectSelected({ reads++; BluetoothProfile.STATE_DISCONNECTED }, { true },
+            { connects++; elapsed = 18_000; true }, { elapsed }, {}))
+        assertEquals(1, reads); assertEquals(1, connects)
+    }
+
     @Test fun ringingReadinessDoesNotPretendThatScoAudioHasStarted() {
         val ready = NativeCallConnection.receipt(BluetoothProfile.STATE_CONNECTED, true, 10)
         assertEquals(NativeCallConnection.READY, ready and NativeCallConnection.READY)

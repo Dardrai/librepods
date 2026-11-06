@@ -57,6 +57,46 @@ Connected-host reports (`0x002E`) must contain exactly `9 + 8 * count` bytes.
 Duplicate or malformed entries and trailing data are rejected. Routing logs do
 not expose peer names or addresses.
 
+Audio-source reports (`0x000E`) require exactly 13 bytes and a recognized source
+type. Their six address bytes are reversed on the wire; connected-host list
+addresses retain normal order. Non-idle sources and connected-host entries
+reject all-zero and all-FF identities.
+
+Smart-routing relays (`0x0011`) require the exact declared body length and a
+sender in the current connected-host list. Only the established Hijackv2 and
+ReverseBannerTapped dictionaries can request relinquishing ownership. Unknown
+or malformed dictionaries stay passive; text fragments alone cannot trigger
+routing. The matching `0x0010` builders retain their existing wire bytes.
+
+### Host identity experiments
+
+Debug exposes two independent, default-Off choices, applied on the next AACP
+connection. Advertise hearing support adds only bit `0x0200` to the existing
+`0x004D` source-feature mask (`00D7` becomes `02D7`, little endian). Announce Mac
+source sends `0x0024` payload `02 00 01 00 10`. Both startup passes use one
+settings snapshot. Changing either choice does not send packets on the current
+connection, change SDP identity or restart Bluetooth.
+
+These reproduce specific dongle observations, not its complete `F2FF` mask.
+Neither transmission nor an accepted settings read proves audible hearing
+processing. Mac source announcement is separate from control command `09/24`.
+
+The November5 Pixel check found both experiment choices Off, with Apple DID
+properties76/1 still set. The saved modified-Tahoe captures independently match
+all nine Android stock curve blocks byte-for-byte. The phone's retained snooz
+snapshots ended at16:44 and contained no PME command; its256KiB logcat buffer
+did not retain the user's later preset edits. Those edits therefore have no
+on-wire confirmation in this check. Pixel101 adds transaction-stage, send-result,
+destination and stock-preset logs, plus the applied startup experiment choices.
+It logs no personal curves or clinical record bytes and changes no hearing
+command or default. This is diagnostic coverage, not an audible-processing fix.
+
+The user then enabled Mac source announcement for the Pixel's saved pair,
+independently of hearing capability (still Off). The exact captured
+`04 00 04 00 24 00 02 00 01 00 10` was also sent on the current AACP connection;
+the local transport returned success. The saved choice applies to later startup
+passes. No listening result or proof of effective PME processing is claimed.
+
 ## Automatic settings and live edits
 
 Routine settings use their current reports without an Apply, Read settings or
@@ -69,8 +109,9 @@ reads the full hearing profile followed by Custom Transparency where supported.
 One complete AHPS read publishes both the profile and its validated Audiogram
 source. Busy microphone, recording, call or settings work defers an unstarted
 read rather than skipping it permanently. Each admitted characteristic read is
-bounded to 15 seconds and attempted once per session; a failed bearer is not
-reopened repeatedly. Replaced sessions and cancelled workers cannot publish old
+bounded to 15 seconds. Transient read failures can use the bounded bearer
+recovery below; rejected records and uncertain writes are not retried.
+Replaced sessions and cancelled workers cannot publish old
 records. Loud Sound Reduction's UUID remains unverified on native Android, so
 initialization does not substitute a captured fixed handle for it.
 
@@ -110,6 +151,11 @@ sender updates end-call bits 8–11 and mute bits 16–19 separately. These stat
 sources do not justify sending a guessed version-1 payload or explain all native
 mute prerequisites. Sources: `bluetoothd_49-26.1.mm` functions `sub_1003388B8` and
 `sub_100338AC0`, and `CBStackControllerBTStack-26.1.mm` `modifyDevice:btDevice:settings:error:`.
+
+The Tahoe capture `20261015T184734Z-91b4ace1`, frame 4145, contains incoming
+`09/24 01 23 02 00` (`0x00022301`). Preserve the complete received value while
+keeping the legacy writer disabled. Receipt validation must not share a legacy
+command allowlist or discard the entire dongle settings snapshot for this value.
 
 LibrePods offers only the reviewed end-call choice. Mute/Unmute directs the user
 to the phone's call controls, including restored legacy mute-detail routes; it
@@ -199,9 +245,20 @@ In `20261015T184734Z-91b4ace1`, initialization frames 4158 (`0x16`) and
 Pro 3 pair. No marked configuration change was recorded. Tahoe build `25G241`
 understands the incoming `0x16` layout (current right/left, then previous
 right/left), but its receive dispatcher sends `0x1A` to Unsupported control type.
+The same binary's click-hold sender packs left into bits 8–15 and right into
+bits 0–7 unchanged. Its action table identifies `1` as Siri/Assistant and `5` as
+NoiseManagement; `0x0501` therefore means right Assistant, left Noise Control.
+The earlier command catalog had these names reversed. Primary evidence is the
+`25G241` x86_64 sender at `0x10008EDC9`–`0x10008EE7C` and table `0x100AA90F0`
+(binary SHA-256 `93f3afbf2bb7d84855ae1f2b24c9a222250f33c2808a7b80094bae15c0f62f65`).
 The cycle getter reads a host cache. These observations do not establish a
 device readback method; a marked native configuration change with fresh incoming
 reports is still needed. Never use send success or a host getter as confirmation.
+
+Volume-swipe duration control `0x23` uses `0`, `1`, `2` for Default, Longer and
+Longest. Tahoe frame 4138 in that capture reports `00 00 00 00`. UI labels and
+saved preference conversion use the same zero-based wire values; they must not
+add one or send `3` for Longest.
 
 ## Conversation Awareness
 
@@ -598,15 +655,17 @@ and recording deferrals. Cancellation or connection replacement prevents the
 late response from reviving the old job. No manual Read action is required.
 
 Transport loss, EOF, a read timeout or cancellation no longer permanently blocks
-settings reads for the current AACP session. One replacement ATT bearer is
-allowed, with fresh service discovery and reads; the audio/AACP connection is
-retained. The initial loader retries an admitted transient failure and continues
+settings reads for the current AACP session. At most three ATT bearer attempts
+are allowed, with fresh service discovery and reads; the audio/AACP connection is
+retained. After a transient failure the initial loader waits at least five seconds
+before another read. This deadline survives loader cancellation and resumption
+on the same owner. The loader continues
 to defer during calls, microphone use and recording. Cancellation does not
 restart work by itself, and a replaced AACP owner cannot publish an old reply.
 
 Rejected or malformed responses and any uncertain write still quarantine that
 session. No write is automatically replayed. The replacement budget is exhausted
-after two connection attempts and resets with a new AACP owner. The focused
+after three connection attempts and resets with a new AACP owner. The focused
 offline suite passed 202 checks across 15 suites, and the debug APK built. The
 checks cover readiness ordering, late responses, cancellation, replaced owners,
 busy-audio deferral and bounded transport recovery. These changes avoid reads
@@ -763,6 +822,23 @@ legacy Headphone Accommodations eligibility stay separate; mode refresh does
 not rewrite the received header. The linked evidence documents the exact
 restoration, known header normalization and timing limits without personal values.
 
+On 2026-11-05, the rooted Pixel 10 Pro XL advertised host Device ID
+`004C/4115/0000`, source `0001`, in private capture frame 418. Hearing Aid On
+commands at 6528/6529 received matching fresh clinical reports at 6669/6671.
+PME 6682 retained both destinations Off and its opaque enrollment, but replaced
+the preceding inactive 128-byte legacy curves with zeros. Clinical mode
+confirmation must distinguish this device-side reset from an active Media
+Assist curve change. It accepts zeroing/restoration only for a Hearing Aid
+transition with both PME destinations Off; other curve changes still fail.
+Enabling still requires the original clinical fitting to match a fresh read.
+That final read waits for accepted settings startup on its owned replacement
+connection, under the existing request deadline. These observations establish
+device reports, not an audible Pixel Hearing Aid or accommodations result.
+Pixel95 subsequently confirmed On and Off on that Pixel. Its private complete
+capture contains six identical 104-byte clinical reads and no ATT writes;
+the current clinical fitting was not edited. The phone was left with both
+clinical modes Off and diagnostic HCI logging restored to its original state.
+
 Loud Sound Reduction is not enabled by this transport work. The native capture
 declares UUID `A48FEC08-3921-43DB-82AA-AFBCE8EBB4FB` with properties `0x06`
 (read and write without response), at frame 1424 in
@@ -771,12 +847,30 @@ Write Request contract; its typed write integration remains unverified.
 
 ## Host clock and sensors
 
+The mirrored [sensor contract v1](SENSOR-PROTOCOL.md) is shared with NTPods:
+the same public/synthetic wire fixtures, bounded RemoteHID grammar, motion field
+names, model gates, stream ownership and cleanup rules. Ordinary AirPods 3
+(A2564/A2565) uses RemoteHID `0x00000800` with its exact XML motion declaration;
+Pro 3 keeps the captured SensorDataWX path. Existing gesture channels stay
+compatible, while complete raw motion is available separately. Android's debug
+interval now updates the live stream without silently changing old defaults.
+
 Once a fresh current-device identity establishes hearing support, one `0x001B`
 calendar-clock message is submitted for that control connection:
 `04 00 04 00 1B 00`, uint32 LE Unix seconds at 6, uint32 LE microseconds at 10
 (below 1,000,000), uint16 LE UTF-8 text length at 14, and whole-second RFC3339
 text at 16 with UTC `+00:00` and no NUL. Both representations use one clock
 sample. Out-of-range clocks are rejected. This is unrelated to RTP timestamps.
+The dongle control path uses this same builder and validated phone clock before
+its automatic health reads. Successful local transmission is recorded only for
+the current owner; failure remains retryable within the existing bounded health
+workflow. Neither route sends a clock from cached identity alone.
+
+Service-4 initialization is retried once only if no accepted current connection
+is established after the first complete pass. The dongle uses the same principle,
+adding a bounded legacy-version fallback and read-only capability discovery.
+Source feature flags, raw-hold delegation and audio-ownership commands remain
+transport-specific; they are not copied as an unverified bundle.
 
 Discovered RTBuddy heart-rate report mappings take precedence over legacy IDs
 `19/20/84`. Descriptor-generation changes, including unknown-only descriptors,

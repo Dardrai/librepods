@@ -57,6 +57,14 @@ bool byte_field(const Code& c,uint32_t opcode,unsigned rt,unsigned rn,size_t val
     }
     return false;
 }
+bool one_byte_field(const Code& c,size_t value) {
+    for(size_t p=68;p<c.symbol.size;p+=4) {
+        size_t offset;
+        if(at(c,p-68)==0x52800038 && at(c,p-64)==0x52800089 &&
+           load(at(c,p),0x39000000,24,19,&offset) && offset==value) return true;
+    }
+    return false;
+}
 bool report_mask(const Code& c,size_t* field) {
     size_t count=0;
     for(size_t p=0;p+8<=c.symbol.size;p+=4) {
@@ -82,7 +90,8 @@ bool pixel17_game_host_contract(const SymbolImage& image,Pixel17GameLayout* out)
     const auto& delay=all[14]; const auto& config=all[15]; const auto& avdt_delay=all[16];
     Pixel17GameLayout value;
     size_t p=0, other=0;
-    if(!unique_add(open,20,0,&value.peer) || !unique_add(delay,21,0,&other) || other!=value.peer ||
+    if((!unique_add(open,20,0,&value.peer) && !unique_add(open,24,0,&value.peer)) ||
+        !unique_add(delay,21,0,&other) || other!=value.peer ||
         !call(open,cid.symbol.address,&p) || p<32 ||
         !load(at(open,p+4),0x79000000,0,19,&value.media_cid,2)) return false;
     size_t loads=0;
@@ -107,16 +116,21 @@ bool pixel17_game_host_contract(const SymbolImage& image,Pixel17GameLayout* out)
     for(size_t n=0;n+8<=stop.symbol.size;n+=4)
         if(load(at(stop,n),0x39400000,8,19,&other) &&
             (at(stop,n+4)&0x7f00001f)==0x34000008 &&
-            byte_field(stop,0x39000000,31,19,other) && byte_field(start,0x39000000,25,19,other)) {
+            byte_field(stop,0x39000000,31,19,other) &&
+            (byte_field(start,0x39000000,25,19,other) || one_byte_field(start,other))) {
             value.co_started=other; ++started_fields;
         }
     if(started_fields!=1) return false;
     size_t codec_fields=0;
-    for(size_t n=0;n+28<=start.symbol.size;n+=4)
-        if(add(at(start,n),2,19,&other) && at(start,n+12)==0xaa1403e1 &&
-            at(start,n+16)==0xf9401928 && at(start,n+24)==0xd63f0100) {
+    for(size_t n=0;n+28<=start.symbol.size;n+=4) {
+        size_t peer_argument=0;
+        const bool old=at(start,n+12)==0xaa1403e1 && at(start,n+16)==0xf9401928 && at(start,n+24)==0xd63f0100;
+        const bool current=n>=8 && add(at(start,n-8),1,19,&peer_argument) && peer_argument==value.peer &&
+            at(start,n+8)==0xf9401928 && at(start,n+16)==0xd63f0100;
+        if(add(at(start,n),2,19,&other) && (old || current)) {
             value.codec=other; ++codec_fields;
         }
+    }
     if(codec_fields!=1 || !report_mask(avdt_delay,&value.avdt_reporting_mask) ||
         !report_mask(config,&other) || other!=value.avdt_reporting_mask) return false;
     size_t self_fields=0;

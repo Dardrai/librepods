@@ -28,12 +28,17 @@ class KotlinModule: XposedModule() {
     private var hfpBridgeContext: Context? = null
     private var hfpBridge: AutoCloseable? = null
     @Volatile private var hfpControl: HfpCallSuppression? = null
+    private var usbVolumeInstalled = false
+    private var usbVolumePolicy: UsbAbsoluteVolumeSystemPolicy? = null
+    private var usbVolumeDiscovery: AutoCloseable? = null
+    private var usbVolumeFailureLogged = false
     override fun onModuleLoaded(param: ModuleLoadedParam) {
         log(Log.INFO, TAG, "module initialized at :: ${param.processName}")
         log(Log.INFO, TAG, "framework: $frameworkName($frameworkVersionCode) API $apiVersion")
     }
 
     override fun onSystemServerStarting(param: SystemServerStartingParam) {
+        installUsbVolumePolicy(param.classLoader)
         if (eldAudioFormatHook != null) return
         val method = EldAudioFormatBridge.discover(android.os.Build.VERSION.SDK_INT,
             "system_server", param.classLoader) ?: return
@@ -53,6 +58,79 @@ class KotlinModule: XposedModule() {
         } catch (_: Throwable) {
             log(Log.WARN, TAG, "Audio-format bridge unavailable; keeping framework mapping")
         }
+    }
+
+    private fun installUsbVolumePolicy(loader: ClassLoader) {
+        if (usbVolumeInstalled) return
+        // The system-server callback provides the scope; package process labels may say android.
+        val methods = UsbAbsoluteVolumePolicyHooks.discover(android.os.Build.VERSION.SDK_INT, "system_server", loader,
+            ::usbVolumeFailure) ?: return
+        val installed = mutableListOf<XposedInterface.HookHandle>()
+        var ready = false
+        try {
+            fun usb(value: Any?): Boolean = value != null && runCatching {
+                val type = value.javaClass.getMethod("getType").invoke(value) as Int
+                val role = value.javaClass.getMethod("getRole").invoke(value) as Int
+                role == 2 && type in me.kavishdevar.librepods.shizuku.UsbAbsoluteVolumeBroker.USB_TYPES
+            }.getOrDefault(false)
+            for (method in listOf(methods.register, methods.unregister, methods.behavior)) {
+                installed += hook(method).intercept { chain ->
+                    val policy = usbVolumePolicy
+                    val device = chain.args.getOrNull(if (method == methods.register) 3 else 0)
+                    if (policy != null && !UsbAbsoluteVolumeSystemPolicy.isOwnOperation() && usb(device) && policy.mayMutate() &&
+                        !policy.invalidate("foreign_volume_policy")) null else chain.proceed()
+                }
+            }
+            installed += hook(methods.wiredDevice).intercept { chain ->
+                val policy = usbVolumePolicy
+                if (policy != null && usb(chain.args.firstOrNull()) && policy.mayMutate() &&
+                    !policy.invalidate("usb_topology_changed") && chain.args.getOrNull(1) == 1) null else chain.proceed()
+            }
+            installed += hook(methods.nativePolicy).intercept { chain ->
+                val policy = usbVolumePolicy
+                val type = chain.args.firstOrNull() as? Int
+                if (policy != null && type != null && !UsbAbsoluteVolumeSystemPolicy.isOwnOperation() && policy.ownsNativeType(type))
+                    policy.foreignNativePolicy() else chain.proceed()
+            }
+            installed += hook(methods.audioServerDied).intercept { chain ->
+                usbVolumePolicy?.invalidate("audio_server_restarted")
+                val result = chain.proceed()
+                usbVolumePolicy?.invalidate("audio_server_restarted")
+                result
+            }
+            installed += hook(methods.ready).intercept { chain ->
+                val result = chain.proceed()
+                var stage = "AudioService context"
+                if (ready && usbVolumePolicy == null && chain.thisObject != null) runCatching {
+                    val service = chain.thisObject!!
+                    val context = methods.ready.declaringClass.getDeclaredField("mContext").apply { isAccessible = true }.get(service) as Context
+                    stage = "policy constructor"
+                    val policy = UsbAbsoluteVolumeSystemPolicy(context, service, methods)
+                    stage = "discovery registration"
+                    val discovery = UsbAbsoluteVolumeTransport.install(context, policy, moduleApplicationInfo.uid)
+                    if (discovery == null) {
+                        policy.close()
+                        usbVolumeFailure(stage, IllegalStateException("Discovery identity or permission guard"))
+                    } else {
+                        usbVolumePolicy = policy; usbVolumeDiscovery = discovery
+                        log(Log.INFO, TAG, "Owned USB volume policy ready; inactive until explicit enable")
+                    }
+                }.onFailure { usbVolumeFailure(stage, it) }
+                result
+            }
+            ready = true; usbVolumeInstalled = true
+        } catch (failure: Throwable) {
+            ready = false
+            installed.asReversed().forEach { runCatching { it.unhook() } }
+            usbVolumeFailure("hook installation", failure)
+        }
+    }
+
+    private fun usbVolumeFailure(stage: String, failure: Throwable) {
+        if (usbVolumeFailureLogged) return
+        usbVolumeFailureLogged = true
+        val detail = "${failure.javaClass.simpleName}: ${failure.message.orEmpty()}".replace('\n', ' ').take(180)
+        log(Log.WARN, TAG, "USB volume unavailable at $stage ($detail)")
     }
 
     @SuppressLint("UnsafeDynamicallyLoadedCode")

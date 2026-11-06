@@ -78,7 +78,8 @@ fun MicrophoneSettingsRoute(
 @Composable
 fun MicrophoneSettingsScreen(
     navigateBack: (() -> Unit)?,
-    selectedMode: Int,
+    selectedMode: Int?,
+    enabled: Boolean = true,
     callState: CommunicationAudioController.State? = null,
     onHighQualityCallsChanged: (Boolean) -> Unit = {},
     onMicrophoneSettingsChanged: (Int) -> Unit,
@@ -102,18 +103,21 @@ fun MicrophoneSettingsScreen(
             StyledList {
                 styledListItem(
                     contentText = stringResource(R.string.microphone_automatic),
+                    enabled = enabled,
                     selected = selectedMode == 0,
                     onClick = { onMicrophoneSettingsChanged(0) }
                 )
 
                 styledListItem(
                     contentText = stringResource(R.string.microphone_always_right),
+                    enabled = enabled,
                     selected = selectedMode == 1,
                     onClick = { onMicrophoneSettingsChanged(1) }
                 )
 
                 styledListItem(
                     contentText = stringResource(R.string.microphone_always_left),
+                    enabled = enabled,
                     selected = selectedMode == 2,
                     onClick = { onMicrophoneSettingsChanged(2) }
                 )

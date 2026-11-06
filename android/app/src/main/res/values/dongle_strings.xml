@@ -1,7 +1,17 @@
 <resources>
     <string name="dongle_title">Pico dongle</string>
-    <string name="dongle_choose">Choose paired dongle</string>
+    <string name="dongle_choose">Choose dongle</string>
+    <string name="dongle_attach_or_pair">Attach a USB dongle, or pair AirPods Dongle in Android Bluetooth settings.</string>
+    <string name="dongle_choice_usb" translatable="false">%1$s · USB</string>
+    <string name="dongle_choice_bluetooth" translatable="false">%1$s · Bluetooth</string>
+    <string name="dongle_usb_permission">USB attached · allow access to connect controls</string>
+    <string name="dongle_usb_controls_only">USB controls connected · headphones unavailable</string>
+    <string name="dongle_usb_audio_available">USB controls connected · headphones available</string>
     <string name="dongle_pair_first">Pair AirPods Dongle in Android Bluetooth settings first.</string>
+    <string name="dongle_reconnect_airpods">Reconnect AirPods</string>
+    <string name="dongle_pair_airpods">Pair AirPods</string>
+    <string name="dongle_pair_airpods_description">Pause playback and microphone use, then put your AirPods in pairing mode. The dongle will search for a pair.</string>
+    <string name="dongle_pair_phone">Allow Bluetooth phone pairing</string>
     <string name="dongle_connect">Connect controls</string>
     <string name="dongle_disconnect">Disconnect controls</string>
     <string name="dongle_forget">Forget control link</string>
@@ -72,12 +82,13 @@
     <string name="dongle_permission">Allow Bluetooth access to choose a paired dongle.</string>
     <string name="dongle_close">Close</string>
     <string name="dongle_audio">Audio</string>
+    <string name="dongle_profile_idle">Pause playback and microphone use before changing the output profile.</string>
     <string name="dongle_codec">Output codec</string>
     <string name="dongle_rate_mode">Encoding</string>
     <string name="dongle_constant">Constant bitrate</string>
     <string name="dongle_variable">Variable bitrate</string>
     <string name="dongle_bitrate">Bitrate or limit</string>
-    <string name="dongle_active_codec">Active output: %1$s · negotiated limit %2$d kbps</string>
+    <string name="dongle_active_codec">Active output: %1$s · encoder bitrate limit %2$s kbps</string>
     <string name="dongle_game_mode">Game Mode</string>
     <string name="dongle_game_pending">Waiting for the audio transport</string>
     <string name="dongle_game_failed">Request failed</string>
@@ -107,4 +118,12 @@
     <string name="dongle_weaker">weaker</string>
     <string name="dongle_trend_unknown">trend unavailable</string>
     <string name="dongle_finder_description">Uses only advertisements verified against the selected pair. Signal strength does not give distance or direction.</string>
+    <string name="dongle_phone_pairing">Bluetooth pairing available</string>
+    <string name="dongle_hardware_volume">Hardware volume</string>
+    <string name="dongle_hardware_volume_unavailable">Requires root and the dongle’s selected USB audio route.</string>
+    <string name="dongle_volume_failed">Hardware volume stopped. Reconnect the controls before trying again.</string>
+    <string name="dongle_volume_restore_failed">Hardware volume could not be restored. Keep playback paused and reconnect the controls.</string>
+    <string name="dongle_hold_initialize_title">Set both AirPods</string>
+    <string name="dongle_hold_initialize_description">Choose an action for each AirPod. Both are updated together.</string>
+    <string name="dongle_assistant_requires_direct">Assistant requires a direct AirPods connection.</string>
 </resources>

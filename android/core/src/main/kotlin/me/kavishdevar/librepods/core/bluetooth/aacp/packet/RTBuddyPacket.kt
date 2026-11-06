@@ -1,6 +1,8 @@
 package me.kavishdevar.librepods.core.bluetooth.aacp.packet
 
 import me.kavishdevar.librepods.core.bluetooth.aacp.rtbuddy.proto.SensorDataWX
+import me.kavishdevar.librepods.core.bluetooth.aacp.RemoteHid
+import me.kavishdevar.librepods.core.bluetooth.aacp.types.RemoteHidBuddyPayload
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.MessageOpcode
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.Opcode
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.RTBuddyDescriptor
@@ -57,6 +59,10 @@ data class RTBuddyPacket(
             val data = payload.copyOfRange(6, 6 + length)
 
             val rtBuddyPayload: RTBuddyPayload = when (descriptor) {
+                RTBuddyDescriptor.SENSOR -> {
+                    require(RemoteHid.packets(data) != null) { "Malformed RemoteHID batch" }
+                    RemoteHidBuddyPayload(data)
+                }
                 RTBuddyDescriptor.SENSOR_DATA_WX -> {
                     val trailer = data.size >= 2 && data[data.size - 1] == 0xff.toByte() &&
                         data[data.size - 2] == 0xff.toByte()
@@ -87,6 +93,9 @@ data class RTBuddyPacket(
             destination: PacketDestination = PacketDestination.DEVICE,
         ): RTBuddyPacket {
             val data = when (rtBuddyPayload) {
+                is RemoteHidBuddyPayload -> rtBuddyPayload.data.also {
+                    require(RemoteHid.packets(it) != null) { "Malformed RemoteHID batch" }
+                }
                 is SensorDataWxBuddyPayload ->
                     rtBuddyPayload.data.toByteArray() +
                         if (rtBuddyPayload.data.logType == 5) byteArrayOf(0xff.toByte(), 0xff.toByte()) else byteArrayOf()
@@ -96,6 +105,7 @@ data class RTBuddyPacket(
             }
 
             val descriptorValue = when (rtBuddyPayload) {
+                is RemoteHidBuddyPayload -> rtBuddyPayload.descriptor.value
                 is SensorDataWxBuddyPayload ->
                     rtBuddyPayload.descriptor.value
 

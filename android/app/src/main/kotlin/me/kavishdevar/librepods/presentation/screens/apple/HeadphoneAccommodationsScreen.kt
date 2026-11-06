@@ -75,8 +75,9 @@ fun HeadphoneAccommodationsScreen(viewModel: AppleViewModel, navigateBack: (() -
 }
 
 @Composable
-internal fun DongleAccommodationsScreen(navigateBack: (() -> Unit)?, navigateToTransparency: () -> Unit) {
-    val controller = rememberLibrePodsService()?.dongleControls
+internal fun DongleAccommodationsScreen(navigateBack: (() -> Unit)?,
+    controller: me.kavishdevar.librepods.dongle.DongleController? = rememberLibrePodsService()?.dongleControls,
+    navigateToTransparency: () -> Unit) {
     if (controller == null) return
     val state by controller.state.collectAsState()
     ObserveDongleControls(controller)

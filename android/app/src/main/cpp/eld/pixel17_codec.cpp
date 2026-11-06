@@ -13,9 +13,10 @@ namespace eld {
 namespace {
 constexpr size_t kMutex = 8, kIndex = 0x30, kCodecId = 0x38, kName = 0x40;
 constexpr size_t kPriority = 0x58, kDefaultPriority = 0x5c;
-constexpr size_t kCurrent = 0x60, kLocal = 0xa0, kSelectable = 0xe0;
-constexpr size_t kUser = 0x120, kAudio = 0x160;
-constexpr size_t kOta = 0x1a0, kPeerCaps = 0x1cd, kPeerConfig = 0x1fa, kSource = 0x227;
+constexpr size_t kCurrent = 0x60;
+size_t kLocal = 0xa0, kSelectable = 0xe0, kUser = 0x120, kAudio = 0x160;
+size_t kOta = 0x1a0, kPeerCaps = 0x1cd, kPeerConfig = 0x1fa, kSource = 0x227;
+size_t object_size = kPixel17CodecObjectSize;
 constexpr size_t kMaximumObjects = 32;
 constexpr uint8_t kUnsupportedConfiguration = 0x29;
 
@@ -72,7 +73,7 @@ bool same_bindings(const Pixel17CodecBindings& a, const Pixel17CodecBindings& b)
     return a.allocate == b.allocate && a.release == b.release &&
         a.aac_source_construct == b.aac_source_construct &&
         a.aac_source_vtable == b.aac_source_vtable && a.lock == b.lock &&
-        a.unlock == b.unlock && a.assign_short == b.assign_short && a.debug == b.debug;
+        a.unlock == b.unlock && a.assign_short == b.assign_short && a.debug == b.debug && a.config_size == b.config_size;
 }
 Pixel17NativeConfig fixed_config(int32_t index, int32_t priority) {
     return {index, priority, 2, kPixel17PcmMask, 2, 0, {0, 0, 0, 0}, 0};
@@ -129,19 +130,25 @@ void debug(void* object, int fd) {
 
 bool pixel17_codec_prepare(const Pixel17CodecBindings& bindings) {
     if (!bindings.allocate || !bindings.release || !bindings.aac_source_construct ||
-        !bindings.aac_source_vtable || !bindings.lock || !bindings.unlock || !bindings.assign_short)
+        !bindings.aac_source_vtable || !bindings.lock || !bindings.unlock || !bindings.assign_short ||
+        (bindings.config_size != 64 && bindings.config_size != 80))
         return false;
     for (size_t i = 0; i < kPixel17CodecVtableEntries; ++i)
         if (!bindings.aac_source_vtable[i]) return false;
     std::lock_guard<std::mutex> guard(registry_mutex);
     if (prepared) return same_bindings(host, bindings);
     host = bindings;
+    kLocal=kCurrent+host.config_size; kSelectable=kLocal+host.config_size;
+    kUser=kSelectable+host.config_size; kAudio=kUser+host.config_size;
+    kOta=kAudio+host.config_size; kPeerCaps=kOta+kPixel17CodecStorage;
+    kPeerConfig=kPeerCaps+kPixel17CodecStorage; kSource=kPeerConfig+kPixel17CodecStorage;
+    object_size=(kSource+8)&~size_t(7);
     prepared = true;
     return true;
 }
 
 void* pixel17_codec_create(int32_t index, int32_t priority) {
-    // The observed local-source registry accepts indices 0..7. Built-ins must never be borrowed.
+    // Only the separately conflict-checked extension slot may be constructed.
     if (index != 5 || priority < -1 || priority > 1000000 || quarantined.load()) return nullptr;
     {
         std::lock_guard<std::mutex> guard(registry_mutex);
@@ -157,7 +164,7 @@ void* pixel17_codec_create(int32_t index, int32_t priority) {
     void* object = nullptr;
     bool constructed = false;
     try {
-        object = host.allocate(kPixel17CodecObjectSize);
+        object = host.allocate(object_size);
         if (!object) return nullptr;
         const int32_t effective = priority == 0 ? 6001 : priority;
         host.aac_source_construct(object, effective);
@@ -190,7 +197,12 @@ void* pixel17_codec_create(int32_t index, int32_t priority) {
         store(object, kPriority, effective);
         store(object, kDefaultPriority, priority);
         const auto fixed = fixed_config(index, effective);
-        for (size_t offset : {kCurrent, kLocal, kSelectable}) store(object, offset, fixed);
+        for (size_t offset : {kCurrent, kLocal}) store(object, offset, fixed);
+        // Peer-selectable masks stay empty until Apple capabilities are accepted.
+        Pixel17NativeConfig selectable{};
+        selectable.codec_type = index;
+        selectable.codec_priority = effective;
+        store(object, kSelectable, selectable);
         Pixel17NativeConfig preference{};
         preference.codec_type = index;
         store(object, kUser, preference);
@@ -209,7 +221,7 @@ void* pixel17_codec_create(int32_t index, int32_t priority) {
             if (constructed) {
                 store(object, 0, host.aac_source_vtable);
                 reinterpret_cast<void (*)(void*)>(host.aac_source_vtable[1])(object);
-            } else host.release(object, kPixel17CodecObjectSize);
+            } else host.release(object, object_size);
         }
         return nullptr;
     }

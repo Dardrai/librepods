@@ -92,6 +92,22 @@ class DongleProtocolTest {
         assertThrows(IllegalArgumentException::class.java) { DongleProtocol.settings(bytes.copyOf().also { DongleProtocol.put32(it, 7, 0) }) }
         assertThrows(IllegalArgumentException::class.java) { DongleProtocol.settings(byteArrayOf(1, 2) + bytes.copyOfRange(2, 15) + bytes.copyOfRange(2, 15)) }
     }
+    @Test fun settings_preserve_complete_reports_without_treating_them_as_valid_commands() {
+        val records = listOf(0x24 to 0x00022301L, 0x16 to 0x01050501L, 0x28 to 0xffff_ffffL)
+        val bytes = ByteArray(2 + records.size * 13).also { it[0] = 1; it[1] = records.size.toByte() }
+        records.forEachIndexed { index, (id, value) ->
+            val offset = 2 + index * 13
+            bytes[offset] = id.toByte()
+            DongleProtocol.put32(bytes, offset + 1, 500)
+            DongleProtocol.put32(bytes, offset + 5, 4)
+            DongleProtocol.put32(bytes, offset + 9, value)
+        }
+        val received = DongleProtocol.settings(bytes)
+        for ((id, value) in records) {
+            assertEquals(DongleProtocol.Setting(value, 500, 4), received[id])
+            assertFalse(validLiveSetting(id, value))
+        }
+    }
     @Test fun nearby_identity_is_not_a_distance_or_anonymous_fallback() {
         val bytes = ByteArray(24).also {
             it[0] = 1; it[1] = 0x82.toByte(); it[2] = -52; it[3] = 1

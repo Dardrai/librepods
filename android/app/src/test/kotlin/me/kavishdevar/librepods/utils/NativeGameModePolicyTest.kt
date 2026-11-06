@@ -56,6 +56,17 @@ class NativeGameModePolicyTest {
         assertNull(NativeGameModePolicy.clock(65535,60))
         assertNull(NativeGameModePolicy.clock(1500,30))
     }
+    @Test fun unreportedSessionCanPrepareButCannotDriveAClockWithoutFreshTiming() {
+        val missing = host.copy(delaySerial = 0, delayReceivedMs = 0, delayReceivedNs = 0, delayTenths = 0)
+        assertTrue(NativeGameModePolicy.canApply(owner, 4, missing, 1500))
+        assertFalse(NativeGameModePolicy.freshReport(owner, 4, missing, 0, 1400, 1600))
+        for (invalid in listOf(missing.copy(reporting = false), missing.copy(delaySerial = 1),
+            missing.copy(delayReceivedNs = 1), missing.copy(delayTenths = 65535),
+            missing.copy(streaming = false), missing.copy(scoOrMicrophone = true),
+            missing.copy(encoderReady = false), missing.copy(clockReady = false)))
+            assertFalse(NativeGameModePolicy.canApply(owner, 4, invalid, 1500))
+        assertFalse(NativeGameModePolicy.canApply(owner, 5, missing, 1500))
+    }
     @Test fun sameMillisecondPrewriteReportCannotConfirmEitherTarget() {
         val boundary = 1_500_000_500L
         val before = host.copy(delayReceivedMs = 1500, delayReceivedNs = boundary - 1)

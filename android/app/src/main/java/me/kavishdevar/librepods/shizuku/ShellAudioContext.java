@@ -27,6 +27,10 @@ final class ShellAudioContext extends ContextWrapper {
     @androidx.annotation.Keep
     public String getOpPackageName() { return getPackageName(); }
     @Override public Context getApplicationContext() { return this; }
+    @Override public Object getSystemService(String name) {
+        if (Context.MEDIA_SESSION_SERVICE.equals(name)) RootAppProcess.prepareMedia();
+        return super.getSystemService(name);
+    }
     @Override public Context createDeviceContext(int deviceId) {
         if (deviceId != 0) throw new IllegalArgumentException("Only the physical device is supported");
         return this; // BluetoothManager pins device 0; keep the shell attribution instead of the base context's.

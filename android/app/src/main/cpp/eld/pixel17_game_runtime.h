@@ -3,6 +3,7 @@
 #include "pixel17_hci.h"
 #include "pixel17_game_host.h"
 #include "encoder_interface.h"
+#include "pixel17_packet_policy.h"
 
 namespace eld {
 enum class Pixel17GameOperation : uint32_t { Read = 1, Roundtrip = 2, Prepare = 3 };
@@ -11,7 +12,7 @@ enum class Pixel17GamePhase : uint32_t {
     Restoring, VerifyingRestore, Complete, Failed, Quarantined, Holding
 };
 struct Pixel17GameStatus {
-    uint32_t version = 1;
+    uint32_t version = 2;
     Pixel17GamePhase phase = Pixel17GamePhase::Unsupported;
     Pixel17GameOperation operation = Pixel17GameOperation::Read;
     uint64_t serial = 0, lease_owner = 0;
@@ -30,10 +31,13 @@ struct Pixel17GameStatus {
     uint64_t lease_deadline_ns = 0, clock_request_serial = 0;
     uint64_t clock_observed_ns = 0;
     EncoderClockStatus clock{};
+    Pixel17PacketStatus packets{};
 };
 // Prepare once, after every native function/data context and host layout has
 // passed admission, before installing observer hooks. Failure affects Game only.
-bool pixel17_game_runtime_prepare(Pixel17MainBindings main, Pixel17HciBindings hci);
+bool pixel17_game_runtime_prepare(Pixel17MainBindings main, Pixel17HciBindings hci,
+                                 Pixel17PacketPolicy* packets = nullptr,
+                                 void (*send_packets)(uint16_t,uint16_t) = nullptr);
 bool pixel17_game_refresh();
 // Returns a new monotonic native serial, or0 on refusal. Querying status never
 // reads platform state. All admission/command steps execute on native BT main.
@@ -59,4 +63,5 @@ void pixel17_game_runtime_disable();
 // Called only after an accepted, non-primer encoder callback and outside its
 // mutex. It may schedule one bounded main-thread retry; it never adjusts cadence.
 void pixel17_game_clock_opportunity();
+void pixel17_game_packet_changed();
 }

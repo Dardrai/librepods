@@ -321,6 +321,12 @@ fun NoiseControlSettings(
 
             val offset = remember { Animatable(-1f) }
             var isInitialized by remember { mutableStateOf(false) }
+            var isDragging by remember { mutableStateOf(false) }
+            var dragModeWidth by remember { mutableFloatStateOf(0f) }
+            var dragAdaptiveWidth by remember { mutableFloatStateOf(0f) }
+            var dragOffWidth by remember { mutableFloatStateOf(0f) }
+            var adjustingAdaptive by remember { mutableStateOf(false) }
+            var lastDragStrength by remember { mutableIntStateOf(0) }
 
             val offOffset = if (currentShowOff  && currentMode != 4) 1f else 0f
 
@@ -331,16 +337,16 @@ fun NoiseControlSettings(
             val motion = spring<Float>(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessMedium)
 
             val modeWidth by animateFloatAsState(
-                targetValue = targetModeWidth,
-                animationSpec = if (!isInitialized) snap() else motion,
+                targetValue = if (isDragging) dragModeWidth else targetModeWidth,
+                animationSpec = if (!isInitialized || isDragging) snap() else motion,
             )
             val adaptiveWidth by animateFloatAsState(
-                targetValue = targetAdaptiveWidth,
-                animationSpec = if (!isInitialized) snap() else motion,
+                targetValue = if (isDragging) dragAdaptiveWidth else targetAdaptiveWidth,
+                animationSpec = if (!isInitialized || isDragging) snap() else motion,
             )
             val offWidth by animateFloatAsState(
-                targetValue = targetOffWidth,
-                animationSpec = if (!isInitialized) snap() else motion,
+                targetValue = if (isDragging) dragOffWidth else targetOffWidth,
+                animationSpec = if (!isInitialized || isDragging) snap() else motion,
             )
 
             val currentModeWidth by rememberUpdatedState(modeWidth)
@@ -376,7 +382,6 @@ fun NoiseControlSettings(
 
             val animationCoroutineScope = rememberCoroutineScope()
 
-            var isDragging by remember { mutableStateOf(false) }
             var dragOffset by remember { mutableFloatStateOf(0f) }
             var dragStartOffset by remember { mutableFloatStateOf(0f) }
             var thumbCoordinates by remember { mutableStateOf<LayoutCoordinates?>(null) }
@@ -444,7 +449,7 @@ fun NoiseControlSettings(
                 launch {
                     snapshotFlow { offset.value }
                         .map { currentOffset ->
-                            if (currentMode == 4) {
+                            if (adjustingAdaptive) {
                                 val maxTravel = currentAncStart - currentAdaptiveStart - currentModeWidth
                                 if (maxTravel <= 0f) 0 else {
                                     ((currentOffset - currentAdaptiveStart) / maxTravel * 100f)
@@ -456,7 +461,8 @@ fun NoiseControlSettings(
                         .distinctUntilChanged()
                         .collect { currentAdaptiveStrength ->
                             targetStrength.intValue = currentAdaptiveStrength ?: -1
-                            if (isDragging && currentAdaptiveStrength != null) {
+                            if (isDragging && currentAdaptiveStrength != null && currentAdaptiveStrength != lastDragStrength) {
+                                lastDragStrength = currentAdaptiveStrength
                                 currentStrengthChanged(currentAdaptiveStrength)
                             }
                         }
@@ -746,106 +752,102 @@ fun NoiseControlSettings(
                                 }
                             }
                         }
-                        .pointerInput(enabled, showAdaptiveMode) {
+                        .pointerInput(enabled, showAdaptiveMode, showOffListeningMode) {
                             if (!enabled) return@pointerInput
                             var dragStartRootX: Float? = null
                             var adaptiveDragRange: ClosedFloatingPointRange<Float>? = null
                             var adaptiveFeedbackEnd: Int? = null
-                            detectHorizontalDragGestures(
-                                onDragStart = {
-                                    dragFeedbackMode = currentMode
-                                    dragStrengthFeedbackSent = false
-                                    dragOffset = offset.value
-                                    dragStartOffset = dragOffset
-                                    dragStartRootX = null
-                                    adaptiveDragRange = if (currentMode == 4 && currentShowAdaptive)
-                                        currentAdaptiveStart..(currentAncStart - currentModeWidth) else null
-                                    adaptiveFeedbackEnd = adaptiveDragRange?.let {
-                                        when {
-                                            dragOffset <= it.start -> 0
-                                            dragOffset >= it.endInclusive -> 100
+                            fun endDrag() {
+                                dragFeedbackMode = null
+                                dragStrengthFeedbackSent = false
+                                adjustingAdaptive = false
+                                isDragging = false
+                            }
+                            try {
+                                detectHorizontalDragGestures(
+                                    onDragStart = {
+                                        dragFeedbackMode = currentMode
+                                        dragStrengthFeedbackSent = false
+                                        // A mode echo must not move the segment boundaries beneath the finger.
+                                        dragModeWidth = currentModeWidth
+                                        dragAdaptiveWidth = currentAncStart - currentAdaptiveStart
+                                        dragOffWidth = currentTransparencyStart
+                                        adjustingAdaptive = currentMode == 4 && currentShowAdaptive
+                                        lastDragStrength = currentStrength
+                                        dragOffset = offset.value
+                                        dragStartOffset = dragOffset
+                                        dragStartRootX = null
+                                        adaptiveDragRange = if (currentMode == 4 && currentShowAdaptive)
+                                            currentAdaptiveStart..(currentAncStart - currentModeWidth) else null
+                                        adaptiveFeedbackEnd = adaptiveDragRange?.let {
+                                            when {
+                                                dragOffset <= it.start -> 0
+                                                dragOffset >= it.endInclusive -> 100
+                                                else -> null
+                                            }
+                                        }
+                                        isDragging = true
+                                        animationCoroutineScope.launch { offset.stop() }
+                                    },
+                                    onDragEnd = {
+                                        val thumbCenter = dragOffset + currentModeWidth / 2f
+                                        val finalMode = when {
+                                            currentShowOff && thumbCenter < currentTransparencyStart -> 1
+                                            thumbCenter < currentAdaptiveStart -> 3
+                                            currentShowAdaptive && thumbCenter < currentAncStart -> 4
+                                            else -> 2
+                                        }
+                                        val finalStrength = if (adjustingAdaptive && finalMode == 4) {
+                                            val travel = currentAncStart - currentAdaptiveStart - currentModeWidth
+                                            if (travel <= 0f) currentStrength else
+                                                ((dragOffset - currentAdaptiveStart) / travel * 100f).roundToInt().coerceIn(0, 100)
+                                        } else currentStrength
+                                        // The final offset may not reach snapshotFlow before the gesture ends.
+                                        if (finalMode != dragFeedbackMode) currentModeChanged(finalMode)
+                                        if (adjustingAdaptive && finalMode == 4 && finalStrength != lastDragStrength)
+                                            currentStrengthChanged(finalStrength)
+                                        endDrag()
+                                    },
+                                    onDragCancel = ::endDrag
+                                ) { change, dragAmount ->
+                                    change.consume()
+                                    val coordinates = thumbCoordinates?.takeIf { it.isAttached }
+                                        ?: return@detectHorizontalDragGestures
+                                    // The pointer's local position changes as the thumb follows it.
+                                    val rootX = coordinates.localToRoot(change.position).x
+                                    // The first callback includes the movement beyond touch slop.
+                                    val startRootX = dragStartRootX
+                                        ?: coordinates.localToRoot(change.position - Offset(dragAmount, 0f)).x
+                                    dragStartRootX = startRootX
+                                    val newOffset = dragStartOffset + with(density) { (rootX - startRootX).toDp().value }
+                                    val maxTravel = (currentWidth - currentModeWidth).coerceAtLeast(0f)
+                                    val resistedOffset = adaptiveDragRange?.let {
+                                        val reachedEnd = when {
+                                            newOffset <= it.start -> 0
+                                            newOffset >= it.endInclusive -> 100
                                             else -> null
                                         }
-                                    }
-                                    isDragging = true
-                                },
-                                onDragEnd = {
-                                    val thumbCenter = dragOffset + currentModeWidth / 2f
-                                    val finalMode = when {
-                                        currentShowOff && thumbCenter < currentTransparencyStart -> 1
-                                        thumbCenter < currentAdaptiveStart -> 3
-                                        currentShowAdaptive && thumbCenter < currentAncStart -> 4
-                                        else -> 2
-                                    }
-                                    val finalStrength = if (currentMode == 4 && finalMode == 4) {
-                                        val travel = currentAncStart - currentAdaptiveStart - currentModeWidth
-                                        if (travel <= 0f) currentStrength else
-                                            ((dragOffset - currentAdaptiveStart) / travel * 100f).roundToInt().coerceIn(0, 100)
-                                    } else currentStrength
-                                    // The final offset may not reach snapshotFlow before the gesture ends.
-                                    if (finalMode != currentMode) currentModeChanged(finalMode)
-                                    if (currentMode == 4 && finalMode == 4) currentStrengthChanged(finalStrength)
-                                    dragFeedbackMode = null
-                                    dragStrengthFeedbackSent = false
-                                    isDragging = false
+                                        if (reachedEnd != null && reachedEnd != adaptiveFeedbackEnd) {
+                                            adaptiveFeedbackEnd = reachedEnd
+                                            dragStrengthFeedbackSent = true
+                                            haptics.performHapticFeedback(HapticFeedbackType.SegmentTick)
+                                        } else if (newOffset > it.start + 4f && newOffset < it.endInclusive - 4f) {
+                                            // Leave the detent before rearming its tick, avoiding edge jitter.
+                                            adaptiveFeedbackEnd = null
+                                        }
+                                        resistAdaptiveExit(newOffset, it.start, it.endInclusive)
+                                    } ?: newOffset
+                                    val safeOffset = resistedOffset.coerceIn(0f, maxTravel)
+                                    dragOffset = safeOffset
 
-                                    val finalTarget = when (finalMode) {
-                                        1 -> 0f
-                                        3 -> targetTransparencyStart
-                                        4 -> targetAdaptiveStart + finalStrength * (targetAncStart - targetAdaptiveStart - currentTargetModeWidth) / 100f
-                                        2 -> targetAncStart
-                                        else -> 0f
+                                    animationCoroutineScope.launch {
+                                        offset.snapTo(safeOffset)
                                     }
-
-                                    animationCoroutineScope.launch { offset.animateTo(finalTarget, motion) }
-                                },
-                                onDragCancel = {
-                                    dragFeedbackMode = null
-                                    dragStrengthFeedbackSent = false
-                                    isDragging = false
-                                    val restoredOffset = when (currentMode) {
-                                        1 -> 0f
-                                        3 -> targetTransparencyStart
-                                        4 -> targetAdaptiveStart + currentStrength * (targetAncStart - targetAdaptiveStart - currentTargetModeWidth) / 100f
-                                        2 -> targetAncStart
-                                        else -> 0f
-                                    }
-                                    animationCoroutineScope.launch { offset.animateTo(restoredOffset, motion) }
                                 }
-                            ) { change, dragAmount ->
-                                change.consume()
-                                val coordinates = thumbCoordinates?.takeIf { it.isAttached }
-                                    ?: return@detectHorizontalDragGestures
-                                // The pointer's local position changes as the thumb follows it.
-                                val rootX = coordinates.localToRoot(change.position).x
-                                // The first callback includes the movement beyond touch slop.
-                                val startRootX = dragStartRootX
-                                    ?: coordinates.localToRoot(change.position - Offset(dragAmount, 0f)).x
-                                dragStartRootX = startRootX
-                                val newOffset = dragStartOffset + with(density) { (rootX - startRootX).toDp().value }
-                                val maxTravel = (currentWidth - currentModeWidth).coerceAtLeast(0f)
-                                val resistedOffset = adaptiveDragRange?.let {
-                                    val reachedEnd = when {
-                                        newOffset <= it.start -> 0
-                                        newOffset >= it.endInclusive -> 100
-                                        else -> null
-                                    }
-                                    if (reachedEnd != null && reachedEnd != adaptiveFeedbackEnd) {
-                                        adaptiveFeedbackEnd = reachedEnd
-                                        dragStrengthFeedbackSent = true
-                                        haptics.performHapticFeedback(HapticFeedbackType.SegmentTick)
-                                    } else if (newOffset > it.start + 4f && newOffset < it.endInclusive - 4f) {
-                                        // Leave the detent before rearming its tick, avoiding edge jitter.
-                                        adaptiveFeedbackEnd = null
-                                    }
-                                    resistAdaptiveExit(newOffset, it.start, it.endInclusive)
-                                } ?: newOffset
-                                val safeOffset = resistedOffset.coerceIn(0f, maxTravel)
-                                dragOffset = safeOffset
-
-                                animationCoroutineScope.launch {
-                                    offset.snapTo(safeOffset)
-                                }
+                            } finally {
+                                // Scope cancellation need not call the detector's onDragCancel.
+                                endDrag()
+                                momentum.endPressingAnimation()
                             }
                         }
                         .then(if (enabled) momentum.modifier else Modifier)

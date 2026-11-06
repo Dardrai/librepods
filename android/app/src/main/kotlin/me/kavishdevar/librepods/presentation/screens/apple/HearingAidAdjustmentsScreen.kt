@@ -97,7 +97,8 @@ fun HearingAidAdjustmentsScreen(
 internal fun HearingAidAdjustmentControls(data: ByteArray, session: Long, revision: Long = 0,
     enabled: Boolean, gainSwipe: Boolean, onGainSwipe: (Boolean) -> Unit,
     onEdit: ((ByteArray) -> ByteArray?) -> Unit, onFinished: () -> Unit = {}, onCanceled: () -> Unit = {},
-    readStatus: SettingsReadStatus = SettingsReadStatus.WAITING, connected: Boolean = true) {
+    readStatus: SettingsReadStatus = SettingsReadStatus.WAITING, connected: Boolean = true,
+    gainSwipeEnabled: Boolean = true) {
     val original = remember(data.toList()) { parseHearingAidSettingsResponse(data) }
     val writable = enabled && hearingAidSettingsWritable(data)
     fun edit(transform: (HearingAidSettings) -> HearingAidSettings) {
@@ -122,7 +123,7 @@ internal fun HearingAidAdjustmentControls(data: ByteArray, session: Long, revisi
             startImageVector = LocalIcons.current.SpeakerMin, endImageVector = LocalIcons.current.SpeakerMax,
             onValueChange = { value -> edit { it.withAmplification(amplification = value) } },
             onValueChangeFinished = onFinished, onValueChangeCanceled = onCanceled)
-        StyledToggle(enabled = writable, label = stringResource(R.string.swipe_to_control_amplification),
+        StyledToggle(enabled = writable && gainSwipeEnabled, label = stringResource(R.string.swipe_to_control_amplification),
             checked = gainSwipe, onCheckedChange = onGainSwipe,
             description = stringResource(R.string.swipe_amplification_description))
         StyledSlider(enabled = writable, label = stringResource(R.string.balance), valueRange = -1f..1f,

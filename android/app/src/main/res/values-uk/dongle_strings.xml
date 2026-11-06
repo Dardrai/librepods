@@ -77,7 +77,7 @@
     <string name="dongle_constant">Сталий бітрейт</string>
     <string name="dongle_variable">Змінний бітрейт</string>
     <string name="dongle_bitrate">Бітрейт або обмеження</string>
-    <string name="dongle_active_codec">Активне виведення: %1$s · узгоджений ліміт %2$d кбіт/с</string>
+    <string name="dongle_active_codec">Активне виведення: %1$s · граничний бітрейт кодера %2$s кбіт/с</string>
     <string name="dongle_game_mode">Ігровий режим</string>
     <string name="dongle_game_pending">Очікування аудіоз’єднання</string>
     <string name="dongle_game_failed">Запит не виконано</string>
@@ -109,4 +109,21 @@
     <string name="dongle_weaker">слабший</string>
     <string name="dongle_trend_unknown">напрямок зміни невідомий</string>
     <string name="dongle_finder_description">Використовує лише оголошення, перевірені для вибраної пари. Сила сигналу не вказує відстань чи напрямок.</string>
+    <string name="dongle_attach_or_pair">Під’єднайте USB-адаптер або сполучіть AirPods Dongle у налаштуваннях Bluetooth Android.</string>
+    <string name="dongle_usb_permission">USB під’єднано · дозвольте доступ до керування</string>
+    <string name="dongle_usb_controls_only">Керування USB під’єднано · навушники недоступні</string>
+    <string name="dongle_usb_audio_available">Керування USB під’єднано · навушники доступні</string>
+    <string name="dongle_reconnect_airpods">Знову під’єднати AirPods</string>
+    <string name="dongle_pair_airpods">Сполучити AirPods</string>
+    <string name="dongle_pair_airpods_description">Призупиніть відтворення та мікрофон, а потім увімкніть режим сполучення AirPods. Адаптер шукатиме пару.</string>
+    <string name="dongle_pair_phone">Дозволити сполучення телефону через Bluetooth</string>
+    <string name="dongle_profile_idle">Перед зміною вихідного профілю призупиніть відтворення та мікрофон.</string>
+    <string name="dongle_phone_pairing">Сполучення Bluetooth доступне</string>
+    <string name="dongle_hardware_volume">Апаратна гучність</string>
+    <string name="dongle_hardware_volume_unavailable">Потрібні root і вибраний USB-аудіовихід адаптера.</string>
+    <string name="dongle_volume_failed">Апаратне керування гучністю зупинено. Під’єднайте керування знову перед повторною спробою.</string>
+    <string name="dongle_volume_restore_failed">Не вдалося відновити апаратну гучність. Не відновлюйте відтворення та під’єднайте керування знову.</string>
+    <string name="dongle_hold_initialize_title">Налаштувати обидва AirPods</string>
+    <string name="dongle_hold_initialize_description">Виберіть дію для кожного AirPod. Налаштування обох навушників оновлюються одночасно.</string>
+    <string name="dongle_assistant_requires_direct">Для асистента потрібне пряме підключення до AirPods.</string>
 </resources>

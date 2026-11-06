@@ -77,7 +77,7 @@
     <string name="dongle_constant">Tasa de bits constante</string>
     <string name="dongle_variable">Tasa de bits variable</string>
     <string name="dongle_bitrate">Tasa de bits o límite</string>
-    <string name="dongle_active_codec">Salida activa: %1$s · límite negociado %2$d kbps</string>
+    <string name="dongle_active_codec">Salida activa: %1$s · límite de tasa de bits del codificador %2$s kbps</string>
     <string name="dongle_game_mode">Modo Juego</string>
     <string name="dongle_game_pending">Esperando el transporte de audio</string>
     <string name="dongle_game_failed">Error en la solicitud</string>
@@ -108,4 +108,21 @@
     <string name="dongle_weaker">más débil</string>
     <string name="dongle_trend_unknown">tendencia no disponible</string>
     <string name="dongle_finder_description">Solo usa anuncios verificados para el par seleccionado. La intensidad de la señal no indica distancia ni dirección.</string>
+    <string name="dongle_attach_or_pair">Conecta un dongle USB o vincula AirPods Dongle en los ajustes Bluetooth de Android.</string>
+    <string name="dongle_usb_permission">USB conectado · permite el acceso a los controles</string>
+    <string name="dongle_usb_controls_only">Controles USB conectados · auriculares no disponibles</string>
+    <string name="dongle_usb_audio_available">Controles USB conectados · auriculares disponibles</string>
+    <string name="dongle_reconnect_airpods">Reconectar AirPods</string>
+    <string name="dongle_pair_airpods">Vincular AirPods</string>
+    <string name="dongle_pair_airpods_description">Pausa la reproducción y el micrófono y pon los AirPods en modo de vinculación. El dongle buscará un par.</string>
+    <string name="dongle_pair_phone">Permitir vinculación Bluetooth de un teléfono</string>
+    <string name="dongle_profile_idle">Pausa la reproducción y el micrófono antes de cambiar el perfil de salida.</string>
+    <string name="dongle_phone_pairing">Vinculación Bluetooth disponible</string>
+    <string name="dongle_hardware_volume">Volumen del dispositivo</string>
+    <string name="dongle_hardware_volume_unavailable">Requiere root y la ruta de audio USB del dongle seleccionada.</string>
+    <string name="dongle_volume_failed">El volumen del dispositivo se detuvo. Reconecta los controles antes de reintentarlo.</string>
+    <string name="dongle_volume_restore_failed">No se pudo restaurar el volumen del dispositivo. Mantén la reproducción en pausa y reconecta los controles.</string>
+    <string name="dongle_hold_initialize_title">Configurar ambos AirPods</string>
+    <string name="dongle_hold_initialize_description">Elige una acción para cada AirPod. Ambos se actualizan a la vez.</string>
+    <string name="dongle_assistant_requires_direct">El asistente requiere una conexión directa con los AirPods.</string>
 </resources>

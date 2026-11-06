@@ -6,6 +6,107 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class NativePlaybackReleaseTest {
+    @Test fun aStateReadCrossingTheDeadlineCannotIssueALateDisconnect() {
+        var elapsed = 0L
+        var disconnects = 0
+        val profile = NativePlaybackRelease.Profile({ elapsed = 100; BluetoothProfile.STATE_CONNECTED }) {
+            disconnects++; true
+        }
+        assertFalse(NativePlaybackRelease.releaseProfiles(listOf(profile), 100, { true }, { elapsed }))
+        assertEquals(0, disconnects)
+    }
+
+    @Test fun aBlockingPolicyProofMustStillFinishBeforeTheDeadline() {
+        var elapsed = 0L
+        assertFalse(NativePlaybackRelease.beforeDeadline(100, { elapsed }) { elapsed = 100; true })
+        var checks = 0
+        var disconnects = 0
+        elapsed = 0
+        val profile = NativePlaybackRelease.Profile({ BluetoothProfile.STATE_CONNECTED }) { disconnects++; true }
+        assertFalse(NativePlaybackRelease.releaseProfiles(listOf(profile), 100,
+            { if (++checks == 2) elapsed = 100; true }, { elapsed }))
+        assertEquals(0, disconnects)
+    }
+
+    @Test fun aLateDisconnectedReplyCannotProduceAReleaseReceipt() {
+        var elapsed = 0L
+        var reads = 0
+        val profile = NativePlaybackRelease.Profile({
+            if (++reads == 2) elapsed = 100
+            BluetoothProfile.STATE_DISCONNECTED
+        }) { fail("Already disconnected"); false }
+        assertFalse(NativePlaybackRelease.releaseProfiles(listOf(profile), 100, { true }, { elapsed }))
+    }
+
+    @Test fun aDisconnectFinishingAfterDeadlineCannotMutateTheNextProfile() {
+        var elapsed = 0L
+        var nextWrites = 0
+        val first = NativePlaybackRelease.Profile({ BluetoothProfile.STATE_CONNECTED }) { elapsed = 100; true }
+        val second = NativePlaybackRelease.Profile({ BluetoothProfile.STATE_CONNECTED }) { nextWrites++; true }
+        assertFalse(NativePlaybackRelease.releaseProfiles(listOf(first, second), 100, { true }, { elapsed }))
+        assertEquals(0, nextWrites)
+    }
+
+    @Test fun unavailableRawServiceCannotTurnThePublicDisconnectedFallbackIntoAReceipt() {
+        var reads = 0
+        var disconnects = 0
+        val profile = NativePlaybackRelease.Profile({
+            NativePlaybackRelease.verifiedProfileState({ false }) { reads++; BluetoothProfile.STATE_DISCONNECTED }
+        }) { disconnects++; true }
+        assertThrows(IllegalStateException::class.java) {
+            NativePlaybackRelease.releaseProfiles(listOf(profile), 100, { true }, { 0 })
+        }
+        assertEquals(0, reads); assertEquals(0, disconnects)
+    }
+
+    @Test fun aProxyReplacementDuringTheRawReplyRevokesDisconnectedEvidence() {
+        var sameProxy = true
+        var disconnects = 0
+        val profile = NativePlaybackRelease.Profile({
+            NativePlaybackRelease.verifiedProfileState({ sameProxy }) {
+                sameProxy = false
+                BluetoothProfile.STATE_DISCONNECTED
+            }
+        }) { disconnects++; true }
+        assertThrows(IllegalStateException::class.java) {
+            NativePlaybackRelease.releaseProfiles(listOf(profile), 100, { true }, { 0 })
+        }
+        assertEquals(0, disconnects)
+    }
+
+    @Test fun unknownRawStatesNeverTriggerAProfileDisconnect() {
+        for (state in listOf(-1, 4, 100)) {
+            var disconnects = 0
+            val profile = NativePlaybackRelease.Profile({ NativePlaybackRelease.verifiedProfileState({ true }) { state } }) {
+                disconnects++; true
+            }
+            assertThrows(IllegalStateException::class.java) {
+                NativePlaybackRelease.releaseProfiles(listOf(profile), 100, { true }, { 0 })
+            }
+            assertEquals(0, disconnects)
+        }
+    }
+
+    @Test fun anAcknowledgedRawDisconnectThatStaysConnectedCannotProduceAReceipt() {
+        var elapsed = 0L
+        var disconnects = 0
+        val profile = NativePlaybackRelease.Profile({
+            NativePlaybackRelease.verifiedProfileState({ true }) { BluetoothProfile.STATE_CONNECTED }
+        }) { disconnects++; true }
+        assertFalse(NativePlaybackRelease.releaseProfiles(listOf(profile), 120, { true }, { elapsed }) { elapsed += 40 })
+        assertEquals(1, disconnects); assertEquals(120L, elapsed)
+    }
+
+    @Test fun theOwnerIsRecheckedAfterTheLastDisconnectedReply() {
+        var current = true
+        var reads = 0
+        val profile = NativePlaybackRelease.Profile({
+            if (++reads == 2) current = false
+            BluetoothProfile.STATE_DISCONNECTED
+        }) { fail("Already disconnected"); false }
+        assertFalse(NativePlaybackRelease.releaseProfiles(listOf(profile), 100, { current }, { 0 }))
+    }
+
     @Test fun releaseWaitsForBothProfilesAndNeverReconnects() {
         var elapsed = 0L
         var media = BluetoothProfile.STATE_CONNECTED

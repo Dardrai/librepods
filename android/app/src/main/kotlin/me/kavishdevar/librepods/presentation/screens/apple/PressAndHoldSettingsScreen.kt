@@ -60,7 +60,9 @@ internal fun resolveLongPressSide(route: String, leftLabel: String, rightLabel: 
 @Composable
 internal fun LongPressSettings(uiState: AppleUiState, name: String, connected: Boolean, writing: Boolean,
     navigateBack: (() -> Unit)?, setAction: (String, StemAction) -> Unit, applyCycle: (Int, AppleMetadata) -> Unit,
-    liveCycle: LiveValueState<Int>? = null, cancelCycle: () -> Unit = {}) {
+    liveCycle: LiveValueState<Int>? = null, cancelCycle: () -> Unit = {},
+    actionsEnabled: Boolean = connected, actionsKnown: Boolean = true,
+    initialActions: (@Composable () -> Unit)? = null, assistantAvailable: Boolean = true) {
     val leftLabel = stringResource(R.string.left)
     val rightLabel = stringResource(R.string.right)
     val side = resolveLongPressSide(name, leftLabel, rightLabel)
@@ -74,14 +76,18 @@ internal fun LongPressSettings(uiState: AppleUiState, name: String, connected: B
         Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceContainer)
             .verticalScroll(rememberScrollState()).padding(horizontal = 16.dp)
             .padding(top = top + 8.dp, bottom = bottom), verticalArrangement = Arrangement.spacedBy(24.dp)) {
-            StyledList(key = side to action) {
+            if (!actionsKnown && initialActions != null) initialActions() else StyledList(key = side to action) {
                 for ((choice, label) in listOf(StemAction.CYCLE_NOISE_CONTROL_MODES to R.string.noise_control,
                     StemAction.DIGITAL_ASSISTANT to R.string.digital_assistant)) {
-                    styledListItem(contentText = stringResource(label), selected = action == choice,
-                        enabled = connected && side != null, onClick = { side?.let { setAction(it, choice) } })
+                    styledListItem(contentText = stringResource(label), selected = actionsKnown && action == choice,
+                        enabled = actionsEnabled && side != null && (assistantAvailable || choice != StemAction.DIGITAL_ASSISTANT),
+                        onClick = { side?.let { setAction(it, choice) } })
                 }
             }
-            if (action == StemAction.CYCLE_NOISE_CONTROL_MODES)
+            if (!assistantAvailable)
+                Text(stringResource(R.string.dongle_assistant_requires_direct), style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (action == StemAction.CYCLE_NOISE_CONTROL_MODES || !actionsKnown)
                 NoiseModeCycleSettings(uiState.state, uiState.settings, uiState.metadata, connected, writing, liveCycle, cancelCycle) {
                     applyCycle(it, uiState.metadata)
                 }

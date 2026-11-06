@@ -38,6 +38,9 @@ sealed interface Screen: NavKey {
     data object DongleSettings: Screen
 
     @Serializable
+    data class DongleAirPods(val page: String = "main", val argument: String = ""): Screen
+
+    @Serializable
     data object DongleAccommodations: Screen
 
     @Serializable

@@ -38,6 +38,8 @@ import kotlinx.coroutines.withTimeoutOrNull
 import me.kavishdevar.librepods.core.bluetooth.aacp.packet.AACPPacket
 import me.kavishdevar.librepods.core.bluetooth.aacp.packet.AACPPacketType
 import me.kavishdevar.librepods.core.bluetooth.aacp.packet.AudioSourcePacket
+import me.kavishdevar.librepods.core.bluetooth.aacp.packet.parseRoutingRequest
+import me.kavishdevar.librepods.core.bluetooth.aacp.packet.routingRequestPacket
 import me.kavishdevar.librepods.core.bluetooth.aacp.packet.BatteryInfoPacket
 import me.kavishdevar.librepods.core.bluetooth.aacp.packet.ConnectedDevicesPacket
 import me.kavishdevar.librepods.core.bluetooth.aacp.packet.ControlCommandPacket
@@ -81,6 +83,7 @@ import java.nio.ByteOrder
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.time.Clock
+import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 
@@ -170,7 +173,9 @@ class AACPManager(private val device: AppleDevice,
         isCurrent = { ownsAudioSocket(expected) },
         firmwareMajor = { device.metadata.value.firmwareMajor },
         onMotion = { report ->
-            publishForTransport(this, expected, ::captureAudioSocket) { HeadTracking.addAccel(report.vertical.toFloat(), report.horizontal.toFloat()) }
+            publishForTransport(this, expected, ::captureAudioSocket) {
+                HeadTracking.addMotion(report.report, report.vertical.toFloat(), report.horizontal.toFloat())
+            }
         },
         onHeartRate = { report ->
             publishForTransport(this, expected, ::captureAudioSocket) {
@@ -188,15 +193,21 @@ class AACPManager(private val device: AppleDevice,
                 device.updateState { it.copy(hrmState = state, currentHeartRate = if (state == BuddyState.ACTIVE) it.currentHeartRate else null) }
             }
         },
+        remoteAllowed = { device.metadata.value.model == AirPodsModel.AIRPODS_3 },
+        motionIntervalUs = device.settings.value.takeIf { it.headTrackingIntervalConfigured }
+            ?.headTrackingInterval?.inWholeMicroseconds?.takeIf { it in 20_000..1_000_000 && it % 1000 == 0L }?.toInt(),
     )
 
-    private suspend fun sendDelayedInitPackets(expected: BluetoothSocket): Boolean {
+    private suspend fun sendDelayedInitPackets(expected: BluetoothSocket, settings: me.kavishdevar.librepods.core.devices.AppleSettings): Boolean {
         if (ownsAudioSocket(expected)) {
-            Log.i(TAG, "initializing connection")
+            Log.i(TAG, "initializing connection hearingSupport=${settings.experimentalHearingCapability} " +
+                "macSource=${settings.experimentalMacSourceAnnouncement}")
 
             if (!connectService4(expected)) return false
             delay(200.milliseconds)
-            if (!sendSourceFeatureCapabilities(expected)) return false
+            if (!sendSourceFeatureCapabilities(expected, settings.experimentalHearingCapability)) return false
+            if (settings.experimentalMacSourceAnnouncement && !sendPacket(AACPPacket.createUnknownPacket(
+                    MessageOpcode.DEVICE_INFO, macSourceAnnouncementPayload()), expected)) return false
             delay(200.milliseconds)
             if (!sendNotificationRequest(expected)) return false
             if (!sendCapabilitiesRequest(expected)) return false
@@ -212,9 +223,11 @@ class AACPManager(private val device: AppleDevice,
     }
 
     private suspend fun initializeConnection(expected: BluetoothSocket, scope: CoroutineScope) {
+        val settings = device.settings.value
         var initialAttStarted = false
         repeat(2) { pass ->
-            val initialized = sendDelayedInitPackets(expected)
+            if (pass != 0 && captureSettingsSocket() === expected) return
+            val initialized = sendDelayedInitPackets(expected, settings)
             currentCoroutineContext().ensureActive()
             if (!ownsAudioSocket(expected)) return
             if (initialized && !initialAttStarted) {
@@ -738,53 +751,11 @@ class AACPManager(private val device: AppleDevice,
             }
 
             MessageOpcode.SMART_ROUTING_RESPONSE -> {
-                if (packet.size < 12) return
-                val packetString = packet.decodeToString()
-                val sender =
-                    packet.sliceArray(6..11).reversedArray().joinToString(":") { "%02X".format(it) }
-
+                val routing = parseRoutingRequest(packet, device.state.value.connectedDevices.map { it.macAddress }.toSet()) ?: return
                 publishForTransport(this, sourceSocket, ::captureAudioSocket) {
-                    if ("iPad" in packetString) {
-                        device.state.value.connectedDevices.find { it.macAddress.value == sender }?.type = "iPad"
-                    } else if ("Mac" in packetString) {
-                        device.state.value.connectedDevices.find { it.macAddress.value == sender }?.type = "Mac"
-                    } else if ("iPhone" in packetString) { // not sure if this is it - don't have an iphone
-                        device.state.value.connectedDevices.find { it.macAddress.value == sender }?.type = "iPhone"
-                    } else if ("Linux" in packetString) {
-                        device.state.value.connectedDevices.find { it.macAddress.value == sender }?.type = "Linux"
-                    } else if ("Android" in packetString) {
-                        device.state.value.connectedDevices.find { it.macAddress.value == sender }?.type = "Android"
-                    }
-                    Log.i(TAG, "Received smart routing response")
-                    if (packetString.contains("SetOwnershipToFalse")) {
-                        connectionScope?.launch(start = CoroutineStart.UNDISPATCHED) {
-                            device.emitEvent(
-                                AppleEvent.OwnershipToFalseRequest(
-                                    sender = sender,
-                                    reverseTapped = packetString.contains("ReverseBannerTapped")
-                                )
-                            )
-                        }
-                    }
-                    if (packetString.contains("ShowNearbyUI")) {
-                        connectionScope?.launch(start = CoroutineStart.UNDISPATCHED) {
-                            device.emitEvent(
-                                AppleEvent.ShowNearbyUi(
-                                    sender = sender
-                                )
-                            )
-                        }
-                    }
-
-                    val packet = AACPPacket.createUnknownPacket(
-                        opcode = MessageOpcode.SMART_ROUTING_RESPONSE,
-                        payload = packet.copyOfRange(6, packet.size)
-                    )
-
-                    device.updateState {
-                        it.copy(
-                            aacpPackets = it.aacpPackets + packet
-                        )
+                    connectionScope?.launch(start = CoroutineStart.UNDISPATCHED) {
+                        device.emitEvent(AppleEvent.OwnershipToFalseRequest(
+                            sender = routing.sender.value, reverseTapped = routing.reverseTapped))
                     }
                 }
             }
@@ -800,6 +771,7 @@ class AACPManager(private val device: AppleDevice,
             MessageOpcode.INFORMATION -> {
                 val informationPacket = InformationPacket.parse(packet)
                 var clockPacket: AACPPacket? = null
+                var clockEpoch: Long? = null
 
                 publishForTransport(this, sourceSocket, ::captureAudioSocket) {
                     device.updateState {
@@ -814,10 +786,14 @@ class AACPManager(private val device: AppleDevice,
                         BaseCapability.HEARING_AID in AirPodsSpecs.getSpec(model).baseCapabilities &&
                         hostClockEpoch != epoch) {
                         clockPacket = hostClockPacket()
-                        if (clockPacket != null) hostClockEpoch = epoch
+                        clockEpoch = epoch
                     }
                 }
-                clockPacket?.let { sendPacket(it, sourceSocket) }
+                if (clockPacket?.let { sendPacket(it, sourceSocket) } == true) {
+                    publishForTransport(this, sourceSocket, ::captureAudioSocket) {
+                        if (connectionEpoch.get() == clockEpoch) hostClockEpoch = clockEpoch
+                    }
+                }
             }
 
             MessageOpcode.CUSTOM_EQ -> {
@@ -994,9 +970,8 @@ class AACPManager(private val device: AppleDevice,
     fun sendCapabilitiesRequest(expected: BluetoothSocket? = captureAudioSocket()): Boolean = sendPacket(
         AACPPacket.createUnknownPacket(MessageOpcode.CAPABILITIES_REQUEST, byteArrayOf(0x08)), expected)
 
-    // todo: implement adaptive volume
-    fun sendSourceFeatureCapabilities(expected: BluetoothSocket? = captureAudioSocket()): Boolean {
-        val payload = byteArrayOf(0xd7.toByte(), 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
+    fun sendSourceFeatureCapabilities(expected: BluetoothSocket? = captureAudioSocket(), hearing: Boolean = false): Boolean {
+        val payload = sourceFeatureCapabilitiesPayload(hearing)
         val packet = AACPPacket.createUnknownPacket(
             opcode = MessageOpcode.SOURCE_FEATURE_CAPABILITIES,
             payload
@@ -1016,6 +991,7 @@ class AACPManager(private val device: AppleDevice,
     }
 
     fun setHeadTrackingEnabled(enabled: Boolean): Boolean = rtBuddyManager?.setHeadTrackingEnabled(enabled) ?: false
+    fun setHeadTrackingInterval(interval: Duration): Boolean = rtBuddyManager?.setMotionInterval(interval) ?: false
     fun setHeartRateEnabled(enabled: Boolean): Boolean = rtBuddyManager?.setHeartRateEnabled(enabled) ?: false
     fun setSensorsSuspended(suspended: Boolean) { rtBuddyManager?.setSuspended(suspended) }
 
@@ -1088,36 +1064,7 @@ class AACPManager(private val device: AppleDevice,
         return success
     }
 
-    fun createHijackRequestPacket(targetMacAddress: String): AACPPacket {
-        val buffer = ByteBuffer.allocate(106)
-        buffer.put(
-            targetMacAddress.split(":").map { it.toInt(16).toByte() }.toByteArray().reversedArray()
-        )
-        buffer.put(byteArrayOf(0x62, 0x00))
-        buffer.put(byteArrayOf(0x01, 0xE5.toByte()))
-        buffer.put(0x4A)
-        buffer.put("localscore".toByteArray())
-        buffer.put(byteArrayOf(0x30, 0x64))
-        buffer.put(0x46)
-        buffer.put("reason".toByteArray())
-        buffer.put(0x48)
-        buffer.put("Hijackv2".toByteArray())
-        buffer.put(0x51)
-        buffer.put("audioRoutingScore".toByteArray())
-        buffer.put(byteArrayOf(0x31, 0x2D, 0x01, 0x5F))
-        buffer.put("audioRoutingSetOwnershipToFalse".toByteArray())
-        buffer.put(0x01)
-        buffer.put(0x4B)
-        buffer.put("remotescore".toByteArray())
-        buffer.put(0xA5.toByte())
-
-        val packet = AACPPacket.createUnknownPacket(
-            opcode = MessageOpcode.SMART_ROUTING,
-            payload = buffer.array()
-        )
-
-        return packet
-    }
+    fun createHijackRequestPacket(targetMacAddress: String): AACPPacket = routingRequestPacket(targetMacAddress, false)
 
     fun sendMediaInformataion(selfMacAddress: String, streamingState: Boolean = false): Boolean {
         if (selfMacAddress.length != 17 || !selfMacAddress.matches(Regex("([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}"))) {
@@ -1228,31 +1175,7 @@ class AACPManager(private val device: AppleDevice,
         return success
     }
 
-    fun createHijackReversedPacket(targetMacAddress: String): AACPPacket {
-        val buffer = ByteBuffer.allocate(97)
-        buffer.put(
-            targetMacAddress.split(":").map { it.toInt(16).toByte() }.toByteArray().reversedArray()
-        )
-        buffer.put(byteArrayOf(0x59, 0x00))
-        buffer.put(byteArrayOf(0x01, 0xE3.toByte()))
-        buffer.put(0x5F)
-        buffer.put("audioRoutingSetOwnershipToFalse".toByteArray())
-        buffer.put(0x01)
-        buffer.put(0x59)
-        buffer.put("audioRoutingShowReverseUI".toByteArray())
-        buffer.put(0x01)
-        buffer.put(0x46)
-        buffer.put("reason".toByteArray())
-        buffer.put(0x53)
-        buffer.put("ReverseBannerTapped".toByteArray())
-
-        val packet = AACPPacket.createUnknownPacket(
-            opcode = MessageOpcode.SMART_ROUTING,
-            payload = buffer.array()
-        )
-
-        return packet
-    }
+    fun createHijackReversedPacket(targetMacAddress: String): AACPPacket = routingRequestPacket(targetMacAddress, true)
 
     fun sendAddTiPiDevice(selfMacAddress: String, targetMacAddress: String): Boolean {
         if (selfMacAddress.length != 17 || !selfMacAddress.matches(Regex("([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}")) || targetMacAddress.length != 17 || !targetMacAddress.matches(

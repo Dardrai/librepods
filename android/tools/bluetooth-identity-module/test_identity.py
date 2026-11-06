@@ -84,6 +84,24 @@ def main():
     original = {VENDOR: "224", SOURCE: "2", PRODUCT: "16650", VERSION: "0"}
     f = Fixture(original)
     try:
+        launcher = f.root / "data/adb/ksu/bin/busybox"
+        launcher.write_text('''#!/usr/bin/python3
+import os,sys
+command=sys.argv[1:]
+if command[0]=='sh':
+ os.environ['IDENTITY_TEST_ASH']='1'
+elif command[0]=='flock' and os.environ.get('IDENTITY_TEST_ASH')!='1':
+ try:os.close(9)
+ except OSError:pass
+os.execvp(command[0],command)
+''')
+        launcher.chmod(0o755)
+        assert "active=1" in f.run("enable")
+        f.run("disable")
+        assert f.values() == original
+    finally: f.close()
+    f = Fixture(original)
+    try:
         assert f.run("status") == "version=1\nconfigured=0\nactive=0\n"
         assert "active=1" in f.run("enable")
         assert f.values() == dict(original, **{VENDOR: "76", SOURCE: "1"})
@@ -158,7 +176,7 @@ def main():
             f.run("enable", expected=1)
             assert sentinel.read_text() == "retain" and f.values() == original
         finally: f.close()
-    print("Bluetooth identity helper: 11 restoration, OTA, interruption, ownership and symlink checks passed")
+    print("Bluetooth identity helper: 12 shell-descriptor, restoration, OTA, interruption, ownership and symlink checks passed")
 
 
 if __name__ == "__main__": main()

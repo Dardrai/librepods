@@ -59,6 +59,7 @@ android {
 
 dependencies {
     testImplementation("junit:junit:4.13.2")
+    testImplementation(libs.kotlinx.serialization.json)
     implementation(libs.androidx.core.ktx)
     implementation(libs.kotlinx.serialization.cbor)
     implementation(libs.protobuf.kotlin)

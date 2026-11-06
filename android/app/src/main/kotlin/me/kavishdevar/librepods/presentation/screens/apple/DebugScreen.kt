@@ -8,6 +8,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.foundation.text.input.delete
 import androidx.compose.material3.MaterialTheme
@@ -44,6 +46,8 @@ import me.kavishdevar.librepods.presentation.components.primitives.StyledScaffol
 import me.kavishdevar.librepods.presentation.icons.richText
 import me.kavishdevar.librepods.presentation.viewmodel.AppleUiState
 import me.kavishdevar.librepods.presentation.viewmodel.AppleViewModel
+import me.kavishdevar.librepods.core.devices.AppleSettings
+import me.kavishdevar.librepods.presentation.components.primitives.styledToggle
 import me.kavishdevar.librepods.utils.nonScaledSp
 
 @Composable
@@ -57,6 +61,7 @@ fun DebugRoute(
         uiState = uiState,
         navigateBack = navigateBack,
         sendPacket = viewModel::sendRawPacket,
+        updateSettings = viewModel::updateSettings,
     )
 }
 
@@ -65,6 +70,7 @@ fun DebugScreen(
     uiState: AppleUiState,
     navigateBack: (() -> Unit)?,
     sendPacket: (ByteArray) -> Boolean,
+    updateSettings: ((AppleSettings) -> AppleSettings) -> Unit,
 ) {
     val state = uiState.state
 
@@ -77,10 +83,18 @@ fun DebugScreen(
         Column(
             modifier = Modifier
                 .padding(horizontal = 16.dp)
-                .fillMaxSize(),
+                .fillMaxSize().verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             Spacer(modifier = Modifier.height(topPadding))
+
+            StyledList(title = "Host identity experiments",
+                description = "Applied on the next AirPods connection. Test one change at a time.") {
+                styledToggle(label = "Advertise hearing support", checked = uiState.settings.experimentalHearingCapability,
+                    onCheckedChange = { value -> updateSettings { it.copy(experimentalHearingCapability = value) } })
+                styledToggle(label = "Announce Mac source", checked = uiState.settings.experimentalMacSourceAnnouncement,
+                    onCheckedChange = { value -> updateSettings { it.copy(experimentalMacSourceAnnouncement = value) } })
+            }
 
             val inputState = remember { TextFieldState() }
             val focusRequester = remember { FocusRequester() }

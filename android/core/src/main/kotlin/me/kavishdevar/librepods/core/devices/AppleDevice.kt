@@ -368,6 +368,7 @@ class AppleDevice(
     suspend fun setAccommodations(expected: AccommodationsReport, phone: Boolean?, media: Boolean?,
         preset: AccommodationsPreset?, expectedEditRevision: Long = 0, audiogram: Boolean = false,
         expectedTransport: BluetoothSocket? = null, expectedSession: Long? = null): AccommodationsResult = hearingLock.withLock {
+        Log.i(TAG, "Headphone Accommodations requested phone=$phone media=$media preset=$preset audiogram=$audiogram")
         if (preset != null && audiogram || (preset != null || audiogram) && !att.available) return@withLock AccommodationsResult.NOT_SENT
         val transport = aacp.captureAudioSocket() ?: return@withLock AccommodationsResult.NOT_SENT
         val snapshot = state.value
@@ -404,6 +405,8 @@ class AppleDevice(
             }
         }
         if (!reserved) return@withLock AccommodationsResult.NOT_SENT
+        Log.i(TAG, "Headphone Accommodations accepted phone=${plan.selection.phone} media=${plan.selection.media} " +
+            "preset=${plan.selection.preset} audiogram=$audiogram changesRequired=${plan.changesRequired}")
         fun ownsOperation(): Boolean {
             val value = state.value
             return aacp.ownsAudioSocket(transport) && connectionState.value == ConnectionState.CONNECTED &&
@@ -415,14 +418,18 @@ class AppleDevice(
         var transparencyAttempted = false
         var transparencyConfirmed = false
         var result = AccommodationsResult.NOT_SENT
+        var stage = "preflight"
+        var pmeSend = AccommodationsSendOutcome.NOT_ATTEMPTED
         try {
             result = withTimeoutOrNull(15.seconds) operation@ {
                 if (!current()) return@operation result
+                stage = "read-transparency"
                 val transparency = att.readCharacteristic(ATTHandle.TRANSPARENCY, ::current)
                     ?.copyOf()?.takeIf { it.size == 104 && parseTransparencySettingsResponse(it) != null }
                     ?: return@operation result
                 val attSession = att.sessionToken() ?: return@operation result
                 fun currentPair(): Boolean = current() && att.ownsSession(attSession)
+                stage = "read-clinical-guard"
                 val clinical = att.readCharacteristic(ATTHandle.HEARING_AID, ::currentPair)
                     ?.copyOf()?.takeIf { it.size == 104 && parseHearingAidSettingsResponse(it) != null }
                     ?: return@operation result
@@ -457,12 +464,16 @@ class AppleDevice(
                 if (!currentPair() || state.value.hearingModes.accommodationsReport(session)?.let(plan::canStart) != true)
                     return@operation result
                 if (plan.changesRequired) {
+                    stage = "send-pme"
                     attempted = true
                     result = AccommodationsResult.UNCONFIRMED
+                    pmeSend = AccommodationsSendOutcome.INCOMPLETE
                     if (!aacp.sendAudioPacket(transport, plan.packet())) return@operation result
+                    pmeSend = AccommodationsSendOutcome.COMPLETE
                 }
                 if (transparencyChanges) {
                     if (!currentPair()) return@operation result
+                    stage = "write-transparency"
                     attempted = true
                     transparencyAttempted = true
                     result = AccommodationsResult.UNCONFIRMED
@@ -470,6 +481,7 @@ class AppleDevice(
                         return@operation result
                 }
                 if (!currentPair()) return@operation result
+                stage = "verify-readback"
                 val actualTransparency = att.readCharacteristic(ATTHandle.TRANSPARENCY, ::currentPair)
                 val actualClinical = att.readCharacteristic(ATTHandle.HEARING_AID, ::currentPair)
                 if (!currentPair() || !requestedTransparency.contentEquals(actualTransparency) ||
@@ -509,6 +521,9 @@ class AppleDevice(
             result
         } finally {
             if (attempted && result == AccommodationsResult.NOT_SENT) result = AccommodationsResult.UNCONFIRMED
+            Log.i(TAG, "Headphone Accommodations result=$result stage=$stage pmeSend=$pmeSend " +
+                "phone=${plan.selection.phone} media=${plan.selection.media} preset=${plan.selection.preset} " +
+                "audiogram=$audiogram transparencyAttempted=$transparencyAttempted transparencyConfirmed=$transparencyConfirmed")
             synchronized(aacp) {
                 if (accommodationsConfirmationOwner !== owner) return@synchronized
                 if (!state.value.accommodationsRequest.pending) {
@@ -625,6 +640,12 @@ class AppleDevice(
                 val report = state.first { !current() || (freshSession && !canRefreshHearingConfirmation(owner, mode)) || matches(it) }
                 if (!current() || (freshSession && !canRefreshHearingConfirmation(owner, mode)) || !matches(report)) return@confirmation false
                 if (enabled) {
+                    // Mode reports can arrive before the replacement settings transport finishes startup.
+                    while (freshSession && current() && canRefreshHearingConfirmation(owner, mode) &&
+                        aacp.captureSettingsSocket() !== transport)
+                        delay(50.milliseconds)
+                    if (!current() || (freshSession && !canRefreshHearingConfirmation(owner, mode)) ||
+                        !matches(state.value)) return@confirmation false
                     val readback = att.readCharacteristic(ATTHandle.HEARING_AID)
                     if (!current() || !fitting.contentEquals(readback) || !matches(state.value)) return@confirmation false
                 }
@@ -766,6 +787,7 @@ class AppleDevice(
 
     private class InitialATTRead(val transport: BluetoothSocket, val session: Long) {
         val attempted = mutableSetOf<ATTHandle>()
+        var retryAfter = 0L
         var running = false
     }
     private var initialATTRead: InitialATTRead? = null
@@ -804,6 +826,7 @@ class AppleDevice(
                         ATTHandle.LOUD_SOUND_REDUCTION -> false
                     }
                 } ?: return
+                if (System.nanoTime() / 1_000_000 < initial.retryAfter) { delay(250.milliseconds); continue }
                 if (hearingLock.isLocked || attOperationPending || state.value.hearingModes.pending != null ||
                     state.value.accommodationsRequest.pending || !confirmationAudioIdle()) {
                     delay(250.milliseconds)
@@ -811,9 +834,15 @@ class AppleDevice(
                 }
                 try {
                     val value = readATTCharacteristic(handle, transport, session) { initial.attempted += handle }
-                    if (value == null && current() && att.canRetryRead()) initial.attempted -= handle
+                    if (value == null && current() && att.canRetryRead()) {
+                        initial.attempted -= handle
+                        initial.retryAfter = System.nanoTime() / 1_000_000 + 5_000
+                    }
                 } catch (cancelled: CancellationException) {
-                    if (current() && att.canRetryRead()) initial.attempted -= handle
+                    if (current() && att.canRetryRead()) {
+                        initial.attempted -= handle
+                        initial.retryAfter = System.nanoTime() / 1_000_000 + 5_000
+                    }
                     throw cancelled
                 }
                 // A busy read which never entered ATT must remain available after the call or recording ends.
@@ -989,7 +1018,7 @@ class AppleDevice(
     // TODO: multiple callbacks
     fun detectHeadGestures(callback: (Boolean) -> Unit) {
         if (state.value.headTrackingState != BuddyState.ACTIVE) startHeadTracking()
-        val started = gestureDetector.startDetection(HeadTracking.acceleration, callback)
+        val started = gestureDetector.startDetection(HeadTracking.angularVelocity, callback)
         if (!started) {
             Log.w(TAG, "Failed to start gesture detection, probably because already running.")
         }
@@ -1013,9 +1042,10 @@ class AppleDevice(
         }
     }
 
-    fun setHeadTrackingInterval(interval: Duration) {
-        updateSettings { it.copy(headTrackingInterval = interval) }
-        // Captured native service uses 20 ms; the recognized legacy layout uses 40 ms.
+    fun setHeadTrackingInterval(interval: Duration): Boolean {
+        if (!aacp.setHeadTrackingInterval(interval)) return false
+        updateSettings { it.copy(headTrackingInterval = interval, headTrackingIntervalConfigured = true) }
+        return true
     }
 
     fun setCustomEqEnabled(enabled: Boolean): Boolean =

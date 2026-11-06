@@ -9,7 +9,7 @@ import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 /** Calendar time, separate from the microphone stream's RTP clock. */
-internal fun hostClockPacket(now: Instant = Instant.now()): AACPPacket? {
+fun hostClockPacket(now: Instant = Instant.now()): AACPPacket? {
     if (now.epochSecond !in 0..0xffff_ffffL) return null
     // Pro 3 diagnostics can apply the text offset, so both representations stay in UTC.
     val text = HOST_CLOCK_FORMAT.format(now).toByteArray(Charsets.UTF_8)

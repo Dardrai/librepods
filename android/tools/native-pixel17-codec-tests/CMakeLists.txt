@@ -20,3 +20,7 @@ target_compile_options(pixel17_codec_test_q31 PRIVATE -Wall -Wextra -Werror)
 add_test(NAME pixel17_codec_test_q31 COMMAND pixel17_codec_test_q31)
 
 target_compile_definitions(pixel17_codec_test_q31 PRIVATE ELD_PRIVATE_WIDE_PCM=1)
+foreach(profile pixel17_codec_test pixel17_codec_test_q31)
+    add_test(NAME "${profile}_current" COMMAND ${profile} --current)
+    add_test(NAME "${profile}_current_debug" COMMAND ${profile} --current-debug)
+endforeach()

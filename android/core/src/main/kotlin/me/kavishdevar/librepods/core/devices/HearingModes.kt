@@ -95,7 +95,7 @@ data class HearingModes internal constructor(
             if (mode == HearingMode.MEDIA_ASSIST && (voice != enabled || media != enabled || uncertain == mode))
                 add(pmeReport!!.copyOf().also { it[10] = wireFlag(enabled); it[11] = wireFlag(enabled) })
         }
-        return HearingModePlan(this, desiredHearing, desiredVoice, desiredMedia, desiredGate, packets)
+        return HearingModePlan(this, desiredHearing, desiredVoice, desiredMedia, desiredGate, packets, mode)
     }
 
     fun confirms(plan: HearingModePlan): Boolean =
@@ -117,11 +117,15 @@ data class HearingModes internal constructor(
         reportedHearing == plan.hearing && reportedVoice == plan.voice && reportedMedia == plan.media &&
             reportedGate == plan.gate && hearingReport?.get(7) == plan.original.hearingReport?.get(7) &&
             pmeReport?.copyOfRange(8, 10).contentEquals(plan.original.pmeReport?.copyOfRange(8, 10)) &&
-            pmeReport?.copyOfRange(12, 140).contentEquals(plan.original.pmeReport?.copyOfRange(12, 140))
+            (pmeReport?.copyOfRange(12, 140).contentEquals(plan.original.pmeReport?.copyOfRange(12, 140)) ||
+                // Hearing Aid can clear/restore inactive legacy curves; the clinical fitting is checked separately.
+                plan.mode == HearingMode.HEARING_AID && !plan.voice && !plan.media &&
+                    (pmeReport?.copyOfRange(12, 140)?.all { it == 0.toByte() } == true ||
+                        plan.original.pmeReport?.copyOfRange(12, 140)?.all { it == 0.toByte() } == true))
 }
 
 data class HearingModePlan(val original: HearingModes, val hearing: Boolean, val voice: Boolean,
-    val media: Boolean, val gate: Boolean, val packets: List<ByteArray>)
+    val media: Boolean, val gate: Boolean, val packets: List<ByteArray>, val mode: HearingMode)
 
 private fun flag(value: Byte): Boolean? = when (value.toInt()) { 1 -> true; 2 -> false; else -> null }
 private fun wireFlag(value: Boolean): Byte = if (value) 1 else 2

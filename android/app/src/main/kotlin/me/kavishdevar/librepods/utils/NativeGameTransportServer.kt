@@ -157,6 +157,7 @@ internal class NativeGameTransportServer private constructor(
     private fun reply(request: Request, status: Int, values: LongArray = longArrayOf()) {
         if (closed.get()) return
         val reply = Intent(NativeGameTransportRules.REPLY).setPackage(NativeGameTransportRules.APP)
+            .addFlags(Intent.FLAG_RECEIVER_FOREGROUND)
             .putExtra("version", NativeGameTransportRules.VERSION).putExtra("client", request.client)
             .putExtra("request", request.id).putExtra("server", nonce)
             .putExtra("status", status).putExtra("values", values)

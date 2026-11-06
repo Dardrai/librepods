@@ -1,13 +1,20 @@
 package me.kavishdevar.librepods.presentation.screens.settings
 
 import android.Manifest
+import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothClass
+import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
+import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.os.IBinder
+import android.net.Uri
+import android.provider.Settings
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Arrangement
@@ -20,7 +27,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.BasicAlertDialog
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Surface
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -28,11 +37,13 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
@@ -57,6 +68,9 @@ import androidx.compose.ui.semantics.disabled
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -64,7 +78,12 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import me.kavishdevar.librepods.R
+import me.kavishdevar.librepods.bluetooth.hasNearbyDevicesPermissions
+import me.kavishdevar.librepods.bluetooth.nearbyDevicesPermissions
 import me.kavishdevar.librepods.companion.CompanionState
+import me.kavishdevar.librepods.companion.CompanionPairingClient
+import me.kavishdevar.librepods.companion.CompanionPairingProtocol
+import me.kavishdevar.librepods.companion.CompanionPairingState
 import me.kavishdevar.librepods.core.devices.AppleDevice
 import me.kavishdevar.librepods.core.devices.AppleSettings
 import me.kavishdevar.librepods.core.devices.Device
@@ -170,8 +189,11 @@ private fun CompanionSection(onOpenSettings: (() -> Unit)? = null, service: Libr
 
     if (setup) {
         val pods = devices.values.filterIsInstance<AppleDevice>()
-        val peers = pairedComputers(context, pods.map { it.macAddress.value }.toSet())
-        CompanionLinkDialog(peers, pods, onDismiss = { setup = false }) { peer, device, token ->
+        val choices = pods.map { pod ->
+            val metadata by pod.metadata.collectAsState()
+            CompanionDeviceOption(pod.macAddress.value, metadata.name.ifBlank { "AirPods" })
+        }
+        CompanionLinkSetup(choices, controller != null, controller?.pairing, onDismiss = { setup = false }) { peer, device, token ->
             controller?.link(peer, device, token)
             setup = false
         }
@@ -252,14 +274,93 @@ private fun CompanionVolumeSlider(label: String, value: Float, onValueChange: (F
     }
 }
 
-private data class CompanionPeer(val address: String, val name: String?)
+internal data class CompanionDeviceOption(val address: String, val name: String?)
+internal enum class CompanionPairingAccess { READY, PERMISSION_REQUIRED, BLUETOOTH_OFF, UNAVAILABLE }
+internal data class CompanionPairingDevices(val access: CompanionPairingAccess,
+    val devices: List<CompanionDeviceOption> = emptyList(), val bondedAddresses: Set<String> = emptySet())
 
-private fun pairedComputers(context: Context, airpods: Set<String>): List<CompanionPeer> {
-    if (context.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) return emptyList()
+internal fun companionPairingDevices(context: Context): CompanionPairingDevices {
+    if (!hasNearbyDevicesPermissions(context))
+        return CompanionPairingDevices(CompanionPairingAccess.PERMISSION_REQUIRED)
     return try {
-        context.getSystemService(BluetoothManager::class.java).adapter.bondedDevices
-            .filter { it.address !in airpods }.map { CompanionPeer(it.address, it.name) }.sortedBy { it.name.orEmpty() }
-    } catch (_: SecurityException) { emptyList() }
+        val adapter = context.getSystemService(BluetoothManager::class.java)?.adapter
+            ?: return CompanionPairingDevices(CompanionPairingAccess.UNAVAILABLE)
+        if (!adapter.isEnabled) return CompanionPairingDevices(CompanionPairingAccess.BLUETOOTH_OFF)
+        val bonded = adapter.bondedDevices
+        val computers = bonded.filter { device ->
+            // Some PCs omit their class; exclude only known non-computer classes.
+            when (device.bluetoothClass?.majorDeviceClass) {
+                BluetoothClass.Device.Major.PHONE, BluetoothClass.Device.Major.NETWORKING,
+                BluetoothClass.Device.Major.AUDIO_VIDEO, BluetoothClass.Device.Major.PERIPHERAL,
+                BluetoothClass.Device.Major.IMAGING, BluetoothClass.Device.Major.WEARABLE,
+                BluetoothClass.Device.Major.TOY, BluetoothClass.Device.Major.HEALTH -> false
+                else -> true
+            }
+        }
+        CompanionPairingDevices(CompanionPairingAccess.READY,
+            computers.map { CompanionDeviceOption(it.address, it.name) }.sortedBy { it.name.orEmpty() },
+            bonded.map { it.address }.toSet())
+    } catch (_: SecurityException) { CompanionPairingDevices(CompanionPairingAccess.PERMISSION_REQUIRED) }
+    catch (_: Exception) { CompanionPairingDevices(CompanionPairingAccess.UNAVAILABLE) }
+}
+
+@Composable
+internal fun ObserveCompanionPairing(onRefresh: () -> Unit) {
+    val context = LocalContext.current
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    val refresh by rememberUpdatedState(onRefresh)
+    DisposableEffect(context, lifecycle) {
+        val observer = LifecycleEventObserver { _, event -> if (event == Lifecycle.Event.ON_RESUME) refresh() }
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) { refresh() }
+        }
+        val filter = IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED).apply { addAction(BluetoothAdapter.ACTION_STATE_CHANGED) }
+        // Bluetooth broadcasts can originate from a privileged system app; they only trigger a fresh local read.
+        val registered = runCatching { context.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED); true }.getOrDefault(false)
+        lifecycle.addObserver(observer)
+        refresh()
+        onDispose { lifecycle.removeObserver(observer); if (registered) context.unregisterReceiver(receiver) }
+    }
+}
+
+@Composable
+private fun CompanionLinkSetup(pods: List<CompanionDeviceOption>, ready: Boolean, pairing: CompanionPairingClient?, onDismiss: () -> Unit,
+    onLink: (String, String, String) -> Unit) {
+    val context = LocalContext.current
+    val owner = remember(pairing) { Any() }
+    val pairingState by (pairing?.state ?: remember { MutableStateFlow(CompanionPairingState()) }).collectAsState()
+    val ownedState = pairingState.takeIf { it.owner === owner }
+    DisposableEffect(pairing, owner) { onDispose { pairing?.cancel(owner) } }
+    LaunchedEffect(ownedState?.complete) { if (ownedState?.complete == true) onDismiss() }
+    var paired by remember(context) { mutableStateOf(companionPairingDevices(context)) }
+    var settingsError by remember { mutableStateOf(false) }
+    var permissionDenied by remember { mutableStateOf(false) }
+    ObserveCompanionPairing { paired = companionPairingDevices(context) }
+    val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        paired = companionPairingDevices(context)
+        permissionDenied = paired.access == CompanionPairingAccess.PERMISSION_REQUIRED
+    }
+    val bonded = paired.bondedAddresses
+    val podAddresses = pods.map { it.address }.toSet()
+    CompanionLinkDialog(paired.copy(devices = paired.devices.filter { it.address !in podAddresses }),
+        pods.filter { it.address in bonded }, ready, settingsError,
+        onOpenBluetooth = {
+            settingsError = runCatching { context.startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS)) }.isFailure
+        }, onPermission = {
+            if (permissionDenied) settingsError = runCatching {
+                context.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${context.packageName}")))
+            }.isFailure
+            else permission.launch(nearbyDevicesPermissions.toTypedArray())
+        },
+        onDismiss = { pairing?.cancel(owner); onDismiss() },
+        pairingState = pairingState.copy(busy = ownedState?.busy == true, failed = ownedState?.failed == true),
+        retryReady = pairing != null && pairingState.pendingPeer in paired.devices.map { it.address } && pairingState.pendingDevice in bonded,
+        onRetryPending = { pairing?.retry(owner) },
+        onLink = { peer, device, token ->
+            val full = CompanionPairingProtocol.fullCode(token)
+            if (full != null) onLink(peer, device, full)
+            else pairing?.start(owner, peer, device, token)
+        })
 }
 
 @Composable
@@ -267,7 +368,7 @@ internal fun CompanionSettingsContent(state: CompanionState, enabled: Boolean,
     onLink: () -> Unit, onReconnect: () -> Unit, onUnlink: () -> Unit, onPhone: () -> Unit, onPc: () -> Unit,
     onCancel: () -> Unit, onManage: (() -> Unit)? = null, onLocalPhone: (() -> Unit)? = null) {
     StyledList(key = Triple(state.linked, state.connected, state.busy),
-        title = stringResource(R.string.companion_title),
+        title = stringResource(if (onManage == null) R.string.companion_connection_title else R.string.companion_title),
         description = if (state.linked) stringResource(R.string.companion_description) else null) {
         if (state.linked) {
             item { _, _ ->
@@ -315,7 +416,7 @@ internal fun CompanionSettingsContent(state: CompanionState, enabled: Boolean,
             }
         } else styledListItem(contentText = stringResource(R.string.companion_link),
             supportingText = companionDetail(state),
-            orientation = StyledListItemOrientation.Vertical, enabled = enabled, onClick = onLink)
+            orientation = StyledListItemOrientation.Vertical, onClick = onLink)
     }
 }
 
@@ -339,50 +440,109 @@ private fun companionDetail(state: CompanionState): String = when (state.detail)
 }
 
 @Composable
-private fun CompanionLinkDialog(peers: List<CompanionPeer>, pods: List<AppleDevice>, onDismiss: () -> Unit,
+@OptIn(ExperimentalMaterial3Api::class)
+internal fun CompanionLinkDialog(paired: CompanionPairingDevices, pods: List<CompanionDeviceOption>, ready: Boolean = true,
+    settingsError: Boolean = false, onOpenBluetooth: () -> Unit, onPermission: () -> Unit, onDismiss: () -> Unit,
+    pairingState: CompanionPairingState = CompanionPairingState(), retryReady: Boolean = false, onRetryPending: () -> Unit = {},
+    onLink: (String, String, String) -> Unit) {
+    BasicAlertDialog(onDismissRequest = onDismiss) {
+        Surface(shape = MaterialTheme.shapes.extraLarge, color = MaterialTheme.colorScheme.surfaceContainer) {
+            CompanionLinkForm(paired, pods, ready, settingsError, onOpenBluetooth, onPermission, onDismiss,
+                pairingState, retryReady, onRetryPending, onLink)
+        }
+    }
+}
+
+@Composable
+internal fun CompanionLinkForm(paired: CompanionPairingDevices, pods: List<CompanionDeviceOption>, ready: Boolean = true,
+    settingsError: Boolean = false, onOpenBluetooth: () -> Unit, onPermission: () -> Unit, onDismiss: () -> Unit,
+    pairingState: CompanionPairingState = CompanionPairingState(), retryReady: Boolean = false, onRetryPending: () -> Unit = {},
     onLink: (String, String, String) -> Unit) {
     var selectedPeer by remember { mutableStateOf<String?>(null) }
     var selectedPods by remember { mutableStateOf<String?>(null) }
     var token by remember { mutableStateOf("") }
     var error by remember { mutableStateOf(false) }
-    AlertDialog(onDismissRequest = onDismiss,
-        title = { Text(stringResource(R.string.companion_link)) },
-        text = {
-            Column(Modifier.heightIn(max = 460.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text(stringResource(R.string.companion_setup), style = MaterialTheme.typography.bodyMedium)
-                StyledList(title = stringResource(R.string.companion_pc)) {
+    val focus = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
+    val peers = paired.devices
+    val validSelection = selectedPeer != selectedPods && peers.any { it.address == selectedPeer } && pods.any { it.address == selectedPods }
+    val code = CompanionPairingProtocol.fullCode(token) ?: CompanionPairingProtocol.shortCode(token)
+    val canLink = ready && !pairingState.busy && paired.access == CompanionPairingAccess.READY && validSelection && code != null
+    Column(Modifier.fillMaxWidth().padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        Text(stringResource(R.string.companion_link), style = MaterialTheme.typography.headlineSmall, color = MaterialTheme.colorScheme.onSurface)
+            Column(Modifier.weight(1f, fill = false).heightIn(max = 460.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                StyledList(key = Pair(paired.access, pairingState.busy), title = stringResource(R.string.companion_pairing_title),
+                    description = stringResource(R.string.companion_pairing_description)) {
+                    if (paired.access == CompanionPairingAccess.PERMISSION_REQUIRED)
+                        styledListItem(contentText = stringResource(R.string.companion_allow_nearby), enabled = !pairingState.busy, onClick = onPermission)
+                    styledListItem(contentText = stringResource(R.string.companion_open_bluetooth), enabled = !pairingState.busy, onClick = onOpenBluetooth)
+                }
+                if (paired.access != CompanionPairingAccess.READY) Text(stringResource(when (paired.access) {
+                    CompanionPairingAccess.PERMISSION_REQUIRED -> R.string.companion_nearby_required
+                    CompanionPairingAccess.BLUETOOTH_OFF -> R.string.companion_bluetooth_off
+                    else -> R.string.companion_bluetooth_unavailable
+                }), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (settingsError) Text(stringResource(R.string.companion_bluetooth_settings_failed), color = MaterialTheme.colorScheme.error)
+                Text(stringResource(R.string.companion_setup), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface)
+                StyledList(key = Pair(peers, pairingState.busy), title = stringResource(R.string.companion_pc)) {
                     peers.forEach { peer ->
                         styledListItem(contentText = peer.name?.takeIf { it.isNotBlank() } ?: stringResource(R.string.companion_unnamed_pc),
+                            supportingText = peer.address, orientation = StyledListItemOrientation.Vertical,
+                            enabled = !pairingState.busy,
                             selected = selectedPeer == peer.address, onClick = { selectedPeer = peer.address })
                     }
                 }
-                StyledList(title = stringResource(R.string.companion_airpods)) {
+                StyledList(key = Pair(pods, pairingState.busy), title = stringResource(R.string.companion_airpods)) {
                     pods.forEach { pod ->
-                        val metadata by pod.metadata.collectAsState()
-                        styledListItem(contentText = metadata.name.ifBlank { "AirPods" },
-                            selected = selectedPods == pod.macAddress.value, onClick = { selectedPods = pod.macAddress.value })
+                        styledListItem(contentText = pod.name ?: "AirPods", supportingText = pod.address,
+                            orientation = StyledListItemOrientation.Vertical,
+                            enabled = !pairingState.busy,
+                            selected = selectedPods == pod.address, onClick = { selectedPods = pod.address })
                     }
                 }
-                if (peers.isEmpty() || pods.isEmpty()) Text(stringResource(R.string.companion_pair_first))
-                CompanionLinkCodeField(token, error) { token = it.take(64); error = false }
+                if (paired.access == CompanionPairingAccess.READY && peers.isEmpty()) Text(stringResource(R.string.companion_no_paired_pc), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (paired.access == CompanionPairingAccess.READY && pods.isEmpty()) Text(stringResource(R.string.companion_no_paired_airpods), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                CompanionLinkCodeField(token, error, enabled = !pairingState.busy, shortCodes = true) { token = it.take(64); error = false }
+                if (pairingState.busy) Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                    Text(stringResource(R.string.companion_pairing_progress), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                if (pairingState.failed) Text(stringResource(R.string.companion_pairing_failed), color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+                if (pairingState.pendingPeer != null && pairingState.pendingDevice != null) StyledList(
+                    key = Pair(retryReady, pairingState.busy),
+                    description = stringResource(R.string.companion_pairing_retry_description,
+                        peers.firstOrNull { it.address == pairingState.pendingPeer }?.name ?: pairingState.pendingPeer,
+                        pods.firstOrNull { it.address == pairingState.pendingDevice }?.name ?: pairingState.pendingDevice)) {
+                    styledListItem(contentText = stringResource(R.string.companion_pairing_retry),
+                        enabled = retryReady && !pairingState.busy, onClick = onRetryPending)
+                }
+                Text(stringResource(R.string.companion_access_hint), style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (!ready) Text(stringResource(R.string.companion_service_unavailable), color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-        },
-        confirmButton = { TextButton(enabled = selectedPeer != null && selectedPods != null && token.matches(Regex("[0-9a-fA-F]{64}")), onClick = {
-            try { onLink(selectedPeer!!, selectedPods!!, token); token = "" }
-            catch (_: Exception) { token = ""; error = true }
-        }) { Text(stringResource(R.string.companion_link)) } },
-        dismissButton = { TextButton(onClick = { token = ""; onDismiss() }) { Text(stringResource(android.R.string.cancel)) } })
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            TextButton(onClick = { token = ""; onDismiss() }) { Text(stringResource(android.R.string.cancel)) }
+            TextButton(enabled = canLink, onClick = {
+                focus.clearFocus(); keyboard?.hide()
+                try { onLink(selectedPeer!!, selectedPods!!, code!!); token = "" }
+                catch (_: Exception) { token = ""; error = true }
+            }) { Text(stringResource(R.string.companion_link)) }
+        }
+    }
 }
 
 @Composable
-internal fun CompanionLinkCodeField(value: String, error: Boolean, onValueChange: (String) -> Unit) {
+internal fun CompanionLinkCodeField(value: String, error: Boolean, enabled: Boolean = true, shortCodes: Boolean = false, onValueChange: (String) -> Unit) {
     val focus = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
     OutlinedTextField(value = value, onValueChange = onValueChange,
         modifier = Modifier.fillMaxWidth().semantics { contentDataType = ContentDataType.None },
         label = { Text(stringResource(R.string.companion_token)) },
         visualTransformation = PasswordVisualTransformation(), singleLine = true,
-        keyboardOptions = KeyboardOptions(autoCorrectEnabled = false, keyboardType = KeyboardType.Password, imeAction = ImeAction.Done),
+        enabled = enabled,
+        keyboardOptions = KeyboardOptions(autoCorrectEnabled = false,
+            keyboardType = if (shortCodes && value.none { it.isLetter() }) KeyboardType.NumberPassword else KeyboardType.Password, imeAction = ImeAction.Done),
         keyboardActions = KeyboardActions(onDone = { focus.clearFocus(); keyboard?.hide() }),
         isError = error, supportingText = { Text(stringResource(if (error) R.string.companion_setup_error else R.string.companion_token_hint)) })
 }

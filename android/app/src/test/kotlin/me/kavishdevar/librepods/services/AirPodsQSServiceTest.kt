@@ -28,6 +28,8 @@ import me.kavishdevar.librepods.core.devices.AppleState
 import me.kavishdevar.librepods.core.devices.ConnectionState
 import me.kavishdevar.librepods.core.devices.Device
 import me.kavishdevar.librepods.presentation.overlays.ListeningModeDialog
+import me.kavishdevar.librepods.presentation.overlays.DongleListeningFixture
+import me.kavishdevar.librepods.presentation.overlays.DongleListeningTarget
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
@@ -55,11 +57,13 @@ class AirPodsQSServiceTest {
     private val tile get() = tileController.get()
     private lateinit var devices: MutableStateFlow<Map<MacAddress, Device<*, *, *>>>
     private val sockets = mutableListOf<Pair<AppleDevice, BluetoothSocket>>()
+    private lateinit var dongle: DongleListeningFixture
 
     @Before fun setUp() {
         shadowOf(context).grantPermissions(Manifest.permission.BLUETOOTH_CONNECT)
         shadowOf(context.getSystemService(BluetoothManager::class.java).adapter).setState(BluetoothAdapter.STATE_ON)
         val service = Robolectric.buildService(LibrePodsService::class.java).get()
+        dongle = DongleListeningFixture(service)
         @Suppress("UNCHECKED_CAST")
         devices = LibrePodsService::class.java.getDeclaredField("_devices").apply { isAccessible = true }
             .get(service) as MutableStateFlow<Map<MacAddress, Device<*, *, *>>>
@@ -325,6 +329,71 @@ class AirPodsQSServiceTest {
         connection.value = ConnectionState.DISCONNECTED
         idle()
         assertEquals(Tile.STATE_UNAVAILABLE, tile.qsTile.state)
+    }
+
+    @Test fun aConnectedDongleEnablesTheTileAndOpensTheSamePickerWithoutANativeDevice() {
+        dongle.connect()
+        mockConstruction(ListeningModeDialog::class.java) { dialog, construction ->
+            assertSame(tile, construction.arguments()[0])
+            val target = construction.arguments()[1] as DongleListeningTarget
+            assertSame(dongle.controller, target.controller)
+            `when`(dialog.isShowing).thenReturn(true)
+        }.use { created ->
+            tile.onStartListening(); idle()
+            assertEquals(Tile.STATE_ACTIVE, tile.qsTile.state)
+            assertEquals("Dongle AirPods", tile.qsTile.subtitle)
+            assertEquals(context.getString(R.string.transparency), tile.qsTile.label)
+            tile.onClick()
+            assertSame(created.constructed().single(), tileShadow().dialogs.single())
+            assertTrue(dongle.writes.isEmpty())
+            dongle.mode.value = dongle.mode.value.copy(requested = 4L, pending = true)
+            idle()
+            assertEquals(context.getString(R.string.adaptive), tile.qsTile.label)
+            assertEquals(3L, dongle.state.value.settings[0x0d]?.value)
+        }
+    }
+
+    @Test fun selectedButUnavailableDongleNeverFallsBackToTheNativePair() = withPickerMocks { created ->
+        val native = device()
+        devices.value = mapOf(native.macAddress to native)
+        dongle.connect()
+        dongle.state.value = dongle.state.value.copy(connected = false, attached = true)
+        tile.onStartListening(); idle(); tile.onClick()
+        assertEquals(Tile.STATE_UNAVAILABLE, tile.qsTile.state)
+        assertTrue(created.constructed().isEmpty())
+        assertTrue(native.state.value.requestedControls.isEmpty())
+    }
+
+    @Test fun aRememberedButUnpluggedDongleDoesNotHideTheConnectedNativePair() = withPickerMocks { created ->
+        val native = device()
+        devices.value = mapOf(native.macAddress to native)
+        dongle.state.value = dongle.state.value.copy(selected = true)
+        tile.onStartListening(); idle(); tile.onClick()
+        assertEquals(Tile.STATE_ACTIVE, tile.qsTile.state)
+        assertEquals("My AirPods", tile.qsTile.subtitle)
+        assertSame(created.constructed().single(), tileShadow().dialogs.single())
+    }
+
+    @Test fun aDongleConnectionChangedDuringUnlockCannotOpenAnOldPicker() {
+        dongle.connect()
+        tile.onStartListening(); idle()
+        tileShadow().locked = true
+        tile.onClick()
+        val unlock = requireNotNull(tileShadow().unlock)
+        dongle.state.value = dongle.state.value.copy(controlSession = 8)
+        idle()
+        tileShadow().locked = false
+        unlock.run()
+        assertTrue(tileShadow().dialogs.isEmpty())
+    }
+
+    @Test fun dongleVisibilityIsReleasedWithTheSameOwnerWhenTheShadeStopsListening() {
+        dongle.connect()
+        tile.onStartListening(); idle(); tile.onStopListening()
+        val calls = mockingDetails(dongle.controller).invocations.filter { it.method.name == "controlsVisible" }
+        assertEquals(listOf(true, false), calls.map { it.arguments[0] })
+        assertSame(calls.first().arguments[1], calls.last().arguments[1])
+        assertEquals(Tile.STATE_ACTIVE, tile.qsTile.state)
     }
 
     private fun tileShadow() = Shadow.extract<TileLifecycleShadow>(tile)

@@ -219,7 +219,39 @@ class NativeGameModeEngineTest {
         assertTrue(f.effects.contains("restore:12"))
     }
 
-    @Test fun playingWithoutTimingWaitsForAReportWhileBelowTargetNeverRaisesTheDelay() = runBlocking {
+    @Test fun sessionWithoutInitialTimingRequiresOwnedPreparationAndFreshPostTargetReport() = runBlocking {
+        val f = Fixture()
+        f.value = f.value.copy(host = f.value.host.copy(delayTenths = 0, delaySerial = 0,
+            delayReceivedMs = 0, delayReceivedNs = 0))
+        assertFalse(f.step().active)
+        assertEquals(listOf("prepare"), f.effects)
+        assertFalse(f.step().active)
+        assertEquals(listOf("prepare", "heartbeat:12", "target:60"), f.effects)
+        assertFalse(f.step().active)
+        assertTrue(f.clocks.isEmpty())
+        f.report(600)
+        assertTrue(f.step().active)
+        assertTrue(f.clocks.isEmpty())
+    }
+
+    @Test fun missingPostTargetTimingTimesOutAndRestoresInsteadOfClaimingActive() = runBlocking {
+        val f = Fixture()
+        f.value = f.value.copy(host = f.value.host.copy(delayTenths = 0, delaySerial = 0,
+            delayReceivedMs = 0, delayReceivedNs = 0))
+        f.step(); f.step()
+        f.now += 2100
+        val timeout = f.step()
+        assertFalse(timeout.active)
+        assertEquals(NativeGameModeController.Issue.REPORT_UNCONFIRMED, timeout.issue)
+        assertEquals(listOf("target:60", "target:150"), f.effects.filter { it.startsWith("target:") })
+        assertTrue(f.clocks.isEmpty())
+        f.report(1500)
+        f.step(); f.step()
+        assertTrue(f.value.restored)
+        assertFalse(f.engine.remoteRestorePending)
+    }
+
+    @Test fun invalidTimingWaitsForAReportWhileBelowTargetNeverRaisesTheDelay() = runBlocking {
         val f = Fixture()
         f.value = f.value.copy(host = f.value.host.copy(delayTenths = 0, delaySerial = 0))
         assertEquals(NativeGameModeController.Issue.WAITING_FOR_TIMING, f.step().issue)

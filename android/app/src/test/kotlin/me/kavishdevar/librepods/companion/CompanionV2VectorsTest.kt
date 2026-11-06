@@ -18,10 +18,10 @@ class CompanionV2VectorsTest {
         val cases = fixture.getJSONArray("cases")
         for (index in 0 until cases.length()) {
             val case = cases.getJSONObject(index)
-            val authenticated = case.getString("name") !in setOf("hello", "capability_subset", "unknown_capability")
             val actual = runCatching {
                 val frame = CompanionProtocol.parse(case.getString("frame"))
-                CompanionProtocol.validate(frame, fixture.getString("device"), if (authenticated) fixture.getString("sid") else null)
+                CompanionProtocol.validate(frame, fixture.getString("device"),
+                    if (frame.getString("type") == "hello") null else fixture.getString("sid"))
             }.isSuccess
             assertEquals(case.getString("name"), case.getBoolean("accepted"), actual)
         }

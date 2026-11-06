@@ -29,6 +29,8 @@ import me.kavishdevar.librepods.core.utils.redactMac
 import javax.crypto.Cipher
 import javax.crypto.spec.SecretKeySpec
 
+private const val SOCKET_TAG = "createSocket"
+
 fun createBluetoothSocket(
     adapter: BluetoothAdapter, device: BluetoothDevice, uuid: ParcelUuid, psm: Int
 ): BluetoothSocket {
@@ -55,15 +57,15 @@ fun createBluetoothSocket(
             return constructor.newInstance(*params) as BluetoothSocket
 
         } catch (e: Exception) {
-            if (Log.isLoggable("createSocket", Log.DEBUG))
-                Log.d("createSocket", "L2CAP $psm: constructor signature #${index + 1} failed: ${e.javaClass.simpleName}")
+            if (Log.isLoggable(SOCKET_TAG, Log.DEBUG))
+                Log.d(SOCKET_TAG, "L2CAP $psm: constructor signature #${index + 1} failed: ${e.javaClass.simpleName}")
             lastException = e
         }
     }
 
     val errorMessage =
         "Failed to create BluetoothSocket after trying $attemptedConstructors constructor signatures"
-    Log.e("createSocket<$psm>", errorMessage)
+    Log.e(SOCKET_TAG, "L2CAP $psm: $errorMessage")
     throw lastException ?: IllegalStateException(errorMessage)
 }
 

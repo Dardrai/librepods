@@ -16,7 +16,9 @@ import me.kavishdevar.librepods.core.bluetooth.aacp.rtbuddy.proto.SensorDataWX
 import me.kavishdevar.librepods.core.bluetooth.aacp.rtbuddy.proto.SensorServiceSetting
 import me.kavishdevar.librepods.core.bluetooth.aacp.rtbuddy.proto.SensorServiceType
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.SensorDataWxBuddyPayload
+import me.kavishdevar.librepods.core.bluetooth.aacp.types.RemoteHidBuddyPayload
 import me.kavishdevar.librepods.core.data.apple.BuddyState
+import me.kavishdevar.librepods.core.data.apple.MotionReport
 import me.kavishdevar.librepods.core.devices.PacketDestination
 import kotlin.time.Duration
 
@@ -30,6 +32,8 @@ internal class RTBuddyManager(
     private val onHeartRate: (SensorReports.HeartRate) -> Unit,
     private val onMotionState: (BuddyState) -> Unit,
     private val onHeartRateState: (BuddyState) -> Unit,
+    private val remoteAllowed: () -> Boolean = { false },
+    private var motionIntervalUs: Int? = null,
 ) : AutoCloseable {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val frames = SensorFrames()
@@ -42,6 +46,11 @@ internal class RTBuddyManager(
     private var closed = false
     private var motionLive: Int? = null
     private var motionNative = false
+    private var motionRemote = false
+    private var motionStopping = false
+    private var stopRetry = false
+    private var remoteService: Int? = null
+    private var remoteRequested = false
     private var motionSince = 0L
     private var lastMotion = 0L
     private var lastHeart = 0L
@@ -54,6 +63,7 @@ internal class RTBuddyManager(
                 delay(250)
                 synchronized(this@RTBuddyManager) {
                     if (closed) return@synchronized
+                    if (stopRetry && isCurrent()) { stopRetry = false; stopMotion(retry = true) }
                     if (motionWanted && !suspended) {
                         if (motionLive == null) startMotion()
                         if (now() - maxOf(motionSince, lastMotion) >= 5_000) {
@@ -70,9 +80,9 @@ internal class RTBuddyManager(
 
     @Synchronized
     fun requestDescriptors() {
-        if (closed || descriptorsRequested || !isCurrent()) return
-        descriptorsRequested = true
-        sendSensorData(SensorDataWX.newBuilder().setRequestAllDescriptors(RequestAllDescriptors.getDefaultInstance()).build())
+        if (closed || descriptorsRequested || !isCurrent() || remoteAllowed()) return
+        descriptorsRequested = sendSensorData(
+            SensorDataWX.newBuilder().setRequestAllDescriptors(RequestAllDescriptors.getDefaultInstance()).build())
     }
 
     @Synchronized
@@ -80,11 +90,19 @@ internal class RTBuddyManager(
         if (closed || !isCurrent()) return
         for (frame in frames.feed(chunk)) {
             val packet = try { RTBuddyPacket.parse(frame) } catch (_: Exception) { continue }
+            val remote = packet.rtBuddyPayload as? RemoteHidBuddyPayload
+            if (remote != null) {
+                if (remoteAllowed()) receiveRemote(remote.data)
+                continue
+            }
+            if (remoteAllowed()) continue
             val data = (packet.rtBuddyPayload as? SensorDataWxBuddyPayload)?.data ?: continue
             val batch = reports.receive(data, legacyMotion())
             if (batch.mappingChanged) {
                 // The previous address can now name another sensor; never send it a delayed Stop.
                 motionLive = null
+                motionStopping = false
+                stopRetry = false
                 motionSince = now()
                 lastMotion = 0
                 lastHeart = 0
@@ -93,7 +111,7 @@ internal class RTBuddyManager(
                 if (motionWanted && !suspended) startMotion()
             }
             if (suspended) continue
-            if (motionWanted && batch.motion != null) {
+            if (motionWanted && !motionStopping && batch.motion != null) {
                 lastMotion = now()
                 onMotionState(BuddyState.ACTIVE)
                 onMotion(batch.motion)
@@ -106,11 +124,42 @@ internal class RTBuddyManager(
         }
     }
 
+    private fun receiveRemote(body: ByteArray) {
+        val packets = RemoteHid.packets(body) ?: return
+        for (packet in packets) {
+            if (packet.device == 0 || packet.response || packet.status) continue
+            val connects = packet.kind == 0 && RemoteHid.motionDescriptor(packet.payload)
+            if (connects || (packet.device == remoteService && packet.kind in setOf(0, 1))) {
+                // A replacement address may name another sensor; never send the previous address a Stop.
+                val same = connects && remoteService == packet.device && motionLive == packet.device
+                if (same) stopMotion()
+                remoteService = packet.device.takeIf { connects }
+                if (!same) {
+                    motionLive = null
+                    motionStopping = false
+                    stopRetry = false
+                }
+                motionSince = now()
+                lastMotion = 0
+                if (motionWanted) onMotionState(BuddyState.WAITING)
+                if (motionWanted && !suspended) startMotion()
+            }
+            if (packet.kind == 2 && packet.device == remoteService && motionLive == packet.device &&
+                packet.payload.size == 58 && motionWanted && !suspended && !motionStopping) {
+                val report = MotionReport.parse(packet.payload, packet.timestampNs) ?: continue
+                lastMotion = now()
+                onMotionState(BuddyState.ACTIVE)
+                onMotion(SensorReports.Motion(report.gyroRaw[1], report.gyroRaw[2]).also { it.report = report })
+            }
+        }
+    }
+
     @Synchronized
     fun setHeadTrackingEnabled(enabled: Boolean): Boolean {
         if (closed || !isCurrent()) return false
         motionWanted = enabled
         if (enabled) {
+            if (motionStopping) stopMotion()
             motionSince = now()
             lastMotion = 0
             onMotionState(BuddyState.WAITING)
@@ -157,30 +206,74 @@ internal class RTBuddyManager(
         }
     }
 
-    private fun legacyMotion(): Int? = if (reports.motionDescriptorSeen) null else firmwareMajor()?.let { if (it >= 8) 16 else 14 }
+    private fun legacyMotion(): Int? = if (remoteAllowed() || reports.motionDescriptorSeen) null else firmwareMajor()?.let { if (it >= 8) 16 else 14 }
 
     private fun startMotion() {
         if (motionLive != null || suspended || !motionWanted || !isCurrent()) return
+        if (remoteAllowed()) {
+            val service = remoteService
+            if (service == null) {
+                if (!remoteRequested) {
+                    remoteRequested = sendRaw(RemoteHid.connect(nextSequence()))
+                    if (!remoteRequested) { motionWanted = false; onMotionState(BuddyState.INACTIVE) }
+                }
+                return
+            }
+            motionLive = service
+            motionRemote = true
+            if (!sendRaw(RemoteHid.feature(nextSequence(), service, 1, motionIntervalUs ?: 40_000))) {
+                motionWanted = false
+                stopMotion()
+                onMotionState(BuddyState.INACTIVE)
+                return
+            }
+            motionSince = now()
+            return
+        }
         val service = reports.motionService ?: legacyMotion()?.takeUnless { it == reports.heartRateService } ?: return
         val native = reports.motionService != null
-        if ((native && !command(service, 1, report = 4)) || !command(service, if (native) 20_000 else 40_000)) {
+        motionLive = service
+        motionNative = native
+        motionRemote = false
+        if ((native && !command(service, 1, report = 4)) || !command(service, interval(native))) {
             motionWanted = false
+            stopMotion()
             onMotionState(BuddyState.INACTIVE)
             return
         }
-        motionLive = service
-        motionNative = native
         motionSince = now()
     }
 
-    private fun stopMotion() {
+    private fun stopMotion(retry: Boolean = false) {
+        remoteRequested = false
         val service = motionLive ?: return
-        if (service == (reports.motionService ?: legacyMotion())) {
-            if (motionNative) command(service, 10, report = 4)
-            command(service, 0)
-        }
-        motionLive = null
+        val sent = if (motionRemote) {
+            !remoteAllowed() || service != remoteService || sendRaw(RemoteHid.feature(nextSequence(), service, 1, 0))
+        } else if (service == (reports.motionService ?: legacyMotion())) {
+            val fifo = !motionNative || command(service, 10, report = 4)
+            command(service, 0) && fifo
+        } else true
+        motionStopping = !sent
+        if (sent) { motionLive = null; stopRetry = false }
+        else if (!retry) stopRetry = true
         lastMotion = 0
+    }
+
+    private fun interval(native: Boolean): Int = (motionIntervalUs ?: if (native) 20_000 else 40_000)
+        .coerceAtLeast(if (native) 20_000 else 40_000)
+
+    @Synchronized
+    fun setMotionInterval(interval: Duration): Boolean {
+        val us = interval.inWholeMicroseconds
+        if (closed || !isCurrent() || motionStopping || us !in 20_000..1_000_000 || us % 1000 != 0L) return false
+        val service = motionLive
+        if (service != null) {
+            val sent = if (motionRemote) sendRaw(RemoteHid.feature(nextSequence(), service, 1, us.toInt()))
+                else command(service, us.toInt().coerceAtLeast(if (motionNative) 20_000 else 40_000))
+            if (!sent) return false
+        }
+        motionIntervalUs = us.toInt()
+        return true
     }
 
     private fun startHeartCampaign() {
@@ -244,9 +337,10 @@ internal class RTBuddyManager(
     @Synchronized
     fun sendSensorData(data: SensorDataWX): Boolean {
         if (closed || !isCurrent()) return false
-        sequence = (sequence + 1) and 127
-        return sendPacket(RTBuddyPacket.create(SensorDataWxBuddyPayload(data.toBuilder().setSeq(sequence).build()), PacketDestination.DEVICE))
+        return sendPacket(RTBuddyPacket.create(SensorDataWxBuddyPayload(data.toBuilder().setSeq(nextSequence()).build()), PacketDestination.DEVICE))
     }
+
+    private fun nextSequence(): Int { sequence = (sequence + 1) and 127; return sequence }
 
     fun setSensorServiceReportInterval(sensorServiceType: SensorServiceType, interval: Duration): Boolean =
         interval.inWholeMicroseconds.takeIf { it in 0..Int.MAX_VALUE.toLong() }?.let {

@@ -17,6 +17,6 @@ class RootAudioService : RootService() {
     override fun onBind(intent: Intent): IBinder = bridge
 
     override fun onDestroy() {
-        bridge.close()
+        if (::bridge.isInitialized) bridge.close()
     }
 }

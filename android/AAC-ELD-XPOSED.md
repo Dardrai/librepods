@@ -40,6 +40,34 @@ were restored exactly, and ordinary music, pause/resume and stem controls passed
 after cleanup. ELD playback does not establish accommodations processing; see
 the [controlled comparison](#pixel-headphone-accommodations-check).
 
+### Peer-selectable codec reporting, 30 October (source only)
+
+The Pixel 10's Bluetooth relay connection to the Pico negotiated LHDC v5 at
+48 kHz, 24-bit stereo, although Android's HD audio and codec-choice rows were
+disabled. Its local SBC source capability was 44.1 kHz only; the Pico's SBC sink
+is 48 kHz only. The missing rate overlap explains why mandatory SBC was absent
+from the selectable list. Cached Pixel 7 SDK37 `A2dpCodecConfig` explicitly
+requires a selectable mandatory codec before accepting codec preferences.
+Current Pixel 10 UI/status observations agree, but this is not a fresh inspection
+of the Pixel 10 framework or Settings implementation.
+
+The module also had a separate capability-reporting defect: its ELD constructor
+populated peer-selectable rate, sample-width and channel masks before accepting
+any peer capabilities. The native capability getter includes entries with all
+three masks nonzero, so an unrelated sink could incorrectly list ELD. The source
+fix retains local ELD capability while leaving peer-selectable masks empty until
+a compatible Apple capability or configuration is accepted. Rejected requests
+preserve previously accepted state.
+
+Host ASan/UBSan checks passed for PCM16 and PCM32 adapters, both debug-callback
+modes and native registry integration. The new regression fails against the
+original source and passes with the correction. Evidence and source hashes are
+in the parent workspace's `outputs/codec-selectable-20261030` directory.
+
+**This native correction is not installed.** The working private encoder on the
+phone was left unchanged. It does not create SBC rate overlap, bypass Android's
+mandatory-codec check or advertise unsupported 44.1 kHz decoding/resampling.
+
 ### Controlled Note8 result and rollback
 
 The October 25 prototype passed startup: exact image/context validation and the

@@ -17,6 +17,10 @@ import rikka.shizuku.SystemServiceHelper
 class ShizukuAudioService @JvmOverloads constructor(context: Context,
     private val exitOnDestroy: Boolean = true,
 ) : IAudioBridge.Stub(), AutoCloseable {
+    init {
+        // Both libsu and root-mode Shizuku are app-owned clients, never system_server.
+        if (Process.myUid() == 0) RootAppProcess.prepare()
+    }
     private val originalContext = context
     private val expectedUid = context.packageManager.getApplicationInfo(BuildConfig.APPLICATION_ID, 0).uid
     private val shellContext by lazy { ShellAudioContext(context).also { it.installProcessAttribution() } }
@@ -27,6 +31,8 @@ class ShizukuAudioService @JvmOverloads constructor(context: Context,
     private var callConnection: NativeCallConnection? = null
     private var mediaPause: Pair<IPlaybackRecoveryOwner, OwnedMediaPause>? = null
     private var volumeChecking = false
+    private val usbVolume = RootUsbAbsoluteVolume(originalContext)
+    private val dongleHid by lazy { RootDongleHid(originalContext, expectedUid, ::enforceCaller) }
     private var microphoneProbe: Pair<IPlaybackRecoveryOwner, RootMicrophoneProbe>? = null
     private var communication: Pair<IPlaybackRecoveryOwner, RootCommunicationRoute>? = null
     private val volumeSync by lazy {
@@ -81,12 +87,73 @@ class ShizukuAudioService @JvmOverloads constructor(context: Context,
         volumeSync.forget(owner.asBinder())
     }
 
+    override fun inspectUsbAbsoluteVolume(audioDeviceId: Int, boardSerial: String): Bundle {
+        enforceCaller()
+        val identity = Binder.clearCallingIdentity()
+        return try {
+            check(!cleanupFailed.get())
+            UsbAbsoluteVolumeInspection.inspect(shellContext, audioDeviceId, boardSerial)
+        } finally { Binder.restoreCallingIdentity(identity) }
+    }
+
+    override fun inspectUsbAbsoluteVolumePolicy(policy: IUsbAbsoluteVolumePolicy, audioDeviceId: Int,
+        boardSerial: String): Bundle {
+        enforceCaller(); check(android.os.Process.myUid() == 0)
+        val identity = Binder.clearCallingIdentity()
+        return try {
+            check(!cleanupFailed.get())
+            val selected = if (audioDeviceId == 0) UsbAbsoluteVolumeInspection.resolveDeviceId(originalContext, boardSerial) ?: 0 else audioDeviceId
+            if (selected <= 0) Bundle().apply {
+                putBoolean("available", false); putString("reason", "root_identity_unavailable")
+            } else usbVolume.inspect(policy, selected, boardSerial)
+        }
+        finally { Binder.restoreCallingIdentity(identity) }
+    }
+
+    override fun openDongleHid(deviceName: String, boardSerial: String, interfaceId: Int,
+        owner: IPlaybackRecoveryOwner): IUsbHidConnection {
+        enforceCaller()
+        check(Process.myUid() == 0) { "Shared USB controls require root access" }
+        val pid = Binder.getCallingPid()
+        val identity = Binder.clearCallingIdentity()
+        return try {
+            check(!cleanupFailed.get())
+            val device = originalContext.getSystemService(android.hardware.usb.UsbManager::class.java)
+                .deviceList[deviceName] ?: error("USB dongle detached")
+            dongleHid.open(DongleHidIdentity.Target(deviceName, boardSerial, device.productId, interfaceId), pid, owner)
+        } catch (error: Exception) {
+            throw if (error is RuntimeException) error else
+                IllegalStateException("Shared USB controls could not open: ${error.message}", error)
+        } finally { Binder.restoreCallingIdentity(identity) }
+    }
+
     override fun retireOwner(owner: IPlaybackRecoveryOwner) {
         enforceCaller()
+        releaseUsbAbsoluteVolume(owner)
         finishCommunication(owner, false)
         finishMicrophoneProbe(owner)
         finishOwnedMedia(owner, false)
         volumeSync.forget(owner.asBinder())
+    }
+
+    override fun startUsbAbsoluteVolume(owner: IPlaybackRecoveryOwner, policy: IUsbAbsoluteVolumePolicy,
+        events: IUsbAbsoluteVolumeEvents, proof: Bundle): Bundle {
+        enforceCaller()
+        val identity = Binder.clearCallingIdentity()
+        return try { check(!cleanupFailed.get()); usbVolume.start(owner, policy, events, proof) }
+        finally { Binder.restoreCallingIdentity(identity) }
+    }
+    override fun renewUsbAbsoluteVolume(owner: IPlaybackRecoveryOwner, proof: Bundle): Bundle {
+        enforceCaller(); val identity = Binder.clearCallingIdentity()
+        return try { usbVolume.renew(owner, proof) } finally { Binder.restoreCallingIdentity(identity) }
+    }
+    override fun notifyUsbAbsoluteVolume(owner: IPlaybackRecoveryOwner, proof: Bundle, acknowledgedRequestSequence: Long): Bundle {
+        enforceCaller(); val identity = Binder.clearCallingIdentity()
+        return try { usbVolume.notify(owner, proof, acknowledgedRequestSequence) } finally { Binder.restoreCallingIdentity(identity) }
+    }
+    override fun releaseUsbAbsoluteVolume(owner: IPlaybackRecoveryOwner): Bundle {
+        enforceCaller(); val identity = Binder.clearCallingIdentity()
+        return try { usbVolume.release(owner) } finally { Binder.restoreCallingIdentity(identity) }
     }
 
     override fun nativeCall(address: String, owner: IPlaybackRecoveryOwner, connect: Boolean): Int {
@@ -216,6 +283,19 @@ class ShizukuAudioService @JvmOverloads constructor(context: Context,
             }
             Binder.restoreCallingIdentity(identity)
         }
+    }
+
+    override fun inspectCompanionMedia(address: String): Bundle {
+        enforceCaller()
+        check(originalContext.packageManager.checkPermission(Manifest.permission.BLUETOOTH_CONNECT,
+            BuildConfig.APPLICATION_ID) == PackageManager.PERMISSION_GRANTED)
+        val identity = Binder.clearCallingIdentity()
+        return try {
+            if (cleanupFailed.get()) return CompanionMediaInspection.failure(MediaInspectionStage.HELPER_CONTEXT, MediaInspectionReason.CLEANUP_FAILED)
+            CompanionMediaInspection.read(shellContext, address)
+        } catch (error: Exception) {
+            CompanionMediaInspection.failure(MediaInspectionStage.HELPER_CONTEXT, CompanionMediaInspection.failureReason(error))
+        } finally { Binder.restoreCallingIdentity(identity) }
     }
 
     override fun inspectCallMedia(address: String): Bundle {
@@ -380,5 +460,7 @@ class ShizukuAudioService @JvmOverloads constructor(context: Context,
         routes.first?.close()
         routes.second?.close()
         volumeSync.close()
+        usbVolume.close()
+        dongleHid.close()
     }
 }

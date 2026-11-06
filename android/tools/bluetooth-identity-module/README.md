@@ -27,6 +27,11 @@ The root-only state tree rejects symlinks, unexpected entries and unsafe owners
 or modes. Originally absent properties require the root manager's `resetprop`
 utility for exact restoration.
 
+Version 1.0.1 runs the helper under the root manager's BusyBox ash. Android's
+mksh closes the extra descriptors in child processes, which otherwise makes
+`flock` fail before reading or changing the identity. The same process and
+stdin lease are retained across the shell switch.
+
 Build and test on a Linux host:
 
 ```sh

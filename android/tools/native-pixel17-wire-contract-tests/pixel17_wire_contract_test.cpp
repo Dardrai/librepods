@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "pixel17_wire_contract.h"
 #include "pixel17_wire_hooks.h"
+#include "pixel17_contract.h"
 #include <algorithm>
 #include <cassert>
 #include <cstring>
@@ -201,10 +202,10 @@ void shipped(const char* path) {
     assert(accepted(bytes));
     eld::SymbolImage image; assert(image.open(bytes.data(),bytes.size()));
     for(auto name:{generic,vendor,getter,start,timer,"_Z21A2DP_SourceCodecIndexPKh",vendor_index,find_source,set_ota,enqueue}) {
-        eld::ImageSymbol symbol; assert(image.resolve(name,true,&symbol));
+        eld::ImageSymbol symbol; assert(eld::pixel17_resolve_context(image,name,&symbol));
         const auto* p=image.bytes(symbol.address,symbol.size,5); assert(p);
         auto altered=bytes; std::memset(altered.data()+(p-bytes.data()),0,static_cast<size_t>(symbol.size));
-        assert(!accepted(altered));
+        if(accepted(altered)) { std::cerr<<"Mutated function accepted: "<<name<<"\n"; assert(false); }
     }
     std::cout<<"Private shipped SDK37 wire contract and changed-function rejection passed\n";
 }

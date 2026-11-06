@@ -52,6 +52,8 @@ fun AudioSettings(
     gameModeChecked: Boolean = false,
     gameModeDescription: String? = null,
     onGameModeChanged: (Boolean) -> Unit = {},
+    adaptiveVolumeEnabled: Boolean = true,
+    conversationAwarenessEnabled: Boolean = true,
 ) {
     if (adaptiveVolumeCapability || conversationAwarenessCapability || loudSoundReductionCapability || gameModeVisible) {
         StyledList(title = stringResource(R.string.audio)) {
@@ -69,6 +71,7 @@ fun AudioSettings(
                     label = stringResource(R.string.personalized_volume),
                     description = stringResource(R.string.personalized_volume_description),
                     checked = adaptiveVolumeChecked,
+                    enabled = adaptiveVolumeEnabled,
                     onCheckedChange = onAdaptiveVolumeCheckedChange,
                 )
             }
@@ -78,6 +81,7 @@ fun AudioSettings(
                     label = stringResource(R.string.conversation_awareness),
                     description = stringResource(R.string.conversation_awareness_description),
                     checked = conversationAwarenessChecked,
+                    enabled = conversationAwarenessEnabled,
                     onCheckedChange = onConversationAwarenessCheckedChange,
                 )
             }

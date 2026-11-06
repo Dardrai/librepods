@@ -13,6 +13,23 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 class SensorTransportTest {
+    @Test fun requestedIntervalsUpdateTheLiveStreamWithoutRaisingLegacyRate() {
+        val writes = mutableListOf<AACPPacket>()
+        val manager = RTBuddyManager({ writes += it; true }, { true }, { true }, { 9 }, {}, {}, {}, {})
+        try {
+            assertFalse(manager.setMotionInterval(kotlin.time.Duration.parse("5ms")))
+            manager.setHeadTrackingEnabled(true)
+            assertTrue(manager.setMotionInterval(kotlin.time.Duration.parse("20ms")))
+            val packet = (writes.last() as RTBuddyPacket).rtBuddyPayload as SensorDataWxBuddyPayload
+            val config = packet.data.serviceSettings.configuration.toByteArray()
+            assertArrayEquals(byteArrayOf(1, 0x40, 0x9c.toByte(), 0, 0), config) // 40,000 us legacy floor.
+            assertTrue(manager.setMotionInterval(kotlin.time.Duration.parse("80ms")))
+            val slower = ((writes.last() as RTBuddyPacket).rtBuddyPayload as SensorDataWxBuddyPayload)
+                .data.serviceSettings.configuration.toByteArray()
+            assertArrayEquals(byteArrayOf(1, 0x80.toByte(), 0x38, 1, 0), slower)
+            manager.setHeadTrackingEnabled(false)
+        } finally { manager.close() }
+    }
     private fun frame(log: Int = 3) = RTBuddyPacket.create(SensorDataWxBuddyPayload(
         SensorDataWX.newBuilder().setSeq(7).setLogType(log)
             .setAnotherSensorStream(ByteString.copyFrom(ByteArray(58))).build())).rawPacket
@@ -43,6 +60,23 @@ class SensorTransportTest {
         }
         assertThrows(IllegalArgumentException::class.java) { RTBuddyPacket.parse(noTrailer) }
         assertThrows(IllegalArgumentException::class.java) { RTBuddyPacket.parse(record + byteArrayOf(0)) }
+    }
+
+    @Test fun failedDescriptorWriteCanRetryAndSuccessfulWriteIsDeduplicated() {
+        val writes = mutableListOf<AACPPacket>()
+        var accept = false
+        val manager = RTBuddyManager({ writes.add(it); accept }, { true }, { true }, { 9 }, {}, {}, {}, {})
+        try {
+            manager.requestDescriptors()
+            assertEquals(1, writes.size)
+            accept = true
+            manager.requestDescriptors()
+            manager.requestDescriptors()
+            assertEquals(2, writes.size)
+            writes.forEach {
+                assertTrue(((it as RTBuddyPacket).rtBuddyPayload as SensorDataWxBuddyPayload).data.hasRequestAllDescriptors())
+            }
+        } finally { manager.close() }
     }
 
     @Test fun sensorIntentSuspendsAndResumesOnlyTheCapturedTransport() {

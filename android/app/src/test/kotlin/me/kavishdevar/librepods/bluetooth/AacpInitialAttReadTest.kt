@@ -38,6 +38,25 @@ import kotlin.coroutines.suspendCoroutine
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [37], application = Application::class, shadows = [HearingModeSocketShadow::class])
 class AacpInitialAttReadTest {
+    @Test fun identityExperimentsUseOneSnapshotForBothStartupPasses() = runBlocking<Unit> {
+        fixture { device, _, socket ->
+            device.updateSettings { it.copy(experimentalHearingCapability = true, experimentalMacSourceAnnouncement = true) }
+            val output = Shadow.extract<HearingModeSocketShadow>(socket).output
+            output.onPacket = { packet ->
+                if (packet[4] == 0x4d.toByte()) device.updateSettings {
+                    it.copy(experimentalHearingCapability = false, experimentalMacSourceAnnouncement = false)
+                }
+            }
+            val scope = CoroutineScope(coroutineContext + Job())
+            try { withTimeout(6_000) { startup(device.aacp, socket, scope, peerReady = false) } }
+            finally { scope.cancel() }
+            assertEquals(2, output.packets.count { it[4] == 0x4d.toByte() })
+            assertTrue(output.packets.filter { it[4] == 0x4d.toByte() }.all { it[6] == 0xd7.toByte() && it[7] == 2.toByte() })
+            val announcements = output.packets.filter { it[4] == 0x24.toByte() }
+            assertEquals(2, announcements.size)
+            announcements.forEach { assertArrayEquals(byteArrayOf(4, 0, 4, 0, 0x24, 0, 2, 0, 1, 0, 0x10), it) }
+        }
+    }
     @Test fun successfulWritesWaitForAcceptedCurrentServiceAndDuplicateRejectionCannotRevokeIt() = runBlocking<Unit> {
         fixture { device, script, socket ->
             val scope = CoroutineScope(coroutineContext + Job())
@@ -144,7 +163,7 @@ class AacpInitialAttReadTest {
         }
     }
 
-    @Test fun firstCompleteStartupStartsAttBeforeTheRepeatAndOnlyOnce() = runBlocking<Unit> {
+    @Test fun acceptedCompleteStartupLoadsAttOnceWithoutRepeatingInitialization() = runBlocking<Unit> {
         fixture { device, script, socket ->
             val output = Shadow.extract<HearingModeSocketShadow>(socket).output
             var passes = 0
@@ -159,13 +178,13 @@ class AacpInitialAttReadTest {
                 assertEquals(1, passes)
                 assertFalse(worker.isCompleted)
                 withTimeout(6_000) { worker.await() }
-                assertEquals(2, passes)
+                assertEquals(1, passes)
                 assertEquals(listOf(ATTHandle.HEARING_AID, ATTHandle.TRANSPARENCY), script.reads)
             } finally { worker.cancelAndJoin() }
         }
     }
 
-    @Test fun initialAttWaitsForEveryRequiredStartupPacketWithoutBlockingTheRepeat() = runBlocking<Unit> {
+    @Test fun unknownModelDefersAttWithoutRepeatingAnAcceptedConnection() = runBlocking<Unit> {
         fixture(AirPodsModel.UNKNOWN) { device, script, socket ->
             val output = Shadow.extract<HearingModeSocketShadow>(socket).output
             val scope = this
@@ -175,7 +194,7 @@ class AacpInitialAttReadTest {
                 assertEquals(listOf(1), output.packets.map { it[4].toInt() and 255 })
                 assertTrue(script.reads.isEmpty())
                 withTimeout(6_000) { worker.await() }
-                assertEquals("A deferred ATT reader must not block the three-second repeat", 2,
+                assertEquals("Model discovery must not restart an already accepted service", 1,
                     output.packets.count { it[0] == 0.toByte() && it[4] == 1.toByte() })
                 assertTrue(script.reads.isEmpty())
                 val required = listOf(1, 0x4d, 0x0f, 1, 9, 0x29, 0x30)
@@ -268,6 +287,7 @@ class AacpInitialAttReadTest {
     @Test fun transientInitialReadRetriesAfterCompleteStartupWithoutReopeningAacp() = runBlocking<Unit> {
         fixture { device, script, socket ->
             var failed = false
+            val started = System.nanoTime()
             script.read = { handle ->
                 if (handle == ATTHandle.HEARING_AID && !failed) {
                     failed = true
@@ -281,7 +301,8 @@ class AacpInitialAttReadTest {
             val scope = this
             val worker = async { startup(device.aacp, socket, scope) }
             try {
-                withTimeout(2_000) { while (device.state.value.transparencyReadStatus != SettingsReadStatus.AVAILABLE) delay(5) }
+                withTimeout(9_000) { while (device.state.value.transparencyReadStatus != SettingsReadStatus.AVAILABLE) delay(5) }
+                assertTrue(System.nanoTime() - started >= 5_000_000_000L)
                 assertEquals(listOf(ATTHandle.HEARING_AID, ATTHandle.HEARING_AID, ATTHandle.TRANSPARENCY), script.reads)
                 assertArrayEquals(profile(), device.state.value.hearingAidData)
                 assertSame(socket, device.aacp.captureAudioSocket())
@@ -298,7 +319,7 @@ class AacpInitialAttReadTest {
                 script.retryable = handle == ATTHandle.HEARING_AID && script.reads.count { it == handle } == 1
                 null
             }
-            withTimeout(2_000) { initialize(device, socket) }
+            withTimeout(9_000) { initialize(device, socket) }
             initialize(device, socket)
             assertEquals(listOf(ATTHandle.HEARING_AID, ATTHandle.HEARING_AID, ATTHandle.TRANSPARENCY), script.reads)
             assertEquals(SettingsReadStatus.UNAVAILABLE, device.state.value.hearingAidReadStatus)
@@ -323,7 +344,7 @@ class AacpInitialAttReadTest {
                 delay(50)
                 assertEquals(1, script.reads.size)
                 device.updateMicrophoneState { it.copy(isActive = false) }
-                withTimeout(2_000) { resumed.await() }
+                withTimeout(9_000) { resumed.await() }
                 assertEquals(listOf(ATTHandle.HEARING_AID, ATTHandle.HEARING_AID, ATTHandle.TRANSPARENCY), script.reads)
                 assertArrayEquals(profile(), device.state.value.hearingAidData)
             } finally { resumed.cancelAndJoin(); device.updateMicrophoneState { it.copy(isActive = false) } }

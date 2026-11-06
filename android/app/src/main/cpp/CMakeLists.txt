@@ -7,8 +7,12 @@ option(LIBREPODS_PRIVATE_WIDE_PCM "Private Pixel PCM32/Q31 experiment; requires 
 if(LIBREPODS_PRIVATE_WIDE_PCM AND NOT LIBREPODS_PRIVATE_OWNED_FDK)
     message(FATAL_ERROR "Wide Pixel PCM requires the matching private owned FDK backend")
 endif()
-option(ELD_KEEP_GAME_FLUSH_BASELINE "Private Game Mode comparison preserving the captured flush timeout" OFF)
+option(ELD_KEEP_GAME_FLUSH_BASELINE "Preserve the captured controller flush timeout in Game Mode" ON)
 option(LIBREPODS_NATIVE_TRACE "Verbose native hook diagnostics" OFF)
+
+add_library(dongle_hid SHARED dongle_hid.cpp)
+target_compile_options(dongle_hid PRIVATE -O2 -fvisibility=hidden -Wall -Wextra -Werror)
+target_link_options(dongle_hid PRIVATE -Wl,--strip-all -Wl,--gc-sections -Wl,-z,max-page-size=16384)
 
 add_library(hiddenapi SHARED
         hiddenapi.cpp
@@ -55,6 +59,8 @@ add_library(fluoride_hooks SHARED
         eld/pixel17_game_host.cpp
         eld/pixel17_game_host_contract.cpp
         eld/pixel17_game_runtime.cpp
+        eld/pixel17_packet_policy.cpp
+        eld/pixel17_packet_contract.cpp
         eld/hook_transaction.cpp
 
         xz/xz_crc32.c

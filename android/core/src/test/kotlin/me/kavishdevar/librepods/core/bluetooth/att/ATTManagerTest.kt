@@ -158,12 +158,12 @@ class ATTManagerTest {
             Transport().apply { connectAction = { throw IOException("Offline") } }
         })
         repeat(5) { assertNull(manager.readCharacteristic(ATTHandle.TRANSPARENCY)) }
-        assertEquals(2, starts.get())
+        assertEquals(3, starts.get())
         assertFalse(manager.canRetryRead())
         owner.set(ATTOwner(Any(), 2))
         assertFalse(manager.canRetryRead())
         assertNull(manager.readCharacteristic(ATTHandle.TRANSPARENCY))
-        assertEquals(3, starts.get())
+        assertEquals(4, starts.get())
         manager.disconnect()
     }
 

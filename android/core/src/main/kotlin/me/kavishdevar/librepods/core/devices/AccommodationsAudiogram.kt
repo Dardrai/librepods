@@ -19,7 +19,7 @@ class AccommodationsAudiogram private constructor(val session: Long, private val
         repeat(4) { normalized.forEach { value -> putFloat(value) } }
     }.array()
 
-    internal fun transparency(baseline: ByteArray): ByteArray? {
+    fun transparency(baseline: ByteArray): ByteArray? {
         if (parseTransparencySettingsResponse(baseline) == null || baseline.size != 104) return null
         return baseline.copyOf().also { result ->
             val target = ByteBuffer.wrap(result).order(ByteOrder.LITTLE_ENDIAN)
