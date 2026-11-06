@@ -151,7 +151,25 @@ selected ref, with no separate source-ref override. They use that certificate
 only when the workflow runs on `main` and checks out its current tip. Pull requests, other
 branches and untrusted manual refs use a development certificate and cannot
 update the installed signed app. CI verifies the certificate before uploading
-trusted APKs. Signing does not enable the optional AAC-ELD encoder backend.
+trusted APKs.
+
+Normal Debug and Release APKs build the full AAC-ELD encoder and PCM32/Q31 path
+from the pinned source, with optimized native code in both variants. The signed
+`main` CI APK is the Pixel installation input; no older native library is
+overlaid afterward. Each APK includes the FDK, wrapper and modification notices,
+and CI supplies the corresponding encoder source bundle alongside it. CI checks
+the packaged native build contract and notices before upload. Runtime opt-in,
+phone-image validation and codec/session guards still apply; including the
+encoder does not enable it on an unsupported device.
+
+The `apk-debug` and signed release artifacts contain the APK,
+`aac-eld-source.tar.gz`, `aac-eld-source.json` and `SHA256SUMS`. The source archive
+contains the complete linked, Q31-modified FDK tree and owned wrapper; its JSON
+records the pinned upstream source, app commit and source hashes.
+
+The full build retains the existing GPL and FDK licenses. FDK/GPL compatibility
+remains a known distribution issue; notices and source availability do not
+resolve it. See the [encoder license boundary](tools/native-owned-fdk-tests/README.md#build-and-license-boundary).
 
 From `android/`, run `./gradlew :app:verifyPixel` with JDK 21 and the SDK/NDK
 versions declared in the project. This runs core and app unit tests, Android

@@ -3,6 +3,10 @@
 This is [Ripthulhu/librepods](https://github.com/Ripthulhu/librepods), based on the
 upstream Android rewrite, with Pixel/Shizuku support, nearby pairing and Dynamic Island
 overlays. Android builds are distributed through GitHub only, from `main`.
+Normal Android builds include the source-built AAC-ELD/PCM32 encoder. Trusted
+`main` CI builds supply the signed APK used for Pixel installations. Runtime compatibility checks and
+the [encoder license boundary](android/tools/native-owned-fdk-tests/README.md#build-and-license-boundary)
+still apply.
 
 - [Download signed APKs](https://github.com/Ripthulhu/librepods/releases)
 - [Development builds and checks](https://github.com/Ripthulhu/librepods/actions/workflows/ci-android.yml)

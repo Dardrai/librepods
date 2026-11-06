@@ -11,6 +11,18 @@ static_assert(std::is_same<HANDLE_AACENCODER, EldFdkHandle>::value);
 static_assert(sizeof(AACENC_InfoStruct::confBuf) == sizeof(EldFdkInfo::confBuf));
 
 namespace {
+#define ELD_STRINGIFY_INNER(value) #value
+#define ELD_STRINGIFY(value) ELD_STRINGIFY_INNER(value)
+#if defined(__ELF__)
+__attribute__((used, retain))
+#elif defined(__GNUC__) || defined(__clang__)
+__attribute__((used))
+#endif
+const char kBuildContract[] = "LIBREPODS_AAC_ELD_BUILD_V1;backend=owned-fdk;pcm_bits="
+    ELD_STRINGIFY(ELD_OWNED_PCM_BITS) ";fdk=" ELD_OWNED_FDK_REVISION;
+#undef ELD_STRINGIFY
+#undef ELD_STRINGIFY_INNER
+
 int32_t open_owned(EldFdkHandle* output, uint32_t modules, uint32_t channels) {
     if (!output || *output) return AACENC_INVALID_HANDLE;
     return static_cast<int32_t>(aacEncOpen(output, modules, channels));

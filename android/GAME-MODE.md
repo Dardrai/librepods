@@ -1,7 +1,7 @@
 # Game Mode: current support and native integration boundary
 
-LibrePods already controls Game Mode through the USB dongle. A private SDK37
-Pixel switch is now available for controlled trials behind the validated native
+LibrePods already controls Game Mode through the USB dongle. The SDK37
+Pixel switch is available for controlled trials behind the validated native
 boundary. A controlled native On/Off transition has now passed on the Pixel10
 ProXL with Pro3 firmware9A348, accepted48kHz/256kbps AAC-ELD and continuous
 playback. Broader release checks remain pending. The first preview refused its
@@ -13,11 +13,11 @@ The SDK37 Pixel prototype now includes guarded native media observations,
 controller flush read/write completions, exact-baseline restoration and a finite
 encoder-clock operation. Its controller round trip has passed on the Pixel 7 Pro;
 the coordinated Pixel 10 trial below extends that evidence to one On/Off cycle.
-These remain private experiments. The Note8 prototype has pinned, read-only
-Start/Stop, DelayReport, actual source-peer and SCO helpers, with generation
+These remain guarded experimental features. The Note8 prototype has pinned,
+read-only Start/Stop, DelayReport, actual source-peer and SCO helpers, with generation
 guards. On the Note8, controller flush-timeout updates and their acknowledged
 restoration are still missing. AACP control `0B` alone is insufficient to implement the coordinated
-policy below. Keep the private trial separate from broader release support.
+policy below. Keep the recorded trial separate from broader release support.
 Encoder/codec readiness is separate from
 Game Mode readiness.
 The [AAC-ELD/Xposed design](AAC-ELD-XPOSED.md) tracks that separate native route.
@@ -71,13 +71,20 @@ does not establish those results.
 Pixel98's local private APK paired a baseline-preserving native library with
 the app's fixed-96-slot policy. The app rejected the native hold and restored
 it before sending the receiver target. Pixel99 corrects that packaging mismatch:
-build the app with `-PprivateGameKeepFlushBaseline=true` when using the private
-native library built with `ELD_KEEP_GAME_FLUSH_BASELINE=ON`. The local packager
-checks both values before replacing the library. The November 6 protocol merge
-promotes baseline preservation to ordinary Debug and Release builds: both the
+that preview built the app with `-PprivateGameKeepFlushBaseline=true` alongside
+the native library built with `ELD_KEEP_GAME_FLUSH_BASELINE=ON`; its local
+packager checked both values before replacing the library. The November 6
+protocol merge promotes baseline preservation to ordinary Debug and Release builds: both the
 app policy and native backend retain the captured timeout. The historical build
 field name remains for compatibility. Do not bypass hold verification to mask
 an app/backend mismatch.
+
+Normal APK builds now compile the full AAC-ELD/PCM32 backend from source in both
+variants, with the native build optimized as Release. CI verifies the packaged
+backend, source bundle and notices alongside the existing signing certificate;
+Pixel installation uses that same APK without an older-library overlay. The
+runtime opt-in, exact phone-image guards and Game Mode admission checks remain.
+
 Pixel99 passed all 69 Game Mode Android tests and was installed. Pixel98's
 failure capture independently confirmed active, non-failed 48kHz/256kbps ELD
 encoding and a valid 150ms DelayReport; the refusal was after native preparation,
@@ -230,8 +237,9 @@ the observed check; these are unchanged totals, not a claim of zero earlier
 faults. Local evidence is `outputs/codec-quality-followup-20261026/game-accepted-private.json`.
 
 This APK used `privateGameKeepFlushBaseline=true`, retaining the captured 0-slot
-controller baseline. The normal source default remains 96 slots; the private
-result does not validate that default or change it. Five-second user actions
+controller baseline. At that checkpoint the normal source default was 96 slots;
+the private result did not validate that default. The later November 6 change
+above preserves the captured baseline in normal builds. Five-second user actions
 are not measured transition times, and neither the drift budget nor the final
 receipt measures acoustic latency.
 
@@ -430,7 +438,7 @@ does not establish new firmware behavior or native Android Game Mode support.
 
 ## Smallest required native boundary
 
-Expose the private native UI only when the hook reports a usable boundary for
+Expose the native UI only when the hook reports a usable boundary for
 the actual route; keep unsupported routes unavailable. Java connection state, an Apple identity flag,
 encoder availability and successful AACP transmission do not provide it.
 
@@ -517,7 +525,7 @@ nominal submitted samples and report bounded completion.
 - [Dongle Game Mode contract](https://github.com/Ripthulhu/airpods-dongle/blob/main/docs/CONTROL-EXTENSIONS.md#game-mode) and [firmware policy](https://github.com/Ripthulhu/airpods-dongle/blob/main/src/btstack/playback_options.h).
 - [Captured Mac transition](https://github.com/Ripthulhu/ntpods/blob/main/docs/MACOS-AUDIO-CAPTURE-2026-10-12.md#working-gaming-transition), [Windows policy and limits](https://github.com/Ripthulhu/ntpods/blob/main/docs/WINDOWS-AUDIO-LATENCY.md#automatic-receiver-buffer-policy), and [Windows state machine/calculation tests](https://github.com/Ripthulhu/ntpods/blob/main/windows/daemon/src/playback/buffer.rs).
 
-The private SDK37 receiver-target coordinator and control are available for
+The SDK37 receiver-target coordinator and control are available for
 guarded trials. The separately controlled AAC-ELD prototype has codec-identity
 hooks and an owned encoder-failure fallback. One controlled Pixel 10 cycle is
 established above; release support still needs cancellation on SCO/disconnect,
@@ -527,13 +535,15 @@ toggle remain distinct from measured acoustic latency.
 
 ## Portable follow-up
 
-Default builds keep `LIBREPODS_PRIVATE_OWNED_FDK=OFF`; they do not include the
-private owned encoder used for these live results. The pushed source and passing
-host tests do not turn an ordinary APK into this private ELD/Game Mode build.
-See [the private encoder boundary](AAC-ELD-XPOSED.md) before preparing a local
-experiment. Raw captures, device keys and private APKs are not repository inputs.
+Normal Debug and Release builds enable the owned encoder and PCM32/Q31 path
+using the legacy `LIBREPODS_PRIVATE_OWNED_FDK` and
+`LIBREPODS_PRIVATE_WIDE_PCM` option names. The APK and its encoder source bundle
+come from the same source build; CI and Pixel installation no longer substitute
+an older native library. See [the encoder build and license boundary](AAC-ELD-XPOSED.md).
+Inclusion does not bypass runtime compatibility or establish a new listening
+result. Raw captures, device keys and historical private APKs are not build inputs.
 
-The current baseline-preserving private build passed the manual On/Off check
+The recorded baseline-preserving local build passed the manual On/Off check
 above, including final native Complete/error0, no hold/clock/restore obligation,
 and exact original controller readback. Use diagnostic **query only** while the
 coordinator owns a hold; the separate read/roundtrip probe has its own cleanup.
@@ -551,7 +561,7 @@ From `android/`, portable Android checks are:
 ./gradlew :app:testDebugUnitTest --tests '*NativeGame*' :app:lintDebug :app:assembleDebug
 ```
 
-The native host suites require no phone or private FDK encoder. For example,
+The native host suites require no phone or linked FDK encoder. For example,
 in a Unix host shell with CMake and an ASan/UBSan-capable compiler:
 
 ```sh

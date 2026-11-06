@@ -2,12 +2,26 @@
 
 ## Current result
 
+Normal Debug and Release APKs now compile the owned AAC-ELD encoder and complete
+PCM32/Q31 path from the pinned source, using optimized native code in both
+variants. The legacy CMake names `LIBREPODS_PRIVATE_OWNED_FDK` and
+`LIBREPODS_PRIVATE_WIDE_PCM` remain for compatibility; ordinary app builds enable
+both. The APK carries all three encoder notices, and CI supplies the linked
+encoder source bundle alongside the signed APK. The Pixel installation uses
+the signed `main` CI APK directly, without substituting an older `libfluoride_hooks.so`.
+The [license boundary](tools/native-owned-fdk-tests/README.md#build-and-license-boundary)
+remains documented; packaging source and notices is not a new linking permission.
+
+This packaging change does not broaden runtime support. The prior listening
+results below belong to their recorded local builds; a newly compiled APK needs
+its own device startup, negotiation and listening checks.
+
 The Note8 adapter remains build-pinned. The SDK37 Pixel prototype now has its
 own exact-symbol resolver, native codec registration, extended Java identity,
-wire helpers and software-PCM encoder adapter. Neither is enabled by default.
+wire helpers and software-PCM encoder adapter. Both still require runtime opt-in.
 Ordinary codecs and Apple identity remain independent. Unknown layouts or
-conflicting codec registrations are rejected. The Pixel's private preview now
-plays audible AAC-ELD through Android's software Bluetooth route. Corrected host
+conflicting codec registrations are rejected. The earlier local Pixel preview
+played audible AAC-ELD through Android's software Bluetooth route. Corrected host
 flush handling keeps ELD selected through clean pause/resume, and the guarded
 registry-restoration repair has passed a live full case return.
 
@@ -64,9 +78,10 @@ modes and native registry integration. The new regression fails against the
 original source and passes with the correction. Evidence and source hashes are
 in the parent workspace's `outputs/codec-selectable-20261030` directory.
 
-**This native correction is not installed.** The working private encoder on the
-phone was left unchanged. It does not create SBC rate overlap, bypass Android's
-mandatory-codec check or advertise unsupported 44.1 kHz decoding/resampling.
+**At that checkpoint, this native correction was not installed.** The working
+local encoder on the phone was left unchanged. It does not create SBC rate
+overlap, bypass Android's mandatory-codec check or advertise unsupported
+44.1 kHz decoding/resampling.
 
 ### Controlled Note8 result and rollback
 
@@ -203,10 +218,11 @@ remain pending. Earlier phone listening receipts used the old encoder settings.
 Record hearing/EQ modes for a controlled comparison rather than assuming they
 are off.
 
-This remains a lossy codec with an explicitly 16-bit PCM input path. The peak
-bitrate constraint still limits the encoder's bit reservoir; it is not relaxed
-without peer and packet-budget evidence. The private FDK licensing boundary and
-default-off build option are unchanged.
+This earlier comparison used a lossy codec with a 16-bit PCM input path. The
+later PCM32/Q31 work is recorded below. The peak bitrate constraint still limits
+the encoder's bit reservoir; it is not relaxed without peer and packet-budget
+evidence. At this checkpoint the encoder was a private build opt-in; current
+APK packaging is described above and the FDK license boundary still applies.
 
 An offline follow-up used the same eight-second stereo fixture, pinned FDK
 encoder/decoder, 20 kHz bandwidth and afterburner, changing only average/peak
@@ -274,12 +290,13 @@ decoded quality and unchanged packet timing/budget still need validation; no
 32-bit source change has been deployed at this checkpoint. AAC-ELD remains the
 compressed wire format, without an uncompressed 32-bit-per-sample transport claim.
 
-The private native option `LIBREPODS_PRIVATE_WIDE_PCM=ON` now implements that
+The native option `LIBREPODS_PRIVATE_WIDE_PCM=ON` implements that
 complete PCM32/Q31 path, requiring the owned FDK backend. It requests the 32-bit
 codec mask, reports a 32-bit track width, reads 3,840-byte stereo blocks and uses
 an isolated, explicitly modified Q31 FDK source copy. The platform-bound Note8
-path remains S16, mismatched input widths are rejected, and both private build
-options default off. No codec bitrate, frame period, priming, clock policy or
+path remains S16 and mismatched input widths are rejected. Normal app builds
+enable both encoder options; the standalone S16 suite deliberately leaves the
+wide-PCM option off. No codec bitrate, frame period, priming, clock policy or
 321-byte peak AU bound changes with source width.
 
 Both widths pass the existing decoded gain, stereo, frequency, transient and
@@ -302,7 +319,7 @@ or four host discards observed after the initial listening/pause-resume test. Th
 539.21 seconds of 10 ms encoded frames, not an acoustic latency measurement.
 The user confirmed clean audio, normal loudness and smooth five-second
 pause/resume starts. Private evidence is `outputs/p17wide/pixel10-live-private.json`.
-The private build remains gated off by default; this is not a Pixel 7, other
+That local trial predates the normal full-APK build; it is not a Pixel 7, other
 firmware, Game Mode, call-routing or acoustic-resolution compatibility pass.
 
 ### Pixel Headphone Accommodations check
@@ -405,11 +422,12 @@ It preserves RTP/AU continuity across feeding resets. At this earlier adapter
 stage, native Game Mode still awaited its separate controller/clock checks;
 the later controlled result is recorded in [GAME-MODE.md](GAME-MODE.md).
 
-The owned FDK backend is **private-experiment only**:
-`LIBREPODS_PRIVATE_OWNED_FDK=ON` explicitly enables it. Default builds neither
-fetch nor link FDK. Its license is not GPL-compatible; a redistributable
-integration needs a separately licensed worker/boundary or another compatible
-arrangement. Private test artifacts retain both FDK and wrapper notices.
+Normal app builds enable `LIBREPODS_PRIVATE_OWNED_FDK=ON` and
+`LIBREPODS_PRIVATE_WIDE_PCM=ON`, fetch the hash-pinned FDK source and compile its
+modified Q31 path. Both build variants package FDK, MIT wrapper and modification
+notices, and CI publishes the corresponding source bundle. The legacy option
+names do not identify a separate private APK. This does not resolve the existing
+GPL/FDK compatibility issue; see the [license boundary](tools/native-owned-fdk-tests/README.md#build-and-license-boundary).
 
 Offline coverage includes 48 Java codec/format tests, Android lint, all four normal APK
 ABIs, strict ARM64 private builds, malformed ELF/XZ inputs, exact symbol aliases,
@@ -580,8 +598,9 @@ The user also confirmed automatic full-case return, two clean pause/resume
 cycles and working listening-mode stem control with tracing off. The subsequent
 status read remained on 256 kbps ELD with the same Bluetooth process, no encoder
 failure or quarantine, and no active packet capture.
-The pacing change and owned FDK route remain private opt-ins, with production
-defaults off; this is not a general release or a claim that all handovers work.
+This trial used the then-private pacing and owned FDK build. Normal APKs now
+include that source-built backend, but the result does not establish every
+handover or broaden the guarded runtime compatibility boundary.
 
 Broader real-time performance, AAC/SBC recovery, complete stream lifecycle tests
 and Game Mode release checks remain pending; the later single Pixel 10 On/Off

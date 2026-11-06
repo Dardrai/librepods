@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-# Explicitly opted-in private experiments only; FDK is not GPL-compatible.
+# FDK is not GPL-compatible; packaging its notices does not grant a linking exception.
 include_guard(GLOBAL)
 
 function(eld_add_private_owned_fdk)
@@ -72,7 +72,8 @@ function(eld_add_private_owned_fdk)
     endif()
     add_library(eld_owned_fdk STATIC "${ELD_ROOT}/owned_fdk_encoder.cpp")
     target_include_directories(eld_owned_fdk PUBLIC "${ELD_ROOT}")
-    target_compile_definitions(eld_owned_fdk PUBLIC ELD_OWNED_PCM_BITS=${OWNED_PCM_BITS})
+    target_compile_definitions(eld_owned_fdk PUBLIC ELD_OWNED_PCM_BITS=${OWNED_PCM_BITS}
+        PRIVATE ELD_OWNED_FDK_REVISION="${FDK_REVISION}")
     target_link_libraries(eld_owned_fdk PRIVATE fdk-aac)
     set_target_properties(eld_owned_fdk PROPERTIES POSITION_INDEPENDENT_CODE ON
         CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
@@ -85,5 +86,17 @@ function(eld_add_private_owned_fdk)
     if(LIBREPODS_PRIVATE_WIDE_PCM)
         configure_file("${FDK_BUILD_SOURCE}/LIBREPODS-MODIFICATIONS.txt"
             "${CMAKE_BINARY_DIR}/licenses/NOTICE-FDK-modifications.txt" COPYONLY)
+    endif()
+    if(ANDROID AND LIBREPODS_ELD_ASSETS_DIR)
+        if(NOT LIBREPODS_PRIVATE_WIDE_PCM)
+            message(FATAL_ERROR "The app's bundled AAC-ELD assets require the PCM32/Q31 encoder")
+        endif()
+        set(ASSET_NOTICES "${LIBREPODS_ELD_ASSETS_DIR}/aac-eld")
+        file(MAKE_DIRECTORY "${ASSET_NOTICES}")
+        # ABI configure tasks share these identical notices; serialize their atomic copies.
+        file(LOCK "${LIBREPODS_ELD_ASSETS_DIR}/.notices.lock" GUARD FUNCTION TIMEOUT 60)
+        foreach(NOTICE_NAME NOTICE-FDK.txt NOTICE-owned-fdk-MIT.txt NOTICE-FDK-modifications.txt)
+            configure_file("${CMAKE_BINARY_DIR}/licenses/${NOTICE_NAME}" "${ASSET_NOTICES}/${NOTICE_NAME}" COPYONLY)
+        endforeach()
     endif()
 endfunction()

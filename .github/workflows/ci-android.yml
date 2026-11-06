@@ -8,11 +8,13 @@ on:
       - 'android/**'
       - '.github/workflows/ci-android.yml'
       - '.github/scripts/android_ci_metadata.py'
+      - '.github/scripts/verify_android_codec.py'
   pull_request:
     paths:
       - 'android/**'
       - '.github/workflows/ci-android.yml'
       - '.github/scripts/android_ci_metadata.py'
+      - '.github/scripts/verify_android_codec.py'
   workflow_dispatch:
     inputs:
       publish_release:
@@ -50,6 +52,7 @@ jobs:
           REQUEST_TAG: ${{ inputs.release_tag || '' }}
         run: |
           python3 .github/scripts/android_ci_metadata.py --self-test
+          python3 .github/scripts/verify_android_codec.py --self-test
           python3 .github/scripts/android_ci_metadata.py
       - uses: actions/setup-java@v4
         with:
@@ -87,13 +90,15 @@ jobs:
             cmake --build "$build" --parallel 2
             ctest --test-dir "$build" --output-on-failure --timeout 30
           done
-      - name: Test decoded AAC-ELD quality
-        # Isolated encoder tests: keep combined binaries private and the APK encoder opt-in off.
+      - name: Test decoded AAC-ELD quality in S16 and Q31
         run: |
-          build="$RUNNER_TEMP/librepods-native/native-owned-fdk-tests"
-          cmake -S android/tools/native-owned-fdk-tests -B "$build" -G Ninja -DCMAKE_BUILD_TYPE=Debug
-          cmake --build "$build" --parallel 2
-          ctest --test-dir "$build" --output-on-failure --timeout 60
+          for wide_pcm in OFF ON; do
+            build="$RUNNER_TEMP/librepods-native/native-owned-fdk-tests-$wide_pcm"
+            cmake -S android/tools/native-owned-fdk-tests -B "$build" -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+              -DLIBREPODS_PRIVATE_WIDE_PCM="$wide_pcm"
+            cmake --build "$build" --parallel 2
+            ctest --test-dir "$build" --output-on-failure --timeout 60
+          done
       - name: Prepare existing fork signing
         if: >-
           github.repository == 'Ripthulhu/librepods' &&
@@ -128,6 +133,8 @@ jobs:
       - name: Test, lint and build Android APKs
         working-directory: android
         run: ./gradlew --no-daemon :core:lintDebug :app:verifyPixel
+      - name: Verify complete AAC-ELD PCM32 APK payloads
+        run: python3 .github/scripts/verify_android_codec.py --build-tools "$ANDROID_HOME/build-tools/36.0.0"
       - name: Verify trusted APK signatures
         if: steps.metadata.outputs.sign_artifacts == 'true'
         run: |
@@ -151,20 +158,28 @@ jobs:
             android/app/build/test-results/
             android/app/build/overlay-previews/
             android/app/build/reports/lint-results-debug.*
+            android/app/build/reports/codec-packaging.json
           if-no-files-found: ignore
+      - name: Prepare complete debug download
+        run: |
+          mkdir -p artifacts/debug
+          cp android/app/build/outputs/apk/debug/app-debug.apk artifacts/debug/
+          cp android/app/build/outputs/codec-source/aac-eld-source.tar.gz android/app/build/outputs/codec-source/aac-eld-source.json artifacts/debug/
+          (cd artifacts/debug && sha256sum ./*.apk ./*.tar.gz ./*.json > SHA256SUMS)
       - uses: actions/upload-artifact@v4
         with:
           name: apk-debug
-          path: android/app/build/outputs/apk/debug/app-debug.apk
+          path: artifacts/debug/*
           if-no-files-found: error
       - name: Verify and checksum release APK
         if: steps.metadata.outputs.publish_release == 'true'
         env:
           APP_VERSION: ${{ steps.metadata.outputs.app_version }}
         run: |
-          mkdir -p artifacts
-          apk="artifacts/LibrePods-v${APP_VERSION}-release.apk"
+          mkdir -p artifacts/release
+          apk="artifacts/release/LibrePods-v${APP_VERSION}-release.apk"
           cp android/app/build/outputs/apk/release/app-release.apk "$apk"
+          cp android/app/build/outputs/codec-source/aac-eld-source.tar.gz android/app/build/outputs/codec-source/aac-eld-source.json artifacts/release/
           signing_details=$("$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs "$apk")
           printf '%s\n' "$signing_details"
           signer_sha256=$(printf '%s\n' "$signing_details" | awk '/^Signer #[0-9]+ certificate SHA-256 digest: / {print $NF}')
@@ -172,12 +187,12 @@ jobs:
             echo 'Refusing to publish: APK must use the existing fork signing certificate' >&2
             exit 1
           fi
-          (cd artifacts && sha256sum ./*.apk > SHA256SUMS)
+          (cd artifacts/release && sha256sum ./*.apk ./*.tar.gz ./*.json > SHA256SUMS)
       - uses: actions/upload-artifact@v4
         if: steps.metadata.outputs.publish_release == 'true'
         with:
           name: apk-release
-          path: artifacts/*
+          path: artifacts/release/*
           if-no-files-found: error
       - name: Remove signing material
         if: always()

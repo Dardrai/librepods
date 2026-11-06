@@ -1,7 +1,9 @@
 import java.util.Properties
+import org.gradle.api.file.DirectoryProperty
+import org.gradle.api.tasks.OutputDirectory
 
-val appVersionName = (rootProject.extra["appVersionName"] as String) + "-pixel114"
-val appVersionCode = 200000199
+val appVersionName = (rootProject.extra["appVersionName"] as String) + "-pixel115"
+val appVersionCode = 200000200
 
 plugins {
     alias(libs.plugins.android.application)
@@ -13,6 +15,11 @@ plugins {
     alias(libs.plugins.protobuf)
 //    alias(libs.plugins.hilt)
     id("kotlin-parcelize")
+}
+
+abstract class EldAssetsSync : Sync() {
+    @get:OutputDirectory
+    abstract val assetsDirectory: DirectoryProperty
 }
 
 val localPropsFile = rootProject.file("local.properties")
@@ -81,6 +88,18 @@ android {
         targetSdk = 37
         versionCode = appVersionCode
         versionName = appVersionName
+        externalNativeBuild {
+            cmake {
+                arguments += listOf(
+                    "-DCMAKE_BUILD_TYPE=Release",
+                    "-DLIBREPODS_PRIVATE_OWNED_FDK=ON",
+                    "-DLIBREPODS_PRIVATE_WIDE_PCM=ON",
+                    "-DELD_KEEP_GAME_FLUSH_BASELINE=ON",
+                    "-DLIBREPODS_NATIVE_TRACE=OFF",
+                    "-DLIBREPODS_ELD_ASSETS_DIR=${layout.projectDirectory.dir(".cxx/eld-assets").asFile.invariantSeparatorsPath}"
+                )
+            }
+        }
     }
     buildTypes {
         release {
@@ -90,12 +109,6 @@ android {
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
             )
-            externalNativeBuild {
-                cmake {
-                    arguments += "-DCMAKE_BUILD_TYPE=Release"
-                    arguments += "-DELD_KEEP_GAME_FLUSH_BASELINE=ON"
-                }
-            }
             if (releaseSigningAvailable) {
                 signingConfig = signingConfigs.getByName("release")
             }
@@ -105,11 +118,6 @@ android {
         }
         debug {
             buildConfigField("boolean", "PRIVATE_GAME_KEEP_FLUSH_BASELINE", "true")
-            externalNativeBuild {
-                cmake {
-                    arguments += "-DELD_KEEP_GAME_FLUSH_BASELINE=ON"
-                }
-            }
             if (releaseSigningAvailable) {
                 signingConfig = signingConfigs.getByName("release")
             }
@@ -148,6 +156,29 @@ android {
     }
 
     ndkVersion = "30.0.14904198"
+}
+
+val prepareEldAssets = tasks.register<EldAssetsSync>("prepareEldAssets") {
+    val noticeStage = layout.projectDirectory.dir(".cxx/eld-assets")
+    val notices = listOf("NOTICE-FDK.txt", "NOTICE-owned-fdk-MIT.txt", "NOTICE-FDK-modifications.txt")
+        .map { noticeStage.file("aac-eld/$it").asFile }
+    dependsOn(tasks.matching { it.name.startsWith("configureCMakeRelease[") })
+    from(noticeStage) { include("aac-eld/**") }
+    assetsDirectory.set(layout.buildDirectory.dir("generated/eld-assets"))
+    into(assetsDirectory)
+    inputs.files(notices)
+    // Validate before Sync's NO-SOURCE shortcut so missing notices cannot produce an incomplete APK.
+    onlyIf {
+        for (notice in notices) {
+            check(notice.isFile && notice.length() > 0) { "Missing encoder notice: $notice" }
+        }
+        true
+    }
+}
+androidComponents {
+    onVariants { variant ->
+        variant.sources.assets?.addGeneratedSourceDirectory(prepareEldAssets, EldAssetsSync::assetsDirectory)
+    }
 }
 
 dependencies {
