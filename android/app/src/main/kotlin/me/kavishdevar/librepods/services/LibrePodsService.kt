@@ -164,6 +164,14 @@ private const val STOP_COMMUNICATION = "me.kavishdevar.librepods.STOP_COMMUNICAT
 private const val A2DP_ACTIVE_DEVICE_CHANGED = "android.bluetooth.a2dp.profile.action.ACTIVE_DEVICE_CHANGED"
 private const val HEADSET_ACTIVE_DEVICE_CHANGED = "android.bluetooth.headset.profile.action.ACTIVE_DEVICE_CHANGED"
 
+/** Notification listening-mode buttons paired with the ANC_MODE value the service expects (1 off, 2 ANC, 3 transparency, 4 adaptive). */
+private val NOTIFICATION_LISTENING_MODE_BUTTONS = listOf(
+    R.id.notification_off_button to 1,
+    R.id.notification_transparency_button to 3,
+    R.id.notification_adaptive_button to 4,
+    R.id.notification_anc_button to 2,
+)
+
 @SuppressLint("MissingPermission")
 class LibrePodsService: Service() {
     private lateinit var dongleControlsLazy: Lazy<me.kavishdevar.librepods.dongle.DongleController>
@@ -2326,8 +2334,10 @@ class LibrePodsService: Service() {
             retireIneligibleHeadGestures(device)
             updateHeartRateAlert(device)
             withContext(Dispatchers.Main.immediate) {
-                if (!destroying && devices.value[device.macAddress] === device && device.settings.value == settings)
+                if (!destroying && devices.value[device.macAddress] === device && device.settings.value == settings) {
                     islandWindow.updateAdaptiveStrength(device)
+                    updateDeviceNotification(device = device)
+                }
             }
             companionSettingsWriters.getOrPut(device.macAddress) { Mutex() }.withLock {
                 if (device.settings.value == settings) appleRepository.saveSettings(device.macAddress, settings)
@@ -2463,58 +2473,55 @@ class LibrePodsService: Service() {
         if (device.connectionState.value == ConnectionState.CONNECTED || device.connectionState.value == ConnectionState.AVAILABLE) {
             when (device) {
                 is AppleDevice -> {
+                    val state = device.state.value
+                    val metadata = device.metadata.value
+                    val batteryText = state.battery.joinToString(" ") { "${it.component.name[0]}: ${it.level}%" }
+                    val currentMode = (state.requestedControls[ControlCommandIdentifier.LISTENING_MODE]
+                        ?: state.controlStates[ControlCommandIdentifier.LISTENING_MODE])?.firstOrNull()?.toInt()
+                    val showOff = state.effectiveAllowOff(device.settings.value, metadata.modelNumber) == true
+
+                    // Android caps notification actions at three and left-aligns them, so the listening-mode
+                    // buttons live in a custom expanded view: evenly spaced, centered, and with room for Off.
+                    val expandedView = RemoteViews(packageName, R.layout.notification_noise_control).apply {
+                        setTextViewText(R.id.notification_title, metadata.name)
+                        setTextViewText(R.id.notification_battery, batteryText)
+                        setViewVisibility(R.id.notification_off_button, if (showOff) View.VISIBLE else View.GONE)
+                        NOTIFICATION_LISTENING_MODE_BUTTONS.forEach { (viewId, mode) ->
+                            setOnClickPendingIntent(
+                                viewId,
+                                PendingIntent.getService(
+                                    this@LibrePodsService,
+                                    notificationId + mode,
+                                    Intent(this@LibrePodsService, LibrePodsService::class.java).apply {
+                                        action = "ACTION_SET_ANC_MODE"
+                                        putExtra("MAC_ADDRESS", device.macAddress.toString())
+                                        putExtra("ANC_MODE", mode)
+                                    },
+                                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                                )
+                            )
+                            val selected = mode == currentMode
+                            setInt(
+                                viewId, "setBackgroundResource",
+                                if (selected) R.drawable.shape_notification_mode_button_selected
+                                else R.drawable.shape_notification_mode_button
+                            )
+                            setFloat(viewId, "setAlpha", if (selected) 1f else 0.7f)
+                        }
+                    }
+
                     val updatedNotificationBuilder =
                         NotificationCompat.Builder(this, "device_${device.macAddress}")
                             .setSmallIcon(R.drawable.ic_airpods)
-                            .setContentTitle(device.metadata.value.name)
-                            .setContentText(device.state.value.battery.joinToString(" ") { "${it.component.name[0]}: ${it.level}%" })
+                            .setContentTitle(metadata.name)
+                            .setContentText(batteryText)
                             .setContentIntent(pendingIntent)
                             .setCategory(Notification.CATEGORY_STATUS)
                             .setPriority(NotificationCompat.PRIORITY_LOW)
                             .setOnlyAlertOnce(true)
                             .setOngoing(true)
-                            .addAction(
-                                R.drawable.ic_transparency, // icon never shows up?? (tested on AOSP ROMs)
-                                "Transparency",
-                                PendingIntent.getService(
-                                    this,
-                                    notificationId + 3,
-                                    Intent(this, LibrePodsService::class.java).apply {
-                                        action = "ACTION_SET_ANC_MODE"
-                                        putExtra("MAC_ADDRESS", device.macAddress.toString())
-                                        putExtra("ANC_MODE", 3)
-                                    },
-                                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-                                ),
-                            )
-                            .addAction(
-                                R.drawable.ic_adaptive,
-                                "Adaptive",
-                                PendingIntent.getService(
-                                    this,
-                                    notificationId + 4,
-                                    Intent(this, LibrePodsService::class.java).apply {
-                                        action = "ACTION_SET_ANC_MODE"
-                                        putExtra("MAC_ADDRESS", device.macAddress.toString())
-                                        putExtra("ANC_MODE", 4)
-                                    },
-                                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-                                ),
-                            )
-                            .addAction(
-                                R.drawable.ic_noise_cancellation,
-                                "Noise Cancellation",
-                                PendingIntent.getService(
-                                    this,
-                                    notificationId + 2,
-                                    Intent(this, LibrePodsService::class.java).apply {
-                                        action = "ACTION_SET_ANC_MODE"
-                                        putExtra("MAC_ADDRESS", device.macAddress.toString())
-                                        putExtra("ANC_MODE", 2)
-                                    },
-                                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-                                ),
-                            )
+                            .setStyle(NotificationCompat.DecoratedCustomViewStyle())
+                            .setCustomBigContentView(expandedView)
 
                     val updatedNotification = updatedNotificationBuilder.build()
 
