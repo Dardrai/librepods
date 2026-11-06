@@ -1,309 +1,54 @@
-# LibrePods Android rewrite fork
+# LibrePods for Android
 
-This is [Ripthulhu/librepods](https://github.com/Ripthulhu/librepods), based on the
-upstream Android rewrite, with Pixel/Shizuku support, nearby pairing and Dynamic Island
-overlays. Android builds are distributed through GitHub only, from `main`.
-Normal Android builds include the source-built AAC-ELD/PCM32 encoder. Trusted
-`main` CI builds supply the signed APK used for Pixel installations. Runtime compatibility checks and
-the [encoder license boundary](android/tools/native-owned-fdk-tests/README.md#build-and-license-boundary)
-still apply.
+AirPods controls with an Apple-style interface, native AAC-ELD/PCM32 on supported
+rooted phones, and Pico dongle integration. This is the
+[Ripthulhu fork](https://github.com/Ripthulhu/librepods) of
+[LibrePods](https://github.com/librepods-org/librepods).
 
-- [Download signed APKs](https://github.com/Ripthulhu/librepods/releases)
-- [Development builds and checks](https://github.com/Ripthulhu/librepods/actions/workflows/ci-android.yml)
-- [Android installation and build instructions](android/README.md)
-- [Fork behavior and known limitations](android/PIXEL-REWRITE.md)
-- [Pico dongle controls and verification limits](android/DONGLE.md)
+## Download
 
-The upstream project information and acknowledgments follow.
+**[Download Android APK](https://github.com/Ripthulhu/librepods/releases/latest/download/LibrePods.apk)**
 
-> [!WARNING]
-> librepods.org is not an official website of the LibrePods project. It inaccurately claims to be the official website of the project by claiming copyrights and using the LibrePods logo in the footer. And at the same time, they say that the project is not affiliated with the LibrePods project or its developers.
-> 
-> Please report any other such websites to [me@kavish.xyz](mailto:me@kavish.xyz)
- 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="./imgs/banner-dark.png" />
-  <source media="(prefers-color-scheme: light)" srcset="./imgs/banner.png" />
-  <img alt="LibrePods" src="./imgs/banner.png" />
-</picture>
+[Current release: notes, checksums and encoder source](https://github.com/Ripthulhu/librepods/releases/latest)
 
-<div align="center" style="margin: 20px 0px;">
-<a href="https://github.com/Ripthulhu/librepods/releases">
-  <img src="https://img.shields.io/github/downloads/Ripthulhu/librepods/total?label=GitHub%20Downloads" />
-</a>
-<a href="https://github.com/Ripthulhu/librepods/actions/workflows/ci-android.yml">
-  <img src="https://github.com/Ripthulhu/librepods/actions/workflows/ci-android.yml/badge.svg" />
-</a>
-<a href="https://github.com/kavishdevar/librepods/actions/workflows/ci-linux-rust.yml">
-  <img src="https://github.com/kavishdevar/librepods/actions/workflows/ci-linux-rust.yml/badge.svg" />
-</a>
-<a href="https://github.com/Ripthulhu/librepods/issues">
-  <img src="https://img.shields.io/github/issues/Ripthulhu/librepods" />
-</a>
-<a href="https://discord.gg/HhG4ycVum4">
-  <img src="https://img.shields.io/discord/1441416992027574375?logoColor=white&color=5865F2&label=Discord" />
-</a>
-</div>
+Requires Android 13 or later. Install over your existing fork build to keep its
+settings. The APK uses this repository's established signing key.
 
-# What is LibrePods?
+[Installation and device compatibility](android/README.md#installation)
 
-LibrePods allows you to use AirPods features that are exclusive to Apple devices. It implements the proprietary protocol used to exchange data between AirPods and Apple devices, enabling features like changing noise control modes, fast ear detection, accurate battery status, head gestures, conversational awareness, and more on non-Apple platforms.
+## Connect your AirPods
 
-# Feature availability
+| Connection | Setup |
+| --- | --- |
+| Pico USB or Bluetooth dongle | The recommended route. LibrePods controls a compatible dongle through the app's device settings. See the [dongle guide](android/DONGLE.md). |
+| Phone Bluetooth | Connect directly to Android. Root access can replace Shizuku, and supported rooted system builds can use native AAC-ELD/PCM32. See [Bluetooth access](android/README.md#bluetooth-access-with-root-or-shizuku). |
 
-| Feature                                                     | Linux | Android |
-| ----------------------------------------------------------- | ----- | ------- |
-| Changing Listening Mode                                     | ✅     | ✅       |
-| Ear detection                                               | ✅     | ✅       |
-| Battery status                                              | ✅     | ✅       |
-| Renaming AirPods <details><summary>Note for Android</summary>On Android, you need to re-pair your AirPods after renaming them because Android might not use the latest name.</details>                                            | ✅     | ✅       |
-| Loud Sound Reduction                                        | 🔴     | Unavailable¹ |
-| Head Gestures                                               | ⛔     | 🧪       |
-| Conversational Awareness                                    | ✅     | ✅       |
-| Automatically connect to AirPods <details><summary>Note for Android</summary>Android handles automatic reconnection. LibrePods requests a takeover only when you tap Connect.</details> | ✅     | ✅       |
-| Hearing Aid                                                 | 🔴     | Unavailable¹ |
-| Transparency Mode customization                             | 🔴     | Unavailable¹ |
-| Multi-device connectivity (Bluetooth Multipoint; 2 devices only) | ⚪     | ❓       |
-| <details><summary>Other accessibility configs (click to expand)</summary><ul><li>Press speed</li><li>Press and Hold duration</li><li>Noise Cancellation with single AirPod</li><li>Volume control on swipe</li><li>Volume swipe speed</li></ul></details>       | 🔴     | ✅       |
-| <details><summary>Other general configs</summary><ul><li>Press and Hold to cycle between listening modes/invoke digital assistant (invoking digital assistant needs a recent firmware)</li><li>Configure call controls</li><li>Personalized volume</li><li>Microphone side</li><li>Pause media when falling asleep (needs a recent firmware)</li><li>Enable <code>Off listening mode</code> to switch to <code>Off</code></li></ul></details>                   | 🔴     | ✅       |
-| [Head-tracked Spatial Audio](#spatial-audio)                | ❓     | ❓       |
-| [Heart Rate Monitoring](#heart-rate-monitoring-airpods-pro-3-and-later) | ⛔     | 🧪       |
-| [Find My](#find-my)                                         | ❓     | ❓       |
-| [High quality two-way audio](#high-quality-two-way-audio)   | 🔴     | Unavailable |
+Listening modes, battery status, ear detection and supported AirPods settings
+share the same interface. Feature availability depends on the AirPods model,
+firmware and selected connection.
 
-| Symbol | Meaning                                                             |
-| ------ | ------------------------------------------------------------------- |
-| ✅     | Implemented and works well                                          |
-| ⚪     | Needs [VendorID spoofing](#vendorid-spoofing); use at your own risk |
-| 🔴     | Not implemented yet; planned                                        |
-| ⛔     | Will not be implemented                                             |
-| ❓     | Unknown                                                             |
-| 🧪     | Experimental; not yet verified on hardware with this Android rewrite |
+For NTPods on Windows, follow the [phone–PC connection guide](android/README.md#link-ntpods-on-a-pc).
 
-¹ The Android rewrite's ATT reader and writer are unavailable. VendorID spoofing
-does not restore these settings. See [Android ATT access](android/PROTOCOL.md#android-att-access).
+## Development
 
-Android features depend on the AirPods model and firmware. This fork has been
-tested on a Pixel 10 Pro XL; it is not restricted to Pixel devices. See the
-[Android instructions](android/README.md) for compatible Bluetooth stacks and
-the current rewrite's limitations.
+- [Build, signing and CI instructions](android/README.md#development-builds)
+- [GitHub Actions and check reports](https://github.com/Ripthulhu/librepods/actions/workflows/ci-android.yml)
+- [Fork history and known limitations](android/PIXEL-REWRITE.md)
+- [Android protocol documentation](android/PROTOCOL.md)
 
-## Find My
+Normal Android builds compile the full AAC-ELD/PCM32 encoder from pinned source.
+Debug and Release use the same optimized native codec and the existing repository
+signing key for trusted builds. APK notices, encoder sources and checksums travel
+with the release.
 
-The following features related to Find My are planned, but require further RE and might need root on Android:
+## Credits and licenses
 
-- Add your AirPods to the Find My network
-- Play sound through charging case to find it
-- Notify when leaving behind
-- Toggle case charging sounds
+Copyright (C) 2025 LibrePods contributors. LibrePods is licensed under
+[GPL-3.0-or-later](LICENSE); existing third-party licenses also apply. See the
+[encoder license boundary](android/tools/native-owned-fdk-tests/README.md#build-and-license-boundary).
 
-## Spatial Audio
-
-The app does not currently provide head tracking information to Android for the OS to perform HRTF. This has not been explored completely, and it might need root. 
-
-Spatializing stereo sound is beyond this project's scope and will never be available. Many OEMs have an implementation of their own for this.
-
-## Heart Rate Monitoring (AirPods Pro 3 and later)
-Heart rate reading, history, alerts and Health Connect export are implemented
-for supported AirPods. Sensors and head gestures have not been retested on
-hardware with this Android rewrite.
-
-## High quality two-way audio
-On iOS/iPadOS, you can continue using A2DP while AirPods send the audio stream from its microphone over AACP. 
-
-This Android fork retains experimental high-quality microphone recording in
-Recorder. The failed app microphone injection and cellular-call relay experiments
-have been removed. Physical tests on the older fork do not validate this rewrite.
-High-quality two-way call audio is unavailable. See
-[experimental audio boundaries](android/PIXEL-REWRITE.md#experimental-audio-boundaries).
-
-# Installation
-
-- [**Android**](/android/README.md)
-- [**Linux**](/linux/README.md)
-
-# VendorID Spoofing
-
-Turns out, if you change the VendorID in DID Profile to that of Apple, you get access to several special features!
-
-You can do this on Linux by editing the DeviceID in `/etc/bluetooth/main.conf`. Add this line to the config file `DeviceID = bluetooth:004C:0000:0000`. For android you can enable the `act as Apple device` setting in the app's settings (shown only when Xposed is available and LibrePods module is enabled).
-
-On Android this hook still needs root/Xposed. Shizuku does not change the host's
-VendorID, and the rewrite's protected ATT settings remain unavailable.
-
-## Multi-device Connectivity
-
-Upto two devices can be simultaneously connected to AirPods, for audio and control both. Seamless connection switching. The same notification shows up on Apple device when Android takes over the AirPods as if it were an Apple device ("Move to iPhone"). Android also shows a popup when the other device takes over.
-
-On this Android rewrite, Connect in the nearby island can request the selected
-pair's audio connection with authorized Shizuku. Opening the case alone does not
-take over audio. Simultaneous two-host playback has not been verified on the rewrite.
-
-## Accessibility Settings and Hearing Aid
-
-On this Android rewrite, accessibility settings like press speed, press-and-hold
-duration and noise cancellation with a single AirPod can be configured.
-
-The Android rewrite currently cannot read or write the protected ATT settings,
-so hearing aid fitting and enablement, custom transparency and loud sound
-reduction are unavailable. The app doesn't provide a way to take a hearing test
-because it requires much more precision. It is much better to use an already
-available audiogram result.
-
-# Protocol and Reverse Engineering
-
-Please refer to the Wireshark dissector plugin by Nojus ([@pabloaul](https://github.com/pabloaul)) for more information on the protocols used: [pabloaul/apple-wireshark](https://github.com/pabloaul/apple-wireshark)
-
-The dissector had not been used in LibrePods for most of the implementation; I had reverse engineered the protocol myself before this dissector was made. But many (future) features including two-way high quality audio and spatial audio would not have been possible without their RE efforts!
-
-# Use of AI
-
-## Android app
-
-The following describes the upstream Android app. This fork's rewrite changes
-also use AI assistance.
-
-These parts of the app were completely AI-generated: 
-- Head Gestures - all of it, including logic and the UI
-- The offset setup with r2+the xposed module (both versions)
-- Troubleshooter and LogCollector
-
-Rest everything- the background service, the Bluetooth manager classes (AACP and ATT), the entire UI, even the smallest components were written manually.
-
-Some parts of the UI components were borrowed from [Kyant0's demo app](https://github.com/Kyant0/AndroidLiquidGlass/tree/master/catalog), which is licensed under [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0).
-
-## Linux (rewrite)
-
-The `aacp.rs` and the `att.rs` files were translated from Kotlin to Rust with AI. Some parts of the `media_controller.rs` file, mainly the pulse integration, was also AI-generated.
-
-# Supporters
-
-A huge thank you to everyone supporting the project!
-
-<table>
-  <tr>
-    <td align="center">
-      <a href="https://github.com/davdroman">
-        <img src="https://github.com/davdroman.png?size=48" width="48" height="48"alt="davdroman"/><br />
-        @davdroman
-      </a>
-    </td>
-    <td align="center">
-      <a href="https://github.com/tedsalmon">
-        <img src="https://github.com/tedsalmon.png?size=48" width="48" height="48"alt="tedsalmon"/><br />
-        @tedsalmon
-      </a>
-    </td>
-    <td align="center">
-      <a href="https://github.com/wiless">
-        <img src="https://github.com/wiless.png?size=48" width="48" height="48"alt="wiless"/><br />
-        @wiless
-      </a>
-    </td>
-  </tr>
-  <tr>
-    <td align="center">
-      <a href="https://github.com/SmartMsg">
-        <img src="https://github.com/SmartMsg.png?size=48" width="48" height="48"alt="SmartMsg"/><br />
-        @SmartMsg
-      </a>
-    </td>
-    <td align="center">
-      <a href="https://github.com/lunaroyster">
-        <img src="https://github.com/lunaroyster.png?size=48" width="48" height="48"alt="lunaroyster"/><br />
-        @lunaroyster
-      </a>
-    </td>
-    <td align="center">
-      <a href="https://github.com/ressiwage">
-        <img src="https://github.com/ressiwage.png?size=48" width="48" height="48"alt="ressiwage"/><br />
-        @ressiwage
-      </a>
-    </td>
-  </tr>
-  <tr>
-    <td align="center">
-      <a href="https://github.com/kkjdroid">
-        <img src="https://github.com/kkjdroid.png?size=48" width="48" height="48"alt="kkjdroid"/><br />
-        @kkjdroid
-      </a>
-    </td>
-    <td align="center">
-      <a href="https://github.com/CitrusJoules">
-        <img src="https://github.com/CitrusJoules.png?size=48" width="48" height="48"alt="CitrusJoules"/><br />
-        @CitrusJoules
-      </a>
-    </td>
-    <td align="center">
-      <a href="https://github.com/DanielReyesDev">
-        <img src="https://github.com/DanielReyesDev.png?size=48" width="48" height="48"alt="DanielReyesDev"/><br />
-        @DanielReyesDev
-      </a>
-    </td>
-  </tr>
-  <tr>
-    <td align="center">
-      <a href="https://github.com/sumitduster">
-        <img src="https://github.com/sumitduster.png?size=48" width="48" height="48"alt="sumitduster"/><br />
-        @sumitduster
-      </a>
-    </td>
-    <td align="center">
-      <a href="https://github.com/GrifTheDev">
-        <img src="https://github.com/GrifTheDev.png?size=48" width="48" height="48"alt="GrifTheDev"/><br />
-        @GrifTheDev
-      </a>
-    </td>
-  </tr>
-</table>
-
-# Special Thanks
-- @tyalie for making the first documentation on the protocol! ([tyalie/AAP-Protocol-Definition](https://github.com/tyalie/AAP-Protocol-Defintion))
-- @rithvikvibhu and folks over at lagrangepoint for helping with the hearing aid feature ([gist](https://gist.github.com/rithvikvibhu/45e24bbe5ade30125f152383daf07016))
-- @devnoname120 for helping with the first root patch
-- @timgromeyer for making the first version of the linux app
-- @hackclub for hosting [High Seas](https://highseas.hackclub.com) and [Low Skies](https://low-skies.hackclub.com)!
-- Of course, everyone who has contributed to the project in any way, including by testing, sharing feedback, or just showing interest!
-
-# Alternates for other platforms:
-- CAPod - A companion app for AirPods on Android. ([play store](https://play.google.com/store/apps/details?id=eu.darken.capod) | [source code](https://github.com/d4rken-org/capod)). An alternative if your device's Bluetooth stack cannot run LibrePods without root.
-- MagicPods for Steam Deck ([website](https://magicpods.app/steamdeck/))
-- MagicPods - if you're looking for "LibrePods for Windows"  ([ms store](https://apps.microsoft.com/store/detail/9P6SKKFKSHKM) [installer](https://magicpods.app/installer/MagicPods.appinstaller) | [website](https://magicpods.app/))
-
-# Star History
-
-<a href="https://www.star-history.com/?repos=librepods-org%2Flibrepods&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=librepods-org/librepods&type=date&theme=dark&legend=top-left&sealed_token=CS9QF2Wcx-_EN6M7lBhwvTa2WBd5eB8FbQa5FWt3SV14v1OcQdy2aCGsXxHoytVaoylP_pTxj1h2U-odoXDV_EwTqMxM-MQwG_WpvV_1g_yH-Jh3ux2BuWCmS98LxLqfox2ibLOlFDHu_-geTLFsTmqTc1SjX6-NYxVHXF5DaqnxFOAyjLPL5_WtXVew" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=librepods-org/librepods&type=date&legend=top-left&sealed_token=CS9QF2Wcx-_EN6M7lBhwvTa2WBd5eB8FbQa5FWt3SV14v1OcQdy2aCGsXxHoytVaoylP_pTxj1h2U-odoXDV_EwTqMxM-MQwG_WpvV_1g_yH-Jh3ux2BuWCmS98LxLqfox2ibLOlFDHu_-geTLFsTmqTc1SjX6-NYxVHXF5DaqnxFOAyjLPL5_WtXVew" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=librepods-org/librepods&type=date&legend=top-left&sealed_token=CS9QF2Wcx-_EN6M7lBhwvTa2WBd5eB8FbQa5FWt3SV14v1OcQdy2aCGsXxHoytVaoylP_pTxj1h2U-odoXDV_EwTqMxM-MQwG_WpvV_1g_yH-Jh3ux2BuWCmS98LxLqfox2ibLOlFDHu_-geTLFsTmqTc1SjX6-NYxVHXF5DaqnxFOAyjLPL5_WtXVew" />
- </picture>
-</a>
-
-# License
-
-LibrePods - AirPods liberated from Apple’s ecosystem
-Copyright (C) 2025 LibrePods contributors
-
-This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-any later version.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program.  If not, see <https://www.gnu.org/licenses/>.
-
-# Trademark Notice
-
-The GPL does not grant any rights to use the LibrePods name, logo, or branding. The LibrePods name and logo may not be used for software, websites, domains, products, services, or other projects in a manner that suggests affiliation with, endorsement by, or association with the official LibrePods project without prior permission.
-
-If you see any misuse of the LibrePods name or logo, please report it to [me@kavish.xyz](mailto:me@kavish.xyz).
-
-The SF Pro font used in the Android app is the property of Apple Inc.. This will be removed in future versions of the app and replaced with an open alternative soon.
-
-AirPods, AirPods Pro, AirPods Max, and the AirPods logo are trademarks of Apple Inc. The LibrePods project is not affiliated with or endorsed by Apple Inc. in any way.
+The [earlier README and upstream background](docs/UPSTREAM.md) preserve the
+original project information, supporter and contributor acknowledgments, Linux
+information, license text and trademark notices. This fork is independent of
+the upstream maintainers. AirPods and Apple trademarks belong to Apple Inc.;
+the project is not affiliated with or endorsed by Apple.

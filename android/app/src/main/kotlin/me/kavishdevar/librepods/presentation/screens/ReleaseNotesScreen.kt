@@ -115,7 +115,7 @@ fun ReleaseNotesScreen(
             )
 
             val versionName = BuildConfig.VERSION_NAME.removeSuffix("-debug")
-            val url = "https://github.com/Ripthulhu/librepods/releases/tag/v$versionName"
+            val url = "https://github.com/Ripthulhu/librepods/releases/latest"
             val fullText = "${stringResource(R.string.version)} $versionName"
             val textColor = MaterialTheme.colorScheme.primary
 

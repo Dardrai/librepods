@@ -21,10 +21,15 @@ def app_version(properties, app_gradle):
     return f"{major}.{minor}.{patch}{prerelease}{suffix[1]}"
 
 
-def release_request(event, ref, requested, tag):
+def release_request(event, ref, requested, tag, repository="", version="", commit=""):
     tagged = event == "push" and ref.startswith("refs/tags/")
-    publish = tagged or (event == "workflow_dispatch" and requested == "true")
+    automatic = repository == "Ripthulhu/librepods" and event == "push" and ref == "refs/heads/main"
+    publish = tagged or automatic or (event == "workflow_dispatch" and requested == "true")
     tag = ref.removeprefix("refs/tags/") if tagged else tag
+    if automatic:
+        if not re.fullmatch(r"[0-9a-f]{40}", commit) or not re.fullmatch(r"[A-Za-z0-9._-]+", version):
+            raise ValueError("Automatic releases require the exact version and source commit")
+        tag = f"v{version}-{commit[:12]}"
     if publish and not re.fullmatch(r"(?:v|pixel-)[A-Za-z0-9][A-Za-z0-9._-]*", tag):
         raise ValueError("Publishing requires an explicit v* or pixel-* release tag")
     return publish, tag if publish else ""
@@ -63,6 +68,17 @@ def self_test():
         assert release_request(event, "refs/heads/pixel-shizuku-rewrite", "false", "v1") == (False, "")
     assert release_request("workflow_dispatch", "refs/heads/main", "true", "pixel-11") == (True, "pixel-11")
     assert release_request("push", "refs/tags/v2.0.0", "false", "") == (True, "v2.0.0")
+    commit = "a" * 40
+    assert release_request("push", "refs/heads/main", "false", "", "Ripthulhu/librepods",
+                           "2.0.0-alpha.1-pixel115", commit) == (True, "v2.0.0-alpha.1-pixel115-aaaaaaaaaaaa")
+    assert release_request("push", "refs/heads/main", "false", "", "another/librepods", "v1", commit) == (False, "")
+    for invalid_version, invalid_commit in (("", commit), ("v1\ninjected=value", commit), ("v1", "short")):
+        try:
+            release_request("push", "refs/heads/main", "false", "", "Ripthulhu/librepods", invalid_version, invalid_commit)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Automatic release accepted invalid metadata")
     for tag in ("", "other-1", "v1\ncommit=bad", "v$(echo bad)"):
         try:
             release_request("workflow_dispatch", "refs/heads/main", "true", tag)
@@ -93,13 +109,14 @@ if __name__ == "__main__":
         raise SystemExit("Usage: android_ci_metadata.py [--self-test]")
     else:
         event, ref = os.environ["GITHUB_EVENT_NAME"], os.environ["GITHUB_REF"]
-        publish, tag = release_request(event, ref,
-                                       os.environ.get("REQUEST_RELEASE", "false"), os.environ.get("REQUEST_TAG", ""))
-        if publish:
-            subprocess.run(["git", "check-ref-format", f"refs/tags/{tag}"], check=True)
         version = app_version(Path("android/version.properties").read_text(), Path("android/app/build.gradle.kts").read_text())
         commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
         repository = os.environ["GITHUB_REPOSITORY"]
+        publish, tag = release_request(event, ref,
+                                       os.environ.get("REQUEST_RELEASE", "false"), os.environ.get("REQUEST_TAG", ""),
+                                       repository, version, commit)
+        if publish:
+            subprocess.run(["git", "check-ref-format", f"refs/tags/{tag}"], check=True)
         sign = False
         if signing_candidate(repository, event, ref):
             subprocess.run(["git", "fetch", "--no-tags", "origin", "main:refs/remotes/origin/main"], check=True)

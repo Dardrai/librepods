@@ -9,16 +9,18 @@ on:
       - '.github/workflows/ci-android.yml'
       - '.github/scripts/android_ci_metadata.py'
       - '.github/scripts/verify_android_codec.py'
+      - '.github/scripts/publish_android_release.py'
   pull_request:
     paths:
       - 'android/**'
       - '.github/workflows/ci-android.yml'
       - '.github/scripts/android_ci_metadata.py'
       - '.github/scripts/verify_android_codec.py'
+      - '.github/scripts/publish_android_release.py'
   workflow_dispatch:
     inputs:
       publish_release:
-        description: Publish a signed GitHub prerelease (requires fork signing secrets)
+        description: Publish a signed GitHub release (main pushes publish automatically)
         type: boolean
         default: false
       release_tag:
@@ -53,6 +55,7 @@ jobs:
         run: |
           python3 .github/scripts/android_ci_metadata.py --self-test
           python3 .github/scripts/verify_android_codec.py --self-test
+          python3 .github/scripts/publish_android_release.py --self-test
           python3 .github/scripts/android_ci_metadata.py
       - uses: actions/setup-java@v4
         with:
@@ -173,11 +176,9 @@ jobs:
           if-no-files-found: error
       - name: Verify and checksum release APK
         if: steps.metadata.outputs.publish_release == 'true'
-        env:
-          APP_VERSION: ${{ steps.metadata.outputs.app_version }}
         run: |
           mkdir -p artifacts/release
-          apk="artifacts/release/LibrePods-v${APP_VERSION}-release.apk"
+          apk="artifacts/release/LibrePods.apk"
           cp android/app/build/outputs/apk/release/app-release.apk "$apk"
           cp android/app/build/outputs/codec-source/aac-eld-source.tar.gz android/app/build/outputs/codec-source/aac-eld-source.json artifacts/release/
           signing_details=$("$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs "$apk")
@@ -202,6 +203,9 @@ jobs:
     if: needs.build.outputs.publish_release == 'true'
     needs: build
     runs-on: ubuntu-latest
+    concurrency:
+      group: android-github-release
+      cancel-in-progress: false
     permissions:
       contents: write
     steps:
@@ -214,22 +218,10 @@ jobs:
         with:
           name: apk-release
           path: artifacts
-      - name: Publish signed GitHub prerelease
+      - name: Publish complete signed GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
           RELEASE_COMMIT: ${{ needs.build.outputs.commit }}
           APP_VERSION: ${{ needs.build.outputs.app_version }}
-        run: |
-          if git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"; then
-            tagged_commit=$(git rev-list -n 1 "refs/tags/$RELEASE_TAG")
-            if [ "$tagged_commit" != "$RELEASE_COMMIT" ]; then
-              echo 'Refusing to publish: the release tag points to a different commit' >&2
-              exit 1
-            fi
-          fi
-          (cd artifacts && sha256sum --check SHA256SUMS)
-          gh release create "$RELEASE_TAG" artifacts/* \
-            --target "$RELEASE_COMMIT" \
-            --title "LibrePods Pixel $APP_VERSION" \
-            --generate-notes --prerelease
+        run: python3 .github/scripts/publish_android_release.py artifacts

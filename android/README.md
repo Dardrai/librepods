@@ -1,8 +1,16 @@
-For this fork's Pixel/Shizuku build, upgrade notes and known limitations, see
-[Pixel fork on the Android rewrite](PIXEL-REWRITE.md).
+# LibrePods for Android
 
-This fork uses the upstream Android rewrite's screens and per-device settings.
-Apple is the default design; Material remains available in the app settings.
+**[Download Android APK](https://github.com/Ripthulhu/librepods/releases/latest/download/LibrePods.apk)**
+
+[Current release: notes, checksums and encoder source](https://github.com/Ripthulhu/librepods/releases/latest)
+
+This fork provides Apple-style AirPods controls, native AAC-ELD/PCM32 on supported
+rooted Android builds, and Pico dongle integration. The signed APK updates existing
+fork installations in place. Apple is the default design; Material remains
+available in the app settings.
+
+For upgrade history and known limitations, see
+[Pixel fork on the Android rewrite](PIXEL-REWRITE.md).
 
 ## Root Requirement
 
@@ -29,12 +37,14 @@ Apple is the default design; Material remains available in the app settings.
 
 ## Installation
 
-### GitHub Releases
+### Install the APK
 
-This fork is distributed only through [GitHub releases](https://github.com/Ripthulhu/librepods/releases).
-Install the signed release APK. Existing fork installations can be updated in
-place; keep the app installed to preserve its settings and Shizuku authorization.
+Use **Download Android APK** at the top of this page. Keep an existing fork
+installation in place to preserve its settings and root or Shizuku authorization.
 An APK signed with a different certificate cannot update an existing installation.
+
+For a Pico dongle, follow the [dongle connection guide](DONGLE.md). For direct
+phone Bluetooth, continue below.
 
 ### Bluetooth access with root or Shizuku
 
@@ -182,9 +192,15 @@ at the repository root. Release signing uses the existing `RELEASE_STORE_FILE`,
 in an untracked `android/local.properties`. Without those entries, the release
 APK is unsigned. Keep signing material out of the repository.
 
-To publish a signed GitHub prerelease, run the workflow against `main`
-with its `publish_release` and `release_tag` inputs, or push a `v*` or `pixel-*`
-tag on `main` history. Trusted CI builds require the fork's existing
+Successful `main` builds automatically publish a signed release with a unique
+`v<app-version>-<commit>` tag. Download its `LibrePods.apk` from
+[the latest release](https://github.com/Ripthulhu/librepods/releases/latest);
+the matching encoder source, provenance and checksums accompany it. Releases
+are marked as previews in their title and notes. Older build completions cannot
+replace a newer build as Latest, and existing tags and release assets are not overwritten.
+To publish an explicit tag, run the workflow against `main` with its
+`publish_release` and `release_tag` inputs, or push a `v*` or `pixel-*` tag on
+`main` history. Trusted CI builds require the fork's existing
 `RELEASE_KEYSTORE_FILE` (base64 keystore), `RELEASE_STORE_PASSWORD`,
 `RELEASE_KEY_ALIAS` and `RELEASE_KEY_PASSWORD` secrets. The same key signs debug
 and release APKs; no new key is generated. Publishing from a manual workflow
