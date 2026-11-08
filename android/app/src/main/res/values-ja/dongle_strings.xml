@@ -5,7 +5,7 @@
     <string name="dongle_usb_audio_available">USB操作が接続済み · ヘッドフォンを利用できます</string>
     <string name="dongle_reconnect_airpods">AirPodsを再接続</string>
     <string name="dongle_pair_airpods">AirPodsをペア設定</string>
-    <string name="dongle_pair_airpods_description">再生とマイクの使用を一時停止し、AirPodsをペア設定モードにしてください。ドングルがペアを検索します。</string>
+    <string name="dongle_pair_airpods_description">ペアリングすると、ドングルに保存されたAirPodsのペア設定が削除されます。保存済みのAirPodsに接続する場合は「AirPodsを再接続」を使用してください。再生とマイクの使用を一時停止し、AirPodsをペア設定モードにしてください。ドングルがペアを検索します。</string>
     <string name="dongle_pair_phone">Bluetooth電話のペア設定を許可</string>
     <string name="dongle_profile_idle">出力プロファイルを変更する前に再生とマイクの使用を一時停止してください。</string>
     <string name="dongle_phone_pairing">Bluetoothのペア設定が可能</string>

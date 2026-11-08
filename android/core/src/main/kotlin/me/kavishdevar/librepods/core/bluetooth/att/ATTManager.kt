@@ -84,6 +84,7 @@ class ATTManager internal constructor(
 
     private class Session(val owner: ATTOwner, val socket: ATTTransport) {
         val retired = AtomicBoolean()
+        val completedReadsAllowed = AtomicBoolean(true)
         var bearer: ATTBearer? = null
         var reader: Thread? = null
         var mtu = 0
@@ -116,13 +117,14 @@ class ATTManager internal constructor(
         !it.retired.get() && it.owner.same(captureOwner()) && it.socket.connected && it.bearer?.isCurrent == true
     }
 
-    private fun retire(active: Session, retryable: Boolean = true) {
+    private fun retire(active: Session, retryable: Boolean = true, preserveCompletedRead: Boolean = false) {
+        if (!preserveCompletedRead) active.completedReadsAllowed.set(false)
         synchronized(this) {
             if (session === active && !retryable) failedOwner = active.owner
         }
         if (!active.retired.compareAndSet(false, true)) return
         synchronized(active.reads) { active.reads.clear() }
-        active.bearer?.retire(retryable)
+        active.bearer?.retire(retryable, preserveCompletedRead)
         runCatching { active.socket.close() }
         active.reader?.interrupt()
     }
@@ -149,7 +151,9 @@ class ATTManager internal constructor(
                 if (rx !in 48..65535 || tx !in 48..65535) throw ATTFailure("Unsupported Classic ATT MTU")
                 active.mtu = minOf(rx, tx)
                 if (!owner.same(captureOwner()) || !active.socket.connected || active.retired.get()) throw ATTFailure("ATT connection retired", retryable = true)
-                active.bearer = ATTBearer(active.mtu, active.socket::write, { retryable -> retire(active, retryable) }) {
+                active.bearer = ATTBearer(active.mtu, active.socket::write, { retryable, preserveCompletedRead ->
+                    if (!active.retired.get()) retire(active, retryable, preserveCompletedRead)
+                }) {
                     session === active && !active.retired.get() && owner.same(captureOwner()) && active.socket.connected
                 }
                 // A full receive buffer preserves L2CAP SDU boundaries; writes are never split into PDUs.
@@ -164,7 +168,7 @@ class ATTManager internal constructor(
                     } catch (error: Exception) {
                         // Closing this ATT socket cancels a blocked read without disturbing AACP/audio.
                         if (error !is IOException && error !is InterruptedException) retire(active, retryable = false)
-                    } finally { retire(active) }
+                    } finally { active.bearer?.retire(retryable = true, preserveCompletedRead = true) }
                 }, "LibrePods-ATT-reader").also { it.isDaemon = true; it.start() }
                 true
             } == true
@@ -208,8 +212,10 @@ class ATTManager internal constructor(
         // A full-MTU reply can be a truncated long value. No read-blob assembly or guessed padding.
         if (response.size >= active.mtu || !validValue(handle, value))
             throw ATTFailure("Incomplete or unsupported ATT setting")
-        if (currentSession() !== active || !canRead()) throw ATTFailure("ATT read retired", retryable = true)
-        synchronized(active.reads) { active.reads[handle] = value.copyOf() }
+        if (session !== active || !active.completedReadsAllowed.get() || !active.owner.same(captureOwner()) || !canRead())
+            throw ATTFailure("ATT read retired", retryable = true)
+        // A peer's idle close cannot erase a completed read, but it grants no live write proof.
+        if (currentSession() === active) synchronized(active.reads) { active.reads[handle] = value.copyOf() }
         return value
     }
 
@@ -227,6 +233,7 @@ class ATTManager internal constructor(
         try {
             blocking(active, 8000) {
                 if (read(active, handle, canSend)?.contentEquals(baseline) != true) return@blocking false
+                if (currentSession() !== active || !canSend()) return@blocking false
                 val pdu = byteArrayOf(opcode.toByte(), characteristic.handle.toByte(), (characteristic.handle ushr 8).toByte()) + requested
                 writeStarted.set(true)
                 val sent = if (opcode == 0x12) active.bearer!!.request(pdu, 0x13, canSend = canSend).contentEquals(byteArrayOf(0x13))
@@ -246,7 +253,7 @@ class ATTManager internal constructor(
                 }
                 false
             }.let { result ->
-                if (result == null && writeStarted.get()) retire(active, retryable = false)
+                if (result != true && writeStarted.get()) retire(active, retryable = false)
                 result == true
             }
         } catch (error: Exception) {

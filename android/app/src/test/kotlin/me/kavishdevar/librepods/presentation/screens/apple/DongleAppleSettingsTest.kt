@@ -12,6 +12,8 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import me.kavishdevar.librepods.data.LiveRecordEditor
 import me.kavishdevar.librepods.data.LiveRecordSource
+import me.kavishdevar.librepods.data.LiveAccommodationsEditor
+import me.kavishdevar.librepods.data.LiveAccommodationsSource
 import me.kavishdevar.librepods.data.LiveValueEditor
 import me.kavishdevar.librepods.data.LiveValueSource
 import me.kavishdevar.librepods.dongle.DongleController
@@ -23,6 +25,8 @@ import me.kavishdevar.librepods.core.data.StemAction
 import me.kavishdevar.librepods.core.devices.AirPodsModel
 import me.kavishdevar.librepods.core.devices.AppleMetadata
 import me.kavishdevar.librepods.core.devices.HearingModes
+import me.kavishdevar.librepods.core.devices.AccommodationsRequestState
+import me.kavishdevar.librepods.core.devices.ReceivedAccommodations
 import me.kavishdevar.librepods.dongle.DongleProtocol
 import me.kavishdevar.librepods.dongle.DongleState
 import me.kavishdevar.librepods.dongle.appleUiState
@@ -43,6 +47,65 @@ class DongleAppleSettingsTest {
     @get:Rule val compose = createComposeRule()
     private val metadata = AppleMetadata(name = "AirPods Pro", model = AirPodsModel.AIRPODS_PRO_3,
         modelNumber = "A3063", version3 = "9442752")
+
+    @Test fun queuedTransparencyChoiceRemainsEditableWhileAnotherOperationIsBusy() {
+        val original = ByteArray(104).also { java.nio.ByteBuffer.wrap(it).order(java.nio.ByteOrder.LITTLE_ENDIAN).putFloat(0, 1f) }
+        var source = LiveRecordSource("pair", original, true)
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            val editor = LiveRecordEditor(scope, { source }, { it.size == 104 }, ByteArray::contentEquals,
+                write = { _, _, _ -> error("A busy source must not send") })
+            assertTrue(editor.edit(0) { it.also { data -> java.nio.ByteBuffer.wrap(data).order(java.nio.ByteOrder.LITTLE_ENDIAN).putFloat(40, .25f) } })
+            source = source.copy(writable = false); editor.observe()
+            val flow = MutableStateFlow(DongleState(connected = true, busy = true, metadata = metadata,
+                status = DongleProtocol.Status(1, listOf(1, 2, 3, 4, 5, 6), 3, 3, listOf(90, 90, 70), 3, 0x38)))
+            val controller = mock(DongleController::class.java) { call -> when (call.method.name) {
+                "getState" -> flow
+                "liveTransparencyEditor" -> editor
+                else -> Answers.RETURNS_DEFAULTS.answer(call)
+            } }
+            compose.setContent { LibrePodsTheme(designSystem = DesignSystem.Apple) { DongleTransparencyScreen(null, controller) } }
+            val label = org.robolectric.RuntimeEnvironment.getApplication().getString(R.string.transparency_mode)
+            compose.onNode(hasText(label) and hasClickAction()).assertIsEnabled().performClick()
+            compose.runOnIdle {
+                assertFalse(editor.state.value.pending)
+                assertFalse(requireNotNull(me.kavishdevar.librepods.core.bluetooth.att.types.parseTransparencySettingsResponse(editor.state.value.requested!!)).enabled)
+                editor.cancel(editor.state.value.revision)
+            }
+            compose.onNode(hasText(label) and hasClickAction()).assertIsNotEnabled()
+        } finally { scope.cancel() }
+    }
+
+    @Test fun queuedAccommodationsChoiceRemainsEditableWhileAnotherOperationIsBusy() {
+        val modes = HearingModes.empty()
+            .withReport(byteArrayOf(4, 0, 4, 0, 9, 0, 0x2c, 1, 2, 0, 0))
+            .withReport(byteArrayOf(4, 0, 4, 0, 9, 0, 0x33, 2, 0, 0, 0))
+            .withReport(ByteArray(140).also { byteArrayOf(4, 0, 4, 0, 0x53, 0, 0x84.toByte(), 0, 2, 2, 2, 2).copyInto(it) })
+        val report = requireNotNull(modes.accommodationsReport(7))
+        var source = LiveAccommodationsSource("pair", report, ReceivedAccommodations.parse(report.packet(), 7, 1), AccommodationsRequestState(), true)
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            val editor = LiveAccommodationsEditor(scope, { source }) { _, _, _, _, _ -> error("A busy source must not send") }
+            assertTrue(editor.edit(0) { it.copy(phone = true) })
+            source = source.copy(writable = false); editor.observe()
+            val flow = MutableStateFlow(DongleState(connected = true, busy = true, metadata = metadata, hearingModes = modes, controlSession = 7,
+                status = DongleProtocol.Status(1, listOf(1, 2, 3, 4, 5, 6), 3, 3, listOf(90, 90, 70), 3, 0x38)))
+            val controller = mock(DongleController::class.java) { call -> when (call.method.name) {
+                "getState" -> flow
+                "liveAccommodationsEditor" -> editor
+                else -> Answers.RETURNS_DEFAULTS.answer(call)
+            } }
+            compose.setContent { LibrePodsTheme(designSystem = DesignSystem.Apple) { DongleAccommodationsScreen(null, controller) {} } }
+            compose.onNodeWithText("Media").performScrollTo().assertIsEnabled().performClick()
+            compose.runOnIdle {
+                assertFalse(editor.state.value.pending)
+                assertTrue(editor.state.value.requested!!.selection.phone)
+                assertTrue(editor.state.value.requested!!.selection.media)
+                editor.cancel(editor.state.value.revision)
+            }
+            compose.onNodeWithText("Media").assertIsNotEnabled()
+        } finally { scope.cancel() }
+    }
 
     @Test fun projectedDongleMetadataShowsAdaptiveInTheNormalPressAndHoldChoices() {
         val ui = DongleState(metadata = metadata, savedChoices = mapOf(0x16 to 0x0505L, 0x1a to 10L)).appleUiState()

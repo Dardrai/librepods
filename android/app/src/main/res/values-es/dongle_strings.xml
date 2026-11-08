@@ -114,7 +114,7 @@
     <string name="dongle_usb_audio_available">Controles USB conectados · auriculares disponibles</string>
     <string name="dongle_reconnect_airpods">Reconectar AirPods</string>
     <string name="dongle_pair_airpods">Vincular AirPods</string>
-    <string name="dongle_pair_airpods_description">Pausa la reproducción y el micrófono y pon los AirPods en modo de vinculación. El dongle buscará un par.</string>
+    <string name="dongle_pair_airpods_description">El emparejamiento borra la vinculación de AirPods guardada en el dongle. Usa «Reconectar AirPods» para conectar el par existente. Pausa la reproducción y el micrófono y pon los AirPods en modo de vinculación. El dongle buscará un par.</string>
     <string name="dongle_pair_phone">Permitir vinculación Bluetooth de un teléfono</string>
     <string name="dongle_profile_idle">Pausa la reproducción y el micrófono antes de cambiar el perfil de salida.</string>
     <string name="dongle_phone_pairing">Vinculación Bluetooth disponible</string>

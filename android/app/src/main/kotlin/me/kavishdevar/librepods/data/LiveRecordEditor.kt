@@ -77,7 +77,7 @@ internal class LiveRecordEditor(scope: CoroutineScope, private val read: () -> L
 
     fun edit(expectedRevision: Long, transform: (ByteArray) -> ByteArray?): Boolean = synchronized(lock) {
         observeLocked(read().snapshot())
-        if (expectedRevision != revision || source.owner == null || !source.writable && inFlight == null || !valid(confirmed)) return false
+        if (expectedRevision != revision || source.owner == null || !source.writable && inFlight == null && desired == null || !valid(confirmed)) return false
         val next = transform((desired ?: confirmed).copyOf())?.copyOf() ?: return false
         if (!valid(next)) return false
         if (matches(desired ?: confirmed, next)) return true

@@ -114,7 +114,7 @@
     <string name="dongle_usb_audio_available">Controlos USB ligados · auscultadores disponíveis</string>
     <string name="dongle_reconnect_airpods">Voltar a ligar AirPods</string>
     <string name="dongle_pair_airpods">Emparelhar AirPods</string>
-    <string name="dongle_pair_airpods_description">Pause a reprodução e o microfone e coloque os AirPods em modo de emparelhamento. O dongle procurará um par.</string>
+    <string name="dongle_pair_airpods_description">O emparelhamento apaga o emparelhamento dos AirPods guardado no dongle. Use «Voltar a ligar AirPods» para ligar o par existente. Pause a reprodução e o microfone e coloque os AirPods em modo de emparelhamento. O dongle procurará um par.</string>
     <string name="dongle_pair_phone">Permitir emparelhamento Bluetooth de um telefone</string>
     <string name="dongle_profile_idle">Pause a reprodução e o microfone antes de alterar o perfil de saída.</string>
     <string name="dongle_phone_pairing">Emparelhamento Bluetooth disponível</string>

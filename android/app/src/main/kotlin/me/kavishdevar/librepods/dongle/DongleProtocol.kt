@@ -256,6 +256,8 @@ internal class DongleSession(private val io: suspend (Int, Int, ByteArray) -> By
         require(opcode in listOf(1, 2, 4))
         val target = refresh()
         check(target.capabilities and (if (opcode == 4) 4 else 1) != 0) { "This dongle does not support pairing controls" }
+        if (opcode != 1 && target.flags and (4 or 8 or 16 or 64) != 0)
+            throw DongleRequestException("Pause playback, stop microphone use and disconnect the phone relay before pairing.")
         val token = ((target.lastSequence + 1) and 0xffff_ffffL).takeIf { it != 0L } ?: 1L
         val request = DongleProtocol.header(2).also {
             it[7] = opcode.toByte(); DongleProtocol.put32(it, 8, target.generation)
@@ -267,7 +269,10 @@ internal class DongleSession(private val io: suspend (Int, Int, ByteArray) -> By
         while (now() < deadline) {
             val current = refresh()
             if (current.lastSequence == token && current.lastOpcode == opcode) {
-                if (current.lastResult == 2) throw DongleBusyException()
+                if (current.lastResult == 2) {
+                    if (opcode == 2) throw DongleRequestException("Pairing may have changed the saved AirPods. Check the dongle status before trying again.")
+                    throw DongleBusyException()
+                }
                 check(current.lastResult == 1) { "The dongle did not accept the request" }
                 return current
             }

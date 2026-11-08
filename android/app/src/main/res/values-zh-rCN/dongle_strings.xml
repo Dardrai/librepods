@@ -112,7 +112,7 @@
     <string name="dongle_usb_audio_available">USB 控制已连接 · 耳机可用</string>
     <string name="dongle_reconnect_airpods">重新连接 AirPods</string>
     <string name="dongle_pair_airpods">配对 AirPods</string>
-    <string name="dongle_pair_airpods_description">暂停播放和麦克风使用，然后将 AirPods 置于配对模式。适配器将搜索耳机。</string>
+    <string name="dongle_pair_airpods_description">配对会清除适配器中保存的 AirPods 配对信息。如需连接现有耳机，请使用“重新连接 AirPods”。暂停播放和麦克风使用，然后将 AirPods 置于配对模式。适配器将搜索耳机。</string>
     <string name="dongle_pair_phone">允许蓝牙手机配对</string>
     <string name="dongle_profile_idle">更改输出配置前，请暂停播放和麦克风使用。</string>
     <string name="dongle_phone_pairing">可进行蓝牙配对</string>

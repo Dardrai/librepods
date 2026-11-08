@@ -114,7 +114,7 @@
     <string name="dongle_usb_audio_available">USB-Steuerung verbunden · Kopfhörer verfügbar</string>
     <string name="dongle_reconnect_airpods">AirPods erneut verbinden</string>
     <string name="dongle_pair_airpods">AirPods koppeln</string>
-    <string name="dongle_pair_airpods_description">Wiedergabe und Mikrofon pausieren und die AirPods in den Kopplungsmodus versetzen. Der Dongle sucht nach einem Paar.</string>
+    <string name="dongle_pair_airpods_description">Beim Koppeln wird die auf dem Dongle gespeicherte AirPods-Kopplung gelöscht. Nutze „AirPods erneut verbinden“, um das vorhandene Paar zu verbinden. Wiedergabe und Mikrofon pausieren und die AirPods in den Kopplungsmodus versetzen. Der Dongle sucht nach einem Paar.</string>
     <string name="dongle_pair_phone">Bluetooth-Telefonkopplung erlauben</string>
     <string name="dongle_profile_idle">Wiedergabe und Mikrofon pausieren, bevor das Ausgabeprofil geändert wird.</string>
     <string name="dongle_phone_pairing">Bluetooth-Kopplung verfügbar</string>

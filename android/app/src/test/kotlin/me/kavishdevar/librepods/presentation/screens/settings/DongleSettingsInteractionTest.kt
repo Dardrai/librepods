@@ -15,6 +15,7 @@ import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.hasAnyAncestor
+import androidx.compose.ui.test.hasClickAction
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.isDialog
 import androidx.compose.ui.test.junit4.createComposeRule
@@ -38,6 +39,10 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.mockito.Answers
 import org.mockito.Mockito.mock
+import org.mockito.Mockito.`when`
+import org.mockito.Mockito.never
+import org.mockito.Mockito.verify
+import kotlinx.coroutines.flow.MutableStateFlow
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.LooperMode
@@ -56,6 +61,24 @@ class DongleSettingsInteractionTest {
 
     private val editors = mutableListOf<DongleControlTestEditors>()
     @After fun closeEditors() { editors.forEach { it.close() } }
+    @Test fun pairingDialogDisclosesTheSavedPairRemovalBeforeAnyPairCommand() {
+        val controller = mock(DongleController::class.java)
+        val state = current.value.copy(usb = true, status = current.value.status!!.copy(flags = 0, capabilities = 1))
+        `when`(controller.state).thenReturn(MutableStateFlow(state))
+        compose.setContent {
+            LibrePodsTheme(designSystem = DesignSystem.Material) {
+                Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+                    DongleSettingsSection(controller = controller)
+                }
+            }
+        }
+        compose.onNodeWithText("Pair AirPods").performScrollTo().performClick()
+        compose.onNode(hasText("clears the dongle’s saved AirPods pairing", substring = true) and hasAnyAncestor(isDialog())).assertExists()
+        compose.onNode(hasText("Use Reconnect AirPods to connect the existing pair", substring = true) and hasAnyAncestor(isDialog())).assertExists()
+        verify(controller, never()).pairingCommand(2)
+        compose.onNode(hasText("Pair AirPods") and hasClickAction() and hasAnyAncestor(isDialog())).performClick()
+        verify(controller).pairingCommand(2)
+    }
     @Test fun hydration_without_edits_does_not_write_a_hearing_profile() {
         show(hearing = profile)
         compose.waitForIdle()

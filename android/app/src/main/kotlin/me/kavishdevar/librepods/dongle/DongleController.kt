@@ -658,19 +658,28 @@ internal class DongleController(context: Context) : Closeable {
     fun pairingCommand(opcode: Int) {
         require(opcode in listOf(1, 2, 4))
         val mine = lifecycle.current()
-        scope.launch { io.withLock {
+        val started = lifecycle.publish(mine) {
+            if (mutableState.value.busy) return@publish false
+            mutableState.update { it.copy(busy = true, error = null) }
+            true
+        }
+        if (!started) return
+        scope.launch {
+            try { io.withLock {
             val client = session ?: return@withLock
             if (client.controlEpoch != mine) return@withLock
-            try {
-                publish(client) { mutableState.update { it.copy(busy = true, error = null) } }
-                client.command(opcode)
-                refresh(client)
-            } catch (cancelled: CancellationException) { throw cancelled }
-            catch (error: Exception) { runCatching { publish(client) {
-                mutableState.update { it.copy(error = if (error is DongleBusyException) CONTROL_BUSY else "The dongle did not confirm the request.") }
+            client.command(opcode)
+            refresh(client)
+            } } catch (cancelled: CancellationException) { throw cancelled }
+            catch (error: Exception) { runCatching { lifecycle.publish(mine) {
+                mutableState.update { it.copy(error = when (error) {
+                    is DongleBusyException -> CONTROL_BUSY
+                    is DongleRequestException -> error.message
+                    else -> "The dongle did not confirm the request."
+                }) }
             } } }
-            finally { runCatching { publish(client) { mutableState.update { it.copy(busy = false) } } } }
-        } }
+            finally { runCatching { lifecycle.publish(mine) { mutableState.update { it.copy(busy = false) } } } }
+        }
     }
     private fun <T> publish(client: DongleSession, block: () -> T): T = lifecycle.publish(client.controlEpoch) {
         if (session !== client) throw CancellationException("Dongle session changed")

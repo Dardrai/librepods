@@ -79,7 +79,7 @@ internal fun DongleTransparencyScreen(navigateBack: (() -> Unit)?,
     val live by editor.state.collectAsState()
     TransparencyPage(navigateBack) {
         TransparencyControls(live.displayed, state.controlSession, live.revision,
-            writable = state.connected && (!state.busy || live.pending) && state.status?.microphoneActive == false,
+            writable = state.connected && (!state.busy || live.pending || live.requested != null) && state.status?.microphoneActive == false,
             canEnable = state.hearingModes.customTransparencyAllowed,
             transportAvailable = true, result = state.transparencyResult,
             onEdit = { editor.edit(live.revision, it) }, onFinished = { editor.flush() },

@@ -113,7 +113,7 @@
     <string name="dongle_usb_audio_available">Đã kết nối điều khiển USB · tai nghe khả dụng</string>
     <string name="dongle_reconnect_airpods">Kết nối lại AirPods</string>
     <string name="dongle_pair_airpods">Ghép đôi AirPods</string>
-    <string name="dongle_pair_airpods_description">Tạm dừng phát và sử dụng micrô, rồi chuyển AirPods sang chế độ ghép đôi. Dongle sẽ tìm một cặp tai nghe.</string>
+    <string name="dongle_pair_airpods_description">Việc ghép đôi sẽ xóa liên kết AirPods đã lưu trên dongle. Dùng «Kết nối lại AirPods» để kết nối cặp hiện có. Tạm dừng phát và sử dụng micrô, rồi chuyển AirPods sang chế độ ghép đôi. Dongle sẽ tìm một cặp tai nghe.</string>
     <string name="dongle_pair_phone">Cho phép ghép đôi điện thoại qua Bluetooth</string>
     <string name="dongle_profile_idle">Tạm dừng phát và sử dụng micrô trước khi đổi cấu hình đầu ra.</string>
     <string name="dongle_phone_pairing">Có thể ghép đôi Bluetooth</string>

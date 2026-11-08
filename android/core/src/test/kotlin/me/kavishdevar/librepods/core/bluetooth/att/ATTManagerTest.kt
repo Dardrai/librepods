@@ -13,6 +13,7 @@ import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.atomic.AtomicBoolean
 
 class ATTManagerTest {
     private fun transparency(): ByteArray = ByteArray(104)
@@ -23,9 +24,11 @@ class ATTManagerTest {
         val replies = LinkedBlockingQueue<ByteArray>()
         val closed = CountDownLatch(1)
         var connectAction: (() -> Unit)? = null
+        var onRead: (() -> Unit)? = null
         var reply: (ByteArray) -> ByteArray? = { null }
         override fun connect() { connectAction?.invoke(); if (closed.count == 0L) error("closed"); connected = true }
         override fun read(buffer: ByteArray): Int {
+            onRead?.invoke()
             val pdu = replies.take()
             if (pdu.isEmpty()) return -1
             require(pdu.size <= buffer.size)
@@ -165,6 +168,131 @@ class ATTManagerTest {
         assertNull(manager.readCharacteristic(ATTHandle.TRANSPARENCY))
         assertEquals(4, starts.get())
         manager.disconnect()
+    }
+
+    @Test fun completedReadSurvivesPeerCloseWithoutKeepingTheBearerWritable() = runBlocking {
+        val old = Transport().also { script(it) }
+        val base = old.reply
+        old.reply = { request -> if (request[0] == 0x0a.toByte()) {
+            old.replies.put(base(request)!!)
+            old.replies.put(byteArrayOf())
+            assertTrue(old.closed.await(1, TimeUnit.SECONDS))
+            null
+        } else base(request) }
+        val next = Transport().also { script(it) }
+        val owner = ATTOwner(Any(), 1)
+        val starts = AtomicInteger()
+        val manager = ATTManager({ owner }, { if (starts.getAndIncrement() == 0) old else next })
+        try {
+            assertArrayEquals(transparency(), manager.readCharacteristic(ATTHandle.TRANSPARENCY))
+            assertFalse(manager.available)
+            assertNull(manager.sessionToken())
+            assertFalse(manager.writeCharacteristic(ATTHandle.TRANSPARENCY, transparency(), transparency()) { true })
+            assertTrue(manager.canRetryRead())
+            assertArrayEquals(transparency(), manager.readCharacteristic(ATTHandle.TRANSPARENCY))
+            assertTrue(manager.available)
+            assertEquals(2, starts.get())
+        } finally { manager.disconnect() }
+    }
+
+    @Test fun closedReadCannotSurviveExplicitCancellationOwnerChangeOrInvalidValue() = runBlocking {
+        for (failure in listOf("disconnect", "owner", "admission", "truncated", "rejected")) {
+            val socket = Transport().also { script(it) }
+            val base = socket.reply
+            val owner = AtomicReference(ATTOwner(Any(), 1))
+            var admitted = true
+            lateinit var manager: ATTManager
+            socket.reply = { request -> if (request[0] == 0x0a.toByte()) {
+                socket.replies.put(when (failure) {
+                    "truncated" -> byteArrayOf(0x0b) + ByteArray(103)
+                    "rejected" -> byteArrayOf(1, 0x0a, 0x35, 0, 0x0e)
+                    else -> base(request)!!
+                })
+                socket.replies.put(byteArrayOf())
+                assertTrue(socket.closed.await(1, TimeUnit.SECONDS))
+                if (failure == "disconnect") manager.disconnect()
+                if (failure == "owner") owner.set(ATTOwner(Any(), 2))
+                if (failure == "admission") admitted = false
+                null
+            } else base(request) }
+            manager = ATTManager({ owner.get() }, { socket })
+            try {
+                assertNull(manager.readCharacteristic(ATTHandle.TRANSPARENCY, { admitted }))
+                assertFalse(manager.available)
+                assertNull(manager.sessionToken())
+                assertFalse(manager.writeCharacteristic(ATTHandle.TRANSPARENCY, transparency(), transparency()) { true })
+                if (failure != "owner" && failure != "admission") assertFalse(manager.canRetryRead())
+            } finally { manager.disconnect() }
+        }
+    }
+
+    @Test fun completedReadSurvivesSocketLossBeforeReaderObservesEof() = runBlocking {
+        val socket = Transport().also { script(it) }
+        val base = socket.reply
+        val owner = ATTOwner(Any(), 1)
+        val manager = ATTManager({ owner }, { socket })
+        val replying = AtomicBoolean()
+        val nextRead = CountDownLatch(1)
+        socket.onRead = { if (replying.get()) nextRead.countDown() }
+        socket.reply = { request -> if (request[0] == 0x0a.toByte()) {
+            replying.set(true)
+            socket.replies.put(base(request)!!)
+            // The reader consumed the reply, then blocked on the next read before transport loss.
+            assertTrue(nextRead.await(1, TimeUnit.SECONDS))
+            socket.connected = false
+            null
+        } else base(request) }
+        try {
+            assertArrayEquals(transparency(), manager.readCharacteristic(ATTHandle.TRANSPARENCY))
+            assertFalse(manager.available)
+            assertNull(manager.sessionToken())
+        } finally { manager.disconnect() }
+    }
+
+    @Test fun closeAfterPreWriteReadNeverSendsOrQuarantinesAnUnsentWrite() = runBlocking {
+        val socket = Transport().also { script(it) }
+        val owner = ATTOwner(Any(), 1)
+        val manager = ATTManager({ owner }, { socket })
+        try {
+            val baseline = manager.readCharacteristic(ATTHandle.TRANSPARENCY)!!
+            val next = baseline.copyOf().also { ByteBuffer.wrap(it).order(ByteOrder.LITTLE_ENDIAN).putFloat(36, .25f) }
+            val base = socket.reply
+            socket.reply = { request -> if (request[0] == 0x0a.toByte()) {
+                socket.replies.put(base(request)!!)
+                socket.replies.put(byteArrayOf())
+                assertTrue(socket.closed.await(1, TimeUnit.SECONDS))
+                null
+            } else base(request) }
+            assertFalse(manager.writeCharacteristic(ATTHandle.TRANSPARENCY, next, baseline) { true })
+            assertTrue(manager.canRetryRead())
+            assertFalse(manager.available)
+            assertFalse(socket.requests.any { it[0] in byteArrayOf(0x12, 0x52) })
+        } finally { manager.disconnect() }
+    }
+
+    @Test fun completedReadbackFollowedByCloseCannotConfirmOrRetryAWrite() = runBlocking {
+        val socket = Transport().also { script(it) }
+        val owner = ATTOwner(Any(), 1)
+        val manager = ATTManager({ owner }, { socket })
+        try {
+            val baseline = manager.readCharacteristic(ATTHandle.TRANSPARENCY)!!
+            val next = baseline.copyOf().also { ByteBuffer.wrap(it).order(ByteOrder.LITTLE_ENDIAN).putFloat(36, .25f) }
+            val base = socket.reply
+            var written = false
+            socket.reply = { request ->
+                if (request[0] == 0x12.toByte()) written = true
+                if (request[0] == 0x0a.toByte() && written) {
+                    socket.replies.put(base(request)!!)
+                    socket.replies.put(byteArrayOf())
+                    assertTrue(socket.closed.await(1, TimeUnit.SECONDS))
+                    null
+                } else base(request)
+            }
+            assertFalse(manager.writeCharacteristic(ATTHandle.TRANSPARENCY, next, baseline) { true })
+            assertFalse(manager.canRetryRead())
+            assertFalse(manager.available)
+            assertEquals(1, socket.requests.count { it[0] == 0x12.toByte() })
+        } finally { manager.disconnect() }
     }
 
     @Test fun malformedAndSecurityResponsesCannotOpenAReplacementBearer() = runBlocking {

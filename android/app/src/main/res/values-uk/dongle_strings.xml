@@ -115,7 +115,7 @@
     <string name="dongle_usb_audio_available">Керування USB під’єднано · навушники доступні</string>
     <string name="dongle_reconnect_airpods">Знову під’єднати AirPods</string>
     <string name="dongle_pair_airpods">Сполучити AirPods</string>
-    <string name="dongle_pair_airpods_description">Призупиніть відтворення та мікрофон, а потім увімкніть режим сполучення AirPods. Адаптер шукатиме пару.</string>
+    <string name="dongle_pair_airpods_description">Сполучення видаляє збережене на адаптері сполучення AirPods. Щоб під’єднати наявну пару, виберіть «Знову під’єднати AirPods». Призупиніть відтворення та мікрофон, а потім увімкніть режим сполучення AirPods. Адаптер шукатиме пару.</string>
     <string name="dongle_pair_phone">Дозволити сполучення телефону через Bluetooth</string>
     <string name="dongle_profile_idle">Перед зміною вихідного профілю призупиніть відтворення та мікрофон.</string>
     <string name="dongle_phone_pairing">Сполучення Bluetooth доступне</string>

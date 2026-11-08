@@ -114,7 +114,7 @@
     <string name="dongle_usb_audio_available">Commandes USB connectées · écouteurs disponibles</string>
     <string name="dongle_reconnect_airpods">Reconnecter les AirPods</string>
     <string name="dongle_pair_airpods">Associer les AirPods</string>
-    <string name="dongle_pair_airpods_description">Mettez la lecture et le microphone en pause, puis activez le mode d’association des AirPods. Le dongle recherchera une paire.</string>
+    <string name="dongle_pair_airpods_description">Cette action efface l’appairage AirPods enregistré sur le dongle. Utilisez « Reconnecter les AirPods » pour connecter la paire existante. Mettez la lecture et le microphone en pause, puis activez le mode d’association des AirPods. Le dongle recherchera une paire.</string>
     <string name="dongle_pair_phone">Autoriser l’association Bluetooth d’un téléphone</string>
     <string name="dongle_profile_idle">Mettez la lecture et le microphone en pause avant de changer le profil de sortie.</string>
     <string name="dongle_phone_pairing">Association Bluetooth disponible</string>

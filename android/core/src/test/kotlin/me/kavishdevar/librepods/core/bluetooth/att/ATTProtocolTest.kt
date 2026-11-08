@@ -31,7 +31,7 @@ class ATTProtocolTest {
     @Test fun timeoutRetiresBearerAndLateReplyCannotCompleteAnotherRead() {
         var closed = false
         var sends = 0
-        val bearer = ATTBearer(256, { sends++ }, { closed = true }, { true })
+        val bearer = ATTBearer(256, { sends++ }, { _, _ -> closed = true }, { true })
         assertThrows(ATTFailure::class.java) { bearer.request(byteArrayOf(0x0a, 0x35, 0), 0x0b, 1) }
         assertTrue(closed)
         bearer.receive(byteArrayOf(0x0b, 1))
@@ -43,7 +43,7 @@ class ATTProtocolTest {
         for (reply in listOf(byteArrayOf(1, 0x12, 0x36, 0, 0x0e), byteArrayOf(0x13, 0))) {
             var closed = false
             lateinit var bearer: ATTBearer
-            bearer = ATTBearer(256, { bearer.receive(reply) }, { closed = true }, { true })
+            bearer = ATTBearer(256, { bearer.receive(reply) }, { _, _ -> closed = true }, { true })
             assertThrows(ATTFailure::class.java) { bearer.request(byteArrayOf(0x12, 0x35, 0, 1), 0x13) }
             assertTrue(closed)
         }

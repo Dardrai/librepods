@@ -114,7 +114,7 @@
     <string name="dongle_usb_audio_available">USB kontrolleri bağlı · kulaklıklar kullanılabilir</string>
     <string name="dongle_reconnect_airpods">AirPods’u yeniden bağla</string>
     <string name="dongle_pair_airpods">AirPods’u eşleştir</string>
-    <string name="dongle_pair_airpods_description">Oynatmayı ve mikrofonu duraklatıp AirPods’u eşleştirme moduna alın. Dongle bir çift arayacak.</string>
+    <string name="dongle_pair_airpods_description">Eşleştirme, dongle’da kayıtlı AirPods eşleştirmesini siler. Mevcut çifti bağlamak için «AirPods’u yeniden bağla» seçeneğini kullanın. Oynatmayı ve mikrofonu duraklatıp AirPods’u eşleştirme moduna alın. Dongle bir çift arayacak.</string>
     <string name="dongle_pair_phone">Bluetooth telefon eşleştirmesine izin ver</string>
     <string name="dongle_profile_idle">Çıkış profilini değiştirmeden önce oynatmayı ve mikrofonu duraklatın.</string>
     <string name="dongle_phone_pairing">Bluetooth eşleştirmesi kullanılabilir</string>

@@ -69,13 +69,15 @@ class LiveRecordEditorTest {
             rig.finish(first, writable = false)
             withTimeout(2_000) { while (rig.editor.state.value.pending) delay(5) }
             assertArrayEquals(record(1, 2), rig.editor.state.value.requested)
+            assertTrue(rig.edit(2, 3))
+            assertArrayEquals(record(1, 2, 3), rig.editor.state.value.requested)
             delay(200)
             assertTrue(rig.calls.tryReceive().isFailure)
             rig.source.set(rig.source.get().copy(writable = true))
             rig.editor.observe()
             val second = rig.next()
             assertArrayEquals(record(1), second.expected)
-            assertArrayEquals(record(1, 2), second.value)
+            assertArrayEquals(record(1, 2, 3), second.value)
             rig.finish(second)
             rig.settled()
         }

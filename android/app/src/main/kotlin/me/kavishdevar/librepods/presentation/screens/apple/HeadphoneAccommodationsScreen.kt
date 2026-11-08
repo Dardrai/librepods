@@ -88,7 +88,7 @@ internal fun DongleAccommodationsScreen(navigateBack: (() -> Unit)?,
             received = state.hearingModes.receivedAccommodations(state.controlSession),
             hasReceivedPme = state.controlSession > 0 && state.hearingModes.hasReceivedPme,
             preferenceKey = accommodationsPairKey(state.status?.address),
-            presetsWritable = true, enabled = state.connected && (!state.busy || live.pending) && state.status?.microphoneActive == false,
+            presetsWritable = true, enabled = state.connected && (!state.busy || live.pending || live.requested != null) && state.status?.microphoneActive == false,
             onEdit = { curves, change -> editor.edit(live.revision, curves, change) }, navigateToTransparency = navigateToTransparency,
             requested = live.requested?.selection, revision = live.revision, ownPending = live.pending, onFinished = { editor.flush() },
             onCanceled = { editor.cancel(live.revision) }, error = state.error)

@@ -77,6 +77,26 @@ class DongleControllerLifecycleTest {
         mediaAudio.set(null, previousAudio)
     }
 
+    @Test fun repeatedPairTapsWhileIoIsOccupiedSendOnceAndKeepTheUncertainOutcomeVisible() = runBlocking {
+        val client = mock(DongleSession::class.java)
+        val status = DongleProtocol.Status(3, listOf(1, 2, 3, 4, 5, 6), 0, 0, listOf(null, null, null), 0, 1)
+        val failure = "Pairing may have changed the saved AirPods. Check the dongle status before trying again."
+        `when`(client.refresh()).thenReturn(status)
+        `when`(client.command(2)).thenAnswer { throw DongleRequestException(failure) }
+        attach(client, status)
+        val io = field("io").get(controller) as Mutex
+        io.lock()
+        try {
+            controller.pairingCommand(2)
+            controller.pairingCommand(2)
+            assertTrue(controller.state.value.busy)
+            verify(client, never()).command(2)
+        } finally { io.unlock() }
+        withTimeout(3_000) { while (controller.state.value.busy) delay(5) }
+        verify(client, times(1)).command(2)
+        assertEquals(failure, controller.state.value.error)
+    }
+
     @Test fun closingTheShadeKeepsPickerRefreshUntilTheLastObserverLeaves() {
         controller.automaticPause(false)
         val shade = listOf("listening")

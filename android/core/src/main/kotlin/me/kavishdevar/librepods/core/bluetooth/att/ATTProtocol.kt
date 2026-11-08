@@ -76,7 +76,7 @@ internal fun ByteArray.u16(offset: Int): Int = (this[offset].toInt() and 255) or
 internal class ATTBearer(
     private val mtu: Int,
     private val send: (ByteArray) -> Unit,
-    private val close: (Boolean) -> Unit,
+    private val close: (Boolean, Boolean) -> Unit,
     private val current: () -> Boolean
 ) {
     private class Pending(val request: ByteArray, val opcode: Int) {
@@ -113,8 +113,12 @@ internal class ATTBearer(
                 retire(retryable = true)
                 throw ATTFailure("ATT response timed out", retryable = true)
             }
-            if (!isCurrent || !canSend()) throw ATTFailure("ATT request retired", retryable = true)
-            waiting.response?.copyOf() ?: throw ATTFailure("ATT response unavailable", retryable = true)
+            synchronized(this) {
+                // ATTManager still checks the owner and admission before publishing a completed read.
+                val completedRead = waiting.opcode == 0x0b && waiting.response != null
+                if ((!isCurrent && !completedRead) || !canSend()) throw ATTFailure("ATT request retired", retryable = true)
+                waiting.response?.copyOf() ?: throw ATTFailure("ATT response unavailable", retryable = true)
+            }
         } catch (interrupted: InterruptedException) {
             Thread.currentThread().interrupt()
             retire(retryable = true)
@@ -140,9 +144,12 @@ internal class ATTBearer(
         waiting.done.countDown()
     }
 
-    fun retire(retryable: Boolean = false) {
-        if (!retired.compareAndSet(false, true)) return
-        synchronized(this) { pending?.done?.countDown() }
-        close(retryable)
+    fun retire(retryable: Boolean = false, preserveCompletedRead: Boolean = false) {
+        synchronized(this) {
+            if (!preserveCompletedRead) pending?.response = null
+            if (!retired.compareAndSet(false, true)) return
+            pending?.done?.countDown()
+        }
+        close(retryable, preserveCompletedRead)
     }
 }

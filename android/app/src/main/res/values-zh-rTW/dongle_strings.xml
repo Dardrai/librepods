@@ -112,7 +112,7 @@
     <string name="dongle_usb_audio_available">USB 控制已連接 · 耳機可用</string>
     <string name="dongle_reconnect_airpods">重新連接 AirPods</string>
     <string name="dongle_pair_airpods">配對 AirPods</string>
-    <string name="dongle_pair_airpods_description">暫停播放和麥克風使用，然後將 AirPods 置於配對模式。轉接器將搜尋耳機。</string>
+    <string name="dongle_pair_airpods_description">配對會清除轉接器中儲存的 AirPods 配對資訊。如要連接現有耳機，請使用「重新連接 AirPods」。暫停播放和麥克風使用，然後將 AirPods 置於配對模式。轉接器將搜尋耳機。</string>
     <string name="dongle_pair_phone">允許藍牙手機配對</string>
     <string name="dongle_profile_idle">變更輸出設定前，請暫停播放和麥克風使用。</string>
     <string name="dongle_phone_pairing">可進行藍牙配對</string>

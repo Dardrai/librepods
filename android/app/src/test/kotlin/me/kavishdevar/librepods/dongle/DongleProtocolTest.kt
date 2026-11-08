@@ -14,6 +14,50 @@ class DongleProtocolTest {
         it[7] = 3; DongleProtocol.put32(it, 8, generation)
         it[12] = 1; it[19] = 91; it[20] = 92; it[21] = -1; it[42] = 0x1f
     }
+    @Test fun pairingChecksCurrentAudioAndCaptureBeforeSendingEitherPairCommand() = runBlocking {
+        for (opcode in listOf(2, 4)) for (flag in listOf(4, 8, 16, 64)) {
+            var writes = 0
+            var report = status().also { it[7] = flag.toByte() }
+            val client = DongleSession({ operation, id, request ->
+                assertEquals(2, id)
+                if (operation == 2) {
+                    writes++
+                    report = report.copyOf().also {
+                        DongleProtocol.put32(it, 36, DongleProtocol.u32(request, 18))
+                        it[40] = 1; it[41] = opcode.toByte()
+                    }
+                }
+                report
+            })
+            try { client.command(opcode); fail("Active audio/capture must block pairing") }
+            catch (error: DongleRequestException) { assertTrue(error.message.orEmpty().contains("Pause playback")) }
+            assertEquals(0, writes)
+        }
+    }
+    @Test fun airPodsPairBusyAfterSubmissionIsUncertainAndIsNotRetried() = runBlocking {
+        for (opcode in listOf(2, 4)) {
+            var writes = 0
+            var report = status()
+            val client = DongleSession({ operation, _, request ->
+                if (operation == 2) {
+                    writes++
+                    report = report.copyOf().also {
+                        DongleProtocol.put32(it, 36, DongleProtocol.u32(request, 18))
+                        it[40] = 2; it[41] = opcode.toByte()
+                    }
+                }
+                report
+            })
+            try { client.command(opcode); fail("Pairing must not report success") }
+            catch (error: IOException) {
+                if (opcode == 2) {
+                    assertFalse(error is DongleBusyException)
+                    assertTrue(error.message.orEmpty().contains("may have changed"))
+                } else assertTrue(error is DongleBusyException)
+            }
+            assertEquals(1, writes)
+        }
+    }
     @Test fun fragmented_and_coalesced_frames_keep_boundaries() {
         val response = byteArrayOf(65, 80, 68, 71, 1, 0x81.toByte(), 2, 64) + status()
         val bytes = ByteArrayInputStream(response + response)
