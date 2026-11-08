@@ -27,7 +27,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -150,7 +149,11 @@ class NearbyDeviceConnectionTest {
         devices.value = mapOf(address to device)
     }
 
-    @After fun close() { (field("serviceScope").get(service) as CoroutineScope).cancel() }
+    @After fun close() = runBlocking {
+        withTimeout(2_000) {
+            checkNotNull((field("serviceScope").get(service) as CoroutineScope).coroutineContext[Job]).cancelAndJoin()
+        }
+    }
 
     @Test fun onlyNewNativeMediaEndpointsEmitConnectionFeedback() = runBlocking<Unit> {
         val bluetoothManager = mock(BluetoothManager::class.java)
