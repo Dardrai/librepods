@@ -10,6 +10,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
@@ -71,7 +72,7 @@ internal fun ListeningModePanel(snapshot: ListeningModeSnapshot?, commandFailed:
         Box(Modifier.matchParentSize().layerBackdrop(backdrop)
             .background(MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.18f)))
         Column(Modifier.verticalScroll(rememberScrollState()).padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            verticalArrangement = Arrangement.spacedBy(16.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Icon(LocalIcons.current.Headphones, null, Modifier.size(24.dp), tint = MaterialTheme.colorScheme.onSurface)
@@ -92,14 +93,14 @@ internal fun ListeningModePanel(snapshot: ListeningModeSnapshot?, commandFailed:
             BoxWithConstraints(Modifier.fillMaxWidth()) {
                 val twoColumns = maxWidth >= 340.dp && LocalDensity.current.fontScale <= 1.2f
                 val states = snapshot?.quickSettings.orEmpty().associateBy { it.setting }
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
                     val pairs = listOf(
                         listOf(QuickSetting.CONVERSATION_AWARENESS, QuickSetting.PERSONALIZED_VOLUME),
                         listOf(QuickSetting.EAR_DETECTION, QuickSetting.GAME_MODE),
                         listOf(QuickSetting.LOUD_SOUND_REDUCTION),
                         listOf(QuickSetting.HEARING_AID, QuickSetting.MEDIA_ASSIST))
                     for (pair in pairs) {
-                        if (twoColumns) Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        if (twoColumns) Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                             for (setting in pair) QuickSettingsToggle(
                                 states[setting] ?: QuickSettingState(setting, null, supported = true, enabled = false, reading = true),
                                 backdrop, onToggle, Modifier.weight(1f), compact = pair.size > 1)
@@ -116,7 +117,9 @@ internal fun ListeningModePanel(snapshot: ListeningModeSnapshot?, commandFailed:
 @Composable
 private fun QuickSettingsToggle(state: QuickSettingState, backdrop: Backdrop,
     onToggle: (QuickSetting, Boolean) -> Unit, modifier: Modifier = Modifier, compact: Boolean = false) {
-    val title = stringResource(when (state.setting) {
+    val title = stringResource(if (state.recoveryOff) {
+        if (state.setting == QuickSetting.HEARING_AID) R.string.hearing_aid_recovery_off else R.string.media_assist_recovery_off
+    } else when (state.setting) {
         QuickSetting.CONVERSATION_AWARENESS -> R.string.conversation_awareness
         QuickSetting.EAR_DETECTION -> R.string.ear_detection
         QuickSetting.GAME_MODE -> R.string.native_game_mode
@@ -125,17 +128,24 @@ private fun QuickSettingsToggle(state: QuickSettingState, backdrop: Backdrop,
         QuickSetting.HEARING_AID -> R.string.hearing_aid
         QuickSetting.MEDIA_ASSIST -> R.string.media_assist
     })
-    val description = stringResource(when {
+    val status = stringResource(when {
         !state.supported -> R.string.not_available
         state.pending -> R.string.hearing_mode_pending
         state.requested -> R.string.quick_setting_requested
-        state.checked == null && state.reading -> R.string.hearing_modes_unknown
+        state.reading -> R.string.quick_setting_reading
         state.checked == null -> R.string.hearing_mode_unconfirmed
         state.checked -> R.string.on
         else -> R.string.off
     })
+    val description = when {
+        state.retained && !state.reading && !state.pending && state.checked != null ->
+            stringResource(R.string.quick_setting_last_known, stringResource(if (state.checked) R.string.on else R.string.off))
+        state.setting.control != null && state.requested && !state.pending && state.checked != null ->
+            stringResource(R.string.quick_setting_preference, stringResource(if (state.checked) R.string.on else R.string.off))
+        else -> status
+    }
     val canCancelGameMode = state.setting == QuickSetting.GAME_MODE && state.checked == true
-    val enabled = state.supported && state.enabled && (!state.pending || canCancelGameMode) && state.checked != null
+    val enabled = state.supported && state.enabled && (!state.pending || canCancelGameMode) && (state.checked != null || state.recoveryOff)
     val interactions = remember { MutableInteractionSource() }
     val pressed by interactions.collectIsPressedAsState()
     val pressProgress by animateFloatAsState(if (enabled && pressed) 1f else 0f,
@@ -148,21 +158,25 @@ private fun QuickSettingsToggle(state: QuickSettingState, backdrop: Backdrop,
     val iconColor by animateColorAsState(if (state.checked == true) MaterialTheme.colorScheme.onPrimary
         else foreground, tween(180), label = "quickControlIcon")
     val haptics = LocalHapticFeedback.current
-    Row(modifier.heightIn(min = if (compact) 96.dp else 72.dp)
+    val activate = {
+        val value = if (state.recoveryOff) false else state.checked?.not()
+        if (value != null) {
+            haptics.performHapticFeedback(if (value) HapticFeedbackType.ToggleOn else HapticFeedbackType.ToggleOff)
+            onToggle(state.setting, value)
+        }
+    }
+    val input = if (state.recoveryOff) Modifier.clickable(enabled = enabled, role = Role.Button,
+        interactionSource = interactions, indication = null, onClick = activate)
+    else Modifier.triStateToggleable(state = when (state.checked) {
+        true -> ToggleableState.On; false -> ToggleableState.Off; null -> ToggleableState.Indeterminate
+    }, enabled = enabled, role = Role.Switch, interactionSource = interactions, indication = null, onClick = activate)
+    Row(modifier.heightIn(min = if (compact) 80.dp else 64.dp)
         .appleGlassSurface(backdrop, enabled = state.supported, surfaceColor = color,
             pressProgress = pressProgress, pressScale = 0.018f)
-        .triStateToggleable(state = when (state.checked) {
-            true -> ToggleableState.On; false -> ToggleableState.Off; null -> ToggleableState.Indeterminate
-        }, enabled = enabled, role = Role.Switch, interactionSource = interactions, indication = null) {
-            val value = state.checked
-            if (value != null) {
-                haptics.performHapticFeedback(if (value) HapticFeedbackType.ToggleOff else HapticFeedbackType.ToggleOn)
-                onToggle(state.setting, !value)
-            }
-        }
+        .then(input)
         .semantics(mergeDescendants = true) { stateDescription = description }
         .testTag("quick-setting-${state.setting.name}")
-        .padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically,
+        .padding(horizontal = 16.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp)) {
         Box(Modifier.size(36.dp).clip(CircleShape).background(iconSurface), contentAlignment = Alignment.Center) {
             Icon(quickSettingIcon(state.setting), null, Modifier.size(20.dp), tint = iconColor)

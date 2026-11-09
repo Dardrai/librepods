@@ -177,6 +177,12 @@ class LibrePodsService: Service() {
     private lateinit var dongleControlsLazy: Lazy<me.kavishdevar.librepods.dongle.DongleController>
     internal val dongleControls by lazy { me.kavishdevar.librepods.dongle.DongleController(this) }.also { dongleControlsLazy = it }
     override fun dump(fd: FileDescriptor, writer: PrintWriter, args: Array<out String>?) {
+        if (args?.contains("--settings") == true) {
+            val activeDevices = devices.value.values.filterIsInstance<AppleDevice>()
+            writer.println("settings devices=${activeDevices.size}")
+            activeDevices.forEachIndexed { index, device -> dumpNativeSettings(writer, index, device) }
+            return
+        }
         if (args?.contains("--companion-media") == true) {
             val value = companionMediaDiagnostic.get()
             writer.println("companion_media stage=${value.stage} reason=${value.reason} " +

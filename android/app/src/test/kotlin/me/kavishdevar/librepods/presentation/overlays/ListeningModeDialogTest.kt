@@ -24,6 +24,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.flow.MutableStateFlow
 import me.kavishdevar.librepods.LibrePodsApplication
+import me.kavishdevar.librepods.R
 import me.kavishdevar.librepods.core.bluetooth.MacAddress
 import me.kavishdevar.librepods.core.bluetooth.aacp.AACPManager
 import me.kavishdevar.librepods.core.bluetooth.aacp.packet.ControlCommandPacket
@@ -56,8 +57,13 @@ import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.LooperMode
 import org.robolectric.shadow.api.Shadow
+import org.robolectric.shadows.ShadowToast
 import org.robolectric.util.ReflectionHelpers
 import org.robolectric.util.ReflectionHelpers.ClassParameter
+import java.io.IOException
+import java.io.PipedOutputStream
+import java.time.Duration
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.Executor
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -100,7 +106,11 @@ class ListeningModeDialogTest {
     }
 
     @After fun tearDown() {
-        dialog?.dismiss()
+        dialog?.let { popup ->
+            popup.dismiss()
+            val scope = ReflectionHelpers.getField<CoroutineScope>(popup, "scope")
+            await { scope.coroutineContext[Job]?.isCompleted == true }
+        }
         idle()
         sockets.forEach { (device, socket) -> device.aacp.disconnect(); socket.close() }
         (LibrePodsService::class.java.getDeclaredField("serviceScope").apply { isAccessible = true }.get(service) as CoroutineScope).cancel()
@@ -126,6 +136,7 @@ class ListeningModeDialogTest {
         assertEquals(0, output(target).available())
         assertTrue(popup.writeControl(ControlCommandIdentifier.LISTENING_MODE, 4))
         assertEquals(4, readCommand(target).value.single().toInt())
+        await { target.state.value.requestedControls[ControlCommandIdentifier.LISTENING_MODE]?.firstOrNull() == 4.toByte() }
         assertEquals(3, target.state.value.controlStates[ControlCommandIdentifier.LISTENING_MODE]!!.single().toInt())
         assertEquals(4, ListeningModeSnapshot(target.metadata.value, target.state.value, target.settings.value).mode)
         assertTrue(popup.writeControl(ControlCommandIdentifier.AUTO_ANC_STRENGTH, 72))
@@ -232,10 +243,12 @@ class ListeningModeDialogTest {
         assertFalse(popup.writeControl(ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG, 1))
         assertEquals(0, output(target).available())
         target.loadInitialState(target.state.value, AppleSettings(allowOffChoice = true), target.metadata.value)
+        settingsReady(target)
         assertTrue(popup.writeControl(ControlCommandIdentifier.LISTENING_MODE, 1))
         assertEquals(1, readCommand(target).value.single().toInt())
         target.loadInitialState(AppleState(controlStates = mapOf(ControlCommandIdentifier.LISTENING_MODE to byteArrayOf(4))),
             AppleSettings(), target.metadata.value.copy(model = AirPodsModel.AIRPODS_PRO_3))
+        settingsReady(target)
         assertFalse(popup.writeControl(ControlCommandIdentifier.AUTO_ANC_STRENGTH, 101))
         assertFalse(popup.writeControl(ControlCommandIdentifier.AUTO_ANC_STRENGTH, -1))
     }
@@ -467,15 +480,18 @@ class ListeningModeDialogTest {
     }
 
     @Test fun aFailedQuickSettingDoesNotMarkTheListeningModeRailAsFailed() {
-        val original = device()
-        val target = spy(original)
+        val target = device()
         seedQuickReports(target)
-        doReturn(false).`when`(target).setControlCommand(ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG, true)
+        val attempts = rejectOutput(target)
+        ShadowToast.reset()
         devices.value = mapOf(target.macAddress to target)
         val popup = open(target)
-        assertFalse(popup.writeQuickSetting(QuickSetting.CONVERSATION_AWARENESS, true))
+        assertEquals(0, attempts.get())
+        assertTrue(popup.writeQuickSetting(QuickSetting.CONVERSATION_AWARENESS, true))
+        await { ShadowToast.getTextOfLatestToast() == context.getString(R.string.att_setting_not_confirmed) }
+        assertEquals(1, attempts.get())
         assertFalse(ReflectionHelpers.callInstanceMethod<Boolean>(popup, "getCommandFailed"))
-        assertEquals(0, output(original).available())
+        assertEquals(0, output(target).available())
     }
 
     @Test fun quickSettingsCannotWriteToAReplacedPairOrAfterDismissal() {
@@ -507,14 +523,36 @@ class ListeningModeDialogTest {
         assertEquals(3, dongle.writes.size)
     }
 
-    @Test fun quickSettingsNeverInventABaselineFromASavedChoice() {
+    @Test fun nativeEarDetectionSavesItsConfiguredChoiceOnlyAfterTheCommandIsAccepted() {
         val target = device()
         devices.value = mapOf(target.macAddress to target)
         val popup = open(target)
-        assertFalse(popup.writeQuickSetting(QuickSetting.EAR_DETECTION, false))
         assertFalse(popup.writeQuickSetting(QuickSetting.CONVERSATION_AWARENESS, true))
         assertFalse(popup.writeQuickSetting(QuickSetting.PERSONALIZED_VOLUME, true))
         assertEquals(0, output(target).available())
+        assertTrue(popup.writeQuickSetting(QuickSetting.EAR_DETECTION, false))
+        val sent = readCommand(target)
+        assertEquals(ControlCommandIdentifier.EAR_DETECTION_CONFIG, sent.identifier)
+        assertEquals(1.toByte(), sent.value.single())
+        await { !target.settings.value.earDetectionEnabled }
+        assertEquals("off", target.settings.value.savedUnconfirmedChoices["desired_ear_detection"])
+        assertFalse(ControlCommandIdentifier.EAR_DETECTION_CONFIG in target.state.value.liveControlReports)
+    }
+
+    @Test fun aRejectedEarDetectionCommandLeavesTheConfiguredPreferenceUntouched() {
+        val target = device()
+        val attempts = rejectOutput(target)
+        ShadowToast.reset()
+        devices.value = mapOf(target.macAddress to target)
+        val popup = open(target)
+        assertEquals(0, attempts.get())
+        assertTrue(popup.writeQuickSetting(QuickSetting.EAR_DETECTION, false))
+        await { ShadowToast.getTextOfLatestToast() == context.getString(R.string.att_setting_not_confirmed) }
+        assertEquals(1, attempts.get())
+        assertTrue(target.settings.value.earDetectionEnabled)
+        assertNull(target.settings.value.savedUnconfirmedChoices["desired_ear_detection"])
+        assertEquals(0, output(target).available())
+        assertFalse(ControlCommandIdentifier.EAR_DETECTION_CONFIG in target.state.value.liveControlReports)
     }
 
     @Test fun anInFlightLoudSoundRequestRejectsDuplicatesAndDismissalRetiresItsUiWork() = runBlocking<Unit> {
@@ -587,15 +625,50 @@ class ListeningModeDialogTest {
         val socket = Shadow.newInstanceOf(BluetoothSocket::class.java).apply { connect() }
         sockets += device to socket
         AACPManager::class.java.getDeclaredField("socket").apply { isAccessible = true }.set(device.aacp, socket)
+        settingsReady(device)
         return device
     }
 
     private fun output(device: AppleDevice) = shadowOf(sockets.first { it.first === device }.second).outputStreamSink
     private fun readCommand(device: AppleDevice) = output(device).let { input ->
+        await { input.available() > 0 }
         val bytes = ByteArray(input.available())
         assertTrue(bytes.isNotEmpty())
         assertEquals(bytes.size, input.read(bytes))
         ControlCommandPacket.parse(bytes).controlCommand
     }
+    private fun settingsReady(device: AppleDevice) {
+        val state = ReflectionHelpers.getField<MutableStateFlow<AppleState>>(device, "_state")
+        if (state.value.controlSession <= 0) state.value = state.value.copy(controlSession = 1)
+        val socket = checkNotNull(device.aacp.captureAudioSocket())
+        val type = Class.forName(AACPManager::class.java.name + "\$SettingsStartup")
+        val startup = type.declaredConstructors.single().apply { isAccessible = true }.newInstance(socket, state.value.controlSession)
+        ReflectionHelpers.setField(startup, "sent", true)
+        ReflectionHelpers.setField(startup, "received", true)
+        ReflectionHelpers.setField(device.aacp, "settingsStartup", startup)
+    }
+
+    private fun rejectOutput(device: AppleDevice): AtomicInteger {
+        val attempts = AtomicInteger()
+        val socket = checkNotNull(device.aacp.captureAudioSocket())
+        shadowOf(socket).setOutputStream(object : PipedOutputStream() {
+            override fun write(data: ByteArray, offset: Int, length: Int) {
+                attempts.incrementAndGet()
+                throw IOException("Rejected synthetic control write")
+            }
+        })
+        return attempts
+    }
+
+    private fun await(condition: () -> Boolean) = runBlocking<Unit> {
+        withTimeout(2_000) {
+            while (!condition()) {
+                shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(10))
+                delay(5)
+            }
+        }
+        idle()
+    }
+
     private fun idle() = shadowOf(Looper.getMainLooper()).idle()
 }

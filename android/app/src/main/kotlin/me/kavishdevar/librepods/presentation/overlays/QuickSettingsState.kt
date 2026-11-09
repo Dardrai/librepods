@@ -26,11 +26,12 @@ internal enum class QuickSetting {
 }
 
 internal data class QuickSettingState(val setting: QuickSetting, val checked: Boolean?,
-    val supported: Boolean, val enabled: Boolean, val pending: Boolean = false, val reading: Boolean = false, val requested: Boolean = false)
+    val supported: Boolean, val enabled: Boolean, val pending: Boolean = false, val reading: Boolean = false, val requested: Boolean = false, val recoveryOff: Boolean = false, val retained: Boolean = false)
 
 internal fun nativeQuickSettings(metadata: AppleMetadata, state: AppleState, settings: AppleSettings,
     game: NativeGameModeController.State?, loudSoundWritable: Boolean, profileAvailable: Boolean,
-    pending: Set<QuickSetting> = emptySet(), connected: Boolean = true): List<QuickSettingState> {
+    pending: Set<QuickSetting> = emptySet(), connected: Boolean = true,
+    canWrite: (ControlCommandIdentifier) -> Boolean = { true }, ordinaryBusy: Boolean = false): List<QuickSettingState> {
     val idle = connected && !state.microphoneState.isActive && !state.recordingState.isRecording && state.audioSource.type != AudioSourceType.CALL
     val gameSupported = metadata.model != AirPodsModel.UNKNOWN && game != null && (game.available || settings.nativeGameModeEnabled)
     val gameToggle = QuickSettingState(QuickSetting.GAME_MODE, settings.nativeGameModeEnabled.takeIf { gameSupported },
@@ -41,7 +42,35 @@ internal fun nativeQuickSettings(metadata: AppleMetadata, state: AppleState, set
         state.loudSoundReductionEnabled.takeIf { state.loudSoundReductionReadStatus == SettingsReadStatus.AVAILABLE },
         loudSupported, loudSupported && idle && loudSoundWritable && state.loudSoundReductionReadStatus == SettingsReadStatus.AVAILABLE && pending.isEmpty(), QuickSetting.LOUD_SOUND_REDUCTION in pending,
         state.loudSoundReductionReadStatus == SettingsReadStatus.READING)
-    return quickSettings(metadata, state, { true }, gameToggle, loud, profileAvailable, idle, pending)
+    val earId = ControlCommandIdentifier.EAR_DETECTION_CONFIG
+    val earChoice = state.effectiveEarDetection(settings)
+    val reportedEar = earId.decodeBoolean(state.controlStates[earId]?.takeIf { earId in state.liveControlReports })
+    return quickSettings(metadata, state, canWrite, gameToggle, loud, profileAvailable, idle, pending).map { toggle ->
+        val id = toggle.setting.control
+        when {
+            toggle.setting == QuickSetting.EAR_DETECTION -> toggle.copy(checked = if (toggle.supported) earChoice else null,
+                enabled = toggle.supported && idle && pending.isEmpty() && canWrite(earId), requested = toggle.supported && reportedEar != earChoice)
+            id != null -> {
+                val choice = id.decodeBoolean(state.effectiveControl(id, settings))
+                val report = id.decodeBoolean(state.controlStates[id]?.takeIf { id in state.liveControlReports })
+                toggle.copy(checked = choice, enabled = toggle.supported && choice != null && idle && pending.isEmpty() && canWrite(id),
+                    requested = choice != null && report != choice)
+            }
+            toggle.setting == QuickSetting.GAME_MODE -> toggle
+            else -> toggle.copy(enabled = toggle.enabled && !ordinaryBusy)
+        }
+    }
+}
+
+/** Keep an owned clinical reconnect readable without turning remembered presentation into live proof. */
+internal fun retainQuickPresentation(previous: ListeningModeSnapshot?, current: ListeningModeSnapshot,
+    ownedRefresh: Boolean, reading: Boolean = true): ListeningModeSnapshot {
+    if (!ownedRefresh || previous == null) return current
+    return current.copy(quickSettings = current.quickSettings.map { value ->
+        val known = previous.quickSettings.firstOrNull { it.setting == value.setting }
+        if (value.recoveryOff || value.checked != null || known?.checked == null) value else value.copy(checked = known.checked,
+            supported = value.supported || known.supported, enabled = false, reading = reading, requested = false, retained = true)
+    })
 }
 
 internal fun dongleQuickSettings(dongle: DongleState, edits: Map<Int, LiveValueState<Long>> = emptyMap(),
@@ -79,6 +108,9 @@ private fun quickSettings(metadata: AppleMetadata, state: AppleState,
     fun hearing(setting: QuickSetting, mode: HearingMode): QuickSettingState {
         val reported = if (mode == HearingMode.HEARING_AID) state.hearingModes.hearingAidEnabled else state.hearingModes.mediaAssistEnabled
         val supported = BaseCapability.HEARING_AID in capabilities
+        if (state.hearingModes.uncertain == mode) return QuickSettingState(setting, null, supported,
+            supported && idle && pending.isEmpty() && state.hearingModes.canChange(mode, false),
+            pending = state.hearingModes.pending == mode || setting in pending, recoveryOff = true)
         return QuickSettingState(setting, reported, supported, supported && idle && pending.isEmpty() && reported != null &&
             state.hearingModes.canChange(mode, !reported) && (reported || canReadProfile),
             state.hearingModes.pending == mode || setting in pending)

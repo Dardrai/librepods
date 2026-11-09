@@ -2,6 +2,9 @@
     <string name="listening_mode_close">Close listening modes</string>
     <string name="quick_settings_close" tools:ignore="MissingTranslation">Close AirPods controls</string>
     <string name="quick_setting_requested" tools:ignore="MissingTranslation">Requested</string>
+    <string name="quick_setting_preference" tools:ignore="MissingTranslation">%1$s · preferred</string>
+    <string name="quick_setting_last_known" tools:ignore="MissingTranslation">%1$s · last known</string>
+    <string name="quick_setting_reading" tools:ignore="MissingTranslation">Reading…</string>
     <string name="listening_mode_reading">Reading listening mode…</string>
     <string name="listening_mode_pending">Switching listening mode…</string>
     <string name="listening_mode_failed">Couldn’t change listening mode. Try again.</string>

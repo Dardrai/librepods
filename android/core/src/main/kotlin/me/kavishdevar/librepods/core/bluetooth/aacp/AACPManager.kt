@@ -119,8 +119,8 @@ class AACPManager(private val device: AppleDevice,
     private val listeningModeWriteOrder = AtomicLong()
     private var eqTimeout: Job? = null
     @Volatile var microphonePacketCallback: ((BluetoothSocket, ByteArray) -> Unit)? = null
-    private var microphoneRequested: BluetoothSocket? = null
-    fun isMicrophoneRequested(): Boolean = synchronized(this) { microphoneRequested != null }
+    @Volatile private var microphoneRequested: BluetoothSocket? = null
+    fun isMicrophoneRequested(): Boolean = microphoneRequested != null
 
     fun captureAudioSocket(): BluetoothSocket? = socket?.takeIf { pendingConnect?.socket !== it && it.isConnected }
     fun ownsAudioSocket(expected: BluetoothSocket): Boolean =

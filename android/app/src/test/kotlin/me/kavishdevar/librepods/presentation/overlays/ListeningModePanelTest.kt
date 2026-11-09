@@ -82,7 +82,8 @@ class ListeningModePanelTest {
         for (setting in QuickSetting.entries) {
             control(setting).performScrollTo().assertIsNotEnabled()
                 .assert(SemanticsMatcher.expectValue(SemanticsProperties.ToggleableState, ToggleableState.Indeterminate))
-                .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Reading settings…"))
+                .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription,
+                    RuntimeEnvironment.getApplication().getString(R.string.quick_setting_reading)))
                 .performClick()
         }
         assertTrue(changes.isEmpty())
@@ -138,8 +139,7 @@ class ListeningModePanelTest {
         control(QuickSetting.GAME_MODE).performScrollTo().assertIsOn().assertIsEnabled()
             .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Updating…")).performClick()
         control(QuickSetting.CONVERSATION_AWARENESS).performScrollTo().assertIsOn().assertIsEnabled()
-            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription,
-                RuntimeEnvironment.getApplication().getString(R.string.quick_setting_requested))).performClick()
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, preferenceDescription(true))).performClick()
         compose.runOnIdle { current.value = current.value.copy(quickSettings = current.value.quickSettings.map {
             if (it.setting == QuickSetting.CONVERSATION_AWARENESS) it.copy(checked = false) else it
         }) }
@@ -148,12 +148,58 @@ class ListeningModePanelTest {
             QuickSetting.CONVERSATION_AWARENESS to true), changes)
     }
 
+    @Test fun earDetectionPreferenceIsEditableAndDistinctFromADeviceReport() {
+        val current = mutableStateOf(snapshot(QuickSetting.entries.map { setting ->
+            QuickSettingState(setting, checked = setting == QuickSetting.EAR_DETECTION,
+                supported = true, enabled = true, requested = setting == QuickSetting.EAR_DETECTION)
+        }))
+        val changes = mutableListOf<Pair<QuickSetting, Boolean>>()
+        compose.setContent { fixture(Profile(), current.value) { setting, value -> changes += setting to value } }
+        val ear = control(QuickSetting.EAR_DETECTION).performScrollTo().assertIsEnabled().assertIsOn()
+        ear.assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, preferenceDescription(true)))
+            .performClick()
+        assertEquals(listOf(QuickSetting.EAR_DETECTION to false), changes)
+        compose.runOnIdle { current.value = current.value.copy(quickSettings = current.value.quickSettings.map {
+            if (it.setting == QuickSetting.EAR_DETECTION) it.copy(checked = false) else it
+        }) }
+        ear.assertIsOff().assertIsEnabled()
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, preferenceDescription(false)))
+        compose.runOnIdle { current.value = current.value.copy(quickSettings = current.value.quickSettings.map {
+            if (it.setting == QuickSetting.EAR_DETECTION) it.copy(requested = false) else it
+        }) }
+        ear.assertIsOff().assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Off"))
+    }
+
+    @Test fun uncertainHearingModesOfferOnlyAnOffButtonWithoutInventingAnOnState() {
+        val modes = setOf(QuickSetting.HEARING_AID, QuickSetting.MEDIA_ASSIST)
+        val current = mutableStateOf(snapshot(QuickSetting.entries.map { setting ->
+            QuickSettingState(setting, checked = if (setting in modes) null else false,
+                supported = true, enabled = true, recoveryOff = setting in modes)
+        }))
+        val changes = mutableListOf<Pair<QuickSetting, Boolean>>()
+        compose.setContent { fixture(Profile(), current.value) { setting, value -> changes += setting to value } }
+        for ((setting, label) in listOf(QuickSetting.HEARING_AID to R.string.hearing_aid_recovery_off,
+            QuickSetting.MEDIA_ASSIST to R.string.media_assist_recovery_off)) {
+            control(setting).performScrollTo().assertIsEnabled()
+                .assert(SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.Button))
+                .assert(SemanticsMatcher.keyNotDefined(SemanticsProperties.ToggleableState))
+                .assert(hasText(RuntimeEnvironment.getApplication().getString(label)))
+                .performClick()
+        }
+        assertEquals(listOf(QuickSetting.HEARING_AID to false, QuickSetting.MEDIA_ASSIST to false), changes)
+        compose.runOnIdle { current.value = current.value.copy(quickSettings = current.value.quickSettings.map {
+            if (it.setting in modes) it.copy(pending = true) else it
+        }) }
+        for (setting in modes) control(setting).performScrollTo().assertIsNotEnabled()
+    }
+
     @Test @GraphicsMode(GraphicsMode.Mode.NATIVE)
     fun lightAndDarkPanelsHaveReviewableGlassFixtures() {
         val profile = mutableStateOf(Profile())
         var changes = 0
         val current = snapshot(QuickSetting.entries.mapIndexed { index, setting ->
-            QuickSettingState(setting, checked = index % 2 == 0, supported = true, enabled = true)
+            QuickSettingState(setting, checked = index % 2 == 0, supported = true, enabled = true,
+                requested = setting == QuickSetting.EAR_DETECTION)
         })
         compose.setContent { fixture(profile.value, current) { _, _ -> changes++ } }
         for ((name, value) in listOf("light" to Profile(), "dark-large" to Profile(width = 320, height = 720, fontScale = 1.3f, dark = true))) {
@@ -169,6 +215,10 @@ class ListeningModePanelTest {
     }
 
     private fun control(setting: QuickSetting) = compose.onNodeWithTag("quick-setting-${setting.name}")
+
+    private fun preferenceDescription(enabled: Boolean): String = RuntimeEnvironment.getApplication().let { context ->
+        context.getString(R.string.quick_setting_preference, context.getString(if (enabled) R.string.on else R.string.off))
+    }
 
     private fun snapshot(settings: List<QuickSettingState> = QuickSetting.entries.map {
         QuickSettingState(it, checked = false, supported = true, enabled = true)

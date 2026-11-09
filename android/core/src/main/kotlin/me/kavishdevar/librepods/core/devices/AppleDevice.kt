@@ -366,6 +366,7 @@ class AppleDevice(
     suspend fun setMediaAssistEnabled(enabled: Boolean, expectedTransport: BluetoothSocket? = null, expectedSession: Long? = null): Boolean =
         setHearingMode(HearingMode.MEDIA_ASSIST, enabled, expectedTransport, expectedSession)
 
+    val settingsSocketReady: Boolean get() = aacp.captureSettingsSocket() != null
     val transparencyTransportAvailable: Boolean get() = att.available
     val loudSoundReductionWritable: Boolean get() = connectionState.value == ConnectionState.CONNECTED &&
         state.value.controlSession > 0 && metadata.value.model != AirPodsModel.UNKNOWN && BaseCapability.LOUD_SOUND_REDUCTION in AirPodsSpecs.getSpec(metadata.value.model).baseCapabilities &&

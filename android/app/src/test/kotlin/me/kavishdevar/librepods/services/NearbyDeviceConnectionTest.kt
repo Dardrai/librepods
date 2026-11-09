@@ -17,6 +17,7 @@ import android.media.AudioDeviceInfo
 import android.media.AudioDeviceCallback
 import android.media.AudioManager
 import android.os.ParcelUuid
+import android.os.Looper
 import android.os.SystemClock
 import android.os.VibrationAttributes
 import android.os.VibrationEffect
@@ -27,6 +28,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -36,6 +39,7 @@ import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withContext
 import me.kavishdevar.librepods.LibrePodsApplication
 import me.kavishdevar.librepods.companion.CompanionHoldStore
 import me.kavishdevar.librepods.companion.CompanionHandoffController
@@ -150,9 +154,25 @@ class NearbyDeviceConnectionTest {
     }
 
     @After fun close() = runBlocking {
+        val job = checkNotNull((field("serviceScope").get(service) as CoroutineScope).coroutineContext[Job])
+        job.cancel()
         withTimeout(2_000) {
-            checkNotNull((field("serviceScope").get(service) as CoroutineScope).coroutineContext[Job]).cancelAndJoin()
+            // Paused Robolectric Main must execute queued cancellation/finalizer continuations.
+            while (!job.isCompleted) { shadowOf(Looper.getMainLooper()).idle(); delay(1) }
+            job.join()
         }
+    }
+
+    @Test fun cleanupCompletesAServiceChildsQueuedMainThreadFinalizer() = runBlocking<Unit> {
+        val entered = CountDownLatch(1)
+        val cleaned = AtomicBoolean(false)
+        (field("serviceScope").get(service) as CoroutineScope).launch(Dispatchers.IO) {
+            try { entered.countDown(); awaitCancellation() }
+            finally { withContext(NonCancellable + Dispatchers.Main.immediate) { cleaned.set(true) } }
+        }
+        assertTrue(entered.await(1, TimeUnit.SECONDS))
+        try { close(); assertTrue(cleaned.get()) }
+        finally { shadowOf(Looper.getMainLooper()).idle() }
     }
 
     @Test fun onlyNewNativeMediaEndpointsEmitConnectionFeedback() = runBlocking<Unit> {

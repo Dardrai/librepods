@@ -16,15 +16,51 @@ class QuickSettingsStateTest {
         pending: Set<QuickSetting> = emptySet(), profile: Boolean = false) =
         nativeQuickSettings(metadata, state, settings, game, true, profile, pending).associateBy { it.setting }
 
-    @Test fun unknownOrCachedValuesNeverBecomeAnOffSelectionOrAWritableToggle() {
+    @Test fun unknownAccessoryValuesStayUnknownAndCachedPreferencesDoNotBecomeReceivedProof() {
         val empty = controls()
         assertEquals(7, empty.size)
-        assertTrue(empty.values.all { it.checked == null && !it.enabled })
-        val cached = controls(AppleState(controlStates = ordinary))
-        assertTrue(cached.values.all { it.checked == null && !it.enabled })
+        assertTrue(empty.filterKeys { it != QuickSetting.EAR_DETECTION }.values.all { it.checked == null && !it.enabled })
+        assertEquals(true, empty[QuickSetting.EAR_DETECTION]!!.checked)
+        assertTrue(empty[QuickSetting.EAR_DETECTION]!!.enabled)
+        assertTrue(empty[QuickSetting.EAR_DETECTION]!!.requested)
+        val cachedState = AppleState(controlStates = ordinary)
+        val cached = controls(cachedState)
+        for (key in listOf(QuickSetting.CONVERSATION_AWARENESS, QuickSetting.PERSONALIZED_VOLUME)) {
+            assertEquals(false, cached.getValue(key).checked)
+            assertTrue(cached.getValue(key).requested)
+        }
+        assertTrue(cached[QuickSetting.EAR_DETECTION]!!.requested)
+        val unavailable = nativeQuickSettings(metadata, cachedState, AppleSettings(), null, false, false,
+            canWrite = { false }).associateBy { it.setting }
+        for (key in listOf(QuickSetting.CONVERSATION_AWARENESS, QuickSetting.PERSONALIZED_VOLUME, QuickSetting.EAR_DETECTION)) {
+            assertTrue(unavailable.getValue(key).requested)
+            assertFalse(unavailable.getValue(key).enabled)
+        }
+        assertTrue(cachedState.liveControlReports.isEmpty())
         val unknown = controls(AppleState(controlStates = ordinary, liveControlReports = ordinary.keys),
             metadata = metadata.copy(model = AirPodsModel.UNKNOWN), game = NativeGameModeController.State(available = true))
         assertTrue(unknown.values.none { it.enabled })
+    }
+
+    @Test fun nativeEarDetectionUsesTheSameReportRequestAndSavedPreferenceOrderAsTheMainScreen() {
+        val id = ControlCommandIdentifier.EAR_DETECTION_CONFIG
+        val savedOn = AppleSettings(earDetectionEnabled = true, savedUnconfirmedChoices = mapOf("desired_ear_detection" to "on"))
+        val savedOff = AppleSettings(earDetectionEnabled = true, savedUnconfirmedChoices = mapOf("desired_ear_detection" to "off"))
+        val reportedOff = AppleState(controlStates = mapOf(id to byteArrayOf(1)), liveControlReports = setOf(id))
+        val cases = listOf(
+            Triple(AppleState(), AppleSettings(earDetectionEnabled = false), false),
+            Triple(reportedOff, savedOn, false),
+            Triple(reportedOff.copy(requestedControls = mapOf(id to byteArrayOf(2))), savedOff, true),
+            Triple(AppleState(controlStates = mapOf(id to byteArrayOf(2))), savedOff, false),
+            Triple(AppleState(controlStates = mapOf(id to byteArrayOf(1))), AppleSettings(earDetectionEnabled = true), false),
+            Triple(reportedOff.copy(requestedControls = mapOf(id to byteArrayOf(0))), savedOn, false))
+        for ((state, settings, expected) in cases) {
+            val value = controls(state, settings)[QuickSetting.EAR_DETECTION]!!
+            assertEquals(expected, value.checked)
+            assertTrue(value.enabled)
+            assertEquals(id.decodeBoolean(state.controlStates[id]?.takeIf { id in state.liveControlReports }) != expected, value.requested)
+            assertFalse(value.pending)
+        }
     }
 
     @Test fun liveBooleanReportsKeepEarDetectionEncodingAndPendingIntentSeparate() {
@@ -58,6 +94,29 @@ class QuickSettingsStateTest {
         val waiting = controls(settings = AppleSettings(nativeGameModeEnabled = true),
             game = state.copy(active = false, issue = NativeGameModeController.Issue.WAITING_FOR_AUDIO))[QuickSetting.GAME_MODE]!!
         assertTrue(waiting.pending)
+    }
+
+    @Test fun ordinaryWritesDeferOnlyTypedHearingChangesWhileChoicesAndGameModeStayEditable() {
+        val modes = HearingModes.empty()
+            .withReport(byteArrayOf(4, 0, 4, 0, 9, 0, 0x2c, 1, 2, 0, 0))
+            .withReport(byteArrayOf(4, 0, 4, 0, 9, 0, 0x33, 2, 0, 0, 0))
+            .withReport(ByteArray(140).also { byteArrayOf(4, 0, 4, 0, 0x53, 0, 0x84.toByte(), 0, 2, 1, 2, 2).copyInto(it) })
+        val state = AppleState(controlStates = ordinary, liveControlReports = ordinary.keys, hearingModes = modes,
+            loudSoundReductionReadStatus = SettingsReadStatus.AVAILABLE,
+            hearingAidData = ByteArray(104).also { byteArrayOf(2, 2, 0x60, 0).copyInto(it) },
+            transparencyData = ByteArray(104))
+        fun choices(busy: Boolean) = nativeQuickSettings(metadata, state, AppleSettings(),
+            NativeGameModeController.State(available = true), true, true, ordinaryBusy = busy).associateBy { it.setting }
+        val ready = choices(false)
+        assertTrue(ready.values.all { it.enabled })
+        val busy = choices(true)
+        for (setting in QuickSetting.entries) {
+            val expected = ready.getValue(setting).let {
+                if (setting in setOf(QuickSetting.LOUD_SOUND_REDUCTION, QuickSetting.HEARING_AID, QuickSetting.MEDIA_ASSIST))
+                    it.copy(enabled = false) else it
+            }
+            assertEquals(setting.name, expected, busy.getValue(setting))
+        }
     }
 
     @Test fun clinicalModesRequireExistingFittingAndInactiveCustomTransparencyToEnableButCanTurnOffWithoutThem() {

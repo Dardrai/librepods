@@ -515,6 +515,35 @@ class AacpHearingModesTest {
         }
     }
 
+    @Test fun microphoneRequestHintDoesNotWaitForAnUnrelatedSettingsPublication() = runBlocking<Unit> {
+        withFixture { fixture ->
+            for (requested in listOf(false, true)) {
+                if (requested) assertTrue(fixture.device.aacp.requestMicrophoneStream(fixture.socket))
+                val held = CountDownLatch(1)
+                val release = CountDownLatch(1)
+                val returned = CountDownLatch(1)
+                val observed = AtomicBoolean(!requested)
+                val holder = Thread { synchronized(fixture.device.aacp) {
+                    held.countDown(); release.await(2, TimeUnit.SECONDS)
+                } }.apply { start() }
+                val reader = Thread {
+                    observed.set(fixture.device.aacp.isMicrophoneRequested())
+                    returned.countDown()
+                }
+                try {
+                    assertTrue(held.await(1, TimeUnit.SECONDS))
+                    reader.start()
+                    assertTrue("Reading the UI hint must not wait for the publication monitor", returned.await(1, TimeUnit.SECONDS))
+                    assertEquals(requested, observed.get())
+                } finally {
+                    release.countDown(); holder.join(2_000); reader.join(2_000)
+                }
+                assertFalse(holder.isAlive)
+                assertFalse(reader.isAlive)
+            }
+        }
+    }
+
     @Test fun partialOffFailureRemainsUncertainUntilExplicitOffHasFreshMatchingReports() = runBlocking<Unit> {
         withFixture { fixture ->
             fixture.report(hearing = true, media = false)

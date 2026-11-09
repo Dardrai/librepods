@@ -41,9 +41,23 @@ controls, with two columns at regular phone widths and one column for narrow
 windows or enlarged text. Its height stays inside the available window and its
 content scrolls. Conversation Awareness, Automatic Ear Detection, Game Mode,
 Personalized Volume, Loud Sound Reduction, Hearing Aid and Media Assist reuse
-the native or dongle writers and their current-session reports. Unknown values
-remain indeterminate; unavailable transport is disabled. Requested choices stay
-adjustable, and Game Mode can be cancelled while it waits for playback.
+the native or dongle writers. Listening mode, Adaptive strength and ordinary
+toggles update their displayed intent immediately while Bluetooth and preference
+writes run on IO through one ordered writer. Each control keeps one in-flight value and one replaceable unsent choice.
+Automatic Ear Detection uses the main screen's configured-choice precedence;
+its preference changes only after an accepted command. Ordinary choices without
+a matching fresh report show On/Off · preferred and stay adjustable on a ready
+current connection. Game Mode can be cancelled while it waits for playback.
+
+Hearing Aid, Media Assist and Loud Sound Reduction are disabled while scalar
+writes remain queued or in flight. An admitted typed request disables duplicate
+admission. During the panel's owned
+clinical confirmation refresh, known toggle values remain visible while their
+reports reload. Retained values stay disabled and show Reading only during an
+active read, then On/Off · last known. They supply no write authority or fitting
+baseline. An uncertain clinical mode offers the full screen's guarded Turn Off
+recovery button without presenting an unknown mode as On. Other unknown values
+remain indeterminate; unavailable transport is disabled.
 
 Quick controls use the existing Backdrop glass material, a shared captured layer,
 neutral translucent silhouettes and circular icon wells, following the supplied

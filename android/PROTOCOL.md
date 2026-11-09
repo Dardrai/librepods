@@ -103,15 +103,40 @@ Routine settings use their current reports without an Apply, Read settings or
 Refresh action. AACP initialization subscribes to device reports; opening a
 settings screen does not resend saved choices or reconnect audio.
 
-The Quick Settings panel uses these same current-session reports and writers.
-Ordinary Boolean choices retain the shared per-command encoding, including
-Automatic Ear Detection's `02` On and `01` Off. Requested ordinary choices stay
-replaceable while awaiting a report; an actual in-flight typed request is
-separate. Clinical mode requests capture their socket and control session before
-waiting for the shared settings lock and recheck both after admission. The full
-settings screen and the quick panel pass the same captured ownership proof;
+The Quick Settings panel preserves the shared per-command Boolean encoding,
+including Automatic Ear Detection's `02` On and `01` Off. Native listening mode,
+Adaptive strength and the three ordinary Boolean controls use one ordered IO
+writer, with one in-flight value and one replaceable unsent choice per control.
+Listening mode starts without a pacing delay; other scalar edits use 150 ms.
+Bluetooth and durable preference writes stay off Main. Changing away from
+Adaptive retires unsent strength edits from that mode context.
+
+An accepted scalar send establishes local intent, not device confirmation.
+Conversation Awareness, Ear Detection and Personalized Volume can retain that
+accepted choice for display across AACP reloads within the same Bluetooth
+connection. A fresh report or replacement Bluetooth connection retires that
+fallback. It never restores received reports, authorizes a typed write or replays
+a command. Captions show On/Off · preferred until a fresh matching report is
+known. Ear Detection uses the same configured-choice precedence as the main
+screen even when firmware omits its echo; its preference changes after an
+accepted owned command.
+
+Scalar dispatch rechecks the socket, control session and Bluetooth connection;
+ordinary controls also require accepted settings startup. Hearing Aid, Media
+Assist and Loud Sound Reduction cannot start while scalar edits remain queued
+or in flight, and duplicate typed requests are rejected. Clinical mode requests capture their socket and control session
+before waiting for the shared settings lock and recheck both after admission.
+The full settings screen and quick panel pass that captured ownership proof;
 only the transaction's existing owned confirmation refresh may replace it.
 Opening the panel does not apply toggle choices, fitting or Transparency data.
+
+During that owned clinical refresh, the panel can retain known toggle values for
+the same device instance and target. This changes presentation only: current
+records, capabilities, session and writable guards remain untouched. Retained
+values remain disabled, with Reading during an active read and On/Off · last
+known afterward. The guarded Off-only recovery action remains available when
+its existing mode plan permits it; retention cannot turn that unknown mode into
+an On switch.
 
 Native ATT initialization belongs to one control socket and session. It waits
 for Connected, a known supported model and idle microphone/call state, then
