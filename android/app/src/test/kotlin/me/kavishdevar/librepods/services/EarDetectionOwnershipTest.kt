@@ -22,6 +22,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import me.kavishdevar.librepods.core.bluetooth.MacAddress
 import me.kavishdevar.librepods.core.bluetooth.aacp.AACPManager
+import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommandIdentifier
 import me.kavishdevar.librepods.core.devices.*
 import me.kavishdevar.librepods.database.app.AppSettingsEntity
 import me.kavishdevar.librepods.repository.AppDataRepository
@@ -117,6 +118,27 @@ class EarDetectionOwnershipTest {
         change(emptySet(), full)
         verify(bridge).finishOwnedMedia(true)
         verify(audio, never()).dispatchMediaKeyEvent(any(KeyEvent::class.java))
+        noProfileChanges()
+    }
+
+    @Test fun disabledEarDetectionCannotPauseEvenWhenTheHostPolicyIsEnabled() = runBlocking<Unit> {
+        route(address.value)
+        state.value = state.value.copy(controlStates = mapOf(
+            ControlCommandIdentifier.EAR_DETECTION_CONFIG to byteArrayOf(1)))
+        change(full, emptySet())
+        verify(bridge, never()).pauseOwnedMedia(anyString(), any<() -> Boolean>() ?: { false })
+        verify(bridge, never()).finishOwnedMedia(true)
+        noProfileChanges()
+    }
+
+    @Test fun disablingEarDetectionRetiresARemovalWaitingForTheBridge() = runBlocking<Unit> {
+        route(address.value)
+        bridgeState.value = BridgeState(connected = false)
+        change(full, emptySet())
+        state.value = state.value.copy(requestedControls = mapOf(
+            ControlCommandIdentifier.EAR_DETECTION_CONFIG to byteArrayOf(1)))
+        bridgeState.value = BridgeState(connected = true)
+        verify(bridge, never()).pauseOwnedMedia(anyString(), any<() -> Boolean>() ?: { false })
         noProfileChanges()
     }
 

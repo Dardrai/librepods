@@ -94,10 +94,15 @@ class ListeningModeDialog(context: Context, private val address: MacAddress) :
     private var service: LibrePodsService? = null
     private var owner: AppleDevice? = null
     private var nativeControls: NativeQuickControls? = null
+    private var nativeGameChoices: NativeQuickGameMode? = null
     private var clinicalPresentation: ListeningModeSnapshot? = null
     private var snapshot by mutableStateOf<ListeningModeSnapshot?>(null)
     private var commandFailed by mutableStateOf(false)
     private val quickPending = MutableStateFlow<Set<QuickSetting>>(emptySet())
+    private var quickChoices: Map<QuickSetting, Boolean> = emptyMap()
+    private var quickWrite: Job? = null
+    private var frozen by mutableStateOf(false)
+    private val serviceContext = context.applicationContext
     private val islandWindow by lazy { (context.applicationContext as LibrePodsApplication).islandWindow }
     private val pickerToken = Any()
     private var ownsIslandSuppression = false
@@ -138,7 +143,7 @@ class ListeningModeDialog(context: Context, private val address: MacAddress) :
                     ListeningModePanel(snapshot, commandFailed,
                         onMode = { writeControl(ControlCommandIdentifier.LISTENING_MODE, it) },
                         onStrength = { writeControl(ControlCommandIdentifier.AUTO_ANC_STRENGTH, it) },
-                        onToggle = ::writeQuickSetting, onDismiss = { dismiss() })
+                        onToggle = ::writeQuickSetting, onDismiss = { dismiss() }, loading = !frozen)
                 }
             }
         })
@@ -165,20 +170,19 @@ class ListeningModeDialog(context: Context, private val address: MacAddress) :
             override fun onServiceConnected(name: ComponentName, binder: IBinder) {
                 if (connection !== this) return
                 val connected = (binder as? LibrePodsService.LocalBinder)?.getService()
-                if (connected == null) { close(); return }
+                if (connected == null) { freezePresentation(); return }
                 service = connected
                 val dongle = dongleTarget
                 if (dongle != null) {
                     val controller = connected.dongleControls
-                    if (!dongle.isCurrent(controller)) { close(); return }
+                    if (!dongle.isCurrent(controller)) { freezePresentation(); return }
                     observedDongle = controller
                     controller.controlsVisible(true, owner = pickerToken)
                     observation = scope.launch {
                         val edits = combine(listOf(0x0d, 0x2e, 0x0a, 0x26, 0x28).map { controller.liveSettingEditor(it).state }) { it.toList() }
                         combine(controller.state, edits, controller.liveGameModeEditor().state) { _, _, _ -> dongle.snapshot() }
                             .collect { current ->
-                                snapshot = current
-                                if (current == null) close()
+                                if (current == null) freezePresentation() else { frozen = false; snapshot = current }
                             }
                     }
                     return
@@ -186,7 +190,7 @@ class ListeningModeDialog(context: Context, private val address: MacAddress) :
                 observation = scope.launch {
                     connected.devices.collectLatest { devices ->
                         val device = devices[address] as? AppleDevice
-                        if (device == null || (owner != null && owner !== device)) { close(); return@collectLatest }
+                        if (device == null || (owner != null && owner !== device)) { freezePresentation(); return@collectLatest }
                         owner = device
                         val controls = nativeControls ?: NativeQuickControls(device, scope,
                             idle = { quickPending.value.isEmpty() && isShowing && bound && currentNativeDevice() === device &&
@@ -195,9 +199,13 @@ class ListeningModeDialog(context: Context, private val address: MacAddress) :
                                 if (id == ControlCommandIdentifier.LISTENING_MODE || id == ControlCommandIdentifier.AUTO_ANC_STRENGTH)
                                     reportWrite(false) else reportQuickWrite(false)
                             }).also { nativeControls = it }
+                        val gameChoices = nativeGameChoices ?: NativeQuickGameMode(device, scope,
+                            current = { isShowing && bound && currentNativeDevice() === device &&
+                                !context.getSystemService(KeyguardManager::class.java).isKeyguardLocked },
+                            failed = { reportQuickWrite(false) }).also { nativeGameChoices = it }
                         val game: Flow<NativeGameModeController.State?> =
                             (context.applicationContext as LibrePodsApplication).nativeGameModeControllers[address]?.state ?: flowOf(null)
-                        val extra = combine(game, connected.dongleControls.state, quickPending, controls.changes) { gameState, dongle, pending, _ ->
+                        val extra = combine(game, connected.dongleControls.state, quickPending, controls.changes, gameChoices.state) { gameState, dongle, pending, _, _ ->
                             Triple(gameState, dongle.usesDongleListeningControls, pending)
                         }
                         combine(device.connectionState, device.state, device.settings, device.metadata,
@@ -205,22 +213,27 @@ class ListeningModeDialog(context: Context, private val address: MacAddress) :
                             if (dongle || connection != ConnectionState.CONNECTED || !supportsListening(metadata)) null
                             else {
                                 controls.observe()
+                                gameChoices.observe()
                                 val displayed = controls.displayState(state)
-                                ListeningModeSnapshot(metadata, displayed, settings, nativeQuickSettings(metadata, displayed, settings,
+                                val displayedSettings = gameChoices.displaySettings(settings)
+                                ListeningModeSnapshot(metadata, displayed, displayedSettings, nativeQuickSettings(metadata, displayed, displayedSettings,
                                 gameState, device.loudSoundReductionWritable, device.transparencyTransportAvailable, pending,
                                 connected = connection == ConnectionState.CONNECTED, canWrite = controls::canWrite,
                                 ordinaryBusy = controls.busy))
                             }
                         }.collect { current ->
-                            if (current == null) { snapshot = null; clinicalPresentation = null; close() }
+                            if (current == null) freezePresentation()
                             else {
+                                frozen = false
                                 val pendingClinical = quickPending.value.any { it == QuickSetting.HEARING_AID || it == QuickSetting.MEDIA_ASSIST }
                                 val reading = pendingClinical || listOf(current.state.hearingAidReadStatus,
                                     current.state.transparencyReadStatus, current.state.loudSoundReductionReadStatus)
                                     .any { it == SettingsReadStatus.READING }
                                 val displayed = retainQuickPresentation(clinicalPresentation, current,
                                     ownedRefresh = clinicalPresentation != null, reading = reading)
-                                snapshot = displayed
+                                snapshot = displayed.copy(quickSettings = displayed.quickSettings.map { value ->
+                                    quickChoices[value.setting]?.let { choice -> value.copy(checked = choice, recoveryOff = false) } ?: value
+                                })
                                 if (!pendingClinical && displayed.quickSettings.none { it.retained }) clinicalPresentation = null
                             }
                         }
@@ -228,13 +241,13 @@ class ListeningModeDialog(context: Context, private val address: MacAddress) :
                 }
             }
 
-            override fun onServiceDisconnected(name: ComponentName) { if (connection === this) { releaseBinding(); close() } }
-            override fun onBindingDied(name: ComponentName) { if (connection === this) { releaseBinding(); close() } }
-            override fun onNullBinding(name: ComponentName) { if (connection === this) { releaseBinding(); close() } }
+            override fun onServiceDisconnected(name: ComponentName) { if (connection === this) { freezePresentation(); releaseBinding(keepPresentation = true) } }
+            override fun onBindingDied(name: ComponentName) { if (connection === this) { freezePresentation(); releaseBinding(keepPresentation = true) } }
+            override fun onNullBinding(name: ComponentName) { if (connection === this) { freezePresentation(); releaseBinding(keepPresentation = true) } }
         }
         connection = callback
-        bound = runCatching { context.bindService(Intent(context, LibrePodsService::class.java), callback, Context.BIND_AUTO_CREATE) }.getOrDefault(false)
-        if (!bound) { connection = null; close() }
+        bound = runCatching { serviceContext.bindService(Intent(serviceContext, LibrePodsService::class.java), callback, Context.BIND_AUTO_CREATE) }.getOrDefault(false)
+        if (!bound) { connection = null; freezePresentation() }
     }
 
     /** Recheck the current map and exact instance at dispatch, including before collectors run. */
@@ -268,7 +281,8 @@ class ListeningModeDialog(context: Context, private val address: MacAddress) :
         val device = currentNativeDevice() ?: return false
         val controls = nativeControls ?: return false
         val game = (context.applicationContext as LibrePodsApplication).nativeGameModeControllers[address]
-        val control = nativeQuickSettings(device.metadata.value, controls.displayState(device.state.value), device.settings.value,
+        val control = nativeQuickSettings(device.metadata.value, controls.displayState(device.state.value),
+            nativeGameChoices?.displaySettings(device.settings.value) ?: device.settings.value,
             game?.state?.value, device.loudSoundReductionWritable, device.transparencyTransportAvailable, quickPending.value,
             canWrite = controls::canWrite, ordinaryBusy = controls.busy)
             .first { it.setting == setting }
@@ -276,8 +290,7 @@ class ListeningModeDialog(context: Context, private val address: MacAddress) :
             (control.recoveryOff && enabled) || control.checked == enabled) return false
         setting.control?.let { id -> return reportQuickWrite(controls.edit(id, id.encodeBoolean(enabled).toInt() and 255)) }
         if (setting == QuickSetting.GAME_MODE) {
-            device.updateSettings { it.copy(nativeGameModeEnabled = enabled) }
-            return reportQuickWrite(true)
+            return reportQuickWrite(nativeGameChoices?.edit(enabled) == true)
         }
         if (quickPending.value.isNotEmpty()) return false
         val transport = device.aacp.captureAudioSocket() ?: return false
@@ -286,8 +299,9 @@ class ListeningModeDialog(context: Context, private val address: MacAddress) :
         if (setting == QuickSetting.HEARING_AID || setting == QuickSetting.MEDIA_ASSIST) {
             clinicalPresentation = snapshot
         }
+        quickChoices = mapOf(setting to enabled)
         quickPending.value = setOf(setting)
-        scope.launch {
+        quickWrite = scope.launch {
             try {
                 val confirmed = withContext(Dispatchers.IO) {
                     if (service?.devices?.value?.get(address) !== device || device.aacp.captureAudioSocket() !== transport ||
@@ -304,9 +318,30 @@ class ListeningModeDialog(context: Context, private val address: MacAddress) :
                 if (isShowing && service?.devices?.value?.get(address) === device) reportQuickWrite(confirmed)
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (_: Exception) { if (isShowing && service?.devices?.value?.get(address) === device) reportQuickWrite(false) }
-            finally { quickPending.value = emptySet() }
+            finally {
+                if (quickWrite === coroutineContext[Job]) {
+                    quickChoices = emptyMap(); quickPending.value = emptySet(); quickWrite = null
+                }
+            }
         }
         return reportQuickWrite(true)
+    }
+
+    private fun freezePresentation() {
+        if (!frozen) {
+            frozen = true
+            quickWrite?.cancel()
+            quickWrite = null
+            quickChoices = emptyMap()
+            quickPending.value = emptySet()
+            clinicalPresentation = null
+            nativeControls?.cancelPending()
+            nativeControls?.observe()
+            nativeGameChoices?.cancelPending()
+        }
+        snapshot = snapshot?.let { current -> current.copy(enabled = false, quickSettings = current.quickSettings.map {
+            it.copy(enabled = false, pending = false, reading = false)
+        }) }
     }
 
     private fun reportQuickWrite(success: Boolean): Boolean = success.also {
@@ -378,7 +413,7 @@ class ListeningModeDialog(context: Context, private val address: MacAddress) :
         window?.let { if (it.attributes.width != width) it.attributes = it.attributes.apply { this.width = width } }
     }
 
-    // Dialog.show sets isShowing after onStart; invalid initial bindings must close after that.
+    // Dialog.show sets isShowing after onStart; defer startup keyguard dismissal until then.
     private fun close() { window?.decorView?.post { dismiss() } }
 
     private fun releaseIslandSuppression() {
@@ -387,7 +422,7 @@ class ListeningModeDialog(context: Context, private val address: MacAddress) :
         islandWindow.setListeningPickerVisible(pickerToken, false)
     }
 
-    private fun releaseBinding() {
+    private fun releaseBinding(keepPresentation: Boolean = false) {
         val previous = connection
         connection = null
         observation?.cancel()
@@ -396,9 +431,10 @@ class ListeningModeDialog(context: Context, private val address: MacAddress) :
         observedDongle = null
         service = null
         nativeControls = null
+        nativeGameChoices = null
         clinicalPresentation = null
-        snapshot = null
-        if (bound && previous != null) runCatching { context.unbindService(previous) }
+        if (!keepPresentation) snapshot = null
+        if (bound && previous != null) runCatching { serviceContext.unbindService(previous) }
         bound = false
     }
 
@@ -409,7 +445,7 @@ class ListeningModeDialog(context: Context, private val address: MacAddress) :
 }
 
 internal data class ListeningModeSnapshot(val metadata: AppleMetadata, val state: AppleState, val settings: AppleSettings,
-    val quickSettings: List<QuickSettingState> = emptyList()) {
+    val quickSettings: List<QuickSettingState> = emptyList(), val enabled: Boolean = true) {
     val adaptive get() = BaseCapability.ADAPTIVE_AUDIO in AirPodsSpecs.getSpec(metadata.model).baseCapabilities
     val allowOff get() = state.effectiveAllowOff(settings, metadata.modelNumber) == true
     val modes get() = buildList { if (allowOff) add(1); add(3); if (adaptive) add(4); add(2) }
@@ -420,11 +456,11 @@ internal data class ListeningModeSnapshot(val metadata: AppleMetadata, val state
 
 @Composable
 internal fun ListeningModeContent(snapshot: ListeningModeSnapshot?, commandFailed: Boolean = false,
-    onMode: (Int) -> Unit, onStrength: (Int) -> Unit) {
+    onMode: (Int) -> Unit, onStrength: (Int) -> Unit, loading: Boolean = true) {
     val mode = snapshot?.mode
     val status = stringResource(when {
         commandFailed -> R.string.listening_mode_failed
-        mode == null -> R.string.listening_mode_reading
+        mode == null -> if (loading) R.string.listening_mode_reading else R.string.not_available
         snapshot?.pending == true -> R.string.listening_mode_pending
         mode == 1 -> R.string.off
         mode == 3 -> R.string.transparency
@@ -444,12 +480,14 @@ internal fun ListeningModeContent(snapshot: ListeningModeSnapshot?, commandFaile
                 adaptiveStrength = snapshot.state.controlStates[ControlCommandIdentifier.AUTO_ANC_STRENGTH]?.firstOrNull()?.toInt() ?: 50,
                 requestedAdaptiveStrength = snapshot.state.requestedControls[ControlCommandIdentifier.AUTO_ANC_STRENGTH]?.firstOrNull()?.toInt(),
                 onAdaptiveStrengthChanged = onStrength,
-                showLabels = false)
+                showLabels = false, enabled = snapshot.enabled)
         } else {
             Box(Modifier.fillMaxWidth().height(64.dp)
                 .background(MaterialTheme.colorScheme.surfaceContainerHigh, RoundedCornerShape(percent = 100)),
                 contentAlignment = Alignment.Center) {
-                CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
+                if (loading) CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
+            else androidx.compose.material3.Text(stringResource(R.string.not_available),
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }

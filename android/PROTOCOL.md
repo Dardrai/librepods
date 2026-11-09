@@ -116,10 +116,10 @@ Conversation Awareness, Ear Detection and Personalized Volume can retain that
 accepted choice for display across AACP reloads within the same Bluetooth
 connection. A fresh report or replacement Bluetooth connection retires that
 fallback. It never restores received reports, authorizes a typed write or replays
-a command. Captions show On/Off · preferred until a fresh matching report is
-known. Ear Detection uses the same configured-choice precedence as the main
+a command. The panel displays the selected On or Off value immediately without
+presenting pending or preferred bookkeeping. Ear Detection uses the same configured-choice precedence as the main
 screen even when firmware omits its echo; its preference changes after an
-accepted owned command.
+accepted owned command, together with the host auto-pause choice.
 
 Scalar dispatch rechecks the socket, control session and Bluetooth connection;
 ordinary controls also require accepted settings startup. Hearing Aid, Media
@@ -133,10 +133,15 @@ Opening the panel does not apply toggle choices, fitting or Transparency data.
 During that owned clinical refresh, the panel can retain known toggle values for
 the same device instance and target. This changes presentation only: current
 records, capabilities, session and writable guards remain untouched. Retained
-values remain disabled, with Reading during an active read and On/Off · last
-known afterward. The guarded Off-only recovery action remains available when
+values remain visible and disabled without changing their On/Off labels. The guarded Off-only recovery action remains available when
 its existing mode plan permits it; retention cannot turn that unknown mode into
 an On switch.
+
+A transient missing or replaced owner freezes the entire open panel, including
+its listening-mode rail. The last presentation supplies no write authority. Any
+queued scalar, Game Mode or typed work is retired; exact-owner recovery permits
+new actions and does not replay earlier choices. The dialog owns its service
+binding through the application context, so tile teardown does not dismiss it.
 
 Native ATT initialization belongs to one control socket and session. It waits
 for Connected, a known supported model and idle microphone/call state, then

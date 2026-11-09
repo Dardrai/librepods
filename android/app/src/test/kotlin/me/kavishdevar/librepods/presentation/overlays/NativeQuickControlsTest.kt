@@ -11,10 +11,12 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -23,6 +25,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import me.kavishdevar.librepods.bluetooth.HearingModeSocketShadow
+import me.kavishdevar.librepods.companion.PosixAtomicFileShadow
 import me.kavishdevar.librepods.core.bluetooth.aacp.AACPManager
 import me.kavishdevar.librepods.core.bluetooth.aacp.packet.ControlCommandPacket
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommandIdentifier
@@ -44,7 +47,7 @@ import org.robolectric.shadow.api.Shadow
 import org.robolectric.util.ReflectionHelpers
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [35], application = Application::class, shadows = [HearingModeSocketShadow::class])
+@Config(sdk = [35], application = Application::class, shadows = [HearingModeSocketShadow::class, PosixAtomicFileShadow::class])
 @LooperMode(LooperMode.Mode.PAUSED)
 class NativeQuickControlsTest {
     private val awareness = ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG
@@ -75,7 +78,7 @@ class NativeQuickControlsTest {
     }
 
     @Test fun queuedWritesCannotMoveToAReplacementOwnerOrSurviveDismissal() = runBlocking<Unit> {
-        for (replacement in listOf("socket", "session", "connection", "admission", "dismiss")) fixture { f ->
+        for (replacement in listOf("socket", "session", "connection", "admission", "freeze", "dismiss")) fixture { f ->
             f.blockNextWrite()
             assertTrue(f.controls.edit(awareness, 1))
             assertTrue(f.entered.await(2, TimeUnit.SECONDS))
@@ -86,6 +89,10 @@ class NativeQuickControlsTest {
                 "session" -> f.state.value = f.state.value.copy(controlSession = 2)
                 "connection" -> f.connection.value++
                 "admission" -> f.admitted.set(false)
+                "freeze" -> {
+                    withTimeout(2_000) { f.controls.changes.first { values -> values.count { it.pending } == 2 } }
+                    f.controls.cancelPending()
+                }
                 else -> f.scope.cancel()
             }
             f.controls.observe()
@@ -93,8 +100,30 @@ class NativeQuickControlsTest {
             delay(250)
             shadowOf(Looper.getMainLooper()).idle()
             assertEquals("No queued write may cross $replacement", listOf(awareness to 1), f.writes())
+            if (replacement == "freeze") assertTrue("Retiring queued choices must not report a failed new edit", f.failures.isEmpty())
             assertTrue("An unaccepted queued ear choice cannot persist", f.device.settings.value.earDetectionEnabled)
             if (replacement == "dismiss") assertFalse(f.controls.edit(ear, 1))
+        }
+    }
+
+    @Test fun freezingAndReturningToTheSameOwnerCannotReplayCapturedWork() = runBlocking<Unit> {
+        fixture { f ->
+            f.blockNextWrite()
+            assertTrue(f.controls.edit(awareness, 1))
+            assertTrue(f.entered.await(2, TimeUnit.SECONDS))
+            assertTrue(f.controls.edit(ear, 1))
+            withTimeout(2_000) { f.controls.changes.first { values -> values.count { it.pending } == 2 } }
+            f.admitted.set(false)
+            f.controls.cancelPending()
+            f.admitted.set(true)
+            f.controls.observe()
+            f.release.countDown()
+            f.awaitSettled()
+            assertEquals(listOf(awareness to 1), f.writes())
+            assertTrue(f.device.settings.value.earDetectionEnabled)
+            assertTrue(f.controls.edit(ear, 1))
+            f.await { !f.device.settings.value.earDetectionEnabled }
+            assertEquals(listOf(awareness to 1, ear to 1), f.writes())
         }
     }
 
@@ -150,7 +179,11 @@ class NativeQuickControlsTest {
             assertTrue(f.device.settings.value.earDetectionEnabled)
             f.release.countDown()
             f.await { !f.device.settings.value.earDetectionEnabled }
+            assertFalse(f.device.settings.value.hostAutoPause)
             assertEquals("off", f.device.settings.value.savedUnconfirmedChoices["desired_ear_detection"])
+            assertTrue(f.controls.edit(ear, 2))
+            f.await { f.device.settings.value.earDetectionEnabled }
+            assertTrue(f.device.settings.value.hostAutoPause)
         }
         fixture { f ->
             f.shadow.output.onPacket = { throw IOException("Rejected synthetic write") }
@@ -236,6 +269,7 @@ class NativeQuickControlsTest {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         lateinit var controls: NativeQuickControls
         val failures = CopyOnWriteArrayList<ControlCommandIdentifier>()
+        val preferenceFailures = AtomicInteger()
         val admitted = AtomicBoolean(true)
         val socket = Shadow.newInstanceOf(BluetoothSocket::class.java).apply { connect() }
         val sockets = mutableListOf(socket)
@@ -245,6 +279,7 @@ class NativeQuickControlsTest {
         val state = ReflectionHelpers.getField<MutableStateFlow<AppleState>>(device, "_state")
         val connection = ReflectionHelpers.getField<MutableStateFlow<Int>>(device, "_connectionNumber")
         init {
+            device.onSettingsSaveFailed = { preferenceFailures.incrementAndGet() }
             ReflectionHelpers.setField(device.aacp, "socket", socket)
             val reports = mapOf(ControlCommandIdentifier.LISTENING_MODE to byteArrayOf(3),
                 ControlCommandIdentifier.AUTO_ANC_STRENGTH to byteArrayOf(50),
@@ -277,8 +312,13 @@ class NativeQuickControlsTest {
             val command = ControlCommandPacket.parse(packet).controlCommand
             command.identifier to (command.value.first().toInt() and 255)
         }
-        suspend fun await(condition: () -> Boolean) = withTimeout(2_000) {
-            while (!condition()) { controls.observe(); shadowOf(Looper.getMainLooper()).idle(); delay(5) }
+        suspend fun await(condition: () -> Boolean) {
+            try {
+                withTimeout(2_000) { while (!condition()) { controls.observe(); shadowOf(Looper.getMainLooper()).idle(); delay(5) } }
+            } catch (timeout: TimeoutCancellationException) {
+                throw AssertionError("Synthetic writes=${writes()}, ear=${device.settings.value.earDetectionEnabled}, " +
+                    "host=${device.settings.value.hostAutoPause}, failures=$failures, preferenceFailures=${preferenceFailures.get()}", timeout)
+            }
         }
         suspend fun awaitSettled() {
             val settled = scope.async { controls.changes.first { values -> values.all { !it.pending && it.requested == null } } }

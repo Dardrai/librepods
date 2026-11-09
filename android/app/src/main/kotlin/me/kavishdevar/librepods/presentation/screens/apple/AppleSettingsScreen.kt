@@ -425,7 +425,7 @@ fun AppleSettingsScreen(
                     earDetectionDescription = if (dongle && state.effectiveControl(ControlCommandIdentifier.EAR_DETECTION_CONFIG, settings) == null)
                         stringResource(R.string.dongle_unknown) else null,
                     automaticEarDetectionEnabled = state.effectiveEarDetection(settings),
-                    onAutomaticEarDetectionChanged = { enabled -> setControlCommandBoolean(ControlCommandIdentifier.EAR_DETECTION_CONFIG, enabled); updateSettings { it.copy(earDetectionEnabled = enabled) } },
+                    onAutomaticEarDetectionChanged = { enabled -> setControlCommandBoolean(ControlCommandIdentifier.EAR_DETECTION_CONFIG, enabled); updateSettings { it.copy(earDetectionEnabled = enabled, hostAutoPause = enabled) } },
                     automaticConnectionEnabled = state.effectiveControl(ControlCommandIdentifier.SMART_ROUTING_MODE, settings)?.getOrNull(0) == 0x01.toByte(),
                     onAutomaticConnectionChanged = { setControlCommandBoolean(ControlCommandIdentifier.SMART_ROUTING_MODE, it) },
                     takeoverWhenDisconnected = settings.takeoverWhenDisconnected,

@@ -26,7 +26,8 @@ import me.kavishdevar.librepods.data.LiveValueSource
 /** Ordinary Bluetooth controls keep socket and durable preference writes off Main. */
 internal class NativeQuickControls(private val device: AppleDevice, private val scope: CoroutineScope,
     private val idle: () -> Boolean, private val failed: (ControlCommandIdentifier) -> Unit) {
-    private data class Owner(val socket: BluetoothSocket, val session: Long, val connection: Int, val modeContext: Long = 0)
+    private data class Owner(val socket: BluetoothSocket, val session: Long, val connection: Int, val dispatch: Long, val modeContext: Long = 0)
+    @Volatile private var dispatchRevision = 0L
     private val writer = Mutex()
     private data class Choice(val value: Long, val connection: Int)
     private val accepted = ConcurrentHashMap<ControlCommandIdentifier, Choice>()
@@ -52,12 +53,12 @@ internal class NativeQuickControls(private val device: AppleDevice, private val 
                             if (written && owns(owner)) {
                                 if (id in ordinary) accepted[id] = Choice(value, owner.connection)
                                 if (id == ControlCommandIdentifier.EAR_DETECTION_CONFIG)
-                                    device.updateSettings { it.copy(earDetectionEnabled = value == 2L) }
+                                    device.updateSettings { it.copy(earDetectionEnabled = value == 2L, hostAutoPause = value == 2L) }
                             }
                             written
                         }
                     }
-                    if (!success && scope.isActive) withContext(Dispatchers.Main.immediate) { failed(id) }
+                    if (!success && scope.isActive && owns(owner)) withContext(Dispatchers.Main.immediate) { if (owns(owner)) failed(id) }
                     success
                 }
             }, intervalMs = if (id == ControlCommandIdentifier.LISTENING_MODE) 0 else 150)
@@ -86,6 +87,7 @@ internal class NativeQuickControls(private val device: AppleDevice, private val 
         return accepted
     }
     val busy: Boolean get() = editors.values.any { it.state.value.pending || it.state.value.requested != null }
+    fun cancelPending() { dispatchRevision++; editors.values.forEach { it.cancel(it.state.value.revision) } }
     private fun cancelStrength() {
         val editor = editors[ControlCommandIdentifier.AUTO_ANC_STRENGTH] ?: return
         if (editor.state.value.requested != null) editor.cancel(editor.state.value.revision)
@@ -96,13 +98,14 @@ internal class NativeQuickControls(private val device: AppleDevice, private val 
 
     private fun owns(owner: Owner): Boolean = scope.isActive && device.connectionState.value == ConnectionState.CONNECTED &&
         device.aacp.captureAudioSocket() === owner.socket && device.state.value.controlSession == owner.session &&
-        device.connectionNumber.value == owner.connection && (owner.modeContext == 0L || owner.modeContext == currentModeContext())
+        device.connectionNumber.value == owner.connection && owner.dispatch == dispatchRevision &&
+        (owner.modeContext == 0L || owner.modeContext == currentModeContext())
 
     private fun source(id: ControlCommandIdentifier): LiveValueSource<Long> {
         val state = device.state.value
         val socket = device.aacp.captureAudioSocket()
         val owner = socket?.takeIf { scope.isActive && state.controlSession > 0 &&
-            device.connectionState.value == ConnectionState.CONNECTED }?.let { Owner(it, state.controlSession, device.connectionNumber.value,
+            device.connectionState.value == ConnectionState.CONNECTED }?.let { Owner(it, state.controlSession, device.connectionNumber.value, dispatchRevision,
                 if (id == ControlCommandIdentifier.AUTO_ANC_STRENGTH) currentModeContext() else 0) }
         val value = retainedChoice(id) ?: if (id == ControlCommandIdentifier.EAR_DETECTION_CONFIG)
             if (state.effectiveEarDetection(device.settings.value)) 2L else 1L

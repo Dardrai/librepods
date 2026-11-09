@@ -13,6 +13,7 @@ import android.content.ContextWrapper
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
 import android.os.Looper
+import android.provider.Settings
 import android.view.Gravity
 import android.view.WindowInsets
 import android.view.WindowManager
@@ -24,6 +25,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.flow.MutableStateFlow
 import me.kavishdevar.librepods.LibrePodsApplication
+import me.kavishdevar.librepods.companion.PosixAtomicFileShadow
 import me.kavishdevar.librepods.R
 import me.kavishdevar.librepods.core.bluetooth.MacAddress
 import me.kavishdevar.librepods.core.bluetooth.aacp.AACPManager
@@ -72,7 +74,7 @@ import me.kavishdevar.librepods.core.devices.SettingsReadStatus
 import java.util.function.Consumer
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [37], application = Application::class)
+@Config(sdk = [37], application = Application::class, shadows = [PosixAtomicFileShadow::class])
 @LooperMode(LooperMode.Mode.PAUSED)
 class ListeningModeDialogTest {
     private val context get() = RuntimeEnvironment.getApplication()
@@ -86,6 +88,8 @@ class ListeningModeDialogTest {
     private lateinit var dongle: DongleListeningFixture
 
     @Before fun setUp() {
+        // Lifecycle tests pump a paused looper; a live infinite spinner cannot settle there.
+        Settings.Global.putFloat(context.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 0f)
         app = LibrePodsApplication()
         // Dialog content needs real resources and the service-owned application state.
         ReflectionHelpers.callInstanceMethod<Void>(app, "attach", ClassParameter.from(Context::class.java, context.baseContext))
@@ -268,7 +272,7 @@ class ListeningModeDialogTest {
         assertEquals(0, output(target).available())
     }
 
-    @Test fun replacementAtTheSameAddressCannotReceiveAStaleActionEvenBeforeCollectorsRun() {
+    @Test fun replacementAtTheSameAddressFreezesTheOpenPanelWithoutReceivingAStaleAction() {
         val target = device()
         devices.value = mapOf(target.macAddress to target)
         val popup = open(target)
@@ -276,12 +280,13 @@ class ListeningModeDialogTest {
         devices.value = mapOf(replacement.macAddress to replacement)
         assertFalse(popup.writeControl(ControlCommandIdentifier.LISTENING_MODE, 2))
         idle()
-        assertFalse(popup.isShowing)
+        assertTrue(popup.isShowing)
+        assertFrozen(popup)
         assertEquals(0, output(target).available())
         assertEquals(0, output(replacement).available())
     }
 
-    @Test fun disconnectOrRemovalDismissesInsteadOfFallingBackToADifferentConnectedPair() {
+    @Test fun disconnectKeepsThePanelOpenAndOnlyTheCapturedOwnerCanRecover() {
         val target = device()
         val other = device("00:11:22:33:44:66")
         devices.value = mapOf(target.macAddress to target, other.macAddress to other)
@@ -292,8 +297,33 @@ class ListeningModeDialogTest {
         state.value = ConnectionState.DISCONNECTED
         assertFalse(popup.writeControl(ControlCommandIdentifier.LISTENING_MODE, 2))
         idle()
-        assertFalse(popup.isShowing)
+        assertTrue(popup.isShowing)
+        assertFrozen(popup)
         assertEquals(0, output(other).available())
+        state.value = ConnectionState.CONNECTED
+        idle()
+        assertTrue(popup.isShowing)
+        assertEquals("Recovering the captured owner must not replay a choice", 0, output(target).available())
+        assertTrue(popup.writeControl(ControlCommandIdentifier.LISTENING_MODE, 2))
+        assertEquals(2, readCommand(target).value.single().toInt())
+    }
+
+    @Test fun theApplicationOwnsTheDialogsBindingIndependentlyOfTheTileContext() {
+        val application = spy(app)
+        dialogContext = object : ContextWrapper(dialogContext) {
+            override fun getApplicationContext(): Context = application
+        }
+        val target = device()
+        devices.value = mapOf(target.macAddress to target)
+        val popup = open(target)
+        assertTrue(popup.isShowing)
+        val binds = mockingDetails(application).invocations.filter { it.method.name == "bindService" }
+        assertEquals(1, binds.size)
+        val token = binds.single().arguments[1]
+        popup.dismiss(); idle()
+        val unbinds = mockingDetails(application).invocations.filter { it.method.name == "unbindService" }
+        assertEquals(1, unbinds.size)
+        assertSame(token, unbinds.single().arguments[0])
     }
 
     @Test fun closingReleasesBindingAndCollectorsAndRetiresActions() {
@@ -376,16 +406,17 @@ class ListeningModeDialogTest {
         assertTrue(shadowOf(context).boundServiceConnections.isEmpty())
     }
 
-    @Test fun missingOrUnsupportedPairClosesWithoutSubstitutingAnotherDevice() {
+    @Test fun missingOrUnsupportedPairKeepsAnInactivePanelWithoutSubstitutingAnotherDevice() {
         val target = device(model = AirPodsModel.AIRPODS_4)
         val other = device("00:11:22:33:44:66")
         devices.value = mapOf(other.macAddress to other)
         val missing = open(target)
-        assertFalse(missing.isShowing)
+        assertTrue(missing.isShowing)
         assertFalse(missing.writeControl(ControlCommandIdentifier.LISTENING_MODE, 2))
+        missing.dismiss(); idle()
         devices.value = mapOf(target.macAddress to target, other.macAddress to other)
         val popup = open(target)
-        assertFalse(popup.isShowing)
+        assertTrue(popup.isShowing)
         assertFalse(popup.writeControl(ControlCommandIdentifier.LISTENING_MODE, 2))
         assertEquals(0, output(target).available())
         assertEquals(0, output(other).available())
@@ -408,7 +439,7 @@ class ListeningModeDialogTest {
             popup.writeControl(ControlCommandIdentifier.AUTO_ANC_STRENGTH, 20))
     }
 
-    @Test fun dongleSessionChangesRejectWritesImmediatelyAndCloseTheOldPicker() {
+    @Test fun dongleSessionChangesRejectWritesImmediatelyAndKeepTheOldContextInactive() {
         val changes: List<(me.kavishdevar.librepods.dongle.DongleState) -> me.kavishdevar.librepods.dongle.DongleState> = listOf(
             { it.copy(controlSession = it.controlSession + 1) },
             { it.copy(status = it.status!!.copy(generation = it.status!!.generation + 1)) },
@@ -422,7 +453,9 @@ class ListeningModeDialogTest {
             assertFalse(popup.writeControl(ControlCommandIdentifier.LISTENING_MODE, 2))
             assertTrue(dongle.writes.isEmpty())
             idle()
-            assertFalse(popup.isShowing)
+            assertTrue(popup.isShowing)
+            assertFrozen(popup)
+            popup.dismiss(); idle()
         }
     }
 
@@ -432,19 +465,20 @@ class ListeningModeDialogTest {
         val replacement = DongleListeningFixture(service).apply { connect() }
         val popup = ListeningModeDialog(dialogContext, target).also { dialog = it }
         popup.show(); idle()
-        assertFalse(popup.isShowing)
+        assertTrue(popup.isShowing)
         assertFalse(popup.writeControl(ControlCommandIdentifier.LISTENING_MODE, 2))
         assertTrue(dongle.writes.isEmpty())
         assertTrue(replacement.writes.isEmpty())
     }
 
-    @Test fun changingToDongleModeRetiresAnAlreadyOpenNativePicker() {
+    @Test fun changingToDongleModeFreezesTheOpenNativePanelWithoutSwitchingItsTarget() {
         val native = device()
         devices.value = mapOf(native.macAddress to native)
         val popup = open(native)
         assertTrue(popup.isShowing)
         dongle.connect(); idle()
-        assertFalse(popup.isShowing)
+        assertTrue(popup.isShowing)
+        assertFrozen(popup)
         assertFalse(popup.writeControl(ControlCommandIdentifier.LISTENING_MODE, 2))
         assertEquals(0, output(native).available())
     }
@@ -577,6 +611,10 @@ class ListeningModeDialogTest {
         try {
             assertTrue(popup.writeQuickSetting(QuickSetting.LOUD_SOUND_REDUCTION, true))
             assertTrue(entered.await(2, TimeUnit.SECONDS))
+            idle()
+            val shown = requireNotNull(ReflectionHelpers.callInstanceMethod<ListeningModeSnapshot?>(popup, "getSnapshot"))
+            assertEquals(true, shown.quickSettings.first { it.setting == QuickSetting.LOUD_SOUND_REDUCTION }.checked)
+            assertFalse("Showing the requested choice must not create confirmed device state", target.state.value.loudSoundReductionEnabled)
             assertFalse(popup.writeQuickSetting(QuickSetting.LOUD_SOUND_REDUCTION, true))
             popup.dismiss()
             assertFalse(popup.writeQuickSetting(QuickSetting.LOUD_SOUND_REDUCTION, true))
@@ -586,6 +624,62 @@ class ListeningModeDialogTest {
         withTimeout(2_000) { while (!job.isCompleted) { idle(); delay(5) } }
         verify(target, times(1)).writeATTCharacteristic(ATTHandle.LOUD_SOUND_REDUCTION, byteArrayOf(1),
             byteArrayOf(0), socket, 1L)
+    }
+
+    @Test fun cancellingAnOldTypedRequestCannotClearTheNewerRequestsPendingChoice() = runBlocking<Unit> {
+        val target = spy(device())
+        val socket = sockets.single().second
+        seedQuickReports(target)
+        val state = ReflectionHelpers.getField<MutableStateFlow<AppleState>>(target, "_state")
+        state.value = state.value.copy(loudSoundReductionReadStatus = SettingsReadStatus.AVAILABLE)
+        doReturn(true).`when`(target).loudSoundReductionWritable
+        val entered = List(2) { CountDownLatch(1) }
+        val released = List(2) { CountDownLatch(1) }
+        val calls = AtomicInteger()
+        doAnswer {
+            val index = calls.getAndIncrement()
+            entered[index].countDown()
+            check(released[index].await(5, TimeUnit.SECONDS))
+            true
+        }.`when`(target).writeATTCharacteristic(ATTHandle.LOUD_SOUND_REDUCTION, byteArrayOf(1),
+            byteArrayOf(0), socket, 1L)
+        devices.value = mapOf(target.macAddress to target)
+        val popup = open(target)
+        try {
+            assertTrue(popup.writeQuickSetting(QuickSetting.LOUD_SOUND_REDUCTION, true))
+            assertTrue(entered[0].await(2, TimeUnit.SECONDS))
+            val old = checkNotNull(ReflectionHelpers.getField<Job?>(popup, "quickWrite"))
+            val connection = ReflectionHelpers.getField<MutableStateFlow<ConnectionState>>(target, "_connectionState")
+            connection.value = ConnectionState.DISCONNECTED
+            idle()
+            assertFrozen(popup)
+            connection.value = ConnectionState.CONNECTED
+            idle()
+            assertTrue(popup.writeQuickSetting(QuickSetting.LOUD_SOUND_REDUCTION, true))
+            assertTrue(entered[1].await(2, TimeUnit.SECONDS))
+            val current = checkNotNull(ReflectionHelpers.getField<Job?>(popup, "quickWrite"))
+            assertNotSame(old, current)
+            released[0].countDown()
+            await { old.isCompleted }
+            assertSame(current, ReflectionHelpers.getField<Job?>(popup, "quickWrite"))
+            val pending = ReflectionHelpers.getField<MutableStateFlow<Set<QuickSetting>>>(popup, "quickPending")
+            assertEquals(setOf(QuickSetting.LOUD_SOUND_REDUCTION), pending.value)
+            val displayed = requireNotNull(ReflectionHelpers.callInstanceMethod<ListeningModeSnapshot?>(popup, "getSnapshot"))
+            assertEquals(true, displayed.quickSettings.first { it.setting == QuickSetting.LOUD_SOUND_REDUCTION }.checked)
+            assertFalse(popup.writeQuickSetting(QuickSetting.LOUD_SOUND_REDUCTION, true))
+            released[1].countDown()
+            await { current.isCompleted }
+            assertTrue(pending.value.isEmpty())
+        } finally { released.forEach { it.countDown() }; popup.dismiss() }
+        verify(target, times(2)).writeATTCharacteristic(ATTHandle.LOUD_SOUND_REDUCTION, byteArrayOf(1),
+            byteArrayOf(0), socket, 1L)
+    }
+
+    private fun assertFrozen(popup: ListeningModeDialog) {
+        val current = requireNotNull(ReflectionHelpers.callInstanceMethod<ListeningModeSnapshot?>(popup, "getSnapshot"))
+        assertFalse(current.enabled)
+        assertTrue(current.quickSettings.none { it.enabled })
+        assertFalse(popup.writeQuickSetting(QuickSetting.EAR_DETECTION, false))
     }
 
     private fun seedQuickReports(device: AppleDevice) {
@@ -670,5 +764,5 @@ class ListeningModeDialogTest {
         idle()
     }
 
-    private fun idle() = shadowOf(Looper.getMainLooper()).idle()
+    private fun idle() = shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(10))
 }

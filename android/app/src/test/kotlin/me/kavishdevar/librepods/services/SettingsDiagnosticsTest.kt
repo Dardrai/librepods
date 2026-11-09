@@ -5,6 +5,8 @@ import android.bluetooth.BluetoothSocket
 import java.io.FileDescriptor
 import java.io.PrintWriter
 import java.io.StringWriter
+import me.kavishdevar.librepods.utils.NativeGameModeController
+import me.kavishdevar.librepods.LibrePodsApplication
 import kotlinx.coroutines.flow.MutableStateFlow
 import me.kavishdevar.librepods.core.bluetooth.MacAddress
 import me.kavishdevar.librepods.core.bluetooth.aacp.AACPManager
@@ -18,6 +20,7 @@ import org.mockito.Mockito.*
 import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import org.robolectric.util.ReflectionHelpers
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [37], application = Application::class)
@@ -28,6 +31,7 @@ class SettingsDiagnosticsTest {
 
     @Before fun setup() {
         service = Robolectric.buildService(LibrePodsService::class.java).get()
+        ReflectionHelpers.setField(service, "mApplication", LibrePodsApplication())
         val awareness = ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG
         val volume = ControlCommandIdentifier.ADAPTIVE_VOLUME_CONFIG
         val ear = ControlCommandIdentifier.EAR_DETECTION_CONFIG
@@ -40,6 +44,7 @@ class SettingsDiagnosticsTest {
             hearingModes = HearingModes.empty().withRequestState(HearingMode.HEARING_AID, null))))
         `when`(device.settings).thenReturn(MutableStateFlow(AppleSettings(
             savedUnconfirmedChoices = mapOf("desired_ear_detection" to "off"))))
+        `when`(device.macAddress).thenReturn(MacAddress("AA:BB:CC:DD:EE:FF"))
         `when`(device.connectionState).thenReturn(MutableStateFlow(ConnectionState.CONNECTED))
         `when`(device.metadata).thenReturn(MutableStateFlow(AppleMetadata(name = "PRIVATE_AIRPODS_NAME")))
         `when`(device.aacp).thenReturn(aacp)
@@ -63,11 +68,27 @@ class SettingsDiagnosticsTest {
         assertTrue(output.contains("profile_read=READING"))
         assertTrue(output.contains("loud_sound_read=WAITING loud_sound_value=unknown"))
         assertTrue(output.contains("pending=HEARING_AID"))
+        assertTrue(output.contains("settings_game device_index=0 desired_preference=off controller_present=false desired_controller=unknown active=unknown"))
+        assertTrue(output.contains("settings_route device_index=0 bridge_connected=false route_matches=false"))
         assertFalse(output.contains("AA:BB:CC:DD:EE:FF"))
         assertFalse(output.contains("PRIVATE_AIRPODS_NAME"))
         assertFalse(output.contains("PRIVATE_HEARING_PROFILE"))
         assertTrue(mockingDetails(aacp).invocations.all { it.method.name in setOf("captureAudioSocket", "isMicrophoneRequested") })
         verify(device, never()).metadata
+    }
+
+    @Test fun gameDiagnosticsKeepThePreferenceSeparateFromControllerProgressWithoutRequestingAChange() {
+        `when`(device.settings).thenReturn(MutableStateFlow(AppleSettings(nativeGameModeEnabled = true)))
+        val controller = NativeGameModeController.State(desiredOn = true, active = false, available = true,
+            restoring = false, remoteRestorePending = true, issue = NativeGameModeController.Issue.WAITING_FOR_AUDIO)
+        clearInvocations(device, aacp)
+        val output = StringWriter().also { dumpNativeSettings(PrintWriter(it), 0, device, controller) }.toString()
+        assertTrue(output.contains("desired_preference=on controller_present=true desired_controller=on active=off available=on"))
+        assertTrue(output.contains("restoring=off remote_restore_pending=on issue=WAITING_FOR_AUDIO"))
+        assertFalse(output.contains("AA:BB:CC:DD:EE:FF"))
+        assertFalse(output.contains("PRIVATE_HEARING_PROFILE"))
+        assertTrue(mockingDetails(aacp).invocations.all { it.method.name in setOf("captureAudioSocket", "isMicrophoneRequested") })
+        assertTrue(mockingDetails(device).invocations.none { it.method.name.startsWith("set") || it.method.name.startsWith("update") })
     }
 
     @Test fun ordinaryDumpDoesNotCollectSettingsOrInitializeControlWork() {

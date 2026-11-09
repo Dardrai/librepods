@@ -256,7 +256,7 @@ class AirPodsQSServiceTest {
         verify(current).dismiss()
     }
 
-    @Test fun serviceDestructionDismissesTheDialogAndRetiresAPendingUnlock() = withPickerMocks { created ->
+    @Test fun serviceDestructionKeepsTheOpenDialogAndRetiresAPendingUnlock() = withPickerMocks { created ->
         val device = device()
         devices.value = mapOf(device.macAddress to device)
         tile.onStartListening(); idle(); tile.onClick()
@@ -265,7 +265,7 @@ class AirPodsQSServiceTest {
         tile.onClick()
         val unlock = requireNotNull(tileShadow().unlock)
         tile.onDestroy()
-        verify(dialog).dismiss()
+        verify(dialog, never()).dismiss()
         tileShadow().locked = false
         unlock.run()
         assertEquals("A retired tile cannot show another window", 1, created.constructed().size)

@@ -180,7 +180,11 @@ class LibrePodsService: Service() {
         if (args?.contains("--settings") == true) {
             val activeDevices = devices.value.values.filterIsInstance<AppleDevice>()
             writer.println("settings devices=${activeDevices.size}")
-            activeDevices.forEachIndexed { index, device -> dumpNativeSettings(writer, index, device) }
+            activeDevices.forEachIndexed { index, device ->
+                dumpNativeSettings(writer, index, device, gameControllers[device.macAddress]?.state?.value)
+                writer.println("settings_route device_index=$index bridge_connected=${audioControllers[device.macAddress]?.bridge?.state?.value?.connected == true} " +
+                    "route_matches=${MediaController.isMediaRoute(device.macAddress.value)}")
+            }
             return
         }
         if (args?.contains("--companion-media") == true) {
@@ -2297,7 +2301,7 @@ class LibrePodsService: Service() {
             if (state.componentState != previousState.componentState) {
                 if (Log.isLoggable(TAG, Log.DEBUG)) Log.d(TAG, "component state: ${state.componentState}")
 
-                val earDetectionEnabled = deviceSettings.hostAutoPause
+                val earDetectionEnabled = deviceSettings.hostAutoPause && state.effectiveEarDetection(deviceSettings)
                 if (earDetectionEnabled) {
                     processComponentStateChange(
                         device = device,
@@ -2724,7 +2728,7 @@ class LibrePodsService: Service() {
             islandWindow.close()
         }
 
-        if (!pod.settings.value.hostAutoPause || callBlocksSettingsRefresh()) return
+        if (!pod.settings.value.hostAutoPause || !pod.state.value.effectiveEarDetection(pod.settings.value) || callBlocksSettingsRefresh()) return
         val shouldPause = new == EarPresence.NONE || old == EarPresence.FULL && new == EarPresence.PARTIAL
         if (shouldPause) {
             val owner = WearMedia(transport)
@@ -2733,7 +2737,8 @@ class LibrePodsService: Service() {
                 try {
                     fun current() = !destroying && devices.value[pod.macAddress] === pod && wearMediaEpochs[pod.macAddress] === owner &&
                         pod.aacp.ownsAudioSocket(transport) &&
-                        pod.settings.value.hostAutoPause && !callBlocksSettingsRefresh() && !companionReleased.contains(pod.macAddress) &&
+                        pod.settings.value.hostAutoPause && pod.state.value.effectiveEarDetection(pod.settings.value) &&
+                        !callBlocksSettingsRefresh() && !companionReleased.contains(pod.macAddress) &&
                         !companionOperations.containsKey(pod.macAddress) && isNearbyDeviceAudioConnected(pod) &&
                         (owner.paused || earPresenceOf(pod.state.value.componentState) != EarPresence.FULL)
                     companionBridge.connect()

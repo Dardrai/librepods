@@ -45,29 +45,34 @@ the native or dongle writers. Listening mode, Adaptive strength and ordinary
 toggles update their displayed intent immediately while Bluetooth and preference
 writes run on IO through one ordered writer. Each control keeps one in-flight value and one replaceable unsent choice.
 Automatic Ear Detection uses the main screen's configured-choice precedence;
-its preference changes only after an accepted command. Ordinary choices without
-a matching fresh report show On/Off · preferred and stay adjustable on a ready
-current connection. Game Mode can be cancelled while it waits for playback.
+its preferences change only after an accepted command. Toggle labels show the
+chosen On or Off value immediately, including while an owned write is pending.
+The received reports and write authority remain separate from that presentation.
+Game Mode can be cancelled while it waits for playback.
 
 Hearing Aid, Media Assist and Loud Sound Reduction are disabled while scalar
 writes remain queued or in flight. An admitted typed request disables duplicate
-admission. During the panel's owned
-clinical confirmation refresh, known toggle values remain visible while their
-reports reload. Retained values stay disabled and show Reading only during an
-active read, then On/Off · last known. They supply no write authority or fitting
-baseline. An uncertain clinical mode offers the full screen's guarded Turn Off
-recovery button without presenting an unknown mode as On. Other unknown values
-remain indeterminate; unavailable transport is disabled.
+admission. During the panel's owned clinical confirmation refresh, known toggle
+values remain visible and disabled while their reports reload; they supply no
+write authority or fitting baseline. An uncertain clinical mode offers the full
+screen's guarded Turn Off recovery button without presenting an unknown mode as
+On. Other unknown values remain unavailable and disabled.
+
+An open panel owns its application-context service binding independently of the
+Quick Settings tile. Transient disconnects, settings reloads and replaced routes
+do not dismiss it. If its captured device or route is lost, the last presentation
+stays visible with every control disabled; only that exact owner can resume the
+panel. Pending work is retired rather than replayed when the owner returns.
+Explicit close, Back and outside dismissal still release its binding and work.
 
 Quick controls use the existing Backdrop glass material, a shared captured layer,
 neutral translucent silhouettes and circular icon wells, following the supplied
 Control Center reference and AndroidLiquidGlass's KMP examples. Active icon wells
 use the app accent; the glass body stays neutral. A short press spring and 180 ms
-icon color transitions give immediate
-feedback; state captions crossfade without moving the control geometry. Compose
+icon color transitions give immediate feedback without moving the control
+geometry. Compose
 animations retain the system duration scale, including disabled animations.
-Touch targets are at least 48 dp and expose switch state, pending state and
-disabled semantics. Opening or rendering the panel never changes a setting.
+Touch targets are at least 48 dp and expose switch state and disabled semantics. Opening or rendering the panel never changes a setting.
 
 Received records and requested values remain separate. A successful silent PME
 send can supply the next same-session edit baseline, but is not device

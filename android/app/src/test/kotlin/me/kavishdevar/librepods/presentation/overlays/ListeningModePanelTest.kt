@@ -83,7 +83,7 @@ class ListeningModePanelTest {
             control(setting).performScrollTo().assertIsNotEnabled()
                 .assert(SemanticsMatcher.expectValue(SemanticsProperties.ToggleableState, ToggleableState.Indeterminate))
                 .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription,
-                    RuntimeEnvironment.getApplication().getString(R.string.quick_setting_reading)))
+                    RuntimeEnvironment.getApplication().getString(R.string.not_available)))
                 .performClick()
         }
         assertTrue(changes.isEmpty())
@@ -92,20 +92,20 @@ class ListeningModePanelTest {
         }) }
         for (setting in QuickSetting.entries) {
             control(setting).performScrollTo().assertIsNotEnabled().assertIsOn()
-                .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Updating…"))
+                .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "On"))
         }
         compose.runOnIdle { current.value = current.value.copy(quickSettings = current.value.quickSettings.map {
             if (it.setting == QuickSetting.LOUD_SOUND_REDUCTION) it.copy(supported = false) else it
         }) }
         control(QuickSetting.LOUD_SOUND_REDUCTION).performScrollTo().assertIsDisplayed().assertIsNotEnabled()
-            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription,
-                RuntimeEnvironment.getApplication().getString(R.string.not_available)))
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "On"))
         compose.runOnIdle { current.value = current.value.copy(quickSettings = current.value.quickSettings.map {
             if (it.setting == QuickSetting.LOUD_SOUND_REDUCTION) it.copy(supported = true, checked = null,
                 pending = false, reading = false) else it
         }) }
         control(QuickSetting.LOUD_SOUND_REDUCTION).assertIsNotEnabled()
-            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Status unavailable."))
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription,
+                RuntimeEnvironment.getApplication().getString(R.string.not_available)))
         assertTrue("Reports and pending state cannot trigger an action", changes.isEmpty())
     }
 
@@ -137,18 +137,22 @@ class ListeningModePanelTest {
         val changes = mutableListOf<Pair<QuickSetting, Boolean>>()
         compose.setContent { fixture(Profile(), current.value) { setting, value -> changes += setting to value } }
         control(QuickSetting.GAME_MODE).performScrollTo().assertIsOn().assertIsEnabled()
-            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Updating…")).performClick()
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "On")).performClick()
+        compose.runOnIdle { current.value = current.value.copy(quickSettings = current.value.quickSettings.map {
+            if (it.setting == QuickSetting.GAME_MODE) it.copy(checked = false) else it
+        }) }
+        control(QuickSetting.GAME_MODE).assertIsOff().assertIsEnabled().performClick()
         control(QuickSetting.CONVERSATION_AWARENESS).performScrollTo().assertIsOn().assertIsEnabled()
-            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, preferenceDescription(true))).performClick()
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "On")).performClick()
         compose.runOnIdle { current.value = current.value.copy(quickSettings = current.value.quickSettings.map {
             if (it.setting == QuickSetting.CONVERSATION_AWARENESS) it.copy(checked = false) else it
         }) }
         control(QuickSetting.CONVERSATION_AWARENESS).assertIsOff().assertIsEnabled().performClick()
-        assertEquals(listOf(QuickSetting.GAME_MODE to false, QuickSetting.CONVERSATION_AWARENESS to false,
+        assertEquals(listOf(QuickSetting.GAME_MODE to false, QuickSetting.GAME_MODE to true, QuickSetting.CONVERSATION_AWARENESS to false,
             QuickSetting.CONVERSATION_AWARENESS to true), changes)
     }
 
-    @Test fun earDetectionPreferenceIsEditableAndDistinctFromADeviceReport() {
+    @Test fun bookkeepingFlagsNeverReplaceSimpleOnOffCaptions() {
         val current = mutableStateOf(snapshot(QuickSetting.entries.map { setting ->
             QuickSettingState(setting, checked = setting == QuickSetting.EAR_DETECTION,
                 supported = true, enabled = true, requested = setting == QuickSetting.EAR_DETECTION)
@@ -156,18 +160,24 @@ class ListeningModePanelTest {
         val changes = mutableListOf<Pair<QuickSetting, Boolean>>()
         compose.setContent { fixture(Profile(), current.value) { setting, value -> changes += setting to value } }
         val ear = control(QuickSetting.EAR_DETECTION).performScrollTo().assertIsEnabled().assertIsOn()
-        ear.assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, preferenceDescription(true)))
+        ear.assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "On"))
             .performClick()
         assertEquals(listOf(QuickSetting.EAR_DETECTION to false), changes)
         compose.runOnIdle { current.value = current.value.copy(quickSettings = current.value.quickSettings.map {
             if (it.setting == QuickSetting.EAR_DETECTION) it.copy(checked = false) else it
         }) }
         ear.assertIsOff().assertIsEnabled()
-            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, preferenceDescription(false)))
-        compose.runOnIdle { current.value = current.value.copy(quickSettings = current.value.quickSettings.map {
-            if (it.setting == QuickSetting.EAR_DETECTION) it.copy(requested = false) else it
-        }) }
-        ear.assertIsOff().assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Off"))
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Off"))
+        for (flags in listOf(QuickSettingState(QuickSetting.EAR_DETECTION, true, true, false, pending = true),
+            QuickSettingState(QuickSetting.EAR_DETECTION, true, true, false, reading = true),
+            QuickSettingState(QuickSetting.EAR_DETECTION, true, true, false, retained = true))) {
+            compose.runOnIdle { current.value = current.value.copy(quickSettings = current.value.quickSettings.map {
+                if (it.setting == QuickSetting.EAR_DETECTION) flags else it
+            }) }
+            ear.assertIsOn().assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "On"))
+        }
+        for (text in listOf("preferred", "Updating", "Reading", "last known", "Requested"))
+            compose.onAllNodesWithText(text, substring = true).assertCountEquals(0)
     }
 
     @Test fun uncertainHearingModesOfferOnlyAnOffButtonWithoutInventingAnOnState() {
@@ -183,6 +193,7 @@ class ListeningModePanelTest {
             control(setting).performScrollTo().assertIsEnabled()
                 .assert(SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.Button))
                 .assert(SemanticsMatcher.keyNotDefined(SemanticsProperties.ToggleableState))
+                .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, ""))
                 .assert(hasText(RuntimeEnvironment.getApplication().getString(label)))
                 .performClick()
         }
@@ -215,10 +226,6 @@ class ListeningModePanelTest {
     }
 
     private fun control(setting: QuickSetting) = compose.onNodeWithTag("quick-setting-${setting.name}")
-
-    private fun preferenceDescription(enabled: Boolean): String = RuntimeEnvironment.getApplication().let { context ->
-        context.getString(R.string.quick_setting_preference, context.getString(if (enabled) R.string.on else R.string.off))
-    }
 
     private fun snapshot(settings: List<QuickSettingState> = QuickSetting.entries.map {
         QuickSettingState(it, checked = false, supported = true, enabled = true)

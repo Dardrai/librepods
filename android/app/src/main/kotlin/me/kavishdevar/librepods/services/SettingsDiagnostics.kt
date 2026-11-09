@@ -7,12 +7,15 @@ import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommandIdentifi
 import me.kavishdevar.librepods.core.bluetooth.att.types.hearingAidSettingsWritable
 import me.kavishdevar.librepods.core.bluetooth.att.types.parseTransparencySettingsResponse
 import me.kavishdevar.librepods.core.devices.AppleDevice
+import me.kavishdevar.librepods.core.devices.DeviceComponent
 import me.kavishdevar.librepods.core.devices.SettingsReadStatus
 import me.kavishdevar.librepods.core.devices.effectiveControl
 import me.kavishdevar.librepods.core.devices.effectiveEarDetection
+import me.kavishdevar.librepods.utils.NativeGameModeController
 
 /** Explicit dumpsys output contains fixed diagnostic fields, never accessory identities or fitting data. */
-internal fun dumpNativeSettings(writer: PrintWriter, index: Int, device: AppleDevice) {
+internal fun dumpNativeSettings(writer: PrintWriter, index: Int, device: AppleDevice,
+    game: NativeGameModeController.State? = null) {
     val state = device.state.value
     val settings = device.settings.value
     fun flag(value: Boolean?): String = when (value) { true -> "on"; false -> "off"; null -> "unknown" }
@@ -23,6 +26,11 @@ internal fun dumpNativeSettings(writer: PrintWriter, index: Int, device: AppleDe
         "settings_operation_pending=${device.settingsOperationPending} microphone_active=${state.microphoneState.isActive} " +
         "microphone_requested=${device.aacp.isMicrophoneRequested()} recording=${state.recordingState.isRecording} " +
         "call=${state.audioSource.type == AudioSourceType.CALL}")
+    fun worn(component: DeviceComponent) = state.componentState.firstOrNull { it.component == component }?.status?.name ?: "unknown"
+    writer.println("settings_wear device_index=$index ear_detection=${flag(state.effectiveEarDetection(settings))} " +
+        "host_auto_pause=${settings.hostAutoPause} left=${worn(DeviceComponent.LEFT)} right=${worn(DeviceComponent.RIGHT)}")
+    writer.println("settings_conversation device_index=$index stage=${state.conversationAwarenessState} " +
+        "sequence=${state.conversationAwarenessSequence} pause_music=${settings.conversationAwarenessPauseMusicEnabled}")
     val listening = ControlCommandIdentifier.LISTENING_MODE
     writer.println("settings_control device_index=$index control=LISTENING_MODE received=${mode(state.controlStates[listening])} " +
         "live_report=${listening in state.liveControlReports} requested=${mode(state.requestedControls[listening])}")
@@ -34,6 +42,9 @@ internal fun dumpNativeSettings(writer: PrintWriter, index: Int, device: AppleDe
             "live_report=${id in state.liveControlReports} requested=${flag(id.decodeBoolean(state.requestedControls[id]))} preferred=${flag(preferred)}")
     }
     val modes = state.hearingModes
+    writer.println("settings_game device_index=$index desired_preference=${flag(settings.nativeGameModeEnabled)} controller_present=${game != null} " +
+        "desired_controller=${flag(game?.desiredOn)} active=${flag(game?.active)} available=${flag(game?.available)} " +
+        "restoring=${flag(game?.restoring)} remote_restore_pending=${flag(game?.remoteRestorePending)} issue=${game?.issue?.name ?: "none"}")
     val report = modes.accommodationsReport(state.controlSession)
     writer.println("settings_hearing device_index=$index profile_read=${state.hearingAidReadStatus.name} transparency_read=${state.transparencyReadStatus.name} " +
         "loud_sound_read=${state.loudSoundReductionReadStatus.name} loud_sound_value=${flag(state.loudSoundReductionEnabled.takeIf { state.loudSoundReductionReadStatus == SettingsReadStatus.AVAILABLE })} " +

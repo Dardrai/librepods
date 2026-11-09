@@ -1,14 +1,10 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 package me.kavishdevar.librepods.presentation.overlays
 
-import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -63,7 +59,7 @@ import me.kavishdevar.librepods.presentation.icons.LocalIcons
 @Composable
 internal fun ListeningModePanel(snapshot: ListeningModeSnapshot?, commandFailed: Boolean = false,
     onMode: (Int) -> Unit, onStrength: (Int) -> Unit, onToggle: (QuickSetting, Boolean) -> Unit,
-    modifier: Modifier = Modifier, onDismiss: () -> Unit = {}) {
+    modifier: Modifier = Modifier, onDismiss: () -> Unit = {}, loading: Boolean = true) {
     val backdrop = rememberLayerBackdrop()
     val maximumHeight = (LocalConfiguration.current.screenHeightDp.dp - 48.dp).coerceAtLeast(160.dp)
     val closeLabel = stringResource(R.string.quick_settings_close)
@@ -85,10 +81,10 @@ internal fun ListeningModePanel(snapshot: ListeningModeSnapshot?, commandFailed:
                     Icon(LocalIcons.current.Close, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurface)
                 }
             }
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(stringResource(R.string.noise_control), Modifier.padding(horizontal = 8.dp),
                     style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                ListeningModeContent(snapshot, commandFailed, onMode, onStrength)
+                ListeningModeContent(snapshot, commandFailed, onMode, onStrength, loading = loading)
             }
             BoxWithConstraints(Modifier.fillMaxWidth()) {
                 val twoColumns = maxWidth >= 340.dp && LocalDensity.current.fontScale <= 1.2f
@@ -128,24 +124,13 @@ private fun QuickSettingsToggle(state: QuickSettingState, backdrop: Backdrop,
         QuickSetting.HEARING_AID -> R.string.hearing_aid
         QuickSetting.MEDIA_ASSIST -> R.string.media_assist
     })
-    val status = stringResource(when {
-        !state.supported -> R.string.not_available
-        state.pending -> R.string.hearing_mode_pending
-        state.requested -> R.string.quick_setting_requested
-        state.reading -> R.string.quick_setting_reading
-        state.checked == null -> R.string.hearing_mode_unconfirmed
-        state.checked -> R.string.on
-        else -> R.string.off
+    val description = if (state.recoveryOff) "" else stringResource(when (state.checked) {
+        true -> R.string.on
+        false -> R.string.off
+        null -> R.string.not_available
     })
-    val description = when {
-        state.retained && !state.reading && !state.pending && state.checked != null ->
-            stringResource(R.string.quick_setting_last_known, stringResource(if (state.checked) R.string.on else R.string.off))
-        state.setting.control != null && state.requested && !state.pending && state.checked != null ->
-            stringResource(R.string.quick_setting_preference, stringResource(if (state.checked) R.string.on else R.string.off))
-        else -> status
-    }
-    val canCancelGameMode = state.setting == QuickSetting.GAME_MODE && state.checked == true
-    val enabled = state.supported && state.enabled && (!state.pending || canCancelGameMode) && (state.checked != null || state.recoveryOff)
+    val canEditPendingGameMode = state.setting == QuickSetting.GAME_MODE
+    val enabled = state.supported && state.enabled && (!state.pending || canEditPendingGameMode) && (state.checked != null || state.recoveryOff)
     val interactions = remember { MutableInteractionSource() }
     val pressed by interactions.collectIsPressedAsState()
     val pressProgress by animateFloatAsState(if (enabled && pressed) 1f else 0f,
@@ -183,10 +168,8 @@ private fun QuickSettingsToggle(state: QuickSettingState, backdrop: Backdrop,
         }
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             Text(title, style = MaterialTheme.typography.labelLarge, color = foreground)
-            AnimatedContent(description, transitionSpec = { fadeIn(tween(120)) togetherWith fadeOut(tween(80)) },
-                label = "quickControlState") { value ->
-                Text(value, style = MaterialTheme.typography.labelSmall, color = foreground.copy(alpha = 0.8f))
-            }
+            if (description.isNotEmpty()) Text(description, style = MaterialTheme.typography.labelSmall,
+                color = foreground.copy(alpha = 0.8f))
         }
         if (!compact && state.checked == true) Icon(LocalIcons.current.Check, null, Modifier.size(18.dp), tint = foreground)
     }

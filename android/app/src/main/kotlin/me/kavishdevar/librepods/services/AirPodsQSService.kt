@@ -168,7 +168,8 @@ class AirPodsQSService : TileService() {
         Log.d("AirPodsQSService", "Tile service destroyed")
         destroyed = true
         listening = false
-        dismissPicker()
+        // The shown dialog owns its binding; SystemUI can retire the tile after closing the shade.
+        if (picker?.isShowing != true) dismissPicker()
         releaseBinding(publishUnavailable = false)
         scope.cancel()
         super.onDestroy()
