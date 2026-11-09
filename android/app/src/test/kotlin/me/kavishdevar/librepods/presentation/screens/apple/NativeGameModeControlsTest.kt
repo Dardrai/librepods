@@ -38,7 +38,7 @@ class NativeGameModeControlsTest {
         val changes = mutableListOf<Boolean>()
         compose.setContent {
             LibrePodsTheme(designSystem = DesignSystem.Apple, darkTheme = dark) {
-                AudioSettings(false, false, false, false, false, {}, false, {}, false, {}, {}, false,
+                AudioSettings(false, false, false, false, false, {}, false, {}, false, {}, {},
                     gameModeVisible = visible.value, gameModeEnabled = available.value,
                     gameModeChecked = checked.value, gameModeDescription = "Waiting for audio",
                     onGameModeChanged = { changes.add(it); checked.value = it })

@@ -43,6 +43,7 @@ data class AppleState(
     val headTrackingState: BuddyState = BuddyState.INACTIVE,
 
     val loudSoundReductionEnabled: Boolean = false,
+    val loudSoundReductionReadStatus: SettingsReadStatus = SettingsReadStatus.WAITING,
     val transparencyData: ByteArray = byteArrayOf(),
     val hearingAidData: ByteArray = byteArrayOf(),
     val transparencyReadStatus: SettingsReadStatus = SettingsReadStatus.WAITING,

@@ -398,6 +398,7 @@ fun AppleSettingsScreen(
                         )
                     },
                     loudSoundReductionChecked = state.loudSoundReductionEnabled,
+                    loudSoundReductionEnabled = uiState.loudSoundReductionWritable,
                     onLoudSoundReductionCheckedChange = { checked ->
                         writeATTCharacteristic(
                             ATTHandle.LOUD_SOUND_REDUCTION,
@@ -405,7 +406,6 @@ fun AppleSettingsScreen(
                         )
                     },
                     navigateToEqualizer = navigateToEqualizer,
-                    vendorIdHook = uiState.vendorIdHook,
                     gameModeVisible = gameMode.available || settings.nativeGameModeEnabled,
                     gameModeEnabled = gameMode.available,
                     gameModeChecked = settings.nativeGameModeEnabled,

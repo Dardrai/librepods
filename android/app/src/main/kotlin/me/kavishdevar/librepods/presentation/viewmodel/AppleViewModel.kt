@@ -96,6 +96,7 @@ data class AppleUiState(
     val appSettings: AppSettingsEntity = AppSettingsEntity(),
 
     val vendorIdHook: Boolean = false,
+    val loudSoundReductionWritable: Boolean = false,
     val recordings: List<Recording> = emptyList(),
 
     val heartRateSamples: List<HeartRateSample> = emptyList(),
@@ -128,6 +129,7 @@ class AppleViewModel(
     val writingNoiseModeCycle = _writingNoiseModeCycle.asStateFlow()
     private val _writingCallControls = MutableStateFlow(false)
     val writingCallControls = _writingCallControls.asStateFlow()
+    private val writingLoudSoundReduction = MutableStateFlow(false)
 
     fun refreshDeviceSettings(refresh: suspend (AppleDevice) -> DeviceSettingsRefreshResult) {
         if (device.state.value.hearingModes.pending != null || device.state.value.accommodationsRequest.pending) return
@@ -239,8 +241,9 @@ class AppleViewModel(
     private val deviceDetails = combine(
         device.state.distinctUntilChanged(::sameDisplayedAppleState),
         device.settings,
-        device.metadata
-    ) { state, settings, metadata ->
+        device.metadata,
+        writingLoudSoundReduction
+    ) { state, settings, metadata, _ ->
         Triple(state, settings, metadata)
     }
 
@@ -265,6 +268,7 @@ class AppleViewModel(
                 customEq = state.requestedCustomEq ?: state.customEq),
             settings = settings,
             metadata = metadata,
+            loudSoundReductionWritable = !writingLoudSoundReduction.value && device.loudSoundReductionWritable,
             vendorIdHook = if (BluetoothIdentitySettings.usesNativeProperties) device.transparencyTransportAvailable
             else XposedRemotePrefProvider.create().getBoolean(
                 "vendor_id_hook",
@@ -282,6 +286,7 @@ class AppleViewModel(
             state = device.state.value,
             settings = device.settings.value,
             metadata = device.metadata.value,
+            loudSoundReductionWritable = device.loudSoundReductionWritable,
             vendorIdHook = if (BluetoothIdentitySettings.usesNativeProperties) device.transparencyTransportAvailable
                 else XposedRemotePrefProvider.create().getBoolean("vendor_id_hook", false)
         )
@@ -339,12 +344,18 @@ class AppleViewModel(
         val transport = device.aacp.captureAudioSocket()
         val connection = device.connectionNumber.value
         return viewModelScope.launch {
-            val confirmed = withContext(Dispatchers.IO) {
-                transport != null && device.aacp.captureAudioSocket() === transport &&
-                    device.connectionNumber.value == connection && device.writeATTCharacteristic(handle, request, baseline)
-            }
-            if (!confirmed) {
-                Toast.makeText(device.context, R.string.att_setting_not_confirmed, Toast.LENGTH_LONG).show()
+            val loudSound = handle == ATTHandle.LOUD_SOUND_REDUCTION
+            if (loudSound && !writingLoudSoundReduction.compareAndSet(false, true)) return@launch
+            try {
+                val confirmed = withContext(Dispatchers.IO) {
+                    transport != null && device.aacp.captureAudioSocket() === transport &&
+                        device.connectionNumber.value == connection && device.writeATTCharacteristic(handle, request, baseline)
+                }
+                if (!confirmed) {
+                    Toast.makeText(device.context, R.string.att_setting_not_confirmed, Toast.LENGTH_LONG).show()
+                }
+            } finally {
+                if (loudSound) writingLoudSoundReduction.value = false
             }
         }
     }

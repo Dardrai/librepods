@@ -14,6 +14,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.UUID
 
 class ATTManagerTest {
     private fun transparency(): ByteArray = ByteArray(104)
@@ -57,6 +58,102 @@ class ATTManagerTest {
             else -> error("Unexpected ATT opcode")
         } }
         return value
+    }
+
+    private fun loudSoundScript(transport: Transport, initial: ByteArray = byteArrayOf(0), properties: Int = 6): AtomicReference<ByteArray> {
+        val value = AtomicReference(initial.copyOf())
+        transport.reply = { request -> when (request[0].toInt() and 255) {
+            6 -> byteArrayOf(7, 0x20, 1, 0x40, 1)
+            8 -> if (request.u16(1) <= 0x130)
+                byteArrayOf(9, 21, 0x30, 1, properties.toByte(), 0x35, 1) +
+                    UUID.fromString("a48fec08-3921-43db-82aa-afbce8ebb4fb").attBytes()
+                else byteArrayOf(1, 8, 0x40, 1, 0x0a)
+            0x0a -> { assertEquals(0x135, request.u16(1)); byteArrayOf(0x0b) + value.get() }
+            0x52 -> { assertEquals(0x135, request.u16(1)); value.set(request.copyOfRange(3, request.size)); null }
+            else -> error("Unexpected Loud Sound Reduction ATT opcode")
+        } }
+        return value
+    }
+
+    @Test fun loudSoundReductionUsesDiscoveredCommandOnlyHandleAndFreshBooleanReadback() = runBlocking {
+        val socket = Transport(48, 48)
+        loudSoundScript(socket)
+        val owner = ATTOwner(Any(), 1)
+        val manager = ATTManager({ owner }, { socket })
+        try {
+            assertFalse(manager.available(ATTHandle.LOUD_SOUND_REDUCTION))
+            var baseline = manager.readCharacteristic(ATTHandle.LOUD_SOUND_REDUCTION)!!
+            assertArrayEquals(byteArrayOf(0), baseline)
+            assertTrue(manager.available(ATTHandle.LOUD_SOUND_REDUCTION))
+            assertFalse(manager.available)
+            for (value in listOf(1, 0)) {
+                val requested = byteArrayOf(value.toByte())
+                val before = socket.requests.size
+                assertTrue(manager.writeCharacteristic(ATTHandle.LOUD_SOUND_REDUCTION, requested, baseline) { true })
+                assertEquals(listOf(0x0a, 0x52, 0x0a), socket.requests.drop(before).map { it[0].toInt() and 255 })
+                assertArrayEquals(requested, manager.readCharacteristic(ATTHandle.LOUD_SOUND_REDUCTION))
+                baseline = requested
+            }
+            assertFalse(socket.requests.any { it[0] == 0x12.toByte() || it.size >= 3 && it.u16(1) == 0x1b })
+        } finally { manager.disconnect() }
+    }
+
+    @Test fun loudSoundReductionReadOnlyCharacteristicCannotBecomeWritable() = runBlocking {
+        val socket = Transport(48, 48)
+        loudSoundScript(socket, properties = 2)
+        val owner = ATTOwner(Any(), 1)
+        val manager = ATTManager({ owner }, { socket })
+        try {
+            val baseline = manager.readCharacteristic(ATTHandle.LOUD_SOUND_REDUCTION)!!
+            assertFalse(manager.available(ATTHandle.LOUD_SOUND_REDUCTION))
+            assertFalse(manager.writeCharacteristic(ATTHandle.LOUD_SOUND_REDUCTION, byteArrayOf(1), baseline) { true })
+            assertFalse(socket.requests.any { it[0] in byteArrayOf(0x12, 0x52) })
+        } finally { manager.disconnect() }
+    }
+
+    @Test fun loudSoundReductionRejectsMalformedReadsAndWrites() = runBlocking {
+        val invalidValues = listOf(byteArrayOf(), byteArrayOf(2), byteArrayOf(-1), byteArrayOf(0, 0), ByteArray(104))
+        for (invalid in invalidValues) {
+            val socket = Transport()
+            val value = loudSoundScript(socket)
+            val owner = ATTOwner(Any(), 1)
+            val manager = ATTManager({ owner }, { socket })
+            try {
+                val baseline = manager.readCharacteristic(ATTHandle.LOUD_SOUND_REDUCTION)!!
+                val before = socket.requests.size
+                assertFalse(manager.writeCharacteristic(ATTHandle.LOUD_SOUND_REDUCTION, invalid, baseline) { true })
+                assertFalse(manager.writeCharacteristic(ATTHandle.LOUD_SOUND_REDUCTION, byteArrayOf(1), invalid) { true })
+                assertEquals(before, socket.requests.size)
+                value.set(invalid)
+                assertNull(manager.readCharacteristic(ATTHandle.LOUD_SOUND_REDUCTION))
+                assertFalse(manager.canRetryRead())
+                assertFalse(socket.requests.any { it[0] in byteArrayOf(0x12, 0x52) })
+            } finally { manager.disconnect() }
+        }
+    }
+
+    @Test fun loudSoundReductionCannotConfirmAnUnchangedOrMalformedReadbackOrAChangedBaseline() = runBlocking {
+        for (failure in listOf("unchanged", "malformed", "baseline")) {
+            val socket = Transport()
+            val value = loudSoundScript(socket)
+            val owner = ATTOwner(Any(), 1)
+            val manager = ATTManager({ owner }, { socket })
+            try {
+                val baseline = manager.readCharacteristic(ATTHandle.LOUD_SOUND_REDUCTION)!!
+                val base = socket.reply
+                socket.reply = { request -> if (request[0] == 0x52.toByte()) {
+                    value.set(if (failure == "malformed") byteArrayOf(2) else baseline)
+                    null
+                } else base(request) }
+                if (failure == "baseline") value.set(byteArrayOf(1))
+                assertFalse(manager.writeCharacteristic(ATTHandle.LOUD_SOUND_REDUCTION, byteArrayOf(1), baseline) { true })
+                assertEquals(if (failure == "baseline") 0 else 1, socket.requests.count { it[0] == 0x52.toByte() })
+                if (failure != "baseline") {
+                    assertFalse(manager.canRetryRead())
+                    assertNull(manager.readCharacteristic(ATTHandle.LOUD_SOUND_REDUCTION))
+                }
+            } finally { manager.disconnect() }
+        }
     }
 
     @Test fun dynamicDiscoveryRequiresFullFreshReadBeforeVerifiedWrite() = runBlocking {

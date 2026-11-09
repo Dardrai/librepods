@@ -128,11 +128,47 @@ class AacpAttWritesTest {
             reportModes(device, socket, hearing = true)
             assertFalse(device.writeATTCharacteristic(ATTHandle.TRANSPARENCY, baseline.copyOf().put(0, 1f), baseline))
             verifyNoInteractions(att.manager)
-            att.readReturns(ATTHandle.LOUD_SOUND_REDUCTION, byteArrayOf(0), byteArrayOf(1))
+            att.readReturns(ATTHandle.LOUD_SOUND_REDUCTION, byteArrayOf(0), byteArrayOf(0), byteArrayOf(1))
+            assertArrayEquals(byteArrayOf(0), device.readATTCharacteristic(ATTHandle.LOUD_SOUND_REDUCTION))
             att.onWrite(ATTHandle.LOUD_SOUND_REDUCTION) { true }
             assertFalse(device.writeATTCharacteristic(ATTHandle.LOUD_SOUND_REDUCTION, byteArrayOf(2)))
             assertTrue(device.writeATTCharacteristic(ATTHandle.LOUD_SOUND_REDUCTION, byteArrayOf(1)))
             assertTrue(device.state.value.loudSoundReductionEnabled)
+        }
+    }
+
+    @Test fun loudSoundReductionNeedsALoadedBaselineAndExactOwnReadback() = runBlocking<Unit> {
+        withFixture { device, att, _ ->
+            assertFalse(device.writeATTCharacteristic(ATTHandle.LOUD_SOUND_REDUCTION, byteArrayOf(1)))
+            verifyNoInteractions(att.manager)
+        }
+        for (model in listOf(AirPodsModel.UNKNOWN, AirPodsModel.AIRPODS_PRO_1)) withFixture { device, att, _ ->
+            device.loadInitialState(device.state.value, AppleSettings(), device.metadata.value.copy(model = model))
+            att.readReturns(ATTHandle.LOUD_SOUND_REDUCTION, byteArrayOf(0))
+            assertArrayEquals(byteArrayOf(0), device.readATTCharacteristic(ATTHandle.LOUD_SOUND_REDUCTION))
+            assertEquals(SettingsReadStatus.AVAILABLE, device.state.value.loudSoundReductionReadStatus)
+            assertFalse(device.writeATTCharacteristic(ATTHandle.LOUD_SOUND_REDUCTION, byteArrayOf(1)))
+            assertEquals(0, att.writeCount(ATTHandle.LOUD_SOUND_REDUCTION))
+        }
+        for (baseline in listOf(0, 1)) for (result in listOf("matches", "unchanged", "missing", "malformed")) withFixture { device, att, _ ->
+            val original = byteArrayOf(baseline.toByte())
+            val requested = byteArrayOf((1 - baseline).toByte())
+            val readback = when (result) {
+                "matches" -> requested
+                "unchanged" -> original
+                "missing" -> null
+                else -> byteArrayOf(2)
+            }
+            att.readReturns(ATTHandle.LOUD_SOUND_REDUCTION, original, original, readback)
+            assertArrayEquals(original, device.readATTCharacteristic(ATTHandle.LOUD_SOUND_REDUCTION))
+            att.onWrite(ATTHandle.LOUD_SOUND_REDUCTION) { true }
+            assertFalse(device.writeATTCharacteristic(ATTHandle.LOUD_SOUND_REDUCTION, requested, byteArrayOf(2)))
+            assertEquals(0, att.writeCount(ATTHandle.LOUD_SOUND_REDUCTION))
+            assertEquals(result == "matches", device.writeATTCharacteristic(ATTHandle.LOUD_SOUND_REDUCTION, requested))
+            assertEquals(1, att.writeCount(ATTHandle.LOUD_SOUND_REDUCTION))
+            assertEquals(if (result == "matches") SettingsReadStatus.AVAILABLE else SettingsReadStatus.UNAVAILABLE,
+                device.state.value.loudSoundReductionReadStatus)
+            assertEquals(if (result == "matches") baseline == 0 else baseline == 1, device.state.value.loudSoundReductionEnabled)
         }
     }
 

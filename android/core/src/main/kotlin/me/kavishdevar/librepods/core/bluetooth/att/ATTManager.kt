@@ -37,8 +37,7 @@ import kotlin.coroutines.resumeWithException
 
 enum class ATTHandle(internal val uuid: UUID?) {
     TRANSPARENCY(UUID.fromString("d5621cc1-f7ab-45db-9403-9eaf744d5390")),
-    // Its UUID has not been verified. Do not substitute the old fixed handle.
-    LOUD_SOUND_REDUCTION(null),
+    LOUD_SOUND_REDUCTION(UUID.fromString("a48fec08-3921-43db-82aa-afbce8ebb4fb")),
     HEARING_AID(UUID.fromString("a4120005-95c5-4d6f-9098-0f0b41457e0a"))
 }
 
@@ -97,9 +96,12 @@ class ATTManager internal constructor(
     @Volatile private var attemptOwner: ATTOwner? = null
     @Volatile private var connectionAttempts = 0
 
-    val available: Boolean get() = currentSession()?.let { active -> synchronized(active.reads) {
-        active.mtu >= 107 && active.characteristics[ATTHandle.TRANSPARENCY]?.writeOpcode != null &&
-            active.reads[ATTHandle.TRANSPARENCY]?.let { it.size == 104 && parseTransparencySettingsResponse(it) != null } == true
+    val available: Boolean get() = available(ATTHandle.TRANSPARENCY)
+
+    fun available(handle: ATTHandle): Boolean = currentSession()?.let { active -> synchronized(active.reads) {
+        active.characteristics[handle]?.writeOpcode != null && active.reads[handle]?.let {
+            it.size + 3 <= active.mtu && validWrite(handle, it)
+        } == true
     } } == true
 
     internal fun sessionToken(): Any? = currentSession()
@@ -267,7 +269,7 @@ class ATTManager internal constructor(
     private fun validValue(handle: ATTHandle, data: ByteArray): Boolean = when (handle) {
         ATTHandle.TRANSPARENCY -> data.size == 104 && parseTransparencySettingsResponse(data) != null
         ATTHandle.HEARING_AID -> data.size == 104 && parseHearingAidSettingsResponse(data) != null
-        ATTHandle.LOUD_SOUND_REDUCTION -> false
+        ATTHandle.LOUD_SOUND_REDUCTION -> data.size == 1 && data[0] in byteArrayOf(0, 1)
     }
     private fun validWrite(handle: ATTHandle, data: ByteArray): Boolean = validValue(handle, data) &&
         (handle != ATTHandle.HEARING_AID || hearingAidSettingsWritable(data))

@@ -105,15 +105,15 @@ settings screen does not resend saved choices or reconnect audio.
 
 Native ATT initialization belongs to one control socket and session. It waits
 for Connected, a known supported model and idle microphone/call state, then
-reads the full hearing profile followed by Custom Transparency where supported.
+reads the full hearing profile, Custom Transparency and Loud Sound Reduction where supported.
 One complete AHPS read publishes both the profile and its validated Audiogram
 source. Busy microphone, recording, call or settings work defers an unstarted
 read rather than skipping it permanently. Each admitted characteristic read is
 bounded to 15 seconds. Transient read failures can use the bounded bearer
 recovery below; rejected records and uncertain writes are not retried.
 Replaced sessions and cancelled workers cannot publish old
-records. Loud Sound Reduction's UUID remains unverified on native Android, so
-initialization does not substitute a captured fixed handle for it.
+records. Loud Sound Reduction is discovered by UUID and read as exactly one
+byte, `00` or `01`; no captured fixed handle is substituted.
 
 Full-record edits retain one in-flight request and one latest desired record,
 with 150 ms pacing. Further field edits build on that latest intent. Exact own
@@ -839,11 +839,20 @@ capture contains six identical 104-byte clinical reads and no ATT writes;
 the current clinical fitting was not edited. The phone was left with both
 clinical modes Off and diagnostic HCI logging restored to its original state.
 
-Loud Sound Reduction is not enabled by this transport work. The native capture
-declares UUID `A48FEC08-3921-43DB-82AA-AFBCE8EBB4FB` with properties `0x06`
-(read and write without response), at frame 1424 in
-`20261024T150956Z-00aee364`. This does not establish the legacy fixed-handle
-Write Request contract; its typed write integration remains unverified.
+Loud Sound Reduction uses UUID `A48FEC08-3921-43DB-82AA-AFBCE8EBB4FB`,
+declared with properties `0x06` (read and write without response) at frame 1424
+in `20261024T150956Z-00aee364`, and independently observed in the native
+Android discovery at frame 508 of the 2026-10-25 accommodations read capture.
+Android discovers the current value handle and sends the advertised ATT Write
+Command (`0x52`), not a fixed-handle Write Request (`0x12`) or an expected
+Write Response (`0x13`). Only an exact fresh one-byte `00`/`01` readback
+confirms the change. A successful same-session read is required before editing;
+unread, malformed, disconnected and uncertain states do not enable the toggle.
+Synthetic transport tests exercise discovery at a relocated handle, both
+Boolean changes and rejected confirmations. On 2026-11-09, Pixel117 on the
+Pixel 10 Pro XL confirmed both toggle directions through this readback path;
+the user restored the starting setting. This establishes setting confirmation,
+not a measurement of acoustic protection.
 
 ## Host clock and sensors
 

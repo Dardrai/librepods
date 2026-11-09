@@ -96,6 +96,7 @@ class AppleDevice(
         _state.value = state.copy(aacpPackets = retainedPacketHistory(state.aacpPackets),
             controlSession = 0, accommodationsRequest = AccommodationsRequestState(), accommodationsAudiogramSource = null,
             transparencyReadStatus = SettingsReadStatus.WAITING, hearingAidReadStatus = SettingsReadStatus.WAITING,
+            loudSoundReductionReadStatus = SettingsReadStatus.WAITING,
             controlStates = state.cachedControlStates(settings, metadata.modelNumber))
         _settings.value = if (settings.allowOffChoice != null && "desired_allow_off" !in settings.savedUnconfirmedChoices)
             settings.copy(savedUnconfirmedChoices = settings.savedUnconfirmedChoices +
@@ -364,6 +365,11 @@ class AppleDevice(
     suspend fun setMediaAssistEnabled(enabled: Boolean): Boolean = setHearingMode(HearingMode.MEDIA_ASSIST, enabled)
 
     val transparencyTransportAvailable: Boolean get() = att.available
+    val loudSoundReductionWritable: Boolean get() = connectionState.value == ConnectionState.CONNECTED &&
+        state.value.controlSession > 0 && metadata.value.model != AirPodsModel.UNKNOWN && BaseCapability.LOUD_SOUND_REDUCTION in AirPodsSpecs.getSpec(metadata.value.model).baseCapabilities &&
+        state.value.loudSoundReductionReadStatus == SettingsReadStatus.AVAILABLE && att.available(ATTHandle.LOUD_SOUND_REDUCTION) &&
+        confirmationAudioIdle() && state.value.hearingModes.pending == null &&
+        !state.value.accommodationsRequest.pending
 
     suspend fun setAccommodations(expected: AccommodationsReport, phone: Boolean?, media: Boolean?,
         preset: AccommodationsPreset?, expectedEditRevision: Long = 0, audiogram: Boolean = false,
@@ -667,6 +673,7 @@ class AppleDevice(
     suspend fun writeATTCharacteristic(handle: ATTHandle, value: ByteArray, expected: ByteArray? = null,
         expectedTransport: BluetoothSocket? = null, expectedSession: Long? = null): Boolean {
         val requested = value.copyOf()
+        if (handle == ATTHandle.LOUD_SOUND_REDUCTION && state.value.loudSoundReductionReadStatus != SettingsReadStatus.AVAILABLE) return false
         val baseline = expected?.copyOf() ?: if (handle == ATTHandle.LOUD_SOUND_REDUCTION)
             byteArrayOf(if (state.value.loudSoundReductionEnabled) 1 else 0) else return false
         val transport = aacp.captureAudioSocket() ?: return false
@@ -679,7 +686,8 @@ class AppleDevice(
             fun cacheMatches(): Boolean = when (handle) {
                 ATTHandle.HEARING_AID -> baseline.contentEquals(state.value.hearingAidData)
                 ATTHandle.TRANSPARENCY -> baseline.contentEquals(state.value.transparencyData)
-                ATTHandle.LOUD_SOUND_REDUCTION -> baseline.contentEquals(byteArrayOf(if (state.value.loudSoundReductionEnabled) 1 else 0))
+                ATTHandle.LOUD_SOUND_REDUCTION -> state.value.loudSoundReductionReadStatus == SettingsReadStatus.AVAILABLE &&
+                    baseline.contentEquals(byteArrayOf(if (state.value.loudSoundReductionEnabled) 1 else 0))
             }
             fun current(): Boolean {
                 val state = state.value
@@ -703,7 +711,8 @@ class AppleDevice(
                         (BaseCapability.HEARING_AID in AirPodsSpecs.getSpec(metadata.value.model).baseCapabilities &&
                             !modes.customTransparencyAllowed))) return@withLock false
                 }
-                ATTHandle.LOUD_SOUND_REDUCTION -> if (!validATTValue(handle, requested)) return@withLock false
+                ATTHandle.LOUD_SOUND_REDUCTION -> if (!validATTValue(handle, requested) || !validATTValue(handle, baseline) ||
+                    metadata.value.model == AirPodsModel.UNKNOWN || BaseCapability.LOUD_SOUND_REDUCTION !in AirPodsSpecs.getSpec(metadata.value.model).baseCapabilities) return@withLock false
             }
             val reserved = synchronized(aacp) {
                 if (attOperationPending || !current()) false else { attOperationPending = true; true }
@@ -763,7 +772,8 @@ class AppleDevice(
     private fun publishATTValue(handle: ATTHandle, value: ByteArray?) {
         updateState {
             when (handle) {
-                ATTHandle.LOUD_SOUND_REDUCTION -> if (value == null) it else it.copy(loudSoundReductionEnabled = value[0] == 1.toByte())
+                ATTHandle.LOUD_SOUND_REDUCTION -> it.copy(loudSoundReductionEnabled = value?.get(0)?.let { byte -> byte == 1.toByte() } ?: it.loudSoundReductionEnabled,
+                    loudSoundReductionReadStatus = if (value == null) SettingsReadStatus.UNAVAILABLE else SettingsReadStatus.AVAILABLE)
                 ATTHandle.TRANSPARENCY -> it.copy(transparencyData = value?.copyOf() ?: byteArrayOf(),
                     transparencyReadStatus = if (value == null) SettingsReadStatus.UNAVAILABLE else SettingsReadStatus.AVAILABLE)
                 ATTHandle.HEARING_AID -> it.copy(hearingAidData = value?.copyOf() ?: byteArrayOf(),
@@ -816,14 +826,14 @@ class AppleDevice(
                 synchronized(aacp) {
                     if (current()) updateState { it.copy(
                         hearingAidReadStatus = if (BaseCapability.HEARING_AID !in capabilities) SettingsReadStatus.UNAVAILABLE else it.hearingAidReadStatus,
-                        transparencyReadStatus = if (BaseCapability.LISTENING_MODE !in capabilities) SettingsReadStatus.UNAVAILABLE else it.transparencyReadStatus) }
+                        transparencyReadStatus = if (BaseCapability.LISTENING_MODE !in capabilities) SettingsReadStatus.UNAVAILABLE else it.transparencyReadStatus,
+                        loudSoundReductionReadStatus = if (BaseCapability.LOUD_SOUND_REDUCTION !in capabilities) SettingsReadStatus.UNAVAILABLE else it.loudSoundReductionReadStatus) }
                 }
-                // Unknown UUIDs remain unavailable; never fall back to a captured handle.
-                val handle = listOf(ATTHandle.HEARING_AID, ATTHandle.TRANSPARENCY).firstOrNull { handle ->
+                val handle = listOf(ATTHandle.HEARING_AID, ATTHandle.TRANSPARENCY, ATTHandle.LOUD_SOUND_REDUCTION).firstOrNull { handle ->
                     handle !in initial.attempted && when (handle) {
                         ATTHandle.HEARING_AID -> BaseCapability.HEARING_AID in capabilities
                         ATTHandle.TRANSPARENCY -> BaseCapability.LISTENING_MODE in capabilities
-                        ATTHandle.LOUD_SOUND_REDUCTION -> false
+                        ATTHandle.LOUD_SOUND_REDUCTION -> BaseCapability.LOUD_SOUND_REDUCTION in capabilities
                     }
                 } ?: return
                 if (System.nanoTime() / 1_000_000 < initial.retryAfter) { delay(250.milliseconds); continue }
@@ -874,7 +884,7 @@ class AppleDevice(
                             if (current()) updateState { when (handle) {
                                 ATTHandle.HEARING_AID -> it.copy(hearingAidReadStatus = SettingsReadStatus.READING)
                                 ATTHandle.TRANSPARENCY -> it.copy(transparencyReadStatus = SettingsReadStatus.READING)
-                                else -> it
+                                ATTHandle.LOUD_SOUND_REDUCTION -> it.copy(loudSoundReductionReadStatus = SettingsReadStatus.READING)
                             } }
                         }
                     }

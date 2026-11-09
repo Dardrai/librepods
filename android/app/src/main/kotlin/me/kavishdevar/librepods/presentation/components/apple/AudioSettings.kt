@@ -46,7 +46,6 @@ fun AudioSettings(
 
     navigateToEqualizer: () -> Unit,
 
-    vendorIdHook: Boolean,
     gameModeVisible: Boolean = false,
     gameModeEnabled: Boolean = false,
     gameModeChecked: Boolean = false,
@@ -54,6 +53,7 @@ fun AudioSettings(
     onGameModeChanged: (Boolean) -> Unit = {},
     adaptiveVolumeEnabled: Boolean = true,
     conversationAwarenessEnabled: Boolean = true,
+    loudSoundReductionEnabled: Boolean = false,
 ) {
     if (adaptiveVolumeCapability || conversationAwarenessCapability || loudSoundReductionCapability || gameModeVisible) {
         StyledList(title = stringResource(R.string.audio)) {
@@ -86,11 +86,12 @@ fun AudioSettings(
                 )
             }
 
-            if (loudSoundReductionCapability && vendorIdHook) {
+            if (loudSoundReductionCapability) {
                 styledToggle(
                     label = stringResource(R.string.loud_sound_reduction),
                     description = stringResource(R.string.loud_sound_reduction_description),
                     checked = loudSoundReductionChecked,
+                    enabled = loudSoundReductionEnabled,
                     onCheckedChange = onLoudSoundReductionCheckedChange,
                 )
             }

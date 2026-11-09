@@ -36,6 +36,8 @@ import com.kyant.backdrop.backdrops.rememberLayerBackdrop
 import me.kavishdevar.librepods.R
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommandIdentifier
 import me.kavishdevar.librepods.core.bluetooth.att.ATTHandle
+import me.kavishdevar.librepods.core.devices.AirPodsSpecs
+import me.kavishdevar.librepods.core.devices.BaseCapability
 import me.kavishdevar.librepods.presentation.components.primitives.StyledScaffold
 import me.kavishdevar.librepods.presentation.components.primitives.StyledToggle
 import me.kavishdevar.librepods.presentation.viewmodel.AppleViewModel
@@ -63,12 +65,13 @@ fun HearingProtectionScreen(
         ) {
             Spacer(modifier = Modifier.height(topPadding))
 
-            if (uiState.vendorIdHook) {
+            if (BaseCapability.LOUD_SOUND_REDUCTION in AirPodsSpecs.getSpec(uiState.metadata.model).baseCapabilities) {
                 StyledToggle(
                     title = stringResource(R.string.environmental_noise),
                     label = stringResource(R.string.loud_sound_reduction),
                     description = stringResource(R.string.loud_sound_reduction_description),
                     checked = state.loudSoundReductionEnabled,
+                    enabled = uiState.loudSoundReductionWritable,
                     onCheckedChange = {
                         viewModel.writeATTCharacteristic(
                             ATTHandle.LOUD_SOUND_REDUCTION,

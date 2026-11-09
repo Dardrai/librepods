@@ -250,7 +250,8 @@ class AACPManager(private val device: AppleDevice,
                         if (captureSettingsSocket() === expected) startInitialSettingsRead(startup)
                         else device.updateState { it.copy(
                             hearingAidReadStatus = if (it.hearingAidReadStatus == SettingsReadStatus.WAITING) SettingsReadStatus.UNAVAILABLE else it.hearingAidReadStatus,
-                            transparencyReadStatus = if (it.transparencyReadStatus == SettingsReadStatus.WAITING) SettingsReadStatus.UNAVAILABLE else it.transparencyReadStatus) }
+                            transparencyReadStatus = if (it.transparencyReadStatus == SettingsReadStatus.WAITING) SettingsReadStatus.UNAVAILABLE else it.transparencyReadStatus,
+                            loudSoundReductionReadStatus = if (it.loudSoundReductionReadStatus == SettingsReadStatus.WAITING) SettingsReadStatus.UNAVAILABLE else it.loudSoundReductionReadStatus) }
                     }
                 }
             }
@@ -447,7 +448,8 @@ class AACPManager(private val device: AppleDevice,
                     settingsStartup = null
                     device.updateState { it.copy(capabilities = emptySet(), hearingModes = hearingStateAfterRefresh(hearingRefresh), controlSession = requestEpoch + 1, accommodationsRequest = accommodationsStateAfterRefresh(hearingRefresh), budRoleRaw = emptyList(), caseInfo = null,
                         hearingAidData = byteArrayOf(), transparencyData = byteArrayOf(),
-                        hearingAidReadStatus = SettingsReadStatus.WAITING, transparencyReadStatus = SettingsReadStatus.WAITING) }
+                        hearingAidReadStatus = SettingsReadStatus.WAITING, transparencyReadStatus = SettingsReadStatus.WAITING,
+                        loudSoundReductionReadStatus = SettingsReadStatus.WAITING) }
                     rtBuddyManager = createSensorSession(socket)
                     true
                 }
@@ -1299,6 +1301,7 @@ class AACPManager(private val device: AppleDevice,
                     requestedControls = emptyMap(), liveControlReports = emptySet(), requestedCustomEq = null, aacpPackets = emptyList(),
                     hearingModes = hearingStateAfterRefresh(hearingRefresh), controlSession = 0, accommodationsRequest = accommodationsStateAfterRefresh(hearingRefresh), hearingAidData = byteArrayOf(), transparencyData = byteArrayOf(),
                     hearingAidReadStatus = SettingsReadStatus.WAITING, transparencyReadStatus = SettingsReadStatus.WAITING,
+                    loudSoundReductionReadStatus = SettingsReadStatus.WAITING,
                     headTrackingState = BuddyState.INACTIVE, hrmState = BuddyState.INACTIVE, currentHeartRate = null)
             }
             // The notification belongs to this retirement, before a replacement can be published.

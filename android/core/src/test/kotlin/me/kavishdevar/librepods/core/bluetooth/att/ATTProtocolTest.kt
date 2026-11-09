@@ -2,11 +2,26 @@ package me.kavishdevar.librepods.core.bluetooth.att
 
 import org.junit.Assert.*
 import org.junit.Test
+import java.util.UUID
 
 class ATTProtocolTest {
     private fun page(declaration: Int, handle: Int, properties: Int = 0x0a) =
         byteArrayOf(9, 21, declaration.toByte(), (declaration ushr 8).toByte(), properties.toByte(), handle.toByte(), (handle ushr 8).toByte()) +
             ATTHandle.TRANSPARENCY.uuid!!.attBytes()
+
+    @Test fun loudSoundReductionDiscoveryUsesItsUuidAndAdvertisedWriteMethod() {
+        for ((properties, opcode) in listOf(2 to null, 6 to 0x52, 10 to 0x12)) {
+            var index = 0
+            val characteristics = discoverATTSettings { _, _ -> when (index++) {
+                0 -> byteArrayOf(7, 0x20, 1, 0x40, 1)
+                1 -> byteArrayOf(9, 21, 0x30, 1, properties.toByte(), 0x35, 1) +
+                    UUID.fromString("a48fec08-3921-43db-82aa-afbce8ebb4fb").attBytes()
+                else -> byteArrayOf(1, 8, 0x40, 1, 0x0a)
+            } }
+            assertEquals(ATTCharacteristic(0x135, opcode), characteristics[ATTHandle.LOUD_SOUND_REDUCTION])
+            assertEquals(1, characteristics.size)
+        }
+    }
 
     @Test fun discoveryRejectsInvalidRangesDuplicateUnreadableAndTruncatedDeclarations() {
         for (response in listOf(byteArrayOf(7, 0, 0, 0x40, 0), byteArrayOf(7, 0x40, 0, 0x20, 0), byteArrayOf(7, 1))) {

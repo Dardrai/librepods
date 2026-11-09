@@ -96,10 +96,11 @@ internal fun AccessibilitySettingsContent(ui: AppleUiState, navigateBack: (() ->
                 description = stringResource(R.string.noise_cancellation_single_airpod_description),
                 checked = value(oneBud) == 1, enabled = canWriteControl(oneBud),
                 onCheckedChange = { setBoolean(oneBud, it) })
-            if (!dongle && BaseCapability.LOUD_SOUND_REDUCTION in capabilities && ui.vendorIdHook)
+            if (!dongle && BaseCapability.LOUD_SOUND_REDUCTION in capabilities)
                 StyledToggle(label = stringResource(R.string.loud_sound_reduction),
                     description = stringResource(R.string.loud_sound_reduction_description),
-                    checked = state.loudSoundReductionEnabled, onCheckedChange = setLoudSoundReduction)
+                    checked = state.loudSoundReductionEnabled, enabled = ui.loudSoundReductionWritable,
+                    onCheckedChange = setLoudSoundReduction)
             StyledListItem(contentText = stringResource(R.string.headphone_accommodations), onClick = navigateToHeadphoneAccommodations)
             if (toneVolume != null) toneVolume() else {
                 val id = ControlCommandIdentifier.CHIME_VOLUME

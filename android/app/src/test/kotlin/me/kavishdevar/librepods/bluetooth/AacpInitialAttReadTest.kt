@@ -71,7 +71,7 @@ class AacpInitialAttReadTest {
                 assertTrue(script.reads.isEmpty())
                 assertNull(settingsSocket(device.aacp))
                 device.aacp.processPacket(readyResponse(), socket)
-                withTimeout(1_000) { while (script.reads.size != 2) delay(5) }
+                withTimeout(1_000) { while (script.reads.size != 3) delay(5) }
                 assertSame(socket, settingsSocket(device.aacp))
                 device.aacp.processPacket(readyResponse().also { it[4] = 0x85.toByte() }, socket)
                 assertSame(socket, settingsSocket(device.aacp))
@@ -89,10 +89,10 @@ class AacpInitialAttReadTest {
                     else byteArrayOf(4, 0, 4, 0, 2, 0, 1, 0x11, 1)
                 device.aacp.processPacket(response, socket)
                 assertNull("A reply alone cannot replace completed initialization", settingsSocket(device.aacp))
-                val count = if (model == AirPodsModel.AIRPODS_PRO_1) 1 else 2
+                val count = if (model == AirPodsModel.AIRPODS_PRO_1) 1 else 3
                 withTimeout(2_000) { while (script.reads.size != count) delay(5) }
                 assertSame(socket, settingsSocket(device.aacp))
-                assertEquals(ATTHandle.TRANSPARENCY, script.reads.last())
+                assertEquals(if (model == AirPodsModel.AIRPODS_PRO_1) ATTHandle.TRANSPARENCY else ATTHandle.LOUD_SOUND_REDUCTION, script.reads.last())
                 assertEquals(model != AirPodsModel.AIRPODS_PRO_1, ATTHandle.HEARING_AID in script.reads)
             } finally { scope.cancel(); worker.cancelAndJoin() }
         }
@@ -115,7 +115,7 @@ class AacpInitialAttReadTest {
                 val next = async { startup(device.aacp, replacement, scope, peerReady = false) }
                 try {
                     device.aacp.processPacket(readyResponse(), replacement)
-                    withTimeout(2_000) { while (script.reads.size != 2) delay(5) }
+                    withTimeout(2_000) { while (script.reads.size != 3) delay(5) }
                     assertSame(replacement, settingsSocket(device.aacp))
                 } finally { next.cancelAndJoin() }
             } finally { scope.cancel(); worker.cancelAndJoin(); replacement.close() }
@@ -136,12 +136,12 @@ class AacpInitialAttReadTest {
                 delay(50)
                 assertTrue("Late initialization must preserve the busy-audio admission policy", script.reads.isEmpty())
                 device.updateMicrophoneState { it.copy(isActive = false) }
-                withTimeout(1_000) { while (script.reads.size != 2) delay(5) }
+                withTimeout(1_000) { while (script.reads.size != 3) delay(5) }
                 assertArrayEquals(profile(), device.state.value.hearingAidData)
-                assertEquals(listOf(ATTHandle.HEARING_AID, ATTHandle.TRANSPARENCY), script.reads)
+                assertEquals(listOf(ATTHandle.HEARING_AID, ATTHandle.TRANSPARENCY, ATTHandle.LOUD_SOUND_REDUCTION), script.reads)
                 repeat(3) { device.aacp.processPacket(response, socket) }
                 delay(50)
-                assertEquals(2, script.reads.size)
+                assertEquals(3, script.reads.size)
                 assertEquals(0, Shadow.extract<HearingModeSocketShadow>(socket).closes)
             } finally { scope.cancel(); worker.cancelAndJoin(); device.updateMicrophoneState { it.copy(isActive = false) } }
         }
@@ -174,12 +174,12 @@ class AacpInitialAttReadTest {
             val scope = this
             val worker = async { startup(device.aacp, socket, scope) }
             try {
-                withTimeout(2_000) { while (script.reads.size != 2) delay(5) }
+                withTimeout(2_000) { while (script.reads.size != 3) delay(5) }
                 assertEquals(1, passes)
                 assertFalse(worker.isCompleted)
                 withTimeout(6_000) { worker.await() }
                 assertEquals(1, passes)
-                assertEquals(listOf(ATTHandle.HEARING_AID, ATTHandle.TRANSPARENCY), script.reads)
+                assertEquals(listOf(ATTHandle.HEARING_AID, ATTHandle.TRANSPARENCY, ATTHandle.LOUD_SOUND_REDUCTION), script.reads)
             } finally { worker.cancelAndJoin() }
         }
     }
@@ -200,8 +200,8 @@ class AacpInitialAttReadTest {
                 val required = listOf(1, 0x4d, 0x0f, 1, 9, 0x29, 0x30)
                 assertEquals(required, output.packets.take(required.size).map { it[4].toInt() and 255 })
                 metadata(device).value = device.metadata.value.copy(model = AirPodsModel.AIRPODS_PRO_3)
-                withTimeout(2_000) { while (script.reads.size != 2) delay(5) }
-                assertEquals(listOf(ATTHandle.HEARING_AID, ATTHandle.TRANSPARENCY), script.reads)
+                withTimeout(2_000) { while (script.reads.size != 3) delay(5) }
+                assertEquals(listOf(ATTHandle.HEARING_AID, ATTHandle.TRANSPARENCY, ATTHandle.LOUD_SOUND_REDUCTION), script.reads)
             } finally {
                 metadata(device).value = device.metadata.value.copy(model = AirPodsModel.AIRPODS_PRO_3)
                 worker.cancelAndJoin()
@@ -227,8 +227,8 @@ class AacpInitialAttReadTest {
                 assertTrue(failed)
                 assertTrue(script.reads.isEmpty())
                 withTimeout(6_000) { worker.await() }
-                withTimeout(2_000) { while (script.reads.size != 2) delay(5) }
-                assertEquals(listOf(ATTHandle.HEARING_AID, ATTHandle.TRANSPARENCY), script.reads)
+                withTimeout(2_000) { while (script.reads.size != 3) delay(5) }
+                assertEquals(listOf(ATTHandle.HEARING_AID, ATTHandle.TRANSPARENCY, ATTHandle.LOUD_SOUND_REDUCTION), script.reads)
                 assertEquals(1, output.packets.count { it[4] == 0x30.toByte() })
             } finally { worker.cancelAndJoin() }
         }
@@ -274,9 +274,10 @@ class AacpInitialAttReadTest {
             assertNotNull(device.state.value.accommodationsAudiogramSource)
             assertEquals(SettingsReadStatus.AVAILABLE, device.state.value.hearingAidReadStatus)
             assertEquals(SettingsReadStatus.AVAILABLE, device.state.value.transparencyReadStatus)
-            assertEquals(listOf(ATTHandle.HEARING_AID, ATTHandle.TRANSPARENCY), script.reads)
+            assertEquals(SettingsReadStatus.AVAILABLE, device.state.value.loudSoundReductionReadStatus)
+            assertEquals(listOf(ATTHandle.HEARING_AID, ATTHandle.TRANSPARENCY, ATTHandle.LOUD_SOUND_REDUCTION), script.reads)
             initialize(device, socket)
-            assertEquals(2, script.reads.size)
+            assertEquals(3, script.reads.size)
             assertSame(socket, device.aacp.captureAudioSocket())
             assertEquals(0, Shadow.extract<HearingModeSocketShadow>(socket).closes)
             assertTrue(Shadow.extract<HearingModeSocketShadow>(socket).output.packets.isEmpty())
@@ -295,15 +296,15 @@ class AacpInitialAttReadTest {
                     null
                 } else {
                     script.retryable = false
-                    if (handle == ATTHandle.HEARING_AID) profile() else ByteArray(104)
+                    setting(handle)
                 }
             }
             val scope = this
             val worker = async { startup(device.aacp, socket, scope) }
             try {
-                withTimeout(9_000) { while (device.state.value.transparencyReadStatus != SettingsReadStatus.AVAILABLE) delay(5) }
+                withTimeout(9_000) { while (device.state.value.loudSoundReductionReadStatus != SettingsReadStatus.AVAILABLE) delay(5) }
                 assertTrue(System.nanoTime() - started >= 5_000_000_000L)
-                assertEquals(listOf(ATTHandle.HEARING_AID, ATTHandle.HEARING_AID, ATTHandle.TRANSPARENCY), script.reads)
+                assertEquals(listOf(ATTHandle.HEARING_AID, ATTHandle.HEARING_AID, ATTHandle.TRANSPARENCY, ATTHandle.LOUD_SOUND_REDUCTION), script.reads)
                 assertArrayEquals(profile(), device.state.value.hearingAidData)
                 assertSame(socket, device.aacp.captureAudioSocket())
                 assertEquals(0, Shadow.extract<HearingModeSocketShadow>(socket).closes)
@@ -321,7 +322,7 @@ class AacpInitialAttReadTest {
             }
             withTimeout(9_000) { initialize(device, socket) }
             initialize(device, socket)
-            assertEquals(listOf(ATTHandle.HEARING_AID, ATTHandle.HEARING_AID, ATTHandle.TRANSPARENCY), script.reads)
+            assertEquals(listOf(ATTHandle.HEARING_AID, ATTHandle.HEARING_AID, ATTHandle.TRANSPARENCY, ATTHandle.LOUD_SOUND_REDUCTION), script.reads)
             assertEquals(SettingsReadStatus.UNAVAILABLE, device.state.value.hearingAidReadStatus)
             assertEquals(SettingsReadStatus.UNAVAILABLE, device.state.value.transparencyReadStatus)
             assertSame(socket, device.aacp.captureAudioSocket())
@@ -338,14 +339,14 @@ class AacpInitialAttReadTest {
             withTimeout(1_000) { first.join() }
             assertEquals(listOf(ATTHandle.HEARING_AID), script.reads)
             device.updateMicrophoneState { it.copy(isActive = true) }
-            script.read = { script.retryable = false; if (it == ATTHandle.HEARING_AID) profile() else ByteArray(104) }
+            script.read = { script.retryable = false; setting(it) }
             val resumed = async { initialize(device, socket) }
             try {
                 delay(50)
                 assertEquals(1, script.reads.size)
                 device.updateMicrophoneState { it.copy(isActive = false) }
                 withTimeout(9_000) { resumed.await() }
-                assertEquals(listOf(ATTHandle.HEARING_AID, ATTHandle.HEARING_AID, ATTHandle.TRANSPARENCY), script.reads)
+                assertEquals(listOf(ATTHandle.HEARING_AID, ATTHandle.HEARING_AID, ATTHandle.TRANSPARENCY, ATTHandle.LOUD_SOUND_REDUCTION), script.reads)
                 assertArrayEquals(profile(), device.state.value.hearingAidData)
             } finally { resumed.cancelAndJoin(); device.updateMicrophoneState { it.copy(isActive = false) } }
         }
@@ -371,7 +372,7 @@ class AacpInitialAttReadTest {
                 assertFalse(initial.isCompleted)
                 setBusy(false)
                 withTimeout(2_000) { initial.await() }
-                assertEquals(listOf(ATTHandle.HEARING_AID, ATTHandle.TRANSPARENCY), script.reads)
+                assertEquals(listOf(ATTHandle.HEARING_AID, ATTHandle.TRANSPARENCY, ATTHandle.LOUD_SOUND_REDUCTION), script.reads)
                 assertArrayEquals(profile(), device.state.value.hearingAidData)
             } finally { setBusy(false) }
         }
@@ -391,7 +392,7 @@ class AacpInitialAttReadTest {
                 assertEquals(SettingsReadStatus.WAITING, device.state.value.hearingAidReadStatus)
                 audio.mode = AudioManager.MODE_NORMAL
                 withTimeout(2_000) { initial.await() }
-                assertEquals(listOf(ATTHandle.HEARING_AID, ATTHandle.TRANSPARENCY), script.reads)
+                assertEquals(listOf(ATTHandle.HEARING_AID, ATTHandle.TRANSPARENCY, ATTHandle.LOUD_SOUND_REDUCTION), script.reads)
                 assertEquals(SettingsReadStatus.AVAILABLE, device.state.value.hearingAidReadStatus)
             } finally { audio.mode = AudioManager.MODE_NORMAL }
         }
@@ -418,6 +419,7 @@ class AacpInitialAttReadTest {
                 device.aacp.disconnect()
                 assertEquals(SettingsReadStatus.WAITING, device.state.value.hearingAidReadStatus)
                 assertEquals(SettingsReadStatus.WAITING, device.state.value.transparencyReadStatus)
+                assertEquals(SettingsReadStatus.WAITING, device.state.value.loudSoundReductionReadStatus)
             } finally { audio.mode = AudioManager.MODE_NORMAL; initial.cancelAndJoin() }
         }
     }
@@ -432,13 +434,13 @@ class AacpInitialAttReadTest {
             first.cancelAndJoin()
             device.updateMicrophoneState { it.copy(isActive = false) }
             withTimeout(2_000) { initialize(device, socket) }
-            assertEquals(2, script.reads.size)
+            assertEquals(3, script.reads.size)
         }
     }
 
     @Test fun malformedOrFailedActualReadsAreNotRetriedInTheSameSession() = runBlocking<Unit> {
         for (failure in listOf<ByteArray?>(null, ByteArray(103), profile().also { it[1] = 1 })) fixture { device, script, socket ->
-            script.read = { handle -> if (handle == ATTHandle.HEARING_AID) failure else ByteArray(104) }
+            script.read = { handle -> if (handle == ATTHandle.HEARING_AID) failure else setting(handle) }
             initialize(device, socket)
             initialize(device, socket)
             assertTrue(device.state.value.hearingAidData.isEmpty())
@@ -458,16 +460,16 @@ class AacpInitialAttReadTest {
                     state(device).value = device.state.value.copy(controlSession = session + 1, hearingAidData = replacement,
                         hearingAidReadStatus = SettingsReadStatus.AVAILABLE)
                     profile()
-                } else ByteArray(104)
+                } else setting(handle)
             }
             initialize(device, socket)
             assertArrayEquals(replacement, device.state.value.hearingAidData)
             assertEquals(SettingsReadStatus.AVAILABLE, device.state.value.hearingAidReadStatus)
             assertEquals(listOf(ATTHandle.HEARING_AID), script.reads)
-            script.read = { handle -> if (handle == ATTHandle.HEARING_AID) replacement else ByteArray(104) }
+            script.read = { handle -> if (handle == ATTHandle.HEARING_AID) replacement else setting(handle) }
             initialize(device, socket)
             assertArrayEquals(replacement, device.state.value.hearingAidData)
-            assertEquals(listOf(ATTHandle.HEARING_AID, ATTHandle.HEARING_AID, ATTHandle.TRANSPARENCY), script.reads)
+            assertEquals(listOf(ATTHandle.HEARING_AID, ATTHandle.HEARING_AID, ATTHandle.TRANSPARENCY, ATTHandle.LOUD_SOUND_REDUCTION), script.reads)
         }
     }
 
@@ -478,14 +480,57 @@ class AacpInitialAttReadTest {
             assertTrue(script.reads.isEmpty())
             metadata(device).value = device.metadata.value.copy(model = AirPodsModel.AIRPODS_PRO_3, modelNumber = "A3063")
             withTimeout(2_000) { initial.await() }
-            assertEquals(2, script.reads.size)
+            assertEquals(3, script.reads.size)
         }
         for (model in listOf(AirPodsModel.AIRPODS_1, AirPodsModel.AIRPODS_PRO_1)) fixture(model) { device, script, socket ->
             initialize(device, socket)
             assertEquals(if (model == AirPodsModel.AIRPODS_PRO_1) listOf(ATTHandle.TRANSPARENCY) else emptyList<ATTHandle>(), script.reads)
             assertEquals(SettingsReadStatus.UNAVAILABLE, device.state.value.hearingAidReadStatus)
+            assertEquals(SettingsReadStatus.UNAVAILABLE, device.state.value.loudSoundReductionReadStatus)
             assertEquals(if (model == AirPodsModel.AIRPODS_PRO_1) SettingsReadStatus.AVAILABLE else SettingsReadStatus.UNAVAILABLE,
                 device.state.value.transparencyReadStatus)
+        }
+    }
+
+    @Test fun loudSoundReductionAutomaticallyLoadsOnlyExactBooleanReportsOncePerSession() = runBlocking<Unit> {
+        for (value in listOf(0, 1)) fixture { device, script, socket ->
+            script.read = { handle ->
+                if (handle == ATTHandle.LOUD_SOUND_REDUCTION) {
+                    assertEquals(SettingsReadStatus.READING, device.state.value.loudSoundReductionReadStatus)
+                    byteArrayOf(value.toByte())
+                } else setting(handle)
+            }
+            initialize(device, socket)
+            initialize(device, socket)
+            assertEquals(value == 1, device.state.value.loudSoundReductionEnabled)
+            assertEquals(SettingsReadStatus.AVAILABLE, device.state.value.loudSoundReductionReadStatus)
+            assertEquals(1, script.reads.count { it == ATTHandle.LOUD_SOUND_REDUCTION })
+            assertFalse(mockingDetails(script.manager).invocations.any { it.method.name.startsWith("writeCharacteristic") })
+            device.aacp.disconnect()
+            assertEquals(SettingsReadStatus.WAITING, device.state.value.loudSoundReductionReadStatus)
+        }
+    }
+
+    @Test fun malformedOrMissingLoudSoundReductionReportsCannotBecomeAWriteBaseline() = runBlocking<Unit> {
+        for (value in listOf<ByteArray?>(null, byteArrayOf(), byteArrayOf(2), byteArrayOf(1, 0))) fixture { device, script, socket ->
+            script.read = { handle -> if (handle == ATTHandle.LOUD_SOUND_REDUCTION) value else setting(handle) }
+            initialize(device, socket)
+            initialize(device, socket)
+            assertEquals(SettingsReadStatus.UNAVAILABLE, device.state.value.loudSoundReductionReadStatus)
+            assertFalse(device.writeATTCharacteristic(ATTHandle.LOUD_SOUND_REDUCTION, byteArrayOf(1)))
+            assertEquals(1, script.reads.count { it == ATTHandle.LOUD_SOUND_REDUCTION })
+            assertFalse(mockingDetails(script.manager).invocations.any { it.method.name.startsWith("writeCharacteristic") })
+        }
+    }
+
+    @Test fun loadingASavedLoudSoundReductionValueDiscardsItsOldReadProof() = runBlocking<Unit> {
+        fixture { device, script, _ ->
+            device.loadInitialState(device.state.value.copy(loudSoundReductionEnabled = true,
+                loudSoundReductionReadStatus = SettingsReadStatus.AVAILABLE), AppleSettings(), device.metadata.value)
+            assertEquals(SettingsReadStatus.WAITING, device.state.value.loudSoundReductionReadStatus)
+            assertFalse(device.writeATTCharacteristic(ATTHandle.LOUD_SOUND_REDUCTION, byteArrayOf(0)))
+            assertTrue(script.reads.isEmpty())
+            assertFalse(mockingDetails(script.manager).invocations.any { it.method.name.startsWith("writeCharacteristic") })
         }
     }
 
@@ -494,7 +539,7 @@ class AacpInitialAttReadTest {
         val reads = mutableListOf<ATTHandle>()
         var beforeAdmission: () -> Unit = {}
         var retryable = false
-        var read: (ATTHandle) -> ByteArray? = { if (it == ATTHandle.HEARING_AID) profile() else ByteArray(104) }
+        var read: (ATTHandle) -> ByteArray? = ::setting
         fun answer(call: org.mockito.invocation.InvocationOnMock): Any? = if (call.method.name.startsWith("readCharacteristic")) {
             val handle = call.arguments[0] as ATTHandle
             beforeAdmission()
@@ -553,6 +598,11 @@ class AacpInitialAttReadTest {
         .single { it.name.startsWith("captureSettingsSocket") && it.parameterCount == 0 }.invoke(manager) as BluetoothSocket?
 
     companion object {
+        private fun setting(handle: ATTHandle): ByteArray = when (handle) {
+            ATTHandle.HEARING_AID -> profile()
+            ATTHandle.TRANSPARENCY -> ByteArray(104)
+            ATTHandle.LOUD_SOUND_REDUCTION -> byteArrayOf(0)
+        }
         private fun profile() = ByteArray(104).also { byteArrayOf(2, 2, 0x60, 0).copyInto(it) }
         private fun readyResponse() = byteArrayOf(1, 0, 4, 0, 0, 0, 1, 0, 3, 0) + ByteArray(8)
     }
