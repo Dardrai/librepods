@@ -106,6 +106,7 @@ import androidx.compose.ui.semantics.setProgress
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
@@ -158,7 +159,8 @@ fun NoiseControlSettings(
     showLabels: Boolean = true,
     requestedAdaptiveStrength: Int? = null,
     showAdaptiveMode: Boolean = true,
-    enabled: Boolean = true
+    enabled: Boolean = true,
+    modeIconSize: Dp = 32.dp
 ) {
     val haptics = LocalHapticFeedback.current
     var dragFeedbackMode by remember { mutableStateOf<Int?>(null) }
@@ -557,7 +559,7 @@ fun NoiseControlSettings(
                             Icon(
                                 bitmap = ImageBitmap.imageResource(R.drawable.ic_noise_cancellation),
                                 contentDescription = null,
-                                modifier = Modifier.size(32.dp).testTag("noise-control-icon-1"),
+                                modifier = Modifier.size(modeIconSize).testTag("noise-control-icon-1"),
                                 tint = MaterialTheme.colorScheme.onSurface
                             )
                         }
@@ -571,7 +573,7 @@ fun NoiseControlSettings(
                             Icon(
                                 bitmap = ImageBitmap.imageResource(R.drawable.ic_transparency),
                                 contentDescription = null,
-                                modifier = Modifier.size(32.dp).testTag("noise-control-icon-3"),
+                                modifier = Modifier.size(modeIconSize).testTag("noise-control-icon-3"),
                                 tint = MaterialTheme.colorScheme.onSurface
                             )
                         }
@@ -638,7 +640,7 @@ fun NoiseControlSettings(
                                 Icon(
                                     bitmap = ImageBitmap.imageResource(R.drawable.ic_adaptive),
                                     contentDescription = null,
-                                    modifier = Modifier.size(32.dp).testTag("noise-control-icon-4"),
+                                    modifier = Modifier.size(modeIconSize).testTag("noise-control-icon-4"),
                                     tint = MaterialTheme.colorScheme.onSurface,
                                 )
 
@@ -670,7 +672,7 @@ fun NoiseControlSettings(
                             Icon(
                                 bitmap = ImageBitmap.imageResource(R.drawable.ic_noise_cancellation),
                                 contentDescription = null,
-                                modifier = Modifier.size(32.dp).testTag("noise-control-icon-2"),
+                                modifier = Modifier.size(modeIconSize).testTag("noise-control-icon-2"),
                                 tint = MaterialTheme.colorScheme.onSurface
                             )
                         }

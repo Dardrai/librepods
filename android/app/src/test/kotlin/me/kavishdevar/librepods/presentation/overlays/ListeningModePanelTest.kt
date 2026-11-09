@@ -132,6 +132,46 @@ class ListeningModePanelTest {
         assertEquals("Scrolling and layout cannot apply settings", 0, changes)
     }
 
+    @Test fun listeningRailBalancesItsIconsAndSpacingWithoutChangingItsTouchGeometry() {
+        val profile = mutableStateOf(Profile())
+        val current = mutableStateOf(snapshot())
+        var changes = 0
+        compose.setContent { fixture(profile.value, current.value) { _, _ -> changes++ } }
+        for (value in listOf(Profile(), Profile(dark = true),
+            Profile(width = 320, height = 720, fontScale = 1.3f),
+            Profile(width = 320, height = 720, fontScale = 1.3f, dark = true))) {
+            compose.runOnIdle { profile.value = value }
+            val rail = compose.onNodeWithTag("listening-mode-control", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
+            val heading = compose.onNodeWithText(RuntimeEnvironment.getApplication().getString(R.string.noise_control))
+                .fetchSemanticsNode().boundsInRoot
+            val firstTile = control(QuickSetting.CONVERSATION_AWARENESS).fetchSemanticsNode().boundsInRoot
+            assertEquals("The rail keeps the established 64dp target", 64f, rail.height, 0.5f)
+            assertEquals("The rail and tiles share their outer alignment", firstTile.left, rail.left, 0.5f)
+            assertEquals("The section label follows the tile gutter rhythm", 14f, rail.top - heading.bottom, 0.5f)
+            assertEquals("Separate the listening rail from the toggle grid", 20f, firstTile.top - rail.bottom, 0.5f)
+            for (mode in listOf(3, 4, 2)) {
+                compose.runOnIdle { current.value = current.value.copy(state = current.value.state.copy(
+                    controlStates = mapOf(ControlCommandIdentifier.LISTENING_MODE to byteArrayOf(mode.toByte())))) }
+                compose.mainClock.advanceTimeBy(1500)
+                compose.waitForIdle()
+                assertEquals("Mode changes cannot resize or move the rail", rail,
+                    compose.onNodeWithTag("listening-mode-control", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot)
+                for (id in listOf(3, 4, 2)) {
+                    val icon = compose.onNodeWithTag("noise-control-icon-$id", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
+                    assertEquals("Mode glyphs match the panel's lighter proportions", 28f, icon.width, 0.5f)
+                    assertEquals(28f, icon.height, 0.5f)
+                    assertEquals(rail.center.y, icon.center.y, 0.5f)
+                }
+                for (label in listOf(R.string.transparency, R.string.adaptive, R.string.noise_cancellation)) {
+                    val target = compose.onNodeWithContentDescription(RuntimeEnvironment.getApplication().getString(label))
+                        .fetchSemanticsNode().boundsInRoot
+                    assertTrue("Each mode retains a full touch target", target.width >= 48f && target.height >= 48f)
+                }
+            }
+        }
+        assertEquals("Layout and reports do not send commands", 0, changes)
+    }
+
     @Test fun waitingGameModeCanBeCancelledAndRequestedOrdinaryChoicesCanBeReplaced() {
         val current = mutableStateOf(snapshot(QuickSetting.entries.map { setting ->
             QuickSettingState(setting, checked = setting in setOf(QuickSetting.GAME_MODE, QuickSetting.CONVERSATION_AWARENESS),

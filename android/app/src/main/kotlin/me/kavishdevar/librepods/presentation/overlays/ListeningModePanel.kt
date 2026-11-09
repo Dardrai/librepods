@@ -68,7 +68,7 @@ internal fun ListeningModePanel(snapshot: ListeningModeSnapshot?, commandFailed:
         Box(Modifier.matchParentSize().layerBackdrop(backdrop)
             .background(MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.18f)))
         Column(Modifier.verticalScroll(rememberScrollState()).padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            verticalArrangement = Arrangement.spacedBy(20.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Icon(LocalIcons.current.Headphones, null, Modifier.size(24.dp), tint = MaterialTheme.colorScheme.onSurface)
@@ -81,10 +81,10 @@ internal fun ListeningModePanel(snapshot: ListeningModeSnapshot?, commandFailed:
                     Icon(LocalIcons.current.Close, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurface)
                 }
             }
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
                 Text(stringResource(R.string.noise_control), Modifier.padding(horizontal = 8.dp),
                     style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                ListeningModeContent(snapshot, commandFailed, onMode, onStrength, loading = loading)
+                ListeningModeContent(snapshot, commandFailed, onMode, onStrength, loading = loading, modeIconSize = 28.dp)
             }
             BoxWithConstraints(Modifier.fillMaxWidth()) {
                 val twoColumns = maxWidth >= 340.dp && LocalDensity.current.fontScale <= 1.2f
