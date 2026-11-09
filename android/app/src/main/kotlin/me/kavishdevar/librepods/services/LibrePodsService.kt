@@ -182,7 +182,7 @@ class LibrePodsService: Service() {
             writer.println("settings devices=${activeDevices.size}")
             activeDevices.forEachIndexed { index, device ->
                 dumpNativeSettings(writer, index, device, gameControllers[device.macAddress]?.state?.value)
-                writer.println("settings_route device_index=$index bridge_connected=${audioControllers[device.macAddress]?.bridge?.state?.value?.connected == true} " +
+                writer.println("settings_route device_index=$index bridge_connected=${companionBridge.state.value.connected} " +
                     "route_matches=${MediaController.isMediaRoute(device.macAddress.value)}")
             }
             return

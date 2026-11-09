@@ -7,6 +7,8 @@ import java.io.PrintWriter
 import java.io.StringWriter
 import me.kavishdevar.librepods.utils.NativeGameModeController
 import me.kavishdevar.librepods.LibrePodsApplication
+import me.kavishdevar.librepods.shizuku.BridgeState
+import me.kavishdevar.librepods.shizuku.ShizukuAudioClient
 import kotlinx.coroutines.flow.MutableStateFlow
 import me.kavishdevar.librepods.core.bluetooth.MacAddress
 import me.kavishdevar.librepods.core.bluetooth.aacp.AACPManager
@@ -28,10 +30,14 @@ class SettingsDiagnosticsTest {
     private lateinit var service: LibrePodsService
     private val device = mock(AppleDevice::class.java)
     private val aacp = mock(AACPManager::class.java)
+    private val bridge = mock(ShizukuAudioClient::class.java)
+    private val bridgeState = MutableStateFlow(BridgeState())
 
     @Before fun setup() {
         service = Robolectric.buildService(LibrePodsService::class.java).get()
         ReflectionHelpers.setField(service, "mApplication", LibrePodsApplication())
+        ReflectionHelpers.setField(service, "companionBridge\$delegate", lazyOf(bridge))
+        `when`(bridge.state).thenReturn(bridgeState)
         val awareness = ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG
         val volume = ControlCommandIdentifier.ADAPTIVE_VOLUME_CONFIG
         val ear = ControlCommandIdentifier.EAR_DETECTION_CONFIG
@@ -77,6 +83,15 @@ class SettingsDiagnosticsTest {
         verify(device, never()).metadata
     }
 
+    @Test fun routeDiagnosticsUseTheSharedMediaBridgeWithoutAnExperimentalAudioController() {
+        assertTrue((service.application as LibrePodsApplication).experimentalAudioControllers.isEmpty())
+        bridgeState.value = BridgeState(connected = true)
+        clearInvocations(bridge)
+        val output = dump("--settings")
+        assertTrue(output.contains("settings_route device_index=0 bridge_connected=true route_matches=false"))
+        assertTrue(mockingDetails(bridge).invocations.all { it.method.name == "getState" })
+    }
+
     @Test fun gameDiagnosticsKeepThePreferenceSeparateFromControllerProgressWithoutRequestingAChange() {
         `when`(device.settings).thenReturn(MutableStateFlow(AppleSettings(nativeGameModeEnabled = true)))
         val controller = NativeGameModeController.State(desiredOn = true, active = false, available = true,
@@ -92,9 +107,9 @@ class SettingsDiagnosticsTest {
     }
 
     @Test fun ordinaryDumpDoesNotCollectSettingsOrInitializeControlWork() {
-        clearInvocations(device, aacp)
+        clearInvocations(device, aacp, bridge)
         assertEquals("", dump())
-        verifyNoInteractions(device, aacp)
+        verifyNoInteractions(device, aacp, bridge)
     }
 
     private fun dump(vararg args: String): String = StringWriter().also { output ->
