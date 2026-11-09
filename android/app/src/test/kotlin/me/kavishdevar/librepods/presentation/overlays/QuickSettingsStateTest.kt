@@ -10,7 +10,8 @@ class QuickSettingsStateTest {
     private val metadata = AppleMetadata(model = AirPodsModel.AIRPODS_PRO_3, modelNumber = "A3063")
     private val ordinary = mapOf(ControlCommandIdentifier.EAR_DETECTION_CONFIG to byteArrayOf(2),
         ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG to byteArrayOf(2),
-        ControlCommandIdentifier.ADAPTIVE_VOLUME_CONFIG to byteArrayOf(2))
+        ControlCommandIdentifier.ADAPTIVE_VOLUME_CONFIG to byteArrayOf(2),
+        ControlCommandIdentifier.PPE_TOGGLE_CONFIG to byteArrayOf(2))
     private fun controls(state: AppleState = AppleState(), settings: AppleSettings = AppleSettings(),
         game: NativeGameModeController.State? = null, metadata: AppleMetadata = this.metadata,
         pending: Set<QuickSetting> = emptySet(), profile: Boolean = false) =
@@ -18,21 +19,21 @@ class QuickSettingsStateTest {
 
     @Test fun unknownAccessoryValuesStayUnknownAndCachedPreferencesDoNotBecomeReceivedProof() {
         val empty = controls()
-        assertEquals(7, empty.size)
+        assertEquals(8, empty.size)
         assertTrue(empty.filterKeys { it != QuickSetting.EAR_DETECTION }.values.all { it.checked == null && !it.enabled })
         assertEquals(true, empty[QuickSetting.EAR_DETECTION]!!.checked)
         assertTrue(empty[QuickSetting.EAR_DETECTION]!!.enabled)
         assertTrue(empty[QuickSetting.EAR_DETECTION]!!.requested)
         val cachedState = AppleState(controlStates = ordinary)
         val cached = controls(cachedState)
-        for (key in listOf(QuickSetting.CONVERSATION_AWARENESS, QuickSetting.PERSONALIZED_VOLUME)) {
+        for (key in listOf(QuickSetting.CONVERSATION_AWARENESS, QuickSetting.PERSONALIZED_VOLUME, QuickSetting.EN352_PROTECTION)) {
             assertEquals(false, cached.getValue(key).checked)
             assertTrue(cached.getValue(key).requested)
         }
         assertTrue(cached[QuickSetting.EAR_DETECTION]!!.requested)
         val unavailable = nativeQuickSettings(metadata, cachedState, AppleSettings(), null, false, false,
             canWrite = { false }).associateBy { it.setting }
-        for (key in listOf(QuickSetting.CONVERSATION_AWARENESS, QuickSetting.PERSONALIZED_VOLUME, QuickSetting.EAR_DETECTION)) {
+        for (key in listOf(QuickSetting.CONVERSATION_AWARENESS, QuickSetting.PERSONALIZED_VOLUME, QuickSetting.EAR_DETECTION, QuickSetting.EN352_PROTECTION)) {
             assertTrue(unavailable.getValue(key).requested)
             assertFalse(unavailable.getValue(key).enabled)
         }
@@ -83,6 +84,34 @@ class QuickSettingsStateTest {
             assertEquals(status == SettingsReadStatus.READING, control.reading)
             assertEquals(if (status == SettingsReadStatus.AVAILABLE) true else null, control.checked)
         }
+    }
+
+    @Test fun protectionUsesItsOwnReportedBooleanAndRequiresAMatchingModelAndWritableTransport() {
+        val id = ControlCommandIdentifier.PPE_TOGGLE_CONFIG
+        val key = QuickSetting.EN352_PROTECTION
+        assertEquals(id, key.control)
+        for ((raw, expected) in listOf(1.toByte() to true, 2.toByte() to false)) {
+            val state = AppleState(controlStates = mapOf(id to byteArrayOf(raw)), liveControlReports = setOf(id))
+            val value = controls(state).getValue(key)
+            assertEquals(expected, value.checked)
+            assertTrue(value.supported)
+            assertTrue(value.enabled)
+            assertFalse(value.requested)
+            val blocked = nativeQuickSettings(metadata, state, AppleSettings(), null, true, false,
+                canWrite = { it != id }).first { it.setting == key }
+            assertFalse(blocked.enabled)
+            for (model in listOf(AirPodsModel.AIRPODS_PRO_2_USBC, AirPodsModel.UNKNOWN)) {
+                val unsupported = controls(state, metadata = metadata.copy(model = model)).getValue(key)
+                assertFalse(unsupported.supported)
+                assertFalse(unsupported.enabled)
+            }
+        }
+        val requested = AppleState(controlStates = mapOf(id to byteArrayOf(2)), liveControlReports = setOf(id),
+            requestedControls = mapOf(id to byteArrayOf(1)))
+        assertEquals(true, controls(requested).getValue(key).checked)
+        assertTrue(controls(requested).getValue(key).requested)
+        assertNull(controls().getValue(key).checked)
+        assertFalse(controls().getValue(key).enabled)
     }
 
     @Test fun activeGameModeRestorationObligationDoesNotLookLikeAnUnfinishedToggle() {

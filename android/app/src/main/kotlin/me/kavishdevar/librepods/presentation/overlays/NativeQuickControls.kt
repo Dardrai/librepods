@@ -32,7 +32,8 @@ internal class NativeQuickControls(private val device: AppleDevice, private val 
     private data class Choice(val value: Long, val connection: Int)
     private val accepted = ConcurrentHashMap<ControlCommandIdentifier, Choice>()
     private val ordinary = setOf(ControlCommandIdentifier.EAR_DETECTION_CONFIG,
-        ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG, ControlCommandIdentifier.ADAPTIVE_VOLUME_CONFIG)
+        ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG, ControlCommandIdentifier.ADAPTIVE_VOLUME_CONFIG,
+        ControlCommandIdentifier.PPE_TOGGLE_CONFIG)
     private val editors = linkedMapOf<ControlCommandIdentifier, LiveValueEditor<Long>>()
     private val modeLock = Any()
     private var observedMode: Long? = null
@@ -40,7 +41,7 @@ internal class NativeQuickControls(private val device: AppleDevice, private val 
     init {
         for (id in listOf(ControlCommandIdentifier.LISTENING_MODE, ControlCommandIdentifier.AUTO_ANC_STRENGTH,
             ControlCommandIdentifier.EAR_DETECTION_CONFIG, ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG,
-            ControlCommandIdentifier.ADAPTIVE_VOLUME_CONFIG)) {
+            ControlCommandIdentifier.ADAPTIVE_VOLUME_CONFIG, ControlCommandIdentifier.PPE_TOGGLE_CONFIG)) {
             editors[id] = LiveValueEditor(scope, { source(id) }, { valid(id, it) }, { captured, value ->
                 writer.withLock {
                     val owner = captured as Owner
@@ -137,6 +138,7 @@ internal class NativeQuickControls(private val device: AppleDevice, private val 
             ControlCommandIdentifier.AUTO_ANC_STRENGTH -> BaseCapability.ADAPTIVE_AUDIO in capabilities
             ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG -> BaseCapability.CONVERSATION_AWARENESS in capabilities
             ControlCommandIdentifier.ADAPTIVE_VOLUME_CONFIG -> BaseCapability.ADAPTIVE_VOLUME in capabilities
+            ControlCommandIdentifier.PPE_TOGGLE_CONFIG -> BaseCapability.PPE in capabilities
             ControlCommandIdentifier.EAR_DETECTION_CONFIG -> device.metadata.value.model != AirPodsModel.UNKNOWN
             else -> false
         }
@@ -145,7 +147,7 @@ internal class NativeQuickControls(private val device: AppleDevice, private val 
         ControlCommandIdentifier.LISTENING_MODE -> value in 1L..4L
         ControlCommandIdentifier.AUTO_ANC_STRENGTH -> value in 0L..100L
         ControlCommandIdentifier.EAR_DETECTION_CONFIG, ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG,
-        ControlCommandIdentifier.ADAPTIVE_VOLUME_CONFIG -> value in 1L..2L
+        ControlCommandIdentifier.ADAPTIVE_VOLUME_CONFIG, ControlCommandIdentifier.PPE_TOGGLE_CONFIG -> value in 1L..2L
         else -> false
     }
     private fun valid(id: ControlCommandIdentifier, value: Long) = range(id, value) && supported(id) &&

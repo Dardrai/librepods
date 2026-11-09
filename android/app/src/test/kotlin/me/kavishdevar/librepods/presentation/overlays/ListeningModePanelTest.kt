@@ -51,11 +51,11 @@ class ListeningModePanelTest {
     private data class Profile(val width: Int = 384, val height: Int = 640,
         val fontScale: Float = 1f, val dark: Boolean = false)
 
-    @Test fun allSevenSwitchesUseConfirmedStateAndDispatchOneNamedAction() {
+    @Test fun allEightSwitchesUseConfirmedStateAndDispatchOneNamedAction() {
         val current = mutableStateOf(snapshot())
         val changes = mutableListOf<Pair<QuickSetting, Boolean>>()
         compose.setContent { fixture(Profile(), current.value) { setting, value -> changes += setting to value } }
-        assertEquals(7, QuickSetting.entries.size)
+        assertEquals(8, QuickSetting.entries.size)
         assertTrue("Opening and rendering the panel must not send settings", changes.isEmpty())
         for (setting in QuickSetting.entries) {
             val control = control(setting).performScrollTo().assertIsDisplayed().assertIsEnabled()
@@ -71,6 +71,10 @@ class ListeningModePanelTest {
             }) }
             control.assertIsOn()
         }
+        val loud = control(QuickSetting.LOUD_SOUND_REDUCTION).performScrollTo().fetchSemanticsNode().boundsInRoot
+        val protection = control(QuickSetting.EN352_PROTECTION).performScrollTo().fetchSemanticsNode().boundsInRoot
+        assertEquals("Protection belongs beside loud sound reduction", loud.top, protection.top, 1f)
+        assertTrue(loud.right <= protection.left)
     }
 
     @Test fun unknownBusyAndUnsupportedControlsCannotInventOrSendSettings() {

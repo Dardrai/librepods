@@ -36,11 +36,11 @@ reports remain separate. Each visible screen, tile and picker owns its polling
 token; closing the shade must not stop an open picker's updates. A remembered
 but unplugged dongle does not hide a connected native device from the tile.
 
-The expanded Quick Settings panel keeps that rail above seven labeled toggle
+The expanded Quick Settings panel keeps that rail above eight labeled toggle
 controls, with two columns at regular phone widths and one column for narrow
 windows or enlarged text. Its height stays inside the available window and its
 content scrolls. Conversation Awareness, Automatic Ear Detection, Game Mode,
-Personalized Volume, Loud Sound Reduction, Hearing Aid and Media Assist reuse
+Personalized Volume, Loud Sound Reduction, EN 352 Protection, Hearing Aid and Media Assist reuse
 the native or dongle writers. Listening mode, Adaptive strength and ordinary
 toggles update their displayed intent immediately while Bluetooth and preference
 writes run on IO through one ordered writer. Each control keeps one in-flight value and one replaceable unsent choice.

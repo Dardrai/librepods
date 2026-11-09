@@ -54,6 +54,27 @@ class NativeQuickControlsTest {
     private val mode = ControlCommandIdentifier.LISTENING_MODE
     private val strength = ControlCommandIdentifier.AUTO_ANC_STRENGTH
     private val ear = ControlCommandIdentifier.EAR_DETECTION_CONFIG
+    private val protection = ControlCommandIdentifier.PPE_TOGGLE_CONFIG
+
+    @Test fun protectionUsesOneForOnTwoForOffAndCoalescesOnlyTheUnsentTail() = runBlocking<Unit> {
+        fixture { f ->
+            assertFalse(f.controls.edit(protection, 0))
+            assertFalse(f.controls.edit(protection, 3))
+            f.blockNextWrite()
+            assertTrue(f.controls.edit(protection, 1))
+            assertTrue(f.entered.await(2, TimeUnit.SECONDS))
+            assertEquals(1.toByte(), f.controls.displayState(f.state.value).requestedControls[protection]!!.single())
+            val started = System.nanoTime()
+            for (value in listOf(2, 1, 2)) assertTrue(f.controls.edit(protection, value))
+            assertTrue("Protection edits must not wait for Bluetooth", (System.nanoTime() - started) / 1_000_000 < 250)
+            assertEquals(2.toByte(), f.controls.displayState(f.state.value).requestedControls[protection]!!.single())
+            assertEquals(listOf(protection to 1), f.writes())
+            f.release.countDown()
+            f.awaitSettled()
+            assertEquals(listOf(protection to 1, protection to 2), f.writes())
+            assertTrue(f.failures.isEmpty())
+        }
+    }
 
     @Test fun blockedBluetoothWritesLeaveEditsImmediateAndCoalesceOnlyTheUnsentTail() = runBlocking<Unit> {
         fixture { f ->
@@ -84,13 +105,14 @@ class NativeQuickControlsTest {
             assertTrue(f.entered.await(2, TimeUnit.SECONDS))
             assertTrue(f.controls.edit(awareness, 2))
             assertTrue(f.controls.edit(ear, 1))
+            assertTrue(f.controls.edit(protection, 1))
             when (replacement) {
                 "socket" -> f.replaceSocket()
                 "session" -> f.state.value = f.state.value.copy(controlSession = 2)
                 "connection" -> f.connection.value++
                 "admission" -> f.admitted.set(false)
                 "freeze" -> {
-                    withTimeout(2_000) { f.controls.changes.first { values -> values.count { it.pending } == 2 } }
+                    withTimeout(2_000) { f.controls.changes.first { values -> values.count { it.pending } == 3 } }
                     f.controls.cancelPending()
                 }
                 else -> f.scope.cancel()
@@ -199,9 +221,12 @@ class NativeQuickControlsTest {
         fixture(ready = false) { f ->
             assertFalse(f.controls.canWrite(awareness))
             assertFalse(f.controls.edit(awareness, 1))
+            assertFalse(f.controls.canWrite(protection))
+            assertFalse(f.controls.edit(protection, 1))
             assertTrue(f.writes().isEmpty())
             f.settingsReady()
             assertTrue(f.controls.canWrite(awareness))
+            assertTrue(f.controls.canWrite(protection))
             assertTrue(f.controls.edit(awareness, 1))
             f.await { f.writes().isNotEmpty() }
             assertEquals(listOf(awareness to 1), f.writes())
@@ -285,7 +310,8 @@ class NativeQuickControlsTest {
                 ControlCommandIdentifier.AUTO_ANC_STRENGTH to byteArrayOf(50),
                 ControlCommandIdentifier.EAR_DETECTION_CONFIG to byteArrayOf(2),
                 ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG to byteArrayOf(2),
-                ControlCommandIdentifier.ADAPTIVE_VOLUME_CONFIG to byteArrayOf(2))
+                ControlCommandIdentifier.ADAPTIVE_VOLUME_CONFIG to byteArrayOf(2),
+                ControlCommandIdentifier.PPE_TOGGLE_CONFIG to byteArrayOf(2))
             state.value = state.value.copy(controlSession = 1, controlStates = reports, liveControlReports = reports.keys)
         }
         fun settingsReady() {

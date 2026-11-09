@@ -93,7 +93,7 @@ internal fun ListeningModePanel(snapshot: ListeningModeSnapshot?, commandFailed:
                     val pairs = listOf(
                         listOf(QuickSetting.CONVERSATION_AWARENESS, QuickSetting.PERSONALIZED_VOLUME),
                         listOf(QuickSetting.EAR_DETECTION, QuickSetting.GAME_MODE),
-                        listOf(QuickSetting.LOUD_SOUND_REDUCTION),
+                        listOf(QuickSetting.LOUD_SOUND_REDUCTION, QuickSetting.EN352_PROTECTION),
                         listOf(QuickSetting.HEARING_AID, QuickSetting.MEDIA_ASSIST))
                     for (pair in pairs) {
                         if (twoColumns) Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -121,6 +121,7 @@ private fun QuickSettingsToggle(state: QuickSettingState, backdrop: Backdrop,
         QuickSetting.GAME_MODE -> R.string.native_game_mode
         QuickSetting.PERSONALIZED_VOLUME -> R.string.personalized_volume
         QuickSetting.LOUD_SOUND_REDUCTION -> R.string.loud_sound_reduction
+        QuickSetting.EN352_PROTECTION -> R.string.ppe
         QuickSetting.HEARING_AID -> R.string.hearing_aid
         QuickSetting.MEDIA_ASSIST -> R.string.media_assist
     })
@@ -182,6 +183,7 @@ private fun quickSettingIcon(setting: QuickSetting): ImageVector = when (setting
     QuickSetting.GAME_MODE -> QuickSettingIcons.Game
     QuickSetting.PERSONALIZED_VOLUME -> LocalIcons.current.SpeakerMax
     QuickSetting.LOUD_SOUND_REDUCTION -> QuickSettingIcons.Protection
+    QuickSetting.EN352_PROTECTION -> QuickSettingIcons.Protection
     QuickSetting.HEARING_AID -> QuickSettingIcons.Hearing
     QuickSetting.MEDIA_ASSIST -> LocalIcons.current.Headphones
 }

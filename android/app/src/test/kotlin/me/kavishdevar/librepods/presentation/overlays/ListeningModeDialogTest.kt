@@ -499,11 +499,13 @@ class ListeningModeDialogTest {
         val popup = open(target)
         assertEquals(0, output(target).available())
         val current = requireNotNull(ReflectionHelpers.callInstanceMethod<ListeningModeSnapshot?>(popup, "getSnapshot"))
-        assertEquals(7, current.quickSettings.size)
+        assertEquals(8, current.quickSettings.size)
         for ((setting, expected, enabled) in listOf(
             Triple(QuickSetting.EAR_DETECTION, 1, false),
             Triple(QuickSetting.CONVERSATION_AWARENESS, 1, true),
-            Triple(QuickSetting.PERSONALIZED_VOLUME, 1, true))) {
+            Triple(QuickSetting.PERSONALIZED_VOLUME, 1, true),
+            Triple(QuickSetting.EN352_PROTECTION, 1, true),
+            Triple(QuickSetting.EN352_PROTECTION, 2, false))) {
             assertTrue(popup.writeQuickSetting(setting, enabled))
             val command = readCommand(target)
             assertEquals(setting.control, command.identifier)
@@ -535,9 +537,11 @@ class ListeningModeDialogTest {
         val popup = open(target)
         devices.value = mapOf(target.macAddress to device())
         assertFalse(popup.writeQuickSetting(QuickSetting.EAR_DETECTION, false))
+        assertFalse(popup.writeQuickSetting(QuickSetting.EN352_PROTECTION, true))
         assertEquals(0, output(target).available())
         popup.dismiss()
         assertFalse(popup.writeQuickSetting(QuickSetting.EAR_DETECTION, false))
+        assertFalse(popup.writeQuickSetting(QuickSetting.EN352_PROTECTION, true))
     }
 
     @Test fun dongleQuickSettingsUseItsExistingLiveEditorsAndFenceTheSession() {
@@ -549,6 +553,11 @@ class ListeningModeDialogTest {
         assertTrue(popup.writeQuickSetting(QuickSetting.CONVERSATION_AWARENESS, true))
         assertTrue(popup.writeQuickSetting(QuickSetting.PERSONALIZED_VOLUME, true))
         assertTrue(popup.writeQuickSetting(QuickSetting.GAME_MODE, true))
+        val protection = requireNotNull(ReflectionHelpers.callInstanceMethod<ListeningModeSnapshot?>(popup, "getSnapshot"))
+            .quickSettings.first { it.setting == QuickSetting.EN352_PROTECTION }
+        assertNull("The current dongle has no PPE live-setting report", protection.checked)
+        assertFalse(protection.enabled)
+        assertFalse(popup.writeQuickSetting(QuickSetting.EN352_PROTECTION, true))
         assertEquals(listOf(0x0a to 1L, 0x28 to 1L, 0x26 to 1L), dongle.writes)
         assertEquals(listOf(true), dongle.gameWrites)
         assertFalse(popup.writeQuickSetting(QuickSetting.LOUD_SOUND_REDUCTION, true))
@@ -563,6 +572,7 @@ class ListeningModeDialogTest {
         val popup = open(target)
         assertFalse(popup.writeQuickSetting(QuickSetting.CONVERSATION_AWARENESS, true))
         assertFalse(popup.writeQuickSetting(QuickSetting.PERSONALIZED_VOLUME, true))
+        assertFalse(popup.writeQuickSetting(QuickSetting.EN352_PROTECTION, true))
         assertEquals(0, output(target).available())
         assertTrue(popup.writeQuickSetting(QuickSetting.EAR_DETECTION, false))
         val sent = readCommand(target)
@@ -687,7 +697,8 @@ class ListeningModeDialogTest {
         val state = AppleDevice::class.java.getDeclaredField("_state").apply { isAccessible = true }.get(device) as MutableStateFlow<AppleState>
         val controls = mapOf(ControlCommandIdentifier.EAR_DETECTION_CONFIG to byteArrayOf(2),
             ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG to byteArrayOf(2),
-            ControlCommandIdentifier.ADAPTIVE_VOLUME_CONFIG to byteArrayOf(2))
+            ControlCommandIdentifier.ADAPTIVE_VOLUME_CONFIG to byteArrayOf(2),
+            ControlCommandIdentifier.PPE_TOGGLE_CONFIG to byteArrayOf(2))
         state.value = state.value.copy(controlStates = state.value.controlStates + controls,
             liveControlReports = controls.keys, controlSession = 1)
     }

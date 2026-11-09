@@ -105,14 +105,14 @@ settings screen does not resend saved choices or reconnect audio.
 
 The Quick Settings panel preserves the shared per-command Boolean encoding,
 including Automatic Ear Detection's `02` On and `01` Off. Native listening mode,
-Adaptive strength and the three ordinary Boolean controls use one ordered IO
+Adaptive strength and the four ordinary Boolean controls use one ordered IO
 writer, with one in-flight value and one replaceable unsent choice per control.
 Listening mode starts without a pacing delay; other scalar edits use 150 ms.
 Bluetooth and durable preference writes stay off Main. Changing away from
 Adaptive retires unsent strength edits from that mode context.
 
 An accepted scalar send establishes local intent, not device confirmation.
-Conversation Awareness, Ear Detection and Personalized Volume can retain that
+Conversation Awareness, Ear Detection, Personalized Volume and EN 352 Protection can retain that
 accepted choice for display across AACP reloads within the same Bluetooth
 connection. A fresh report or replacement Bluetooth connection retires that
 fallback. It never restores received reports, authorizes a typed write or replays
@@ -120,6 +120,11 @@ a command. The panel displays the selected On or Off value immediately without
 presenting pending or preferred bookkeeping. Ear Detection uses the same configured-choice precedence as the main
 screen even when firmware omits its echo; its preference changes after an
 accepted owned command, together with the host auto-pause choice.
+
+EN 352 Protection uses the existing AACP `PPE_TOGGLE_CONFIG` (`0x37`), with
+`01` On and `02` Off, beside Loud Sound Reduction in the quick panel. It keeps
+the existing PPE model capability and transport guards; the current dongle
+catalog does not expose this control.
 
 Scalar dispatch rechecks the socket, control session and Bluetooth connection;
 ordinary controls also require accepted settings startup. Hearing Aid, Media

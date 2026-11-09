@@ -15,12 +15,13 @@ import me.kavishdevar.librepods.utils.NativeGameModeController
 
 internal enum class QuickSetting {
     CONVERSATION_AWARENESS, EAR_DETECTION, GAME_MODE, PERSONALIZED_VOLUME,
-    LOUD_SOUND_REDUCTION, HEARING_AID, MEDIA_ASSIST;
+    LOUD_SOUND_REDUCTION, EN352_PROTECTION, HEARING_AID, MEDIA_ASSIST;
 
     val control: ControlCommandIdentifier? get() = when (this) {
         CONVERSATION_AWARENESS -> ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG
         EAR_DETECTION -> ControlCommandIdentifier.EAR_DETECTION_CONFIG
         PERSONALIZED_VOLUME -> ControlCommandIdentifier.ADAPTIVE_VOLUME_CONFIG
+        EN352_PROTECTION -> ControlCommandIdentifier.PPE_TOGGLE_CONFIG
         else -> null
     }
 }
@@ -118,5 +119,6 @@ private fun quickSettings(metadata: AppleMetadata, state: AppleState,
     return listOf(ordinary(QuickSetting.CONVERSATION_AWARENESS, BaseCapability.CONVERSATION_AWARENESS in capabilities),
         ordinary(QuickSetting.EAR_DETECTION, knownModel), game,
         ordinary(QuickSetting.PERSONALIZED_VOLUME, BaseCapability.ADAPTIVE_VOLUME in capabilities), loud,
+        ordinary(QuickSetting.EN352_PROTECTION, BaseCapability.PPE in capabilities),
         hearing(QuickSetting.HEARING_AID, HearingMode.HEARING_AID), hearing(QuickSetting.MEDIA_ASSIST, HearingMode.MEDIA_ASSIST))
 }
