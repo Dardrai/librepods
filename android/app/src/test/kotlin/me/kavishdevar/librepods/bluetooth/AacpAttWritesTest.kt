@@ -5,6 +5,10 @@ import android.app.Application
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothSocket
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.async
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.flow.MutableStateFlow
 import me.kavishdevar.librepods.core.bluetooth.aacp.AACPManager
 import me.kavishdevar.librepods.core.bluetooth.att.ATTHandle
 import me.kavishdevar.librepods.core.bluetooth.att.ATTManager
@@ -189,6 +193,36 @@ class AacpAttWritesTest {
                 assertEquals(0, att.readCount(ATTHandle.TRANSPARENCY))
             }
             assertEquals(0, att.writeCount(ATTHandle.HEARING_AID))
+        }
+    }
+
+    @Test fun queuedClinicalModeChangesCannotMigrateToAReplacementControlOwner() = runBlocking<Unit> {
+        for (mode in HearingMode.entries) for (replaceSocket in listOf(false, true)) for (explicitOwner in listOf(false, true)) withFixture { device, att, socket ->
+            val lock = AppleDevice::class.java.getDeclaredField("hearingLock").apply { isAccessible = true }.get(device) as Mutex
+            val session = device.state.value.controlSession
+            lock.lock()
+            val request = async(start = CoroutineStart.UNDISPATCHED) {
+                when {
+                    mode == HearingMode.HEARING_AID && explicitOwner -> device.setHearingAidEnabled(true, socket, session)
+                    mode == HearingMode.HEARING_AID -> device.setHearingAidEnabled(true)
+                    explicitOwner -> device.setMediaAssistEnabled(true, socket, session)
+                    else -> device.setMediaAssistEnabled(true)
+                }
+            }
+            assertFalse(request.isCompleted)
+            val replacement = Shadow.newInstanceOf(BluetoothSocket::class.java).apply { connect() }
+            try {
+                if (replaceSocket) bind(device.aacp, replacement)
+                else {
+                    @Suppress("UNCHECKED_CAST")
+                    val state = AppleDevice::class.java.getDeclaredField("_state").apply { isAccessible = true }
+                        .get(device) as MutableStateFlow<AppleState>
+                    state.value = state.value.copy(controlSession = session + 1)
+                }
+                lock.unlock()
+                assertFalse(request.await())
+                verifyNoInteractions(att.manager)
+            } finally { if (lock.isLocked) lock.unlock(); request.cancel(); replacement.close() }
         }
     }
 

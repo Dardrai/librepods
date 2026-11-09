@@ -36,6 +36,25 @@ reports remain separate. Each visible screen, tile and picker owns its polling
 token; closing the shade must not stop an open picker's updates. A remembered
 but unplugged dongle does not hide a connected native device from the tile.
 
+The expanded Quick Settings panel keeps that rail above seven labeled toggle
+controls, with two columns at regular phone widths and one column for narrow
+windows or enlarged text. Its height stays inside the available window and its
+content scrolls. Conversation Awareness, Automatic Ear Detection, Game Mode,
+Personalized Volume, Loud Sound Reduction, Hearing Aid and Media Assist reuse
+the native or dongle writers and their current-session reports. Unknown values
+remain indeterminate; unavailable transport is disabled. Requested choices stay
+adjustable, and Game Mode can be cancelled while it waits for playback.
+
+Quick controls use the existing Backdrop glass material, a shared captured layer,
+neutral translucent silhouettes and circular icon wells, following the supplied
+Control Center reference and AndroidLiquidGlass's KMP examples. Active icon wells
+use the app accent; the glass body stays neutral. A short press spring and 180 ms
+icon color transitions give immediate
+feedback; state captions crossfade without moving the control geometry. Compose
+animations retain the system duration scale, including disabled animations.
+Touch targets are at least 48 dp and expose switch state, pending state and
+disabled semantics. Opening or rendering the panel never changes a setting.
+
 Received records and requested values remain separate. A successful silent PME
 send can supply the next same-session edit baseline, but is not device
 confirmation. Fresh received records take precedence. Audiogram selection needs

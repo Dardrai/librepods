@@ -1,5 +1,7 @@
-<resources>
+<resources xmlns:tools="http://schemas.android.com/tools">
     <string name="listening_mode_close">Close listening modes</string>
+    <string name="quick_settings_close" tools:ignore="MissingTranslation">Close AirPods controls</string>
+    <string name="quick_setting_requested" tools:ignore="MissingTranslation">Requested</string>
     <string name="listening_mode_reading">Reading listening mode…</string>
     <string name="listening_mode_pending">Switching listening mode…</string>
     <string name="listening_mode_failed">Couldn’t change listening mode. Try again.</string>

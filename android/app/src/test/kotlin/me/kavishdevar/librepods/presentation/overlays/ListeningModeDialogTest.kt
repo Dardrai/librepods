@@ -19,6 +19,9 @@ import android.view.WindowManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.flow.MutableStateFlow
 import me.kavishdevar.librepods.LibrePodsApplication
 import me.kavishdevar.librepods.core.bluetooth.MacAddress
@@ -43,6 +46,8 @@ import org.mockito.Mockito.mockingDetails
 import org.mockito.Mockito.doAnswer
 import org.mockito.Mockito.doReturn
 import org.mockito.Mockito.spy
+import org.mockito.Mockito.verify
+import org.mockito.Mockito.times
 import org.mockito.ArgumentMatchers.any
 import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
@@ -54,6 +59,10 @@ import org.robolectric.shadow.api.Shadow
 import org.robolectric.util.ReflectionHelpers
 import org.robolectric.util.ReflectionHelpers.ClassParameter
 import java.util.concurrent.Executor
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import me.kavishdevar.librepods.core.bluetooth.att.ATTHandle
+import me.kavishdevar.librepods.core.devices.SettingsReadStatus
 import java.util.function.Consumer
 
 @RunWith(RobolectricTestRunner::class)
@@ -434,6 +443,121 @@ class ListeningModeDialogTest {
         val calls = mockingDetails(dongle.controller).invocations.filter { it.method.name == "controlsVisible" }
         assertEquals(listOf(true, false), calls.map { it.arguments[0] })
         assertSame(calls.first().arguments[1], calls.last().arguments[1])
+    }
+
+    @Test fun quickSettingsUseTheNativeBooleanEncodingAndOpeningDoesNotWrite() {
+        val target = device()
+        seedQuickReports(target)
+        devices.value = mapOf(target.macAddress to target)
+        val popup = open(target)
+        assertEquals(0, output(target).available())
+        val current = requireNotNull(ReflectionHelpers.callInstanceMethod<ListeningModeSnapshot?>(popup, "getSnapshot"))
+        assertEquals(7, current.quickSettings.size)
+        for ((setting, expected, enabled) in listOf(
+            Triple(QuickSetting.EAR_DETECTION, 1, false),
+            Triple(QuickSetting.CONVERSATION_AWARENESS, 1, true),
+            Triple(QuickSetting.PERSONALIZED_VOLUME, 1, true))) {
+            assertTrue(popup.writeQuickSetting(setting, enabled))
+            val command = readCommand(target)
+            assertEquals(setting.control, command.identifier)
+            assertEquals(expected, command.value.single().toInt())
+        }
+        assertFalse("Unloaded ATT settings cannot be written from the panel", popup.writeQuickSetting(QuickSetting.LOUD_SOUND_REDUCTION, true))
+        assertFalse("Clinical settings need current reports and a fitting", popup.writeQuickSetting(QuickSetting.HEARING_AID, true))
+    }
+
+    @Test fun aFailedQuickSettingDoesNotMarkTheListeningModeRailAsFailed() {
+        val original = device()
+        val target = spy(original)
+        seedQuickReports(target)
+        doReturn(false).`when`(target).setControlCommand(ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG, true)
+        devices.value = mapOf(target.macAddress to target)
+        val popup = open(target)
+        assertFalse(popup.writeQuickSetting(QuickSetting.CONVERSATION_AWARENESS, true))
+        assertFalse(ReflectionHelpers.callInstanceMethod<Boolean>(popup, "getCommandFailed"))
+        assertEquals(0, output(original).available())
+    }
+
+    @Test fun quickSettingsCannotWriteToAReplacedPairOrAfterDismissal() {
+        val target = device()
+        seedQuickReports(target)
+        devices.value = mapOf(target.macAddress to target)
+        val popup = open(target)
+        devices.value = mapOf(target.macAddress to device())
+        assertFalse(popup.writeQuickSetting(QuickSetting.EAR_DETECTION, false))
+        assertEquals(0, output(target).available())
+        popup.dismiss()
+        assertFalse(popup.writeQuickSetting(QuickSetting.EAR_DETECTION, false))
+    }
+
+    @Test fun dongleQuickSettingsUseItsExistingLiveEditorsAndFenceTheSession() {
+        dongle.connect()
+        val popup = openDongle()
+        assertTrue(dongle.writes.isEmpty())
+        assertTrue(dongle.gameWrites.isEmpty())
+        assertTrue(popup.writeQuickSetting(QuickSetting.EAR_DETECTION, false))
+        assertTrue(popup.writeQuickSetting(QuickSetting.CONVERSATION_AWARENESS, true))
+        assertTrue(popup.writeQuickSetting(QuickSetting.PERSONALIZED_VOLUME, true))
+        assertTrue(popup.writeQuickSetting(QuickSetting.GAME_MODE, true))
+        assertEquals(listOf(0x0a to 1L, 0x28 to 1L, 0x26 to 1L), dongle.writes)
+        assertEquals(listOf(true), dongle.gameWrites)
+        assertFalse(popup.writeQuickSetting(QuickSetting.LOUD_SOUND_REDUCTION, true))
+        dongle.state.value = dongle.state.value.copy(controlSession = 8)
+        assertFalse(popup.writeQuickSetting(QuickSetting.EAR_DETECTION, true))
+        assertEquals(3, dongle.writes.size)
+    }
+
+    @Test fun quickSettingsNeverInventABaselineFromASavedChoice() {
+        val target = device()
+        devices.value = mapOf(target.macAddress to target)
+        val popup = open(target)
+        assertFalse(popup.writeQuickSetting(QuickSetting.EAR_DETECTION, false))
+        assertFalse(popup.writeQuickSetting(QuickSetting.CONVERSATION_AWARENESS, true))
+        assertFalse(popup.writeQuickSetting(QuickSetting.PERSONALIZED_VOLUME, true))
+        assertEquals(0, output(target).available())
+    }
+
+    @Test fun anInFlightLoudSoundRequestRejectsDuplicatesAndDismissalRetiresItsUiWork() = runBlocking<Unit> {
+        val original = device()
+        val target = spy(original)
+        val socket = sockets.single().second
+        seedQuickReports(target)
+        @Suppress("UNCHECKED_CAST")
+        val state = ReflectionHelpers.getField<MutableStateFlow<AppleState>>(target, "_state")
+        state.value = state.value.copy(loudSoundReductionReadStatus = SettingsReadStatus.AVAILABLE)
+        doReturn(true).`when`(target).loudSoundReductionWritable
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        doAnswer {
+            entered.countDown()
+            check(release.await(2, TimeUnit.SECONDS))
+            true
+        }.`when`(target).writeATTCharacteristic(ATTHandle.LOUD_SOUND_REDUCTION, byteArrayOf(1),
+            byteArrayOf(0), socket, 1L)
+        devices.value = mapOf(target.macAddress to target)
+        val popup = open(target)
+        try {
+            assertTrue(popup.writeQuickSetting(QuickSetting.LOUD_SOUND_REDUCTION, true))
+            assertTrue(entered.await(2, TimeUnit.SECONDS))
+            assertFalse(popup.writeQuickSetting(QuickSetting.LOUD_SOUND_REDUCTION, true))
+            popup.dismiss()
+            assertFalse(popup.writeQuickSetting(QuickSetting.LOUD_SOUND_REDUCTION, true))
+        } finally { release.countDown(); popup.dismiss() }
+        val scope = ReflectionHelpers.getField<CoroutineScope>(popup, "scope")
+        val job = checkNotNull(scope.coroutineContext[Job])
+        withTimeout(2_000) { while (!job.isCompleted) { idle(); delay(5) } }
+        verify(target, times(1)).writeATTCharacteristic(ATTHandle.LOUD_SOUND_REDUCTION, byteArrayOf(1),
+            byteArrayOf(0), socket, 1L)
+    }
+
+    private fun seedQuickReports(device: AppleDevice) {
+        @Suppress("UNCHECKED_CAST")
+        val state = AppleDevice::class.java.getDeclaredField("_state").apply { isAccessible = true }.get(device) as MutableStateFlow<AppleState>
+        val controls = mapOf(ControlCommandIdentifier.EAR_DETECTION_CONFIG to byteArrayOf(2),
+            ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG to byteArrayOf(2),
+            ControlCommandIdentifier.ADAPTIVE_VOLUME_CONFIG to byteArrayOf(2))
+        state.value = state.value.copy(controlStates = state.value.controlStates + controls,
+            liveControlReports = controls.keys, controlSession = 1)
     }
 
     private fun openDongle(): ListeningModeDialog = ListeningModeDialog(dialogContext,

@@ -138,6 +138,10 @@ APK as a system app or grant global permissions.
 - Listening modes, Adaptive strength, Allow Off, ear detection, battery status,
   Conversation Awareness, nearby pairing, the Dynamic Island, Quick Settings and
   widgets use the rewrite's per-device state. Features vary by model and firmware.
+- Tap the AirPods tile in Android's Quick Settings for the Control Center-style
+  listening rail and seven live toggles. Native Bluetooth and the USB dongle use
+  their existing setting paths; unsupported controls remain disabled. The panel
+  adapts to larger text and scrolls on smaller screens.
 - Recorder retains experimental high-quality microphone recording. The failed
   app microphone injection and cellular-call relay experiments have been removed.
   Microphone Mode contains only the native Automatic, Always Right and Always
@@ -146,9 +150,11 @@ APK as a system app or grant global permissions.
 - High-quality two-way call audio is unavailable; ordinary Android/HFP calls
   continue to use the native Bluetooth route. The proposed root integration and
   its remaining checks are documented in [High-quality microphone routing for calls](HQ-COMMUNICATION.md).
-- Hearing aid fitting and enablement, custom transparency and loud sound
-  reduction are unavailable while the ATT transport is disabled, even with
-  VendorID spoofing or an existing iPhone fitting.
+- Native hearing settings, Custom Transparency and Loud Sound Reduction use
+  discovered Classic ATT characteristics and confirmed current-session data.
+  Identity spoofing alone does not authorize these controls. Hearing Aid and
+  Media Assist retain their fitting and mode guards; the dongle currently has
+  no typed Loud Sound Reduction control.
 
 ## Development builds
 

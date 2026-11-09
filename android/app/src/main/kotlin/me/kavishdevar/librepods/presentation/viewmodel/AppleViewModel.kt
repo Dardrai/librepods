@@ -296,14 +296,17 @@ class AppleViewModel(
     fun recordings(): List<Recording> = recordingRepository.recordings()
 
     fun setHearingMode(mode: HearingMode, enabled: Boolean) {
+        val transport = device.aacp.captureAudioSocket()
+        val session = device.state.value.controlSession
         hearingModeJob?.cancel()
         hearingModeJob = viewModelScope.launch {
             val confirmed = try {
                 withContext(Dispatchers.IO) {
-                    when (mode) {
-                        HearingMode.HEARING_AID -> device.setHearingAidEnabled(enabled)
-                        HearingMode.MEDIA_ASSIST -> device.setMediaAssistEnabled(enabled)
-                    }
+                    transport != null && device.aacp.captureAudioSocket() === transport && device.state.value.controlSession == session &&
+                        when (mode) {
+                            HearingMode.HEARING_AID -> device.setHearingAidEnabled(enabled, transport, session)
+                            HearingMode.MEDIA_ASSIST -> device.setMediaAssistEnabled(enabled, transport, session)
+                        }
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled

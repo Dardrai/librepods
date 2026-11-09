@@ -103,6 +103,16 @@ Routine settings use their current reports without an Apply, Read settings or
 Refresh action. AACP initialization subscribes to device reports; opening a
 settings screen does not resend saved choices or reconnect audio.
 
+The Quick Settings panel uses these same current-session reports and writers.
+Ordinary Boolean choices retain the shared per-command encoding, including
+Automatic Ear Detection's `02` On and `01` Off. Requested ordinary choices stay
+replaceable while awaiting a report; an actual in-flight typed request is
+separate. Clinical mode requests capture their socket and control session before
+waiting for the shared settings lock and recheck both after admission. The full
+settings screen and the quick panel pass the same captured ownership proof;
+only the transaction's existing owned confirmation refresh may replace it.
+Opening the panel does not apply toggle choices, fitting or Transparency data.
+
 Native ATT initialization belongs to one control socket and session. It waits
 for Connected, a known supported model and idle microphone/call state, then
 reads the full hearing profile, Custom Transparency and Loud Sound Reduction where supported.

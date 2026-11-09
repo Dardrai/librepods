@@ -361,8 +361,10 @@ class AppleDevice(
         aacp.sendControlCommand(ControlCommandIdentifier.LISTENING_MODE.value,
             byteArrayOf(mode.toByte()), quietListeningMode = true)
 
-    suspend fun setHearingAidEnabled(enabled: Boolean): Boolean = setHearingMode(HearingMode.HEARING_AID, enabled)
-    suspend fun setMediaAssistEnabled(enabled: Boolean): Boolean = setHearingMode(HearingMode.MEDIA_ASSIST, enabled)
+    suspend fun setHearingAidEnabled(enabled: Boolean, expectedTransport: BluetoothSocket? = null, expectedSession: Long? = null): Boolean =
+        setHearingMode(HearingMode.HEARING_AID, enabled, expectedTransport, expectedSession)
+    suspend fun setMediaAssistEnabled(enabled: Boolean, expectedTransport: BluetoothSocket? = null, expectedSession: Long? = null): Boolean =
+        setHearingMode(HearingMode.MEDIA_ASSIST, enabled, expectedTransport, expectedSession)
 
     val transparencyTransportAvailable: Boolean get() = att.available
     val loudSoundReductionWritable: Boolean get() = connectionState.value == ConnectionState.CONNECTED &&
@@ -586,86 +588,92 @@ class AppleDevice(
                 context.getSystemService(TelephonyManager::class.java)?.callState == TelephonyManager.CALL_STATE_IDLE)
     }.getOrDefault(false)
 
-    private suspend fun setHearingMode(mode: HearingMode, enabled: Boolean): Boolean = hearingLock.withLock {
-        if (state.value.accommodationsRequest.pending) return@withLock false
-        if (enabled && state.value.accommodationsRequest.requested != null) return@withLock false
-        if (enabled && state.value.accommodationsRequest.result == AccommodationsResult.UNCONFIRMED &&
-            !state.value.accommodationsRequest.editable(state.value.hearingModes.accommodationsReport(state.value.controlSession))) return@withLock false
-        if (metadata.value.model == AirPodsModel.UNKNOWN ||
-            BaseCapability.HEARING_AID !in AirPodsSpecs.getSpec(metadata.value.model).baseCapabilities) return@withLock false
-        var transport = aacp.captureAudioSocket() ?: return@withLock false
-        val original = state.value.hearingModes
-        val plan = original.plan(mode, enabled) ?: return@withLock false
-        if (plan.packets.isEmpty()) return@withLock true
-        val owner = Any()
-        val current = { aacp.ownsAudioSocket(transport) && ownsHearingConfirmation(owner, mode) }
-        val reserved = synchronized(aacp) {
-            if (!aacp.ownsAudioSocket(transport) || state.value.hearingModes !== original ||
-                (enabled && (state.value.microphoneState.isActive || aacp.isMicrophoneRequested()))) false
-            else {
-                hearingConfirmationOwner = owner
-                updateState { it.copy(hearingModes = original.copy(pending = mode)) }
-                true
+    private suspend fun setHearingMode(mode: HearingMode, enabled: Boolean,
+        expectedTransport: BluetoothSocket?, expectedSession: Long?): Boolean {
+        val requestedTransport = expectedTransport ?: aacp.captureAudioSocket() ?: return false
+        val requestedSession = expectedSession ?: state.value.controlSession
+        return hearingLock.withLock {
+            if (aacp.captureAudioSocket() !== requestedTransport || state.value.controlSession != requestedSession) return@withLock false
+            if (state.value.accommodationsRequest.pending) return@withLock false
+            if (enabled && state.value.accommodationsRequest.requested != null) return@withLock false
+            if (enabled && state.value.accommodationsRequest.result == AccommodationsResult.UNCONFIRMED &&
+                !state.value.accommodationsRequest.editable(state.value.hearingModes.accommodationsReport(state.value.controlSession))) return@withLock false
+            if (metadata.value.model == AirPodsModel.UNKNOWN ||
+                BaseCapability.HEARING_AID !in AirPodsSpecs.getSpec(metadata.value.model).baseCapabilities) return@withLock false
+            var transport = requestedTransport
+            val original = state.value.hearingModes
+            val plan = original.plan(mode, enabled) ?: return@withLock false
+            if (plan.packets.isEmpty()) return@withLock true
+            val owner = Any()
+            val current = { aacp.ownsAudioSocket(transport) && ownsHearingConfirmation(owner, mode) }
+            val reserved = synchronized(aacp) {
+                if (!aacp.ownsAudioSocket(transport) || state.value.controlSession != requestedSession || state.value.hearingModes !== original ||
+                    (enabled && (state.value.microphoneState.isActive || aacp.isMicrophoneRequested()))) false
+                else {
+                    hearingConfirmationOwner = owner
+                    updateState { it.copy(hearingModes = original.copy(pending = mode)) }
+                    true
+                }
             }
-        }
-        if (!reserved) return@withLock false
-        var attempted = false
-        var confirmed = false
-        try {
-            confirmed = withTimeoutOrNull(15.seconds) confirmation@ {
-                val fitting = if (enabled) att.readCharacteristic(ATTHandle.HEARING_AID) else null
-                if (!current()) return@confirmation false
-                if (enabled) {
-                    if (fitting == null || !hearingAidSettingsWritable(fitting)) return@confirmation false
-                    val transparency = att.readCharacteristic(ATTHandle.TRANSPARENCY) ?: return@confirmation false
-                    if (!current() || customTransparencyEnabled(transparency) != false) return@confirmation false
-                }
-                if (!state.value.hearingModes.sameConfiguration(original)) return@confirmation false
-                if (enabled && (state.value.microphoneState.isActive || aacp.isMicrophoneRequested())) return@confirmation false
-                for (packet in plan.packets) {
+            if (!reserved) return@withLock false
+            var attempted = false
+            var confirmed = false
+            try {
+                confirmed = withTimeoutOrNull(15.seconds) confirmation@ {
+                    val fitting = if (enabled) att.readCharacteristic(ATTHandle.HEARING_AID) else null
                     if (!current()) return@confirmation false
-                    attempted = true
-                    if (!aacp.sendAudioPacket(transport, packet)) return@confirmation false
+                    if (enabled) {
+                        if (fitting == null || !hearingAidSettingsWritable(fitting)) return@confirmation false
+                        val transparency = att.readCharacteristic(ATTHandle.TRANSPARENCY) ?: return@confirmation false
+                        if (!current() || customTransparencyEnabled(transparency) != false) return@confirmation false
+                    }
+                    if (!state.value.hearingModes.sameConfiguration(original)) return@confirmation false
+                    if (enabled && (state.value.microphoneState.isActive || aacp.isMicrophoneRequested())) return@confirmation false
+                    for (packet in plan.packets) {
+                        if (!current()) return@confirmation false
+                        attempted = true
+                        if (!aacp.sendAudioPacket(transport, packet)) return@confirmation false
+                    }
+                    var freshSession = false
+                    val spontaneous = withTimeoutOrNull(1.seconds) {
+                        state.first { !current() || it.hearingModes.confirms(plan) }
+                    }
+                    if (!current()) return@confirmation false
+                    if (spontaneous?.hearingModes?.confirms(plan) != true) {
+                        val refresh = aacp.prepareHearingConfirmationRefresh(transport, owner, mode)
+                            ?: return@confirmation false
+                        // Closing only this request's socket also releases a blocked connect on cancellation.
+                        val reopened = reopenForConfirmation(refresh) { canRefreshHearingConfirmation(owner, mode) }
+                        if (!reopened) return@confirmation false
+                        transport = refresh.replacement?.takeIf(aacp::ownsAudioSocket) ?: return@confirmation false
+                        freshSession = true
+                    }
+                    fun matches(value: AppleState): Boolean = if (freshSession) value.hearingModes.confirmsFreshSession(plan)
+                        else value.hearingModes.confirms(plan)
+                    val report = state.first { !current() || (freshSession && !canRefreshHearingConfirmation(owner, mode)) || matches(it) }
+                    if (!current() || (freshSession && !canRefreshHearingConfirmation(owner, mode)) || !matches(report)) return@confirmation false
+                    if (enabled) {
+                        // Mode reports can arrive before the replacement settings transport finishes startup.
+                        while (freshSession && current() && canRefreshHearingConfirmation(owner, mode) &&
+                            aacp.captureSettingsSocket() !== transport)
+                            delay(50.milliseconds)
+                        if (!current() || (freshSession && !canRefreshHearingConfirmation(owner, mode)) ||
+                            !matches(state.value)) return@confirmation false
+                        val readback = att.readCharacteristic(ATTHandle.HEARING_AID)
+                        if (!current() || !fitting.contentEquals(readback) || !matches(state.value)) return@confirmation false
+                    }
+                    true
+                } == true
+                confirmed
+            } finally {
+                synchronized(aacp) {
+                    if (hearingConfirmationOwner !== owner) return@synchronized
+                    updateState { state ->
+                        if (state.hearingModes.pending != mode) state else state.copy(hearingModes = state.hearingModes.copy(
+                            pending = null, uncertain = if (confirmed) null else if (attempted) mode else original.uncertain))
+                    }
+                    hearingConfirmationOwner = null
                 }
-                var freshSession = false
-                val spontaneous = withTimeoutOrNull(1.seconds) {
-                    state.first { !current() || it.hearingModes.confirms(plan) }
-                }
-                if (!current()) return@confirmation false
-                if (spontaneous?.hearingModes?.confirms(plan) != true) {
-                    val refresh = aacp.prepareHearingConfirmationRefresh(transport, owner, mode)
-                        ?: return@confirmation false
-                    // Closing only this request's socket also releases a blocked connect on cancellation.
-                    val reopened = reopenForConfirmation(refresh) { canRefreshHearingConfirmation(owner, mode) }
-                    if (!reopened) return@confirmation false
-                    transport = refresh.replacement?.takeIf(aacp::ownsAudioSocket) ?: return@confirmation false
-                    freshSession = true
-                }
-                fun matches(value: AppleState): Boolean = if (freshSession) value.hearingModes.confirmsFreshSession(plan)
-                    else value.hearingModes.confirms(plan)
-                val report = state.first { !current() || (freshSession && !canRefreshHearingConfirmation(owner, mode)) || matches(it) }
-                if (!current() || (freshSession && !canRefreshHearingConfirmation(owner, mode)) || !matches(report)) return@confirmation false
-                if (enabled) {
-                    // Mode reports can arrive before the replacement settings transport finishes startup.
-                    while (freshSession && current() && canRefreshHearingConfirmation(owner, mode) &&
-                        aacp.captureSettingsSocket() !== transport)
-                        delay(50.milliseconds)
-                    if (!current() || (freshSession && !canRefreshHearingConfirmation(owner, mode)) ||
-                        !matches(state.value)) return@confirmation false
-                    val readback = att.readCharacteristic(ATTHandle.HEARING_AID)
-                    if (!current() || !fitting.contentEquals(readback) || !matches(state.value)) return@confirmation false
-                }
-                true
-            } == true
-            confirmed
-        } finally {
-            synchronized(aacp) {
-                if (hearingConfirmationOwner !== owner) return@synchronized
-                updateState { state ->
-                    if (state.hearingModes.pending != mode) state else state.copy(hearingModes = state.hearingModes.copy(
-                        pending = null, uncertain = if (confirmed) null else if (attempted) mode else original.uncertain))
-                }
-                hearingConfirmationOwner = null
             }
         }
     }
