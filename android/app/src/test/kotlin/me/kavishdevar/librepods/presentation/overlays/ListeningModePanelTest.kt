@@ -11,6 +11,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.platform.LocalDensity
@@ -172,6 +173,46 @@ class ListeningModePanelTest {
         assertEquals("Layout and reports do not send commands", 0, changes)
     }
 
+    // Use the same supported Espresso input bridge as NoiseControlSettingsTest.
+    @Config(sdk = [33])
+    @Test fun glassRailAcceptsOneModeTapAndOneDragWithoutMovingItsTargetsOrWritingWhenDisabled() {
+        val current = mutableStateOf(snapshot())
+        val modes = mutableListOf<Int>()
+        var toggles = 0
+        compose.setContent {
+            fixture(Profile(), current.value, onMode = { mode ->
+                modes += mode
+                current.value = current.value.copy(state = current.value.state.copy(
+                    controlStates = mapOf(ControlCommandIdentifier.LISTENING_MODE to byteArrayOf(mode.toByte()))))
+            }) { _, _ -> toggles++ }
+        }
+        fun settle() { compose.mainClock.advanceTimeBy(1500); compose.waitForIdle() }
+        settle()
+        val rail = compose.onNodeWithTag("listening-mode-control", useUnmergedTree = true)
+        val bounds = rail.fetchSemanticsNode().boundsInRoot
+        val anc = compose.onNodeWithContentDescription(RuntimeEnvironment.getApplication().getString(R.string.noise_cancellation))
+        anc.performTouchInput { click() }
+        settle()
+        assertEquals("One physical tap sends one intended mode", listOf(2), modes)
+        compose.onNodeWithTag("noise-control-thumb").performTouchInput {
+            down(center); moveBy(Offset(-bounds.width / 3f, 0f)); up()
+        }
+        settle()
+        assertEquals("One drag into Adaptive sends that mode once", listOf(2, 4), modes)
+        assertEquals(bounds, rail.fetchSemanticsNode().boundsInRoot)
+        compose.runOnIdle { current.value = current.value.copy(enabled = false) }
+        settle()
+        compose.onNodeWithContentDescription(RuntimeEnvironment.getApplication().getString(R.string.transparency))
+            .assertIsNotEnabled().performTouchInput { click() }
+        compose.onNodeWithTag("noise-control-thumb").performTouchInput {
+            down(center); moveBy(Offset(-bounds.width / 3f, 0f)); up()
+        }
+        settle()
+        assertEquals("Frozen controls cannot send tap or drag commands", listOf(2, 4), modes)
+        assertEquals(bounds, rail.fetchSemanticsNode().boundsInRoot)
+        assertEquals("Rail gestures cannot activate an adjacent quick setting", 0, toggles)
+    }
+
     @Test fun waitingGameModeCanBeCancelledAndRequestedOrdinaryChoicesCanBeReplaced() {
         val current = mutableStateOf(snapshot(QuickSetting.entries.map { setting ->
             QuickSettingState(setting, checked = setting in setOf(QuickSetting.GAME_MODE, QuickSetting.CONVERSATION_AWARENESS),
@@ -279,13 +320,14 @@ class ListeningModePanelTest {
 
     @Composable
     private fun fixture(profile: Profile, snapshot: ListeningModeSnapshot,
+        onMode: (Int) -> Unit = {},
         onToggle: (QuickSetting, Boolean) -> Unit) {
         CompositionLocalProvider(LocalDensity provides Density(1f, profile.fontScale)) {
             LibrePodsTheme(designSystem = DesignSystem.Apple, darkTheme = profile.dark) {
                 Box(Modifier.requiredSize(profile.width.dp, profile.height.dp)
                     .background(if (profile.dark) Color(0xFF161C29) else Color(0xFFE7E5F4))
                     .testTag("quick-panel-fixture")) {
-                    ListeningModePanel(snapshot, onMode = {}, onStrength = {}, onToggle = onToggle,
+                    ListeningModePanel(snapshot, onMode = onMode, onStrength = {}, onToggle = onToggle,
                         modifier = Modifier.fillMaxWidth())
                 }
             }

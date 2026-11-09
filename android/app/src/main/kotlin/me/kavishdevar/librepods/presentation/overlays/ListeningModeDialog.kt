@@ -43,6 +43,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.kyant.backdrop.Backdrop
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -457,7 +458,8 @@ internal data class ListeningModeSnapshot(val metadata: AppleMetadata, val state
 
 @Composable
 internal fun ListeningModeContent(snapshot: ListeningModeSnapshot?, commandFailed: Boolean = false,
-    onMode: (Int) -> Unit, onStrength: (Int) -> Unit, loading: Boolean = true, modeIconSize: Dp = 32.dp) {
+    onMode: (Int) -> Unit, onStrength: (Int) -> Unit, loading: Boolean = true, modeIconSize: Dp = 32.dp,
+    surfaceBackdrop: Backdrop? = null) {
     val mode = snapshot?.mode
     val status = stringResource(when {
         commandFailed -> R.string.listening_mode_failed
@@ -481,7 +483,7 @@ internal fun ListeningModeContent(snapshot: ListeningModeSnapshot?, commandFaile
                 adaptiveStrength = snapshot.state.controlStates[ControlCommandIdentifier.AUTO_ANC_STRENGTH]?.firstOrNull()?.toInt() ?: 50,
                 requestedAdaptiveStrength = snapshot.state.requestedControls[ControlCommandIdentifier.AUTO_ANC_STRENGTH]?.firstOrNull()?.toInt(),
                 onAdaptiveStrengthChanged = onStrength,
-                showLabels = false, enabled = snapshot.enabled, modeIconSize = modeIconSize)
+                showLabels = false, enabled = snapshot.enabled, modeIconSize = modeIconSize, surfaceBackdrop = surfaceBackdrop)
         } else {
             Box(Modifier.fillMaxWidth().height(64.dp)
                 .background(MaterialTheme.colorScheme.surfaceContainerHigh, RoundedCornerShape(percent = 100)),

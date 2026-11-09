@@ -84,7 +84,8 @@ internal fun ListeningModePanel(snapshot: ListeningModeSnapshot?, commandFailed:
             Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
                 Text(stringResource(R.string.noise_control), Modifier.padding(horizontal = 8.dp),
                     style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                ListeningModeContent(snapshot, commandFailed, onMode, onStrength, loading = loading, modeIconSize = 28.dp)
+                ListeningModeContent(snapshot, commandFailed, onMode, onStrength, loading = loading,
+                    modeIconSize = 28.dp, surfaceBackdrop = backdrop)
             }
             BoxWithConstraints(Modifier.fillMaxWidth()) {
                 val twoColumns = maxWidth >= 340.dp && LocalDensity.current.fontScale <= 1.2f

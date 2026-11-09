@@ -110,6 +110,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
+import com.kyant.backdrop.Backdrop
 import com.kyant.backdrop.backdrops.layerBackdrop
 import com.kyant.backdrop.backdrops.rememberLayerBackdrop
 import com.kyant.backdrop.drawBackdrop
@@ -124,6 +125,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import me.kavishdevar.librepods.R
+import me.kavishdevar.librepods.presentation.components.primitives.appleGlassSurface
 import me.kavishdevar.librepods.data.app.FontFamilyOption
 import me.kavishdevar.librepods.data.app.FontSettings
 import me.kavishdevar.librepods.core.devices.NoiseControlMode
@@ -160,7 +162,8 @@ fun NoiseControlSettings(
     requestedAdaptiveStrength: Int? = null,
     showAdaptiveMode: Boolean = true,
     enabled: Boolean = true,
-    modeIconSize: Dp = 32.dp
+    modeIconSize: Dp = 32.dp,
+    surfaceBackdrop: Backdrop? = null
 ) {
     val haptics = LocalHapticFeedback.current
     var dragFeedbackMode by remember { mutableStateOf<Int?>(null) }
@@ -517,9 +520,11 @@ fun NoiseControlSettings(
                                 }
                             }
                             .layerBackdrop(backdrop)
-                            .background(railColor, railShape)
-                            .background(railWash, railShape)
-                            .border(0.5.dp, railRim, railShape)
+                            .then(if (surfaceBackdrop != null) Modifier.appleGlassSurface(surfaceBackdrop,
+                                surfaceColor = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = if (isDarkTheme) 0.24f else 0.36f))
+                                else Modifier.background(railColor, railShape)
+                                    .background(railWash, railShape)
+                                    .border(0.5.dp, railRim, railShape))
                             .drawWithContent {
                                 val pressed = momentum.progress.coerceIn(0f, 1f)
                                 if (pressed > 0f) {
@@ -861,7 +866,8 @@ fun NoiseControlSettings(
                             backdrop = backdrop,
                             shape = { RoundedCornerShape(percent = 100) },
                             highlight = {
-                                Highlight.Default.copy(alpha = momentum.progress.coerceIn(0f, 1f))
+                                val pressed = momentum.progress.coerceIn(0f, 1f)
+                                Highlight.Default.copy(alpha = if (surfaceBackdrop != null) 0.34f + 0.66f * pressed else pressed)
                             },
                             shadow = { Shadow(alpha = momentum.progress.coerceIn(0f, 1f)) },
                             innerShadow = {
@@ -893,7 +899,7 @@ fun NoiseControlSettings(
                             onDrawSurface = {
                                 val pressed = momentum.progress.coerceIn(0f, 1f)
                                 drawRect((if (isDarkTheme) Color.White else Color.Black)
-                                    .copy(alpha = 0.1f * (1f - pressed)))
+                                    .copy(alpha = (if (surfaceBackdrop != null) 0.16f else 0.1f) * (1f - pressed)))
                                 drawRect(Color.Black.copy(alpha = 0.03f * pressed))
                             },
                         ).testTag("noise-control-bubble"),

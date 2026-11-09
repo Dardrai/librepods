@@ -2,8 +2,8 @@ import java.util.Properties
 import org.gradle.api.file.DirectoryProperty
 import org.gradle.api.tasks.OutputDirectory
 
-val appVersionName = (rootProject.extra["appVersionName"] as String) + "-pixel122"
-val appVersionCode = 200000207
+val appVersionName = (rootProject.extra["appVersionName"] as String) + "-pixel123"
+val appVersionCode = 200000208
 
 plugins {
     alias(libs.plugins.android.application)
