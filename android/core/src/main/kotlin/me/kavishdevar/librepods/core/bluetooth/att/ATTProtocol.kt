@@ -84,13 +84,19 @@ internal class ATTBearer(
         var response: ByteArray? = null
     }
     private val lock = ReentrantLock()
+    private val writeLock = Any()
     private val retired = AtomicBoolean()
     private var pending: Pending? = null
     val isCurrent: Boolean get() = !retired.get() && current()
 
+    private fun transmit(pdu: ByteArray, canSend: () -> Boolean = { true }) = synchronized(writeLock) {
+        if (!isCurrent || !canSend()) throw ATTFailure("ATT request retired", retryable = true)
+        send(pdu.copyOf())
+    }
+
     fun command(pdu: ByteArray, canSend: () -> Boolean): Boolean = lock.withLock {
         if (!isCurrent || pdu.size < 3 || pdu[0] != 0x52.toByte() || pdu.u16(1) == 0 || pdu.size > mtu || !canSend()) return false
-        try { send(pdu.copyOf()); isCurrent && canSend() }
+        try { transmit(pdu, canSend); isCurrent && canSend() }
         catch (error: Exception) { retire(error is java.io.IOException); false }
     }
 
@@ -108,7 +114,7 @@ internal class ATTBearer(
         synchronized(this) { pending = waiting }
         try {
             if (!isCurrent || !canSend()) throw ATTFailure("ATT request retired", retryable = true)
-            send(pdu.copyOf())
+            transmit(pdu, canSend)
             if (!waiting.done.await(timeoutMillis, TimeUnit.MILLISECONDS)) {
                 retire(retryable = true)
                 throw ATTFailure("ATT response timed out", retryable = true)
@@ -128,20 +134,30 @@ internal class ATTBearer(
         }
     }
 
-    @Synchronized fun receive(pdu: ByteArray) {
+    fun receive(pdu: ByteArray) {
         if (!isCurrent) return
         if (pdu.isEmpty() || pdu.size > mtu) { retire(); return }
-        // No subscriptions are installed. Unsolicited notifications cannot satisfy a request.
-        if (pdu[0] == 0x1b.toByte() && pdu.size >= 3) return
-        val waiting = pending ?: run { retire(); return }
-        if (waiting.done.count == 0L) return
-        val expected = (pdu[0].toInt() and 255) == waiting.opcode && (waiting.opcode != 0x13 || pdu.size == 1)
-        val error = pdu.size == 5 && pdu[0] == 1.toByte() && pdu[1] == waiting.request[0] &&
-            if (waiting.request[0] in byteArrayOf(6, 8)) pdu.u16(2) in waiting.request.u16(1)..waiting.request.u16(3)
-            else waiting.request.size >= 3 && pdu.u16(2) == waiting.request.u16(1)
-        if (!expected && !error) { retire(); return }
-        waiting.response = pdu.copyOf()
-        waiting.done.countDown()
+        if (pdu[0] == 0x1d.toByte()) {
+            if (pdu.size < 3) { retire(); return }
+            // ATT confirms receipt even for an unknown/invalid handle; no value becomes a settings report.
+            try { transmit(byteArrayOf(0x1e)) }
+            catch (error: Exception) { retire(error is java.io.IOException) }
+            return
+        }
+        synchronized(this) {
+            if (!isCurrent) return
+            // No subscriptions are installed. Unsolicited notifications cannot satisfy a request.
+            if (pdu[0] == 0x1b.toByte() && pdu.size >= 3) return
+            val waiting = pending ?: run { retire(); return }
+            if (waiting.done.count == 0L) return
+            val expected = (pdu[0].toInt() and 255) == waiting.opcode && (waiting.opcode != 0x13 || pdu.size == 1)
+            val error = pdu.size == 5 && pdu[0] == 1.toByte() && pdu[1] == waiting.request[0] &&
+                if (waiting.request[0] in byteArrayOf(6, 8)) pdu.u16(2) in waiting.request.u16(1)..waiting.request.u16(3)
+                else waiting.request.size >= 3 && pdu.u16(2) == waiting.request.u16(1)
+            if (!expected && !error) { retire(); return }
+            waiting.response = pdu.copyOf()
+            waiting.done.countDown()
+        }
     }
 
     fun retire(retryable: Boolean = false, preserveCompletedRead: Boolean = false) {

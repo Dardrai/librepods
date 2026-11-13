@@ -899,6 +899,32 @@ Pixel 10 Pro XL confirmed both toggle directions through this readback path;
 the user restored the starting setting. This establishes setting confirmation,
 not a measurement of acoustic protection.
 
+### Indication receipt and reconnect investigation, 2026-11-13
+
+Classic ATT can deliver a Handle Value Indication (`1D`) while idle or while a
+settings request is pending. A complete indication within the negotiated MTU
+must receive Handle Value Confirmation (`1E`), including unknown or invalid
+handles. Discard its value: this confirmation does not constitute a settings
+read, write acknowledgement, subscription, or authorization. See
+[Bluetooth Core, Vol 3, Part F, sections 3.4.7.2–3.4.7.3](https://www.bluetooth.com/wp-content/uploads/Files/Specification/HTML/Core-54/out/en/host/attribute-protocol--att-.html).
+
+Two Pixel captures contained `1D 51 00 01 00 17 00 02 00 01 00 01` followed
+about five milliseconds later by a host-initiated ATT channel close and no
+confirmation. The parser had treated this indication as an unexpected response.
+Pixel124 confirms receipt without completing or retiring the pending request.
+Physical writes serialize independently of request waiting and retirement, so
+a confirmation can be sent during a pending read and a blocked write can still
+be cancelled by closing the bearer. Malformed PDU lengths still retire it.
+
+This is a confirmed bearer bug, not a complete explanation of the reported
+AirPods restarts. Another reproduced full-link timeout had no preceding
+indication or ATT close. Its outgoing RTP sequence/timestamps remained continuous
+until controller acknowledgements stalled. Separate HFP sessions received an
+unterminated `AT+IPHONEACCEV=1,1,96` before peer-initiated profile closure;
+one session did not follow that pattern. Neither observation alone proves the
+cause of a bud reset. Across the two controlled full-link reconnections, AVRCP
+reported the same media volume, `76/127`, despite a reported loudness difference.
+
 ## Host clock and sensors
 
 The mirrored [sensor contract v1](SENSOR-PROTOCOL.md) is shared with NTPods:
