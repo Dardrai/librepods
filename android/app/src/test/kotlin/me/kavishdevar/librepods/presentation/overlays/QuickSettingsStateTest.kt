@@ -2,20 +2,23 @@ package me.kavishdevar.librepods.presentation.overlays
 
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommandIdentifier
 import me.kavishdevar.librepods.core.devices.*
+import me.kavishdevar.librepods.dongle.DongleProtocol
+import me.kavishdevar.librepods.dongle.DongleState
 import me.kavishdevar.librepods.utils.NativeGameModeController
 import org.junit.Assert.*
 import org.junit.Test
 
 class QuickSettingsStateTest {
-    private val metadata = AppleMetadata(model = AirPodsModel.AIRPODS_PRO_3, modelNumber = "A3063")
+    private val metadata = AppleMetadata(model = AirPodsModel.AIRPODS_PRO_3, modelNumber = "A3063", version1 = "9A348")
     private val ordinary = mapOf(ControlCommandIdentifier.EAR_DETECTION_CONFIG to byteArrayOf(2),
         ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG to byteArrayOf(2),
         ControlCommandIdentifier.ADAPTIVE_VOLUME_CONFIG to byteArrayOf(2),
         ControlCommandIdentifier.PPE_TOGGLE_CONFIG to byteArrayOf(2))
     private fun controls(state: AppleState = AppleState(), settings: AppleSettings = AppleSettings(),
         game: NativeGameModeController.State? = null, metadata: AppleMetadata = this.metadata,
-        pending: Set<QuickSetting> = emptySet(), profile: Boolean = false) =
-        nativeQuickSettings(metadata, state, settings, game, true, profile, pending).associateBy { it.setting }
+        pending: Set<QuickSetting> = emptySet(), profile: Boolean = false, protectedAccess: Boolean = true) =
+        nativeQuickSettings(metadata, state, settings, game, true, profile, pending,
+            protectedSettingsSupported = protectedAccess).associateBy { it.setting }
 
     @Test fun unknownAccessoryValuesStayUnknownAndCachedPreferencesDoNotBecomeReceivedProof() {
         val empty = controls()
@@ -115,7 +118,8 @@ class QuickSettingsStateTest {
     }
 
     @Test fun activeGameModeRestorationObligationDoesNotLookLikeAnUnfinishedToggle() {
-        val state = NativeGameModeController.State(desiredOn = true, available = true, active = true, remoteRestorePending = true)
+        val state = NativeGameModeController.State(desiredOn = true, available = true, active = true,
+            remoteRestorePending = true, hostSupported = true)
         val control = controls(settings = AppleSettings(nativeGameModeEnabled = true), game = state)[QuickSetting.GAME_MODE]!!
         assertEquals(true, control.checked)
         assertTrue(control.enabled)
@@ -135,7 +139,8 @@ class QuickSettingsStateTest {
             hearingAidData = ByteArray(104).also { byteArrayOf(2, 2, 0x60, 0).copyInto(it) },
             transparencyData = ByteArray(104))
         fun choices(busy: Boolean) = nativeQuickSettings(metadata, state, AppleSettings(),
-            NativeGameModeController.State(available = true), true, true, ordinaryBusy = busy).associateBy { it.setting }
+            NativeGameModeController.State(available = true, hostSupported = true), true, true, ordinaryBusy = busy,
+            protectedSettingsSupported = true).associateBy { it.setting }
         val ready = choices(false)
         assertTrue(ready.values.all { it.enabled })
         val busy = choices(true)
@@ -163,4 +168,125 @@ class QuickSettingsStateTest {
         assertFalse(controls(fitted.copy(transparencyData = ByteArray(104).also { it[3] = 0x3f; it[2] = 0x80.toByte() }),
             profile = true)[QuickSetting.HEARING_AID]!!.enabled)
     }
+
+    @Test fun protectedControlsNeedExplicitHostSupportEvenWhenTheirRecordsArePresent() {
+        val state = fittedState()
+        val unavailable = nativeQuickSettings(metadata, state, AppleSettings(), null, true, true)
+            .associateBy { it.setting }
+        for (setting in listOf(QuickSetting.LOUD_SOUND_REDUCTION, QuickSetting.HEARING_AID, QuickSetting.MEDIA_ASSIST)) {
+            assertFalse(setting.name, unavailable.getValue(setting).supported)
+            assertFalse(setting.name, unavailable.getValue(setting).enabled)
+            assertTrue(setting.name, controls(state, profile = true).getValue(setting).supported)
+            assertTrue(setting.name, controls(state, profile = true).getValue(setting).enabled)
+        }
+        assertTrue(unavailable.getValue(QuickSetting.EAR_DETECTION).supported)
+        assertTrue(unavailable.getValue(QuickSetting.EN352_PROTECTION).supported)
+    }
+
+    @Test fun unsupportedModelsCannotGainProtectedControlsFromHostAccessOrStaleRecords() {
+        for (model in listOf(AirPodsModel.AIRPODS_PRO_1, AirPodsModel.AIRPODS_4_ANC, AirPodsModel.UNKNOWN)) {
+            val values = controls(fittedState(on = true), profile = true, metadata = metadata.copy(model = model))
+            for (setting in listOf(QuickSetting.LOUD_SOUND_REDUCTION, QuickSetting.HEARING_AID, QuickSetting.MEDIA_ASSIST))
+                assertFalse("$model $setting", values.getValue(setting).supported)
+        }
+    }
+
+    @Test fun supportedControlsRemainPresentWhileRecordsReloadOrAnotherWriteIsPending() {
+        val protectedSettings = setOf(QuickSetting.LOUD_SOUND_REDUCTION, QuickSetting.HEARING_AID, QuickSetting.MEDIA_ASSIST)
+        for (read in SettingsReadStatus.entries) {
+            val state = AppleState(hearingAidReadStatus = read, transparencyReadStatus = read,
+                loudSoundReductionReadStatus = read)
+            val values = nativeQuickSettings(metadata, state, AppleSettings(), null, false, false,
+                pending = setOf(QuickSetting.HEARING_AID), protectedSettingsSupported = true)
+                .associateBy { it.setting }
+            for (setting in protectedSettings) {
+                assertTrue("$read $setting", values.getValue(setting).supported)
+                assertFalse("$read $setting", values.getValue(setting).enabled)
+            }
+        }
+        val disconnected = nativeQuickSettings(metadata, fittedState(), AppleSettings(), null, true, true,
+            connected = false, protectedSettingsSupported = true).associateBy { it.setting }
+        for (setting in protectedSettings) {
+            assertTrue(disconnected.getValue(setting).supported)
+            assertFalse(disconnected.getValue(setting).enabled)
+        }
+    }
+
+    @Test fun losingHostSupportKeepsExistingOnAndUncertainModesAvailableForTurningOff() {
+        val on = controls(fittedState(on = true), profile = true, protectedAccess = false)
+        for (setting in listOf(QuickSetting.LOUD_SOUND_REDUCTION, QuickSetting.HEARING_AID, QuickSetting.MEDIA_ASSIST)) {
+            assertTrue(setting.name, on.getValue(setting).supported)
+            assertEquals(true, on.getValue(setting).checked)
+            assertTrue(setting.name, on.getValue(setting).enabled)
+        }
+        for (mode in HearingMode.entries) {
+            val state = fittedState().let { it.copy(hearingModes = it.hearingModes.withRequestState(null, mode)) }
+            val setting = if (mode == HearingMode.HEARING_AID) QuickSetting.HEARING_AID else QuickSetting.MEDIA_ASSIST
+            val value = controls(state, protectedAccess = false).getValue(setting)
+            assertTrue(value.supported)
+            assertTrue(value.recoveryOff)
+            assertTrue(value.enabled)
+        }
+    }
+
+    @Test fun retainedPresentationCannotBringBackAControlWhoseSupportWasRemoved() {
+        val setting = QuickSetting.HEARING_AID
+        val previous = ListeningModeSnapshot(metadata, AppleState(), AppleSettings(),
+            listOf(QuickSettingState(setting, true, true, true)))
+        val current = previous.copy(quickSettings = listOf(QuickSettingState(setting, null, false, false)))
+        assertEquals(current, retainQuickPresentation(previous, current, ownedRefresh = true))
+    }
+
+    @Test fun gameModeSupportDoesNotDisappearWhileItsNativeRouteIsTemporarilyUnready() {
+        val host = NativeGameModeController.State(hostSupported = true)
+        val waiting = controls(game = host).getValue(QuickSetting.GAME_MODE)
+        assertTrue(waiting.supported)
+        assertEquals(false, waiting.checked)
+        assertFalse(waiting.enabled)
+        assertTrue(controls(game = host.copy(available = true)).getValue(QuickSetting.GAME_MODE).enabled)
+        val off = controls(settings = AppleSettings(nativeGameModeEnabled = true), game = NativeGameModeController.State())
+            .getValue(QuickSetting.GAME_MODE)
+        assertTrue(off.supported)
+        assertTrue(off.enabled)
+        for (other in listOf(metadata.copy(model = AirPodsModel.AIRPODS_PRO_2_USBC), metadata.copy(version1 = "7A294"),
+                metadata.copy(version1 = ""))) {
+            val unsupported = controls(metadata = other, settings = AppleSettings(nativeGameModeEnabled = true),
+                game = host.copy(available = true)).getValue(QuickSetting.GAME_MODE)
+            assertFalse(unsupported.supported)
+            assertFalse(unsupported.enabled)
+        }
+        assertFalse(controls(game = null).getValue(QuickSetting.GAME_MODE).supported)
+        assertFalse(controls(game = NativeGameModeController.State()).getValue(QuickSetting.GAME_MODE).supported)
+    }
+
+    @Test fun dongleProtectedSupportComesFromTheDongleAndSurvivesTemporaryUnreadyStatus() {
+        val fitting = fittedState()
+        val status = DongleProtocol.Status(1, listOf(1, 2, 3, 4, 5, 6), 3, 2,
+            listOf(80, 80, 80), 3, 8 or 32)
+        val dongle = DongleState(connected = true, status = status, metadata = metadata,
+            hearingModes = fitting.hearingModes, hearingAidData = fitting.hearingAidData,
+            transparencyData = fitting.transparencyData)
+        for (ready in listOf(true, false)) {
+            val values = dongleQuickSettings(dongle.copy(status = status.copy(flags = if (ready) 3 else 1)))
+                .associateBy { it.setting }
+            for (setting in listOf(QuickSetting.HEARING_AID, QuickSetting.MEDIA_ASSIST)) {
+                assertTrue(values.getValue(setting).supported)
+                assertEquals(ready, values.getValue(setting).enabled)
+            }
+        }
+        val unsupported = dongleQuickSettings(dongle.copy(status = status.copy(capabilities = 0))).associateBy { it.setting }
+        assertFalse(unsupported.getValue(QuickSetting.HEARING_AID).supported)
+        assertFalse(unsupported.getValue(QuickSetting.MEDIA_ASSIST).supported)
+        assertFalse(unsupported.getValue(QuickSetting.LOUD_SOUND_REDUCTION).supported)
+    }
+
+    private fun fittedState(on: Boolean = false): AppleState = AppleState(
+        loudSoundReductionEnabled = on, loudSoundReductionReadStatus = SettingsReadStatus.AVAILABLE,
+        hearingModes = HearingModes.empty()
+            .withReport(byteArrayOf(4, 0, 4, 0, 9, 0, 0x2c, 1, if (on) 1 else 2, 0, 0))
+            .withReport(byteArrayOf(4, 0, 4, 0, 9, 0, 0x33, if (on) 1 else 2, 0, 0, 0))
+            .withReport(ByteArray(140).also { byteArrayOf(4, 0, 4, 0, 0x53, 0, 0x84.toByte(), 0, 2, 1,
+                if (on) 1 else 2, if (on) 1 else 2).copyInto(it) }),
+        hearingAidData = ByteArray(104).also { byteArrayOf(2, 2, 0x60, 0).copyInto(it) },
+        transparencyData = ByteArray(104))
 }

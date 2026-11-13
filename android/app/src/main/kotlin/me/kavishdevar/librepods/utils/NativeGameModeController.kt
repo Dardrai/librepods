@@ -41,7 +41,8 @@ class NativeGameModeController(
         REPORT_UNCONFIRMED, CLOCK_UNCONFIRMED, RESTORE_UNCONFIRMED, OWNER_LOST }
     data class State(val desiredOn: Boolean = false, val available: Boolean = false,
         val active: Boolean = false, val restoring: Boolean = false,
-        val remoteRestorePending: Boolean = false, val issue: Issue = Issue.NONE)
+        val remoteRestorePending: Boolean = false, val issue: Issue = Issue.NONE,
+        val hostSupported: Boolean = false)
 
     private val mutableState = MutableStateFlow(State())
     val state = mutableState.asStateFlow()

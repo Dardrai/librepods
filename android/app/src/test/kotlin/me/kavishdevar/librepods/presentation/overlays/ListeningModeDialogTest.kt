@@ -39,6 +39,9 @@ import me.kavishdevar.librepods.core.devices.AppleState
 import me.kavishdevar.librepods.core.devices.ConnectionState
 import me.kavishdevar.librepods.core.devices.Device
 import me.kavishdevar.librepods.services.LibrePodsService
+import me.kavishdevar.librepods.utils.BluetoothIdentitySettings
+import me.kavishdevar.librepods.utils.BluetoothIdentityState
+import me.kavishdevar.librepods.utils.NativeGameModeController
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
@@ -88,6 +91,7 @@ class ListeningModeDialogTest {
     private lateinit var dongle: DongleListeningFixture
 
     @Before fun setUp() {
+        setIdentity(BluetoothIdentityState())
         // Lifecycle tests pump a paused looper; a live infinite spinner cannot settle there.
         Settings.Global.putFloat(context.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 0f)
         app = LibrePodsApplication()
@@ -118,6 +122,7 @@ class ListeningModeDialogTest {
         idle()
         sockets.forEach { (device, socket) -> device.aacp.disconnect(); socket.close() }
         (LibrePodsService::class.java.getDeclaredField("serviceScope").apply { isAccessible = true }.get(service) as CoroutineScope).cancel()
+        setIdentity(BluetoothIdentityState())
     }
 
     @Test @Config(qualifiers = "w700dp-h1000dp")
@@ -324,6 +329,37 @@ class ListeningModeDialogTest {
         val unbinds = mockingDetails(application).invocations.filter { it.method.name == "unbindService" }
         assertEquals(1, unbinds.size)
         assertSame(token, unbinds.single().arguments[0])
+    }
+
+    @Test fun reconnectingTheSameDeviceObservesItsReplacementGameControllerAndRetiresTheOldFlow() {
+        val target = device()
+        target.loadInitialState(target.state.value, target.settings.value, target.metadata.value.copy(version1 = "9A348"))
+        val oldState = MutableStateFlow(NativeGameModeController.State(available = true, hostSupported = true))
+        val oldController = mock(NativeGameModeController::class.java)
+        doReturn(oldState).`when`(oldController).state
+        app.nativeGameModeControllers[target.macAddress] = oldController
+        devices.value = mapOf(target.macAddress to target)
+        val popup = open(target)
+        fun shownGame() = requireNotNull(ReflectionHelpers.callInstanceMethod<ListeningModeSnapshot?>(popup, "getSnapshot"))
+            .quickSettings.first { it.setting == QuickSetting.GAME_MODE }
+        await { oldState.subscriptionCount.value > 0 && shownGame().enabled }
+
+        val replacementState = MutableStateFlow(NativeGameModeController.State(hostSupported = true))
+        val replacement = mock(NativeGameModeController::class.java)
+        doReturn(replacementState).`when`(replacement).state
+        app.nativeGameModeControllers[target.macAddress] = replacement
+        val number = ReflectionHelpers.getField<MutableStateFlow<Int>>(target, "_connectionNumber")
+        number.value += 1
+        await { replacementState.subscriptionCount.value > 0 && oldState.subscriptionCount.value == 0 && !shownGame().enabled }
+        assertTrue(shownGame().supported)
+
+        oldState.value = NativeGameModeController.State(restoring = true)
+        idle()
+        assertTrue("The retired controller cannot hide the replacement's supported control", shownGame().supported)
+        assertFalse(shownGame().pending)
+        replacementState.value = replacementState.value.copy(available = true)
+        await { shownGame().enabled }
+        assertEquals("Rebinding controller observation must not send an AirPods command", 0, output(target).available())
     }
 
     @Test fun closingReleasesBindingAndCollectorsAndRetiresActions() {
@@ -600,6 +636,7 @@ class ListeningModeDialogTest {
     }
 
     @Test fun anInFlightLoudSoundRequestRejectsDuplicatesAndDismissalRetiresItsUiWork() = runBlocking<Unit> {
+        setIdentity(BluetoothIdentityState(enabled = true, known = true))
         val original = device()
         val target = spy(original)
         val socket = sockets.single().second
@@ -637,6 +674,7 @@ class ListeningModeDialogTest {
     }
 
     @Test fun cancellingAnOldTypedRequestCannotClearTheNewerRequestsPendingChoice() = runBlocking<Unit> {
+        setIdentity(BluetoothIdentityState(enabled = true, known = true))
         val target = spy(device())
         val socket = sockets.single().second
         seedQuickReports(target)
@@ -690,6 +728,31 @@ class ListeningModeDialogTest {
         assertFalse(current.enabled)
         assertTrue(current.quickSettings.none { it.enabled })
         assertFalse(popup.writeQuickSetting(QuickSetting.EAR_DETECTION, false))
+    }
+
+    @Test fun readableProtectedRecordsCannotEnableAWriteWithoutAnActiveIdentityHook() {
+        val original = device()
+        val target = spy(original)
+        seedQuickReports(target)
+        val state = ReflectionHelpers.getField<MutableStateFlow<AppleState>>(target, "_state")
+        state.value = state.value.copy(loudSoundReductionReadStatus = SettingsReadStatus.AVAILABLE)
+        doReturn(true).`when`(target).loudSoundReductionWritable
+        devices.value = mapOf(target.macAddress to target)
+        val popup = open(target)
+        for (identity in listOf(BluetoothIdentityState(enabled = true), BluetoothIdentityState(known = true))) {
+            setIdentity(identity)
+            idle()
+            assertFalse(popup.writeQuickSetting(QuickSetting.LOUD_SOUND_REDUCTION, true))
+        }
+        assertFalse(mockingDetails(target).invocations.any { it.method.name == "writeATTCharacteristic" })
+        assertEquals(0, output(original).available())
+    }
+
+    private fun setIdentity(value: BluetoothIdentityState) {
+        val controller = BluetoothIdentitySettings::class.java.getDeclaredField("controller\$delegate")
+            .apply { isAccessible = true }.get(null) as Lazy<*>
+        val state = ReflectionHelpers.getField<MutableStateFlow<BluetoothIdentityState>>(controller.value, "mutableState")
+        state.value = value
     }
 
     private fun seedQuickReports(device: AppleDevice) {

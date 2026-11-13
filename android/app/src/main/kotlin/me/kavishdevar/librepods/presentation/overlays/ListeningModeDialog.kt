@@ -56,6 +56,7 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.function.Consumer
@@ -63,6 +64,9 @@ import me.kavishdevar.librepods.LibrePodsApplication
 import me.kavishdevar.librepods.R
 import me.kavishdevar.librepods.core.bluetooth.att.ATTHandle
 import me.kavishdevar.librepods.utils.NativeGameModeController
+import me.kavishdevar.librepods.utils.BluetoothIdentitySettings
+import me.kavishdevar.librepods.utils.XposedState
+import me.kavishdevar.librepods.utils.rememberHiddenQuickSettings
 import me.kavishdevar.librepods.core.bluetooth.MacAddress
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommandIdentifier
 import me.kavishdevar.librepods.core.devices.AirPodsSpecs
@@ -142,10 +146,12 @@ class ListeningModeDialog(context: Context, private val address: MacAddress) :
             setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
             setContent {
                 LibrePodsTheme(designSystem = DesignSystem.Apple, darkTheme = isSystemInDarkTheme()) {
+                    val hiddenNames by rememberHiddenQuickSettings()
                     ListeningModePanel(snapshot, commandFailed,
                         onMode = { writeControl(ControlCommandIdentifier.LISTENING_MODE, it) },
                         onStrength = { writeControl(ControlCommandIdentifier.AUTO_ANC_STRENGTH, it) },
-                        onToggle = ::writeQuickSetting, onDismiss = { dismiss() }, loading = !frozen)
+                        onToggle = ::writeQuickSetting, onDismiss = { dismiss() }, loading = !frozen,
+                        hiddenSettings = QuickSetting.entries.filter { it.name in hiddenNames }.toSet())
                 }
             }
         })
@@ -162,6 +168,7 @@ class ListeningModeDialog(context: Context, private val address: MacAddress) :
     override fun onStart() {
         super.onStart()
         if (context.getSystemService(KeyguardManager::class.java).isKeyguardLocked) { close(); return }
+        BluetoothIdentitySettings.refresh()
         runCatching {
             windowManager.addCrossWindowBlurEnabledListener(context.mainExecutor, blurListener)
             listeningForBlur = true
@@ -205,13 +212,24 @@ class ListeningModeDialog(context: Context, private val address: MacAddress) :
                             current = { isShowing && bound && currentNativeDevice() === device &&
                                 !context.getSystemService(KeyguardManager::class.java).isKeyguardLocked },
                             failed = { reportQuickWrite(false) }).also { nativeGameChoices = it }
+                        @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
                         val game: Flow<NativeGameModeController.State?> =
-                            (context.applicationContext as LibrePodsApplication).nativeGameModeControllers[address]?.state ?: flowOf(null)
-                        val extra = combine(game, connected.dongleControls.state, quickPending, controls.changes, gameChoices.state) { gameState, dongle, pending, _, _ ->
+                            combine(device.connectionState, device.connectionNumber) { _, _ -> Unit }.flatMapLatest {
+                                (context.applicationContext as LibrePodsApplication).nativeGameModeControllers[address]?.state ?: flowOf(null)
+                            }
+                        val protectedAccess = combine(BluetoothIdentitySettings.state, XposedState.state) { identity, hook ->
+                            supportsProtectedQuickSettings(identity, BluetoothIdentitySettings.usesNativeProperties,
+                                hook.available, hook.bluetoothScopeEnabled)
+                        }
+                        val gameAndIdentity = combine(game, protectedAccess) { gameState, supported ->
+                            gameState to supported
+                        }
+                        val extra = combine(gameAndIdentity, connected.dongleControls.state, quickPending, controls.changes, gameChoices.state) { gameState, dongle, pending, _, _ ->
                             Triple(gameState, dongle.usesDongleListeningControls, pending)
                         }
                         combine(device.connectionState, device.state, device.settings, device.metadata,
-                            extra) { connection, state, settings, metadata, (gameState, dongle, pending) ->
+                            extra) { connection, state, settings, metadata, (gameAndAccess, dongle, pending) ->
+                            val (gameState, protectedAccess) = gameAndAccess
                             if (dongle || connection != ConnectionState.CONNECTED || !supportsListening(metadata)) null
                             else {
                                 controls.observe()
@@ -221,7 +239,7 @@ class ListeningModeDialog(context: Context, private val address: MacAddress) :
                                 ListeningModeSnapshot(metadata, displayed, displayedSettings, nativeQuickSettings(metadata, displayed, displayedSettings,
                                 gameState, device.loudSoundReductionWritable, device.transparencyTransportAvailable, pending,
                                 connected = connection == ConnectionState.CONNECTED, canWrite = controls::canWrite,
-                                ordinaryBusy = controls.busy))
+                                ordinaryBusy = controls.busy, protectedSettingsSupported = protectedAccess))
                             }
                         }.collect { current ->
                             if (current == null) freezePresentation()
@@ -286,7 +304,9 @@ class ListeningModeDialog(context: Context, private val address: MacAddress) :
         val control = nativeQuickSettings(device.metadata.value, controls.displayState(device.state.value),
             nativeGameChoices?.displaySettings(device.settings.value) ?: device.settings.value,
             game?.state?.value, device.loudSoundReductionWritable, device.transparencyTransportAvailable, quickPending.value,
-            canWrite = controls::canWrite, ordinaryBusy = controls.busy)
+            canWrite = controls::canWrite, ordinaryBusy = controls.busy,
+            protectedSettingsSupported = supportsProtectedQuickSettings(BluetoothIdentitySettings.state.value,
+                BluetoothIdentitySettings.usesNativeProperties, XposedState.isAvailable, XposedState.bluetoothScopeEnabled))
             .first { it.setting == setting }
         if (!control.enabled || (control.checked == null && !control.recoveryOff) ||
             (control.recoveryOff && enabled) || control.checked == enabled) return false

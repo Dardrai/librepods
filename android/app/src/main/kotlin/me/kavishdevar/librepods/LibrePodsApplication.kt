@@ -6,6 +6,7 @@ import java.util.concurrent.ConcurrentHashMap
 import me.kavishdevar.librepods.audio.ExperimentalAudioController
 import me.kavishdevar.librepods.audio.CommunicationAudioController
 import me.kavishdevar.librepods.utils.NativeGameModeController
+import me.kavishdevar.librepods.utils.BluetoothIdentitySettings
 import me.kavishdevar.librepods.core.bluetooth.MacAddress
 import androidx.health.connect.client.HealthConnectClient
 import androidx.lifecycle.DefaultLifecycleObserver
@@ -108,16 +109,20 @@ class LibrePodsApplication: Application(), XposedServiceHelper.OnServiceListener
     override fun onResume(owner: LifecycleOwner) {
         XposedState.isAvailable = XposedServiceHolder.service != null
         XposedState.bluetoothScopeEnabled = XposedServiceHolder.service?.scope?.contains("com.google.android.bluetooth") == true || XposedServiceHolder.service?.scope?.contains("com.android.bluetooth") == true
+        BluetoothIdentitySettings.refresh()
     }
 
     override fun onServiceBind(service: XposedService) {
         XposedServiceHolder.service = service
         XposedState.isAvailable = true
         XposedState.bluetoothScopeEnabled = XposedServiceHolder.service?.scope?.contains("com.google.android.bluetooth") == true || XposedServiceHolder.service?.scope?.contains("com.android.bluetooth") == true
+        BluetoothIdentitySettings.refresh()
     }
 
     override fun onServiceDied(p0: XposedService) {
         XposedServiceHolder.service = null
         XposedState.isAvailable = false
+        XposedState.bluetoothScopeEnabled = false
+        BluetoothIdentitySettings.refresh()
     }
 }

@@ -64,6 +64,7 @@ internal class NativeGameModeEngine(private val ports: NativeGameModePorts,
     private var lastControl: GameControlOwner? = null
     private var capabilityKnown = false
     private var available = false
+    private var hostSupported = false
     private var beforeReport = 0L
     private var sentAt = 0L
     private var sentAtNs = 0L
@@ -126,7 +127,7 @@ internal class NativeGameModeEngine(private val ports: NativeGameModePorts,
     }
     private fun state(desired: Boolean) = NativeGameModeController.State(desiredOn = desired,
         available = available, active = stage == Stage.ACTIVE, restoring = stage in RESTORING,
-        remoteRestorePending = remoteRestorePending, issue = issue)
+        remoteRestorePending = remoteRestorePending, issue = issue, hostSupported = hostSupported)
 
     suspend fun tick(desired: Boolean, eligible: Boolean, blocked: Boolean,
         control: GameControlOwner?): NativeGameModeController.State {
@@ -146,7 +147,11 @@ internal class NativeGameModeEngine(private val ports: NativeGameModePorts,
         if ((eligible && (!capabilityKnown || desired)) || holdSerial > 0 || remoteRestorePending) {
             val renew = if (stage in RENEWING) holdSerial else 0
             lastReceipt = ports.snapshot(renew)
-            lastReceipt?.let { capabilityKnown = true; available = eligible && it.supported }
+            lastReceipt?.let {
+                capabilityKnown = true; available = eligible && it.supported
+                // Retain host capability through a missing route/query; an explicit native reply can revoke it.
+                hostSupported = it.supported
+            }
         }
         val value = lastReceipt
         nativeObligation = value != null && holdSerial > 0 && sameNativeOwner(value) &&

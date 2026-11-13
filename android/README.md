@@ -139,8 +139,10 @@ APK as a system app or grant global permissions.
   Conversation Awareness, nearby pairing, the Dynamic Island, Quick Settings and
   widgets use the rewrite's per-device state. Features vary by model and firmware.
 - Tap the AirPods tile in Android's Quick Settings for the Control Center-style
-  listening rail and seven live toggles. Native Bluetooth and the USB dongle use
-  their existing setting paths; unsupported controls remain disabled. The panel
+  listening rail and your chosen live toggles. Choose them in LibrePods →
+  **Settings → Quick Settings**. Unsupported controls are hidden automatically;
+  supported controls remain visible during temporary loading or busy states.
+  Native Bluetooth and the USB dongle use their existing setting paths. The panel
   adapts to larger text and scrolls on smaller screens.
 - Recorder retains experimental high-quality microphone recording. The failed
   app microphone injection and cellular-call relay experiments have been removed.

@@ -36,7 +36,7 @@ reports remain separate. Each visible screen, tile and picker owns its polling
 token; closing the shade must not stop an open picker's updates. A remembered
 but unplugged dongle does not hide a connected native device from the tile.
 
-The expanded Quick Settings panel keeps that rail above eight labeled toggle
+The expanded Quick Settings panel keeps that rail above the selected supported toggle
 controls, with two columns at regular phone widths and one column for narrow
 windows or enlarged text. Its height stays inside the available window and its
 content scrolls. Conversation Awareness, Automatic Ear Detection, Game Mode,
@@ -73,6 +73,17 @@ icon color transitions give immediate feedback without moving the control
 geometry. Compose
 animations retain the system duration scale, including disabled animations.
 Touch targets are at least 48 dp and expose switch state and disabled semantics. Opening or rendering the panel never changes a setting.
+
+Configure visible controls only in LibrePods Settings → Quick Settings. The panel
+has no editing controls. Its local visibility preferences do not change device
+settings; all supported controls appear by default, and hidden controls leave no
+empty grid cells. The listening rail remains when every toggle is hidden.
+Filter support by the AirPods model and the current connection's actual feature
+support, independently of temporary read or write readiness. Native protected
+settings require an observed active Apple identity hook; dongles use their own
+capabilities. Game Mode visibility requires observed native backend support,
+retained through temporary route loss. Preserve guarded Off recovery for an
+existing clinical mode, without offering unsupported modes an On action.
 
 Received records and requested values remain separate. A successful silent PME
 send can supply the next same-session edit baseline, but is not device

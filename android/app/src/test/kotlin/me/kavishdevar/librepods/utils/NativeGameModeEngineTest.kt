@@ -19,6 +19,7 @@ class NativeGameModeEngineTest {
         var targetResult: ((Int) -> GameTargetWrite)? = null
         var request = 20L
         var queries = 0
+        var snapshotAvailable = true
         var originalBaseline = 320
         var refusePrepare = false
         var failPrepareBeforeController = false
@@ -26,10 +27,10 @@ class NativeGameModeEngineTest {
         override fun nowMs() = now
         override fun owns(owner: GameControlOwner) = owner.session == control.session &&
             owner.peer == control.peer && owner.socket === control.socket
-        override suspend fun snapshot(heartbeatSerial: Long): GameNativeReceipt {
+        override suspend fun snapshot(heartbeatSerial: Long): GameNativeReceipt? {
             queries++
             if (heartbeatSerial > 0) effects += "heartbeat:$heartbeatSerial"
-            return value
+            return value.takeIf { snapshotAvailable }
         }
         override suspend fun prepare(owner: GameControlOwner, route: GameNativeReceipt): GameNativeReceipt {
             effects += "prepare"
@@ -93,6 +94,41 @@ class NativeGameModeEngineTest {
             completeClock()
             return step()
         }
+    }
+
+    @Test fun hostSupportNeedsNativeProofAndSurvivesRouteLossButNotExplicitRevocation() = runBlocking {
+        val f = Fixture()
+        f.snapshotAvailable = false
+        val unknown = f.step(desired = false)
+        assertFalse(unknown.hostSupported)
+        assertFalse(unknown.available)
+        f.snapshotAvailable = true
+        val supported = f.step(desired = false)
+        assertTrue(supported.hostSupported)
+        assertTrue(supported.available)
+
+        f.snapshotAvailable = false
+        val disconnected = f.engine.tick(false, true, false, null)
+        assertTrue(disconnected.hostSupported)
+        assertFalse(disconnected.available)
+        assertTrue(f.engine.tick(false, true, false, null).hostSupported)
+        assertTrue(f.engine.tick(false, false, false, null).hostSupported)
+
+        f.value = f.value.copy(supported = false)
+        f.snapshotAvailable = true
+        f.control = f.control.copy(session = f.control.session + 1, socket = Any())
+        val revoked = f.step(desired = false)
+        assertFalse(revoked.hostSupported)
+        assertFalse(revoked.available)
+        assertTrue(f.effects.isEmpty())
+    }
+
+    @Test fun explicitUnsupportedHostNeverGainsPresentationSupportFromAnEligibleDevice() = runBlocking {
+        val f = Fixture()
+        f.value = f.value.copy(supported = false)
+        assertFalse(f.step(desired = false).hostSupported)
+        assertFalse(f.step().hostSupported)
+        assertTrue(f.effects.isEmpty())
     }
 
     @Test fun activeRequiresVerifiedHoldFreshReportAndTheNewOwnedClockCompletion() = runBlocking {

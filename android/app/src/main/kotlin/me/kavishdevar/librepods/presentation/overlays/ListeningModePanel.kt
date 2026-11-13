@@ -29,10 +29,10 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.key
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalConfiguration
@@ -59,8 +59,11 @@ import me.kavishdevar.librepods.presentation.icons.LocalIcons
 @Composable
 internal fun ListeningModePanel(snapshot: ListeningModeSnapshot?, commandFailed: Boolean = false,
     onMode: (Int) -> Unit, onStrength: (Int) -> Unit, onToggle: (QuickSetting, Boolean) -> Unit,
-    modifier: Modifier = Modifier, onDismiss: () -> Unit = {}, loading: Boolean = true) {
+    modifier: Modifier = Modifier, onDismiss: () -> Unit = {}, loading: Boolean = true,
+    hiddenSettings: Set<QuickSetting> = emptySet()) {
     val backdrop = rememberLayerBackdrop()
+    val states = snapshot?.quickSettings.orEmpty().associateBy { it.setting }
+    val visible = quickSettingsOrder.filter { states[it]?.supported == true && it !in hiddenSettings }
     val maximumHeight = (LocalConfiguration.current.screenHeightDp.dp - 48.dp).coerceAtLeast(160.dp)
     val closeLabel = stringResource(R.string.quick_settings_close)
     Box(modifier.fillMaxWidth().heightIn(max = maximumHeight).clip(RoundedCornerShape(32.dp))
@@ -87,45 +90,29 @@ internal fun ListeningModePanel(snapshot: ListeningModeSnapshot?, commandFailed:
                 ListeningModeContent(snapshot, commandFailed, onMode, onStrength, loading = loading,
                     modeIconSize = 28.dp, surfaceBackdrop = backdrop)
             }
-            BoxWithConstraints(Modifier.fillMaxWidth()) {
+            if (visible.isNotEmpty()) BoxWithConstraints(Modifier.fillMaxWidth()) {
                 val twoColumns = maxWidth >= 340.dp && LocalDensity.current.fontScale <= 1.2f
-                val states = snapshot?.quickSettings.orEmpty().associateBy { it.setting }
                 Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                    val pairs = listOf(
-                        listOf(QuickSetting.CONVERSATION_AWARENESS, QuickSetting.PERSONALIZED_VOLUME),
-                        listOf(QuickSetting.EAR_DETECTION, QuickSetting.GAME_MODE),
-                        listOf(QuickSetting.LOUD_SOUND_REDUCTION, QuickSetting.EN352_PROTECTION),
-                        listOf(QuickSetting.HEARING_AID, QuickSetting.MEDIA_ASSIST))
-                    for (pair in pairs) {
+                    for (pair in visible.chunked(if (twoColumns) 2 else 1)) {
                         if (twoColumns) Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                            for (setting in pair) QuickSettingsToggle(
-                                states[setting] ?: QuickSettingState(setting, null, supported = true, enabled = false, reading = true),
-                                backdrop, onToggle, Modifier.weight(1f), compact = pair.size > 1)
-                        } else for (setting in pair) QuickSettingsToggle(
-                            states[setting] ?: QuickSettingState(setting, null, supported = true, enabled = false, reading = true),
-                            backdrop, onToggle, Modifier.fillMaxWidth())
+                            for (setting in pair) key(setting) { QuickSettingsToggle(
+                                checkNotNull(states[setting]),
+                                backdrop, onToggle, Modifier.weight(1f), compact = pair.size > 1) }
+                        } else for (setting in pair) key(setting) { QuickSettingsToggle(
+                            checkNotNull(states[setting]),
+                            backdrop, onToggle, Modifier.fillMaxWidth()) }
                     }
                 }
             }
         }
     }
 }
-
 @Composable
 private fun QuickSettingsToggle(state: QuickSettingState, backdrop: Backdrop,
     onToggle: (QuickSetting, Boolean) -> Unit, modifier: Modifier = Modifier, compact: Boolean = false) {
     val title = stringResource(if (state.recoveryOff) {
         if (state.setting == QuickSetting.HEARING_AID) R.string.hearing_aid_recovery_off else R.string.media_assist_recovery_off
-    } else when (state.setting) {
-        QuickSetting.CONVERSATION_AWARENESS -> R.string.conversation_awareness
-        QuickSetting.EAR_DETECTION -> R.string.ear_detection
-        QuickSetting.GAME_MODE -> R.string.native_game_mode
-        QuickSetting.PERSONALIZED_VOLUME -> R.string.personalized_volume
-        QuickSetting.LOUD_SOUND_REDUCTION -> R.string.loud_sound_reduction
-        QuickSetting.EN352_PROTECTION -> R.string.ppe
-        QuickSetting.HEARING_AID -> R.string.hearing_aid
-        QuickSetting.MEDIA_ASSIST -> R.string.media_assist
-    })
+    } else quickSettingLabel(state.setting))
     val description = if (state.recoveryOff) "" else stringResource(when (state.checked) {
         true -> R.string.on
         false -> R.string.off
@@ -175,16 +162,4 @@ private fun QuickSettingsToggle(state: QuickSettingState, backdrop: Backdrop,
         }
         if (!compact && state.checked == true) Icon(LocalIcons.current.Check, null, Modifier.size(18.dp), tint = foreground)
     }
-}
-
-@Composable
-private fun quickSettingIcon(setting: QuickSetting): ImageVector = when (setting) {
-    QuickSetting.CONVERSATION_AWARENESS -> QuickSettingIcons.Conversation
-    QuickSetting.EAR_DETECTION -> QuickSettingIcons.Ear
-    QuickSetting.GAME_MODE -> QuickSettingIcons.Game
-    QuickSetting.PERSONALIZED_VOLUME -> LocalIcons.current.SpeakerMax
-    QuickSetting.LOUD_SOUND_REDUCTION -> QuickSettingIcons.Protection
-    QuickSetting.EN352_PROTECTION -> QuickSettingIcons.Protection
-    QuickSetting.HEARING_AID -> QuickSettingIcons.Hearing
-    QuickSetting.MEDIA_ASSIST -> LocalIcons.current.Headphones
 }

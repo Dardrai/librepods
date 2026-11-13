@@ -23,6 +23,8 @@ import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
+import com.kyant.backdrop.backdrops.layerBackdrop
+import com.kyant.backdrop.backdrops.rememberLayerBackdrop
 import java.io.File
 import me.kavishdevar.librepods.R
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommandIdentifier
@@ -102,16 +104,107 @@ class ListeningModePanelTest {
         compose.runOnIdle { current.value = current.value.copy(quickSettings = current.value.quickSettings.map {
             if (it.setting == QuickSetting.LOUD_SOUND_REDUCTION) it.copy(supported = false) else it
         }) }
-        control(QuickSetting.LOUD_SOUND_REDUCTION).performScrollTo().assertIsDisplayed().assertIsNotEnabled()
-            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "On"))
+        control(QuickSetting.LOUD_SOUND_REDUCTION).assertDoesNotExist()
         compose.runOnIdle { current.value = current.value.copy(quickSettings = current.value.quickSettings.map {
             if (it.setting == QuickSetting.LOUD_SOUND_REDUCTION) it.copy(supported = true, checked = null,
                 pending = false, reading = false) else it
         }) }
-        control(QuickSetting.LOUD_SOUND_REDUCTION).assertIsNotEnabled()
+        control(QuickSetting.LOUD_SOUND_REDUCTION).performScrollTo().assertIsNotEnabled()
             .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription,
                 RuntimeEnvironment.getApplication().getString(R.string.not_available)))
         assertTrue("Reports and pending state cannot trigger an action", changes.isEmpty())
+    }
+
+    @Test fun hiddenAndUnsupportedTilesReflowWithoutGapsAndDisabledSupportedTilesStayVisible() {
+        val hidden = mutableStateOf(setOf(QuickSetting.PERSONALIZED_VOLUME, QuickSetting.HEARING_AID))
+        val current = snapshot(QuickSetting.entries.map { setting ->
+            QuickSettingState(setting, false, supported = setting != QuickSetting.CONVERSATION_AWARENESS,
+                enabled = setting != QuickSetting.GAME_MODE)
+        })
+        var writes = 0
+        compose.setContent { fixture(Profile(), current, hiddenSettings = hidden.value) { _, _ -> writes++ } }
+        for (setting in listOf(QuickSetting.CONVERSATION_AWARENESS, QuickSetting.PERSONALIZED_VOLUME, QuickSetting.HEARING_AID))
+            control(setting).assertDoesNotExist()
+        control(QuickSetting.GAME_MODE).assertIsDisplayed().assertIsNotEnabled()
+        val ear = control(QuickSetting.EAR_DETECTION).fetchSemanticsNode().boundsInRoot
+        val game = control(QuickSetting.GAME_MODE).fetchSemanticsNode().boundsInRoot
+        assertEquals("Remaining controls fill the first row", ear.top, game.top, 0.5f)
+        assertEquals("The same 14dp gutter survives filtering", 14f, game.left - ear.right, 0.5f)
+        val loud = control(QuickSetting.LOUD_SOUND_REDUCTION).fetchSemanticsNode().boundsInRoot
+        val protection = control(QuickSetting.EN352_PROTECTION).fetchSemanticsNode().boundsInRoot
+        assertEquals(loud.top, protection.top, 0.5f)
+        assertEquals(14f, loud.top - ear.bottom, 0.5f)
+        val media = control(QuickSetting.MEDIA_ASSIST).performScrollTo().fetchSemanticsNode().boundsInRoot
+        assertEquals("An odd final control uses the available row", ear.left, media.left, 0.5f)
+        assertEquals(game.right, media.right, 0.5f)
+        compose.runOnIdle { hidden.value = emptySet() }
+        control(QuickSetting.PERSONALIZED_VOLUME).performScrollTo().assertIsDisplayed()
+        control(QuickSetting.HEARING_AID).performScrollTo().assertIsDisplayed()
+        control(QuickSetting.CONVERSATION_AWARENESS).assertDoesNotExist()
+        assertEquals("Visibility updates never change the AirPods settings", 0, writes)
+    }
+
+    @Test fun supportChangesDuringAPressCannotTurnTheGestureIntoADifferentSetting() {
+        val current = mutableStateOf(snapshot().let { value -> value.copy(quickSettings = value.quickSettings.map {
+            if (it.setting == QuickSetting.GAME_MODE) it.copy(supported = false) else it
+        }) })
+        val changes = mutableListOf<Pair<QuickSetting, Boolean>>()
+        compose.setContent { fixture(Profile(), current.value) { setting, checked -> changes += setting to checked } }
+        control(QuickSetting.LOUD_SOUND_REDUCTION).performTouchInput { down(center) }
+        compose.runOnIdle { current.value = current.value.copy(quickSettings = current.value.quickSettings.map {
+            if (it.setting == QuickSetting.GAME_MODE) it.copy(supported = true) else it
+        }) }
+        control(QuickSetting.LOUD_SOUND_REDUCTION).performTouchInput { up() }
+        assertTrue("A reflowed tile must cancel the old gesture instead of changing another setting", changes.isEmpty())
+        control(QuickSetting.LOUD_SOUND_REDUCTION).performClick()
+        assertEquals(listOf(QuickSetting.LOUD_SOUND_REDUCTION to true), changes)
+    }
+
+    @Test fun allHiddenOrMissingControlsLeaveOnlyTheUnchangedListeningRailAndCloseButton() {
+        val hidden = mutableStateOf(QuickSetting.entries.toSet())
+        val current = mutableStateOf(snapshot())
+        var writes = 0
+        compose.setContent { fixture(Profile(), current.value, hiddenSettings = hidden.value) { _, _ -> writes++ } }
+        val rail = compose.onNodeWithTag("listening-mode-control", useUnmergedTree = true)
+            .assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+        for (setting in QuickSetting.entries) control(setting).assertDoesNotExist()
+        compose.onNodeWithContentDescription(RuntimeEnvironment.getApplication().getString(R.string.quick_settings_close))
+            .assertIsDisplayed()
+        compose.onNodeWithText("Edit").assertDoesNotExist()
+        compose.onNodeWithText("Done").assertDoesNotExist()
+        compose.runOnIdle {
+            current.value = current.value.copy(quickSettings = emptyList())
+            hidden.value = emptySet()
+        }
+        for (setting in QuickSetting.entries) control(setting).assertDoesNotExist()
+        assertEquals(rail, compose.onNodeWithTag("listening-mode-control", useUnmergedTree = true)
+            .assertIsDisplayed().fetchSemanticsNode().boundsInRoot)
+        assertEquals(0, writes)
+    }
+
+    @Test fun settingsVisibilityChoicesUseCheckboxesWithoutDeviceOnOffState() {
+        val hidden = mutableStateOf(setOf(QuickSetting.GAME_MODE))
+        val choices = mutableListOf<Pair<QuickSetting, Boolean>>()
+        compose.setContent {
+            LibrePodsTheme(designSystem = DesignSystem.Apple) {
+                val backdrop = rememberLayerBackdrop()
+                Box(Modifier.requiredSize(384.dp, 720.dp).layerBackdrop(backdrop)) {
+                    QuickSettingsChoices(quickSettingsOrder, hidden.value, { setting, visible ->
+                        choices += setting to visible
+                        hidden.value = if (visible) hidden.value - setting else hidden.value + setting
+                    }, backdrop)
+                }
+            }
+        }
+        val game = compose.onNodeWithTag("quick-setting-choice-GAME_MODE")
+        game.assertIsOff().assert(SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.Checkbox))
+            .performClick().assertIsOn()
+        game.performClick().assertIsOff()
+        assertEquals(listOf(QuickSetting.GAME_MODE to true, QuickSetting.GAME_MODE to false), choices)
+        assertTrue(game.fetchSemanticsNode().boundsInRoot.height >= 48f)
+        compose.onAllNodesWithText("On").assertCountEquals(0)
+        compose.onAllNodesWithText("Off").assertCountEquals(0)
+        for (setting in QuickSetting.entries) control(setting).assertDoesNotExist()
     }
 
     @Test fun narrowLargeTextAndShortLandscapeKeepEverySwitchReachable() {
@@ -319,7 +412,7 @@ class ListeningModePanelTest {
         AppleSettings(), quickSettings = settings)
 
     @Composable
-    private fun fixture(profile: Profile, snapshot: ListeningModeSnapshot,
+    private fun fixture(profile: Profile, snapshot: ListeningModeSnapshot, hiddenSettings: Set<QuickSetting> = emptySet(),
         onMode: (Int) -> Unit = {},
         onToggle: (QuickSetting, Boolean) -> Unit) {
         CompositionLocalProvider(LocalDensity provides Density(1f, profile.fontScale)) {
@@ -328,7 +421,7 @@ class ListeningModePanelTest {
                     .background(if (profile.dark) Color(0xFF161C29) else Color(0xFFE7E5F4))
                     .testTag("quick-panel-fixture")) {
                     ListeningModePanel(snapshot, onMode = onMode, onStrength = {}, onToggle = onToggle,
-                        modifier = Modifier.fillMaxWidth())
+                        modifier = Modifier.fillMaxWidth(), hiddenSettings = hiddenSettings)
                 }
             }
         }

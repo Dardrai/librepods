@@ -31,6 +31,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.input.TextFieldState
@@ -49,6 +50,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -62,6 +65,7 @@ import me.kavishdevar.librepods.R
 import me.kavishdevar.librepods.presentation.components.common.AppInfoCard
 import me.kavishdevar.librepods.presentation.components.common.DeviceInfoCard
 import me.kavishdevar.librepods.presentation.components.primitives.StyledBottomSheet
+import me.kavishdevar.librepods.presentation.components.primitives.StyledButton
 import me.kavishdevar.librepods.presentation.components.primitives.StyledConfirmationDialog
 import me.kavishdevar.librepods.presentation.components.primitives.StyledIconButton
 import me.kavishdevar.librepods.presentation.components.primitives.StyledInputField
@@ -72,10 +76,15 @@ import me.kavishdevar.librepods.presentation.components.primitives.StyledScaffol
 import me.kavishdevar.librepods.presentation.components.primitives.styledListItem
 import me.kavishdevar.librepods.presentation.components.primitives.styledToggle
 import me.kavishdevar.librepods.presentation.icons.LocalIcons
+import me.kavishdevar.librepods.presentation.overlays.QuickSetting
+import me.kavishdevar.librepods.presentation.overlays.QuickSettingsChoices
+import me.kavishdevar.librepods.presentation.overlays.quickSettingsOrder
 import me.kavishdevar.librepods.presentation.viewmodel.AppSettingsViewModel
 import me.kavishdevar.librepods.utils.XposedState
 import me.kavishdevar.librepods.utils.BluetoothIdentitySettings
 import me.kavishdevar.librepods.utils.IdentityUpdateResult
+import me.kavishdevar.librepods.utils.QuickSettingsPreferences
+import me.kavishdevar.librepods.utils.rememberHiddenQuickSettings
 
 @Composable
 fun AppSettingsScreen(
@@ -97,6 +106,8 @@ fun AppSettingsScreen(
     val backdrop = rememberLayerBackdrop()
 
     val contactBottomSheet = remember { mutableStateOf(false) }
+    val quickSettingsSheet = remember { mutableStateOf(false) }
+    val hiddenQuickSettings by rememberHiddenQuickSettings()
     val subjectState = remember { TextFieldState() }
     val descriptionState = remember { TextFieldState() }
     val subjectFocusRequester = remember { FocusRequester() }
@@ -165,6 +176,10 @@ fun AppSettingsScreen(
                 contentText = stringResource(R.string.accessibility),
                 onClick = navigateToAppAccessibilityScreen
             )
+
+            Spacer(modifier = Modifier.height(16.dp))
+            StyledListItem(contentText = stringResource(R.string.quick_settings_title),
+                onClick = { quickSettingsSheet.value = true })
 
             if (state.state.hasConnectedToAACP) {
                 Spacer(modifier = Modifier.height(16.dp))
@@ -373,6 +388,30 @@ fun AppSettingsScreen(
         onDismiss = viewModel::resetDialogDismissed,
         backdrop = backdrop
     )
+
+    StyledBottomSheet(
+        visible = quickSettingsSheet.value,
+        onDismiss = { quickSettingsSheet.value = false },
+        backdrop = backdrop
+    ) { innerBackdrop, _ ->
+        val maximumHeight = (LocalConfiguration.current.screenHeightDp.dp - 96.dp).coerceAtLeast(160.dp)
+        Column(Modifier.fillMaxWidth().heightIn(max = maximumHeight).testTag("quick-settings-configuration").verticalScroll(rememberScrollState())
+            .padding(bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(20.dp)) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(stringResource(R.string.quick_settings_title), Modifier.weight(1f),
+                    style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurface)
+                StyledButton(onClick = { quickSettingsSheet.value = false }, backdrop = innerBackdrop) {
+                    Text(stringResource(R.string.quick_settings_done), color = MaterialTheme.colorScheme.onSurface)
+                }
+            }
+            Text(stringResource(R.string.quick_settings_visibility_description),
+                style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            QuickSettingsChoices(quickSettingsOrder, QuickSetting.entries.filter { it.name in hiddenQuickSettings }.toSet(),
+                onVisibilityChanged = { setting, visible -> QuickSettingsPreferences.setHidden(context, setting.name, !visible) },
+                backdrop = innerBackdrop)
+        }
+    }
 
     StyledBottomSheet(
         visible = contactBottomSheet.value,
