@@ -235,28 +235,6 @@ fun AppSettingsScreen(
                     onClick = { contactBottomSheet.value = true },
                 )
 
-                val errorOpeningDiscordInviteText = stringResource(R.string.error_opening_discord_invite)
-
-                styledListItem(
-                    contentText =  stringResource(R.string.discord),
-                    supportingText = stringResource(R.string.contact_discord_supporting_text),
-                    orientation = StyledListItemOrientation.Vertical,
-                    onClick = {
-                        try {
-                            val intent =
-                                Intent(Intent.ACTION_VIEW, "https://discord.gg/Ts4wupXcmc".toUri())
-                            context.startActivity(intent)
-                        } catch (e: Exception) {
-                            e.printStackTrace()
-                            Toast.makeText(
-                                context,
-                                errorOpeningDiscordInviteText,
-                                Toast.LENGTH_SHORT
-                            ).show()
-                        }
-                    },
-                )
-
                 val errorOpeningGitHubLink = stringResource(R.string.error_opening_github_link)
 
                 styledListItem(

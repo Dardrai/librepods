@@ -70,7 +70,7 @@ fun PrivacyPolicyPage(
             )
 
             Text(
-                text = "LibrePods provides several ways to contact me, including email, Discord, and GitHub Issues.",
+                text = "LibrePods provides several ways to contact me, including email and GitHub Issues.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurface
             )
@@ -89,23 +89,6 @@ fun PrivacyPolicyPage(
 
             Text(
                 text = "You can edit or remove any of this information before sending the email.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurface
-            )
-
-            Text(
-                text = "Discord",
-                style = MaterialTheme.typography.titleMedium
-            )
-
-            Text(
-                text = "The app provides a link to the LibrePods Discord server. If you choose to join the Discord server, you will be subject to Discord's privacy policy.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurface
-            )
-
-            Text(
-                text = "I do not receive any information about you from Discord other than what is publicly visible in the Discord server, such as your username, joining date, common servers, and any messages or content you post in the server, unless you choose to share it with me in the Discord server.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurface
             )

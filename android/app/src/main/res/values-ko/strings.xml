@@ -216,7 +216,6 @@
     <string name="listening_mode_noise_cancellation_description">외부 소리를 차단합니다</string>
     <string name="contact">문의</string>
     <string name="email">이메일</string>
-    <string name="discord">Discord</string>
     <string name="github_issues">GitHub 이슈</string>
     <string name="version_code">버전 코드</string>
     <string name="build_type">빌드 유형</string>
