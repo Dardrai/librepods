@@ -17,9 +17,9 @@ AACP (Apple Accessory Communication Protocol) uses various opcodes to define dif
 | 0x0014       | Accessory   | Send connected device MAC                                          |
 | 0x0017       | Both        | Multiple things - undocumented                                     |
 | 0x0019       | Host        | [Stem press](/docs/stem-press.md)                                  |
+| 0x001A       | Accessory   | [Rename device](../android/PROTOCOL.md#device-name)                 |
 | 0x001B       | Accessory   | [Timestamp](/docs/timestamp.md)                                    |
 | 0x001D       | Host        | [Device Information](/docs/device-info.md)                         |
-| 0x001E       | Accessory   | [Rename device](/docs/rename.md)                                   |
 | 0x0022       | Accessory   | Unknown                                                            |
 | 0x0029       | Accessory   | [Host capabilities](/docs/host-capabilities.md#another-opcode) (?) |
 | 0x002B       | Host        | Paired devices (?)                                                 |

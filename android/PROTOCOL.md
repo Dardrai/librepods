@@ -183,6 +183,39 @@ Headphone Accommodations processing. Subsequent loading-race and accessibility
 fixes have offline regression coverage and still need live acceptance. Capture
 results below retain their recorded builds and conditions.
 
+### Device name
+
+Name editing uses the visible **Done** action or keyboard Done. Typing and
+leaving the screen do not send intermediate names. Submission sends once and
+waits for a fresh matching Information report; failure keeps the draft and
+offers an explicit retry. Blank names,
+control characters, invalid Unicode and names exceeding 64 UTF-8 bytes are
+rejected using the same validation as the packet encoder.
+
+The existing rename message is service `04`, opcode `001A`, with payload
+`01 <UTF-8 byte length, little-endian u16> <UTF-8 name>`. The old `001E` entry
+in the opcode index was incorrect. A queued rename is bound to the socket,
+control session and metadata captured before its IO dispatch; it never follows
+a replacement connection. A successful transport send is not a device readback.
+After a 300 ms report window, at most one existing service-coordinated control
+refresh obtains a fresh Information report, with a 2.5-second report deadline.
+Call/microphone/ATT admission and the refresh watchdog remain in force; native
+audio profiles are not reconnected. No rename write is repeated automatically,
+metadata is not fabricated, and no rename echo/getter is invented.
+
+On 2026-11-13 the Pixel sent five correctly framed rename commands without a
+subsequent name report. Fresh peer Information after a user case return matched
+the final requested name exactly (15 UTF-8 bytes instead of the old 21-byte
+name). This established successful device persistence and stale UI metadata as
+the cause of the unchanged display in that comparison.
+
+Pixel127's automatic readback was then verified twice: fresh Information matched
+each requested name exactly, 490 ms and 455 ms after the respective write. There
+were exactly two rename writes, and the preferred name was restored. Only AACP
+and its associated ATT bearer refreshed; the native ACL, media and HFP
+connections stayed up. The user confirmed both settings-row updates appeared
+immediately without a case cycle.
+
 ## Press and Hold
 
 ### Native call controls

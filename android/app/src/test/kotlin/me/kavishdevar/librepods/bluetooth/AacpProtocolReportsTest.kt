@@ -112,6 +112,34 @@ class AacpProtocolReportsTest {
         assertArrayEquals(byteArrayOf(4, 0, 4, 0, 1, 0, 8), shadow.output.bytes.toByteArray())
     }
 
+    @Test fun renameUsesCapturedSocketAndUtf8LengthWithoutInventingANameReport() = withTransport { device, socket ->
+        val name = "Studio 🎧"
+        val bytes = name.toByteArray(Charsets.UTF_8)
+        val metadata = device.metadata.value
+        assertTrue(device.renameDevice(name, socket))
+        assertArrayEquals(byteArrayOf(4, 0, 4, 0, 0x1a, 0, 1, bytes.size.toByte(), 0) + bytes,
+            Shadow.extract<ProtocolReportSocketShadow>(socket).output.bytes.toByteArray())
+        assertSame(metadata, device.metadata.value)
+    }
+
+    @Test fun renameRejectsInvalidFailedAndRetiredRequestsWithoutReplayingOntoAnotherSocket() = withTransport { device, socket ->
+        val output = Shadow.extract<ProtocolReportSocketShadow>(socket).output
+        for (name in listOf("", "   ", "a\u0000b", "é".repeat(33), "bad\uD800")) {
+            assertFalse(device.renameDevice(name, socket))
+        }
+        assertEquals(0, output.bytes.size())
+        output.failWrites = true
+        assertFalse(device.renameDevice("Studio", socket))
+        output.failWrites = false
+        val replacement = socket()
+        try {
+            bind(device.aacp, replacement)
+            assertFalse(device.renameDevice("Studio", socket))
+            assertEquals(0, output.bytes.size())
+            assertEquals(0, Shadow.extract<ProtocolReportSocketShadow>(replacement).output.bytes.size())
+        } finally { replacement.close() }
+    }
+
     @Test fun commandWriteBoundaryDistinguishesAdmissionAndFinalFenceFromUncertainIo() {
         for (rejectAt in 1..3) withTransport { device, socket ->
             var checks = 0

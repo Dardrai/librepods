@@ -176,6 +176,7 @@ fun RenderScreenContent(
             RenameScreen(
                 viewModel = appleViewModel,
                 navigateBack = navigateBack,
+                refreshDeviceSettings = refreshDeviceSettings,
             )
         }
 

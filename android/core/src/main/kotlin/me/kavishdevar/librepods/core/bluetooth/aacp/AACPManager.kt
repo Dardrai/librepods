@@ -997,9 +997,9 @@ class AACPManager(private val device: AppleDevice,
     fun setHeartRateEnabled(enabled: Boolean): Boolean = rtBuddyManager?.setHeartRateEnabled(enabled) ?: false
     fun setSensorsSuspended(suspended: Boolean) { rtBuddyManager?.setSuspended(suspended) }
 
-    fun sendRename(name: String): Boolean {
+    fun sendRename(name: String, expected: BluetoothSocket? = captureAudioSocket()): Boolean {
         val packet = try { RenamePacket.create(name) } catch (_: IllegalArgumentException) { return false }
-        return sendPacket(packet)
+        return sendPacket(packet, expected)
     }
 
     fun sendMediaInformationNewDevice(selfMacAddress: String, targetMacAddress: String): Boolean {

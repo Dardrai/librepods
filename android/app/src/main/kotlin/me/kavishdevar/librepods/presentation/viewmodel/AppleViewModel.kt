@@ -28,6 +28,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -35,6 +36,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.transformLatest
 import kotlinx.coroutines.launch
@@ -439,9 +441,32 @@ class AppleViewModel(
         }
     }
 
-    fun renameDevice(newName: String) = viewModelScope.launch {
-        val sent = withContext(Dispatchers.IO) { device.renameDevice(newName) }
-        if (!sent) Toast.makeText(device.context, R.string.rename_not_sent, Toast.LENGTH_SHORT).show()
+    suspend fun renameDevice(newName: String,
+        refresh: suspend (AppleDevice) -> DeviceSettingsRefreshResult): Boolean {
+        val owner = nativeValueOwner() ?: return false
+        val sent = withContext(Dispatchers.IO) {
+            ownsNativeValue(owner) && device.renameDevice(newName, owner.socket)
+        }
+        if (!sent) return false
+        fun current(socket: BluetoothSocket, session: Long) = device.aacp.captureAudioSocket() === socket &&
+            device.state.value.controlSession == session && device.connectionState.value == ConnectionState.CONNECTED
+        suspend fun reported(socket: BluetoothSocket, session: Long, timeout: Long): Boolean {
+            withTimeoutOrNull(timeout) {
+                device.metadata.first { it !== owner.metadata && it.name == newName || !current(socket, session) }
+            }
+            return current(socket, session) && device.metadata.value.let { it !== owner.metadata && it.name == newName }
+        }
+        // Allow the queued name SDU and a possible information report before retiring its control socket.
+        if (reported(owner.socket, owner.session, 300)) return true
+        if (!ownsNativeValue(owner)) return false
+        val result = try { refresh(device) }
+        catch (cancelled: CancellationException) { throw cancelled }
+        catch (_: Exception) { return false }
+        if (result != DeviceSettingsRefreshResult.RECONNECTED) return false
+        val replacement = device.aacp.captureAudioSocket() ?: return false
+        val session = device.state.value.controlSession
+        if (replacement === owner.socket || session <= owner.session) return false
+        return reported(replacement, session, 2_500)
     }
 
 

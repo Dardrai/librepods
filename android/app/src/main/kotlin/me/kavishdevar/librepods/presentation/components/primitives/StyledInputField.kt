@@ -16,6 +16,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.input.KeyboardActionHandler
 import androidx.compose.foundation.text.input.TextFieldLineLimits
 import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.foundation.text.input.clearText
@@ -35,6 +37,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import me.kavishdevar.librepods.presentation.icons.LocalIcons
@@ -53,13 +56,21 @@ fun StyledInputField(
         containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
         selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
         selectedContentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-    )
+    ),
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    onDone: (() -> Unit)? = null,
 ) {
     val m3eEnabled = LocalDesignSystem.current == DesignSystem.Material && !forceApple
+    val keyboardOptions = KeyboardOptions(imeAction = if (onDone != null) ImeAction.Done else ImeAction.Default)
+    val keyboardAction = onDone?.let { action -> KeyboardActionHandler { action() } }
 
     if(m3eEnabled) {
         TextField(
             state = inputState,
+            enabled = enabled,
+            keyboardOptions = keyboardOptions,
+            onKeyboardAction = keyboardAction,
             placeholder = {
                 Text(
                     text = placeholder,
@@ -68,9 +79,10 @@ fun StyledInputField(
                 )
             },
             lineLimits = if (singleLine) TextFieldLineLimits.SingleLine else TextFieldLineLimits.Default,
-            modifier = Modifier
+            modifier = modifier
                 .fillMaxWidth()
                 .padding(horizontal = 16.dp)
+                .focusRequester(focusRequester)
         )
     }
     else {
@@ -103,14 +115,17 @@ fun StyledInputField(
                         RoundedCornerShape(28.dp)
                     )
                     .padding(horizontal = 16.dp, vertical = 8.dp)
-                    .pointerInput(Unit) {
+                    .pointerInput(focusRequester, enabled) {
                         detectTapGestures {
-                            focusRequester.requestFocus()
+                            if (enabled) focusRequester.requestFocus()
                         }
                     }
             ) {
                 BasicTextField(
                     state = inputState,
+                    enabled = enabled,
+                    keyboardOptions = keyboardOptions,
+                    onKeyboardAction = keyboardAction,
                     lineLimits = if (singleLine) TextFieldLineLimits.SingleLine else TextFieldLineLimits.Default,
                     textStyle = MaterialTheme.typography.bodyMedium.copy(color = MaterialTheme.colorScheme.onBackground),
                     cursorBrush = SolidColor(MaterialTheme.colorScheme.onBackground),
@@ -141,6 +156,7 @@ fun StyledInputField(
                             }
                             if (singleLine && !inputState.text.isEmpty()) {
                                 IconButton(
+                                    enabled = enabled,
                                     onClick = {
                                         inputState.clearText()
                                     }
@@ -155,7 +171,7 @@ fun StyledInputField(
                             }
                         }
                     },
-                    modifier = Modifier
+                    modifier = modifier
                         .fillMaxWidth()
                         .padding(start = 8.dp)
                         .focusRequester(focusRequester)

@@ -1017,7 +1017,8 @@ class AppleDevice(
             ControlCommand(ControlCommandIdentifier.LISTENING_MODE, byteArrayOf(mode.toByte()))), event.sourceSocket)
     }
 
-    fun renameDevice(newName: String): Boolean = aacp.sendRename(newName)
+    fun renameDevice(newName: String, expected: BluetoothSocket? = aacp.captureAudioSocket()): Boolean =
+        aacp.sendRename(newName, expected)
 
     fun startHeadTracking() {
         aacp.setHeadTrackingEnabled(true)

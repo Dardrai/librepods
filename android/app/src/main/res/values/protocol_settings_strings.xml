@@ -14,7 +14,11 @@
     <string name="hearing_mode_enable">Enable</string>
     <string name="hearing_settings_read_only">These hearing settings can be viewed but not changed on this device.</string>
     <string name="att_setting_not_confirmed">Change not confirmed.</string>
-    <string name="rename_not_sent">Could not change the name. Check the name and connection, then try again.</string>
+    <string name="rename_not_sent">Could not verify the name. Check the connection, then try again.</string>
+    <string name="rename_done">Done</string>
+    <string name="rename_name_required">Enter a name.</string>
+    <string name="rename_name_too_long">Choose a shorter name.</string>
+    <string name="rename_name_invalid">This name contains unsupported characters.</string>
     <string name="refresh_device_settings">Refresh device settings</string>
     <string name="refresh_device_settings_busy">Refreshing settings…</string>
     <string name="refresh_device_settings_description">Requests the latest settings from your AirPods.</string>
