@@ -28,6 +28,7 @@ class KotlinModule: XposedModule() {
     private var hfpBridgeContext: Context? = null
     private var hfpBridge: AutoCloseable? = null
     @Volatile private var hfpControl: HfpCallSuppression? = null
+    private val hfpBatteryHooksInstalled = AtomicBoolean(false)
     private var usbVolumeInstalled = false
     private var usbVolumePolicy: UsbAbsoluteVolumeSystemPolicy? = null
     private var usbVolumeDiscovery: AutoCloseable? = null
@@ -139,6 +140,7 @@ class KotlinModule: XposedModule() {
             log(Log.INFO, TAG, "Bluetooth app detected, hooking l2c_fcr_chk_chan_modes")
             try {
                 if (param.isFirstPackage) {
+                    installHfpBatteryNegotiation(param.defaultClassLoader)
                     installHfpCallBridge(param.defaultClassLoader)
                     val abi = android.os.Build.SUPPORTED_ABIS.first()
                     val soName = "libfluoride_hooks.so"
@@ -191,6 +193,40 @@ class KotlinModule: XposedModule() {
 
         if (param.packageName == "com.android.settings") {
             hookSettingsController(param, "com.android.settings.bluetooth.AdvancedBluetoothDetailsHeaderController")
+        }
+    }
+
+    private fun installHfpBatteryNegotiation(loader: ClassLoader) {
+        if (android.os.Build.VERSION.SDK_INT != 37 || !hfpBatteryHooksInstalled.compareAndSet(false, true)) return
+        val handles = mutableListOf<XposedInterface.HookHandle>()
+        val ready = AtomicBoolean(false)
+        try {
+            val state = Class.forName("com.android.bluetooth.hfp.HeadsetStateMachine", false, loader)
+            val native = Class.forName("com.android.bluetooth.hfp.HeadsetNativeInterface", false, loader)
+            val methods = HfpBatteryHookMethods.discover(state, native)
+            val negotiation = HfpBatteryNegotiation()
+            val observed = AtomicBoolean(false)
+            handles += hook(methods.exchange).intercept { chain ->
+                if (!ready.get()) chain.proceed() else negotiation.withXapl(chain.args[0] as? Array<*>,
+                    (chain.args[1] as? android.bluetooth.BluetoothDevice)?.address) { chain.proceed() }
+            }
+            handles += hook(methods.response).intercept { chain ->
+                val original = chain.args[1] as? String
+                val response = if (ready.get()) negotiation.response(
+                    (chain.args[0] as? android.bluetooth.BluetoothDevice)?.address, original) else original
+                if (response == original) chain.proceed() else {
+                    if (observed.compareAndSet(false, true))
+                        log(Log.INFO, TAG, "Pro 3 legacy HFP battery feature withdrawn for XAPL comparison")
+                    chain.proceed(chain.args.toTypedArray().also { it[1] = response })
+                }
+            }
+            ready.set(true)
+            log(Log.INFO, TAG, "Scoped Pro 3 HFP battery negotiation ready")
+        } catch (_: Throwable) {
+            ready.set(false)
+            handles.asReversed().forEach { runCatching { it.unhook() } }
+            hfpBatteryHooksInstalled.set(false)
+            log(Log.WARN, TAG, "HFP battery negotiation unavailable; keeping native calling")
         }
     }
 

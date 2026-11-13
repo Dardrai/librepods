@@ -925,6 +925,34 @@ one session did not follow that pattern. Neither observation alone proves the
 cause of a bud reset. Across the two controlled full-link reconnections, AVRCP
 reported the same media volume, `76/127`, despite a reported loudness difference.
 
+### Pro 3 HFP battery negotiation, 2026-11-13
+
+The reproduced HFP startup exchanges completed standard setup and XAPL, then
+the Pro 3 sent the complete RFCOMM data field `AT+IPHONEACCEV=1,1,96` without
+CR/LF. No continuation arrived. Android's native AT parser waits for a line
+terminator; three recorded sessions then ended with peer-initiated RFCOMM
+disconnect roughly ten seconds later. Other sessions lasted longer, so this
+is a repeatable protocol defect rather than proof of every full-link failure.
+
+Pixel125 withdraws this legacy battery feature: only a synchronous
+XAPL exchange identifying vendor `004C`, product `2027`, with battery support
+can change that same peer's exact `+XAPL=iPhone,2` response to
+`+XAPL=iPhone,0`. AACP battery reports are unaffected. The SDK37 Java hooks use
+exact named method signatures, roll back an incomplete installation, and leave
+other devices, threads, responses and changed host signatures unchanged.
+There is no AT-stream rewriting or native structure offset. The experiment
+requires a restarted Bluetooth process and fresh HFP negotiation.
+
+On the Pixel 10 Pro XL, the wire response changed to `+XAPL=iPhone,0` and the
+unterminated battery command stopped. HFP remained connected for over five
+minutes, including a user-placed Phone call with verified audio in both
+directions and mute. Hang-up closed the eSCO audio link while retaining HFP and
+the media ACL. The user also confirmed clean music and a subsequent case return
+with consistent loudness. Twenty-one focused HFP tests passed; the earlier ATT
+fix passed all 234 core tests. Both app builds passed lint, retained the signing
+key and had byte-identical native libraries. Other communication apps and
+long-term stability remain separate checks.
+
 ## Host clock and sensors
 
 The mirrored [sensor contract v1](SENSOR-PROTOCOL.md) is shared with NTPods:
