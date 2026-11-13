@@ -639,6 +639,8 @@ class NearbyPairingController(
 
     fun cancelPending() { handler.post { dismiss() } }
 
+    fun refreshTheme() { handler.post { if (!closed) popup?.refreshTheme() } }
+
     fun setBlocked(value: Boolean) {
         blocked = value
         handler.post {

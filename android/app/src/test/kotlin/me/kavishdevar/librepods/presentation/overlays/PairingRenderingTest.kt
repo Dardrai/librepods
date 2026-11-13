@@ -8,6 +8,7 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Rect
+import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.LayerDrawable
 import android.os.Looper
 import android.provider.Settings
@@ -118,11 +119,18 @@ class PairingRenderingTest {
                     }
                     val name = view.findViewById<TextView>(R.id.name)
                     val body = view.findViewById<TextView>(R.id.pairing_message)
-                    assertTrue(Color.luminance(name.currentTextColor) < 0.2)
+                    val card = requireNotNull((view.background as GradientDrawable).color).defaultColor
+                    assertEquals("The card follows the system theme", profile.night, Color.luminance(card) < 0.2)
+                    assertEquals("The headline follows the card", !profile.night, Color.luminance(name.currentTextColor) < 0.2)
+                    fun contrast(a: Int, b: Int) = (maxOf(Color.luminance(a), Color.luminance(b)) + 0.05) /
+                        (minOf(Color.luminance(a), Color.luminance(b)) + 0.05)
+                    assertTrue("Headline contrast", contrast(name.currentTextColor, card) >= 7)
                     val headline = requireNotNull(name.layout)
                     for (line in 0 until headline.lineCount)
                         assertEquals("The actual pairing headline must remain complete", 0, headline.getEllipsisCount(line))
-                    assertTrue("Body text contrast", 1.05 / (Color.luminance(body.currentTextColor) + 0.05) >= 4.5)
+                    assertTrue("Body text contrast", contrast(body.currentTextColor, card) >= 4.5)
+                    if (!busy) assertTrue("Action contrast", contrast(button.currentTextColor,
+                        requireNotNull(button.backgroundTintList).defaultColor) >= 4.5)
                     assertEquals(message, body.text.toString())
                     assertEquals(if (stage == PopupWindow.Stage.COMPLETE) View.INVISIBLE else View.VISIBLE, body.visibility)
                     assertEquals(if (stage == PopupWindow.Stage.COMPLETE) View.VISIBLE else View.INVISIBLE,

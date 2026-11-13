@@ -60,6 +60,8 @@ jobs:
       - name: Validate version-specific release notes
         if: steps.metadata.outputs.publish_release == 'true'
         run: python3 .github/scripts/publish_android_release.py --check-notes '${{ steps.metadata.outputs.app_version }}'
+      - name: Test pairing artwork generation
+        run: python3 -I android/tools/pairing-art/test_darken.py -v
       - uses: actions/setup-java@v4
         with:
           distribution: zulu

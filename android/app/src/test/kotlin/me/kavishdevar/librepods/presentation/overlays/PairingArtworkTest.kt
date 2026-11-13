@@ -84,6 +84,38 @@ class PairingArtworkTest {
         assertEquals(View.GONE, video.visibility)
     }
 
+    @Test fun darkCardsUseTheSpinRenderCompositedOnTheCardColour() {
+        val night = android.content.res.Configuration(context.resources.configuration).apply {
+            uiMode = (uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK.inv()) or
+                android.content.res.Configuration.UI_MODE_NIGHT_YES
+        }
+        val darkContext = ContextThemeWrapper(RuntimeEnvironment.getApplication().createConfigurationContext(night),
+            R.style.Theme_LibrePods)
+        val darkSource = DataSource.toDataSource(darkContext,
+            Uri.parse("android.resource://${darkContext.packageName}/${R.raw.pairing_spin_dark}"))
+        ShadowMediaPlayer.addMediaInfo(darkSource, ShadowMediaPlayer.MediaInfo(5_933, 100))
+        val darkContainer = LayoutInflater.from(darkContext).inflate(R.layout.popup_window, null)
+            .findViewById<View>(R.id.popup_artwork_container)
+        val darkVideo = darkContainer.findViewById<TextureView>(R.id.popup_video)
+        val darkPoster = darkContainer.findViewById<ImageView>(R.id.popup_artwork)
+        val darkArtwork = PairingArtwork(darkContainer)
+        try {
+            darkVideo.setSurfaceTexture(SurfaceTexture(0))
+            darkArtwork.start(0x2720)
+            assertEquals(R.drawable.pairing_spin_poster_dark, shadowOf(darkPoster.drawable).createdFromResId)
+            assertEquals(darkSource, shadowOf(requireNotNull(media)).dataSource)
+            val card = darkContext.getColor(R.color.pairing_card)
+            val art = android.graphics.BitmapFactory.decodeResource(darkContext.resources, R.drawable.pairing_spin_poster_dark)
+            try {
+                assertEquals("The dark render's backdrop must match the card", card, art.getPixel(2, 2))
+                assertEquals(card, art.getPixel(art.width - 2, art.height - 2))
+            } finally { art.recycle() }
+        } finally {
+            darkArtwork.stop()
+            darkVideo.surfaceTexture?.release()
+        }
+    }
+
     @Test fun silentLoopKeepsPosterUntilRenderedAndFallsBackOnDecodeError() {
         video.setSurfaceTexture(SurfaceTexture(0))
         artwork.start(0x2720)
@@ -128,6 +160,41 @@ class PairingArtworkTest {
         assertEquals(ShadowMediaPlayer.State.END, playback.state)
         assertEquals(View.VISIBLE, poster.visibility)
         assertEquals(View.GONE, video.visibility)
+    }
+
+    @Test fun themeChangesReplaceOnlyTheOwnedDecoderAndKeepEntranceAndMotionState() {
+        val darkSource = DataSource.toDataSource(context,
+            Uri.parse("android.resource://${context.packageName}/${R.raw.pairing_spin_dark}"))
+        ShadowMediaPlayer.addMediaInfo(darkSource, ShadowMediaPlayer.MediaInfo(5_933, 100))
+        video.setSurfaceTexture(SurfaceTexture(0))
+        artwork.start(0x2720)
+        artwork.setEntranceComplete(true)
+        val original = requireNotNull(media)
+        val latePrepared = shadowOf(original).onPreparedListener
+        artwork.refreshTheme(true)
+        val dark = requireNotNull(media)
+        assertNotSame(original, dark)
+        assertEquals(ShadowMediaPlayer.State.END, shadowOf(original).state)
+        latePrepared.onPrepared(original)
+        shadowOf(original).invokeInfoListener(MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START, 0)
+        assertEquals(ShadowMediaPlayer.State.END, shadowOf(original).state)
+        assertEquals(darkSource, shadowOf(dark).dataSource)
+        assertEquals(R.drawable.pairing_spin_poster_dark, shadowOf(poster.drawable).createdFromResId)
+        artwork.refreshTheme(true)
+        assertSame("An unchanged theme must keep the current decoder", dark, media)
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(100))
+        shadowOf(dark).invokeInfoListener(MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START, 0)
+        artwork.onSurfaceTextureUpdated(requireNotNull(video.surfaceTexture))
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(160))
+        assertEquals("The completed entrance must survive the theme change", View.INVISIBLE, poster.visibility)
+
+        Settings.Global.putFloat(context.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 0f)
+        shadowOf(Looper.getMainLooper()).idle()
+        assertEquals("The existing reduced-motion observer must remain active", View.GONE, video.visibility)
+        assertEquals(ShadowMediaPlayer.State.END, shadowOf(dark).state)
+        artwork.stop()
+        artwork.refreshTheme(false)
+        assertSame("A retired artwork owner cannot create a new decoder", dark, media)
     }
 
     @Test fun dismissingDuringPreparationCannotStartPlaybackFromALatePreparedCallback() {

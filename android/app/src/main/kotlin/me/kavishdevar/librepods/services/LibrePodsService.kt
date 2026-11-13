@@ -29,6 +29,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.content.res.Configuration
 import android.media.AudioManager
 import android.media.AudioDeviceInfo
 import android.media.AudioDeviceCallback
@@ -429,6 +430,11 @@ class LibrePodsService: Service() {
                 retireHeadGestures()
             }
         }
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        nearbyPairing?.refreshTheme()
     }
 
     override fun onCreate() {
@@ -2072,6 +2078,7 @@ class LibrePodsService: Service() {
                     startBleScanner(updateMode = true)
                 }
                 islandWindow.updateSettings(settings)
+                if (oldAppSettings.nightMode != settings.nightMode) nearbyPairing?.refreshTheme()
                 oldAppSettings = settings
                 companion?.linkedDevice()?.let { companion?.preferencesChanged(it) }
             }

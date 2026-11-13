@@ -93,3 +93,10 @@ Profile and transport guards remain active with automatic updates.
 
 Automatic settings reads do not start diagnostics, performance checks, sounds,
 hearing tests or microphone capture. Those actions remain explicit.
+
+Pairing invitations follow the app's Light, Dark or System appearance. An effective
+theme change repaints the existing card and switches its matching artwork without
+replacing the pairing session, current stage, actions, battery readings or expiry
+deadlines. Unchanged appearance does not restart the artwork player. Retired
+decoder callbacks cannot reveal an old frame. Action text keeps at least 4.5:1
+contrast through the pressed ripple in both appearances.

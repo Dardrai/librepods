@@ -25,6 +25,7 @@ import android.animation.ValueAnimator
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.res.ColorStateList
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
@@ -50,7 +51,10 @@ import android.view.WindowManager
 import android.view.animation.PathInterpolator
 import android.widget.Button
 import android.widget.ImageButton
+import android.widget.ProgressBar
 import android.widget.TextView
+import androidx.core.view.descendants
+import me.kavishdevar.librepods.LibrePodsApplication
 import me.kavishdevar.librepods.R
 import me.kavishdevar.librepods.core.bluetooth.ble.NearbyAirPods
 import me.kavishdevar.librepods.core.bluetooth.ble.ProximityReport
@@ -58,6 +62,7 @@ import me.kavishdevar.librepods.core.devices.AirPodsModel
 import me.kavishdevar.librepods.core.devices.Battery
 import me.kavishdevar.librepods.core.devices.BatteryComponent
 import me.kavishdevar.librepods.core.devices.BatteryStatus
+import me.kavishdevar.librepods.presentation.design.NightTheme
 import kotlin.math.min
 
 /** A single invitation; Bluetooth work belongs to NearbyPairingController. */
@@ -65,12 +70,12 @@ import kotlin.math.min
 class PopupWindow(private val context: Context, private val onCloseCallback: () -> Unit = {}) {
     enum class Stage { NEARBY, SETUP, CONNECTING, COMPLETE, RETRY }
 
-    private val mView: View = LayoutInflater.from(ContextThemeWrapper(context, R.style.Theme_LibrePods_Pairing))
-        .inflate(R.layout.popup_window, null)
+    private var themed = pairingContext(context)
+    private val mView: View = LayoutInflater.from(themed).inflate(R.layout.popup_window, null)
     private val windowManager = context.getSystemService(WindowManager::class.java)
     private val handler = Handler(Looper.getMainLooper())
     private val button = mView.findViewById<Button>(R.id.pairing_primary)
-    private val progress = mView.findViewById<View>(R.id.pairing_progress)
+    private val progress = mView.findViewById<ProgressBar>(R.id.pairing_progress)
     private val artwork = PairingArtwork(mView.findViewById(R.id.popup_artwork_container))
     private val batteryRow = mView.findViewById<View>(R.id.pairing_battery_row)
     private var batteries = emptySet<Battery>()
@@ -99,7 +104,7 @@ class PopupWindow(private val context: Context, private val onCloseCallback: () 
     init {
         mView.clipToOutline = true
         mView.findViewById<ImageButton>(R.id.close_button).apply {
-            imageTintList = ColorStateList.valueOf(Color.rgb(99, 99, 102))
+            imageTintList = ColorStateList.valueOf(themed.getColor(R.color.pairing_close_icon))
             setOnClickListener {
                 if (!closing && !notified) {
                     it.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
@@ -189,8 +194,7 @@ class PopupWindow(private val context: Context, private val onCloseCallback: () 
         button.isEnabled = action != null && !busy
         button.importantForAccessibility = if (busy) View.IMPORTANT_FOR_ACCESSIBILITY_NO else View.IMPORTANT_FOR_ACCESSIBILITY_AUTO
         button.visibility = if (busy || action == null) View.GONE else View.VISIBLE
-        button.backgroundTintList = ColorStateList.valueOf(if (stage == Stage.COMPLETE) Color.rgb(242, 242, 247) else Color.WHITE)
-        button.setTextColor(if (stage == Stage.COMPLETE) Color.rgb(28, 28, 30) else Color.rgb(0, 102, 214))
+        applyActionColors()
         progress.visibility = if (busy) View.VISIBLE else View.GONE
         progress.contentDescription = context.getString(if (stage == Stage.CONNECTING)
             R.string.pairing_connecting_title else R.string.pairing_searching)
@@ -206,6 +210,51 @@ class PopupWindow(private val context: Context, private val onCloseCallback: () 
         renderBattery()
         resize()
         if (snapshots.isNotEmpty()) animateContent(snapshots)
+    }
+
+    /** Repaint the current invitation without replacing its session, action, battery data or deadlines. */
+    fun refreshTheme() {
+        if (closing || notified) return
+        val next = pairingContext(context)
+        val nightMask = Configuration.UI_MODE_NIGHT_MASK
+        if ((next.resources.configuration.uiMode and nightMask) == (themed.resources.configuration.uiMode and nightMask)) return
+        themed = next
+        // A fading bitmap still contains the previous palette; the live content already has the current stage.
+        finishContentMotion()
+        reloadBackground(mView, R.drawable.popup_shape)
+        val close = mView.findViewById<ImageButton>(R.id.close_button)
+        reloadBackground(close, R.drawable.popup_button_shape)
+        close.imageTintList = ColorStateList.valueOf(themed.getColor(R.color.pairing_close_icon))
+        reloadBackground(button, R.drawable.pairing_primary_background)
+        applyActionColors()
+        val primary = themed.getColor(R.color.pairing_text_primary)
+        val secondary = themed.getColor(R.color.pairing_text_secondary)
+        mView.findViewById<TextView>(R.id.name).setTextColor(primary)
+        mView.findViewById<TextView>(R.id.pairing_message).setTextColor(secondary)
+        progress.indeterminateTintList = ColorStateList.valueOf(secondary)
+        val batteryValues = setOf(R.id.pairing_buds_battery_text, R.id.pairing_right_battery_text, R.id.pairing_case_battery_text)
+        for (label in (batteryRow as ViewGroup).descendants.filterIsInstance<TextView>()) {
+            label.setTextColor(if (label.id in batteryValues) primary else secondary)
+            // Recolour the existing icons in place, preserving their levels and expiry callbacks.
+            (label.compoundDrawablesRelative[0] as? LayerDrawable)?.let { icon ->
+                icon.getDrawable(0).setTint(themed.getColor(R.color.pairing_battery_track))
+                if (icon.numberOfLayers == 3) icon.getDrawable(2).setTint(themed.getColor(R.color.pairing_battery_charging_icon))
+            }
+        }
+        artwork.refreshTheme(themed.resources.configuration.uiMode and nightMask == Configuration.UI_MODE_NIGHT_YES)
+    }
+
+    private fun reloadBackground(view: View, resource: Int) {
+        val padding = Rect(view.paddingLeft, view.paddingTop, view.paddingRight, view.paddingBottom)
+        view.background = themed.getDrawable(resource)
+        view.setPadding(padding.left, padding.top, padding.right, padding.bottom)
+    }
+
+    private fun applyActionColors() {
+        button.backgroundTintList = ColorStateList.valueOf(themed.getColor(
+            if (stage == Stage.COMPLETE) R.color.pairing_action_complete else R.color.pairing_action))
+        button.setTextColor(themed.getColor(
+            if (stage == Stage.COMPLETE) R.color.pairing_text_primary else R.color.pairing_action_text))
     }
 
     fun updatePairingBattery(batteries: Set<Battery>) {
@@ -278,14 +327,14 @@ class PopupWindow(private val context: Context, private val onCloseCallback: () 
         view.text = if (showLabel) context.getString(R.string.pairing_battery_component_value, label, percentage) else percentage
         view.contentDescription = batteryDescription(battery, label)
         val track = context.getDrawable(R.drawable.island_battery_progress)!!.mutate().apply {
-            setTint(Color.rgb(229, 229, 234)); level = 10_000
+            setTint(themed.getColor(R.color.pairing_battery_track)); level = 10_000
         }
         val fill = context.getDrawable(R.drawable.island_battery_progress)!!.mutate().apply {
             setTint(if (battery != null && battery.level <= 25) Color.rgb(255, 69, 58) else Color.rgb(53, 199, 89))
             level = (battery?.level ?: 0) * 100
         }
         val layers = mutableListOf(track, fill)
-        if (charging(battery)) layers += context.getDrawable(R.drawable.ic_power)!!.mutate().apply { setTint(Color.rgb(28, 28, 30)) }
+        if (charging(battery)) layers += context.getDrawable(R.drawable.ic_power)!!.mutate().apply { setTint(themed.getColor(R.color.pairing_battery_charging_icon)) }
         val icon = LayerDrawable(layers.toTypedArray()).apply {
             if (numberOfLayers == 3) {
                 setLayerSize(2, dp(8), dp(12))
@@ -439,4 +488,21 @@ class PopupWindow(private val context: Context, private val onCloseCallback: () 
     }
 
     private fun dp(value: Int) = (value * context.resources.displayMetrics.density).toInt()
+
+    companion object {
+        /** Follows the app's Light/Dark/System choice, like the island, and resolves -night colors from it. */
+        internal fun pairingContext(context: Context): Context {
+            val base = context.resources.configuration.uiMode
+            val night = when ((context.applicationContext as? LibrePodsApplication)?.appDataRepository?.settings?.value?.nightMode) {
+                NightTheme.Dark -> Configuration.UI_MODE_NIGHT_YES
+                NightTheme.Light -> Configuration.UI_MODE_NIGHT_NO
+                else -> base and Configuration.UI_MODE_NIGHT_MASK
+            }
+            return ContextThemeWrapper(context, R.style.Theme_LibrePods_Pairing).apply {
+                applyOverrideConfiguration(Configuration().apply {
+                    uiMode = (base and Configuration.UI_MODE_NIGHT_MASK.inv()) or night
+                })
+            }
+        }
+    }
 }
