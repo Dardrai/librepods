@@ -2037,7 +2037,7 @@ class LibrePodsService: Service() {
                     if (destroying || devices.value[address] !== device || bluetoothDevice.bondState != BluetoothDevice.BOND_BONDED) false
                     else {
                         attachExperimentalAudio(device)
-                        deviceJobs[address] = listOf(observeConversationAwareness(device), observeStemActions(device), observeAppleState(device), observeAppleSettings(device), observeAppleMetadata(device),
+                        deviceJobs[address] = listOf(observeConversationAwareness(device), observeStemActions(device), observeRoutingEvents(device), observeAppleState(device), observeAppleSettings(device), observeAppleMetadata(device),
                             serviceScope.launch {
                                 device.connectionState.collect {
                                     retireIneligibleHeadGestures(device)
@@ -2094,6 +2094,27 @@ class LibrePodsService: Service() {
                 }
                 StemAction.CYCLE_NOISE_CONTROL_MODES -> device.cycleHoldListeningMode(event)
                 else -> Unit
+            }
+        }
+    }
+
+    /** Another host took the audio route through the buds: show the "Moved to …" island (upstream parity). */
+    fun observeRoutingEvents(device: AppleDevice): Job = serviceScope.launch(Dispatchers.IO, start = CoroutineStart.UNDISPATCHED) {
+        device.events.collect { event ->
+            val (reversed, name) = when (event) {
+                is AppleEvent.ShowNearbyUi -> false to event.deviceName
+                is AppleEvent.OwnershipToFalseRequest -> event.reverseTapped to null
+                else -> return@collect
+            }
+            if (destroying || devices.value[device.macAddress] !== device) return@collect
+            Log.d(TAG, "routing moved to another host, event=${event::class.simpleName} reversed=$reversed")
+            withContext(Dispatchers.Main.immediate) {
+                showIsland(
+                    device,
+                    IslandType.MOVED_TO_OTHER_DEVICE,
+                    reversed = reversed,
+                    otherDeviceName = name ?: getString(R.string.island_other_device_fallback)
+                )
             }
         }
     }

@@ -38,6 +38,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import me.kavishdevar.librepods.core.bluetooth.aacp.packet.AACPPacket
 import me.kavishdevar.librepods.core.bluetooth.aacp.packet.AACPPacketType
 import me.kavishdevar.librepods.core.bluetooth.aacp.packet.AudioSourcePacket
+import me.kavishdevar.librepods.core.bluetooth.aacp.packet.parseNearbyUiRequest
 import me.kavishdevar.librepods.core.bluetooth.aacp.packet.parseRoutingRequest
 import me.kavishdevar.librepods.core.bluetooth.aacp.packet.routingRequestPacket
 import me.kavishdevar.librepods.core.bluetooth.aacp.packet.BatteryInfoPacket
@@ -753,11 +754,16 @@ class AACPManager(private val device: AppleDevice,
             }
 
             MessageOpcode.SMART_ROUTING_RESPONSE -> {
-                val routing = parseRoutingRequest(packet, device.state.value.connectedDevices.map { it.macAddress }.toSet()) ?: return
+                val connected = device.state.value.connectedDevices.map { it.macAddress }.toSet()
+                val routing = parseRoutingRequest(packet, connected)
+                val nearby = parseNearbyUiRequest(packet, connected)
+                if (routing == null && nearby == null) return
                 publishForTransport(this, sourceSocket, ::captureAudioSocket) {
                     connectionScope?.launch(start = CoroutineStart.UNDISPATCHED) {
-                        device.emitEvent(AppleEvent.OwnershipToFalseRequest(
+                        if (routing != null) device.emitEvent(AppleEvent.OwnershipToFalseRequest(
                             sender = routing.sender.value, reverseTapped = routing.reverseTapped))
+                        if (nearby != null) device.emitEvent(AppleEvent.ShowNearbyUi(
+                            sender = nearby.sender.value, deviceName = nearby.deviceName))
                     }
                 }
             }
@@ -1144,7 +1150,7 @@ class AACPManager(private val device: AppleDevice,
         buffer.put(0x01) // separator?
         buffer.put(0x4A)
         buffer.put("localscore".toByteArray())
-        buffer.put(0x31, 0x2D)
+        buffer.put(byteArrayOf(0x31, 0x2D))
         buffer.put(0x01)
         buffer.put(0x46)
         buffer.put("reasonHhijackv2".toByteArray())

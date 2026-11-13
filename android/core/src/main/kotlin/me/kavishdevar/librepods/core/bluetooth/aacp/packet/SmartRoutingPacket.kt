@@ -58,3 +58,24 @@ internal fun parseRoutingRequest(packet: ByteArray, connected: Set<MacAddress>):
     }
     return null
 }
+
+internal data class NearbyUiRequest(val sender: MacAddress, val deviceName: String?)
+
+/**
+ * A relay whose OPACK dictionary sets `SmartRoutingKeyShowNearbyUI` to true: another host
+ * took the audio route and asks this host to show the "Moved to …" banner. The envelope
+ * rules match [parseRoutingRequest]; only the dictionary is decoded instead of byte-matched.
+ */
+internal fun parseNearbyUiRequest(packet: ByteArray, connected: Set<MacAddress>): NearbyUiRequest? {
+    if (packet.size !in 16..1024 || !packet.copyOfRange(0, 6).contentEquals(byteArrayOf(4, 0, 4, 0, 0x11, 0)) ||
+        (packet[12].toInt() and 255 or ((packet[13].toInt() and 255) shl 8)) != packet.size - 14 ||
+        packet[14] != 1.toByte()) return null
+    val address = packet.copyOfRange(6, 12).reversedArray()
+    if (!validRoutingAddress(address)) return null
+    val sender = MacAddress(address.joinToString(":") { "%02X".format(it) })
+    if (sender !in connected) return null
+    val dictionary = Opack.decodeDictionary(packet.copyOfRange(15, packet.size)) ?: return null
+    if (dictionary["SmartRoutingKeyShowNearbyUI"] != true) return null
+    val name = (dictionary["btName"] as? String)?.trim()?.takeIf { it.isNotEmpty() && it.length <= 64 }
+    return NearbyUiRequest(sender, name)
+}

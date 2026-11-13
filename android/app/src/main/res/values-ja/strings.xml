@@ -216,7 +216,6 @@
     <string name="listening_mode_noise_cancellation_description">周囲の音を遮断します</string>
     <string name="contact">お問い合わせ</string>
     <string name="email">メール</string>
-    <string name="discord">Discord</string>
     <string name="github_issues">GitHub Issues</string>
     <string name="version_code">バージョンコード</string>
     <string name="build_type">ビルドタイプ</string>

@@ -18,7 +18,8 @@ sealed interface AppleEvent {
     ): AppleEvent
 
     data class ShowNearbyUi(
-        val sender: String
+        val sender: String,
+        val deviceName: String? = null
     ): AppleEvent
 
     data class OwnershipToFalseRequest(

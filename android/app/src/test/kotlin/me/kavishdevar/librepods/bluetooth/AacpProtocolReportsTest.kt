@@ -4,6 +4,12 @@ import android.Manifest
 import android.app.Application
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothSocket
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import me.kavishdevar.librepods.core.bluetooth.aacp.AACPManager
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.Capability
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommandIdentifier
@@ -110,6 +116,40 @@ class AacpProtocolReportsTest {
         assertTrue(device.aacp.sendCapabilitiesRequest(socket))
         val shadow = Shadow.extract<ProtocolReportSocketShadow>(socket)
         assertArrayEquals(byteArrayOf(4, 0, 4, 0, 1, 0, 8), shadow.output.bytes.toByteArray())
+    }
+
+    @Test fun actualShowNearbyUiWriteIsDecodedOnlyFromItsConnectedPeerOnTheCurrentSocket() = withTransport { device, socket ->
+        val transportScope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        val subscriber = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        val events = mutableListOf<AppleEvent>()
+        AACPManager::class.java.getDeclaredField("connectionScope").apply { isAccessible = true }
+            .set(device.aacp, transportScope)
+        subscriber.launch(start = CoroutineStart.UNDISPATCHED) { device.events.collect { events += it } }
+        try {
+            device.aacp.processPacket(hostHeader + byteArrayOf(1) + host, socket)
+            assertTrue(device.aacp.sendSmartRoutingShowUI("00:11:22:33:44:55"))
+            val written = Shadow.extract<ProtocolReportSocketShadow>(socket).output.bytes.toByteArray()
+            assertEquals(140, written.size)
+            assertArrayEquals(byteArrayOf(4, 0, 4, 0, 0x10, 0, 6, 5, 4, 3, 2, 1, 0x7e, 0, 1, 0xe6.toByte()),
+                written.copyOfRange(0, 16))
+            val relay = written.copyOf().also { it[4] = 0x11 }
+            val previous = device.state.value
+            device.aacp.processPacket(relay, socket)
+            assertSame("The nearby banner does not change audio ownership or settings", previous, device.state.value)
+            assertEquals(1, events.size)
+            val event = events.single() as AppleEvent.ShowNearbyUi
+            assertEquals("01:02:03:04:05:06", event.sender)
+            assertNull(event.deviceName)
+
+            device.aacp.processPacket(hostHeader + byteArrayOf(0), socket)
+            device.aacp.processPacket(relay, socket)
+            assertEquals("A sender absent from the current peer report stays passive", 1, events.size)
+            device.aacp.processPacket(hostHeader + byteArrayOf(1) + host, socket)
+            device.aacp.disconnect(socket)
+            device.aacp.processPacket(relay, socket)
+            device.aacp.processPacket(relay, null)
+            assertEquals("A retired transport cannot emit a nearby banner", 1, events.size)
+        } finally { subscriber.cancel(); transportScope.cancel() }
     }
 
     @Test fun renameUsesCapturedSocketAndUtf8LengthWithoutInventingANameReport() = withTransport { device, socket ->

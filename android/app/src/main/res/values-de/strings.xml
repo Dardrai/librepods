@@ -214,7 +214,6 @@
     <string name="listening_mode_noise_cancellation_description">Blockiert externe Geräusche</string>
     <string name="contact">Kontakt</string>
     <string name="email">E-Mail</string>
-    <string name="discord">Discord</string>
     <string name="github_issues">GitHub Issues</string>
     <string name="version_code">Version-Code</string>
     <string name="build_type">Build-Typ</string>
