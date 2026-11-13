@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="pairing_card">#1C1C1E</color>
+    <color name="pairing_text_primary">#FFFFFF</color>
+    <color name="pairing_text_secondary">#AEAEB2</color>
+    <color name="pairing_close_background">#2C2C2E</color>
+    <color name="pairing_close_icon">#AEAEB2</color>
+    <color name="pairing_action">#1C1C1E</color>
+    <color name="pairing_action_text">#0A84FF</color>
+    <color name="pairing_action_ripple">#290A84FF</color>
+    <color name="pairing_action_complete">#2C2C2E</color>
+    <color name="pairing_battery_track">#3A3A3C</color>
+    <color name="pairing_battery_charging_icon">#FFFFFF</color>
+</resources>

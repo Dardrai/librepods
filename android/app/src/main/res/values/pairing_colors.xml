@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Pairing card palette; values-night holds the dark variant. -->
+    <color name="pairing_card">#FFFFFF</color>
+    <color name="pairing_text_primary">#1C1C1E</color>
+    <color name="pairing_text_secondary">#636366</color>
+    <color name="pairing_close_background">#F0F0F2</color>
+    <color name="pairing_close_icon">#636366</color>
+    <color name="pairing_action">#FFFFFF</color>
+    <color name="pairing_action_text">#0066D6</color>
+    <color name="pairing_action_ripple">#140066D6</color>
+    <color name="pairing_action_complete">#F2F2F7</color>
+    <color name="pairing_battery_track">#E5E5EA</color>
+    <color name="pairing_battery_charging_icon">#1C1C1E</color>
+</resources>

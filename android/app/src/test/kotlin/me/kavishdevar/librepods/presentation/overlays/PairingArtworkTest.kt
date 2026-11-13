@@ -84,6 +84,38 @@ class PairingArtworkTest {
         assertEquals(View.GONE, video.visibility)
     }
 
+    @Test fun darkCardsUseTheSpinRenderCompositedOnTheCardColour() {
+        val night = android.content.res.Configuration(context.resources.configuration).apply {
+            uiMode = (uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK.inv()) or
+                android.content.res.Configuration.UI_MODE_NIGHT_YES
+        }
+        val darkContext = ContextThemeWrapper(RuntimeEnvironment.getApplication().createConfigurationContext(night),
+            R.style.Theme_LibrePods)
+        val darkSource = DataSource.toDataSource(darkContext,
+            Uri.parse("android.resource://${darkContext.packageName}/${R.raw.pairing_spin_dark}"))
+        ShadowMediaPlayer.addMediaInfo(darkSource, ShadowMediaPlayer.MediaInfo(5_933, 100))
+        val darkContainer = LayoutInflater.from(darkContext).inflate(R.layout.popup_window, null)
+            .findViewById<View>(R.id.popup_artwork_container)
+        val darkVideo = darkContainer.findViewById<TextureView>(R.id.popup_video)
+        val darkPoster = darkContainer.findViewById<ImageView>(R.id.popup_artwork)
+        val darkArtwork = PairingArtwork(darkContainer)
+        try {
+            darkVideo.setSurfaceTexture(SurfaceTexture(0))
+            darkArtwork.start(0x2720)
+            assertEquals(R.drawable.pairing_spin_poster_dark, shadowOf(darkPoster.drawable).createdFromResId)
+            assertEquals(darkSource, shadowOf(requireNotNull(media)).dataSource)
+            val card = darkContext.getColor(R.color.pairing_card)
+            val art = android.graphics.BitmapFactory.decodeResource(darkContext.resources, R.drawable.pairing_spin_poster_dark)
+            try {
+                assertEquals("The dark render's backdrop must match the card", card, art.getPixel(2, 2))
+                assertEquals(card, art.getPixel(art.width - 2, art.height - 2))
+            } finally { art.recycle() }
+        } finally {
+            darkArtwork.stop()
+            darkVideo.surfaceTexture?.release()
+        }
+    }
+
     @Test fun silentLoopKeepsPosterUntilRenderedAndFallsBackOnDecodeError() {
         video.setSurfaceTexture(SurfaceTexture(0))
         artwork.start(0x2720)

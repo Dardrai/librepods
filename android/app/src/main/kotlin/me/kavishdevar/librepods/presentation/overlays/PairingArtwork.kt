@@ -4,6 +4,7 @@ package me.kavishdevar.librepods.presentation.overlays
 import android.animation.ValueAnimator
 import android.animation.Animator
 import android.animation.AnimatorListenerAdapter
+import android.content.res.Configuration
 import android.database.ContentObserver
 import android.graphics.Matrix
 import android.graphics.SurfaceTexture
@@ -25,6 +26,10 @@ internal class PairingArtwork(private val container: View) : TextureView.Surface
     private val context = container.context
     private val video = container.findViewById<TextureView>(R.id.popup_video)
     private val poster = container.findViewById<ImageView>(R.id.popup_artwork)
+    // The spin render has white baked in; the dark card uses a copy composited on its own colour.
+    private val dark = context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES
+    private val spinVideo = if (dark) R.raw.pairing_spin_dark else R.raw.pairing_spin
+    private val spinPoster = if (dark) R.drawable.pairing_spin_poster_dark else R.drawable.pairing_spin_poster
     private var active = false
     private var paused = false
     private var animatedModel = false
@@ -97,7 +102,7 @@ internal class PairingArtwork(private val container: View) : TextureView.Surface
             return
         }
         video.visibility = View.VISIBLE
-        if (player == null) poster.setImageResource(R.drawable.pairing_spin_poster)
+        if (player == null) poster.setImageResource(spinPoster)
         val texture = video.surfaceTexture ?: return
         if (player != null) return
         val next = try { MediaPlayer() } catch (error: RuntimeException) {
@@ -128,7 +133,7 @@ internal class PairingArtwork(private val container: View) : TextureView.Surface
                 if (player === next) fail()
                 true
             }
-            next.setDataSource(context, Uri.parse("android.resource://${context.packageName}/${R.raw.pairing_spin}"))
+            next.setDataSource(context, Uri.parse("android.resource://${context.packageName}/$spinVideo"))
             next.prepareAsync()
         } catch (error: Exception) { fail(error) }
     }
