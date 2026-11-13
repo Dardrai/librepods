@@ -57,6 +57,9 @@ jobs:
           python3 .github/scripts/verify_android_codec.py --self-test
           python3 .github/scripts/publish_android_release.py --self-test
           python3 .github/scripts/android_ci_metadata.py
+      - name: Validate version-specific release notes
+        if: steps.metadata.outputs.publish_release == 'true'
+        run: python3 .github/scripts/publish_android_release.py --check-notes '${{ steps.metadata.outputs.app_version }}'
       - uses: actions/setup-java@v4
         with:
           distribution: zulu

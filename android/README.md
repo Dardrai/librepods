@@ -204,6 +204,9 @@ Successful `main` builds automatically publish a signed release with a unique
 the matching encoder source, provenance and checksums accompany it. Releases
 are marked as previews in their title and notes. Older build completions cannot
 replace a newer build as Latest, and existing tags and release assets are not overwritten.
+Before publishing a version, add its user-facing changes and verification results
+to `android/release-notes/<app-version>.md`. CI requires that version's notes and
+includes them in the GitHub release.
 To publish an explicit tag, run the workflow against `main` with its
 `publish_release` and `release_tag` inputs, or push a `v*` or `pixel-*` tag on
 `main` history. Trusted CI builds require the fork's existing

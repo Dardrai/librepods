@@ -12,11 +12,21 @@ from urllib.parse import quote
 
 REPOSITORY = "Ripthulhu/librepods"
 PAYLOADS = {"LibrePods.apk", "aac-eld-source.tar.gz", "aac-eld-source.json"}
+RELEASE_NOTES_DIRECTORY = Path(__file__).resolve().parents[2] / "android" / "release-notes"
 
 
 def require(condition, message):
     if not condition:
         raise ValueError(message)
+
+
+def release_changes(version):
+    require(re.fullmatch(r"[A-Za-z0-9._-]+", version), "Invalid release version")
+    path = RELEASE_NOTES_DIRECTORY / f"{version}.md"
+    require(path.is_file(), f"Missing version-specific release notes: {path}")
+    changes = path.read_text(encoding="utf-8").strip()
+    require(changes, "Release notes must explain this version's changes")
+    return changes
 
 
 def local_assets(directory, commit):
@@ -91,6 +101,7 @@ def publish(directory):
     require(re.fullmatch(r"(?:v|pixel-)[A-Za-z0-9][A-Za-z0-9._-]*", tag), "Invalid release tag")
     require(re.fullmatch(r"[A-Za-z0-9._-]+", version), "Invalid release version")
     require(gh_git_commit() == commit, "Publishing checkout does not match the build")
+    changes = release_changes(version)
     assets = local_assets(directory, commit)
     prefix = f"repos/{REPOSITORY}"
     marker = f"<!-- librepods-android-ci:{commit} -->"
@@ -112,6 +123,7 @@ def publish(directory):
                 f"## LibrePods {version}\n\n"
                 "Preview build with the full AAC-ELD / PCM32 encoder. Install **LibrePods.apk**; "
                 "the existing signing key preserves updates and app data.\n\n"
+                f"{changes}\n\n"
                 "The matching modified encoder source, source provenance and SHA256SUMS are attached. "
                 "Codec compatibility still depends on the Android version and device.\n\n"
                 f"Source: https://github.com/{REPOSITORY}/commit/{commit}\n\n{marker}\n", encoding="utf-8")
@@ -167,6 +179,7 @@ def publication_self_test(directory, assets, commit, tag, marker):
         writes.append(arguments)
         if action == "create":
             assert "--draft" in arguments and "--prerelease" not in arguments
+            assert release_changes(environment["APP_VERSION"]) in Path(arguments[arguments.index("--notes-file") + 1]).read_text()
             state["release"] = dict(tag_name=tag, target_commitish=commit, draft=True, prerelease=False,
                                     body=Path(arguments[arguments.index("--notes-file") + 1]).read_text(), assets=[])
         elif action == "upload":
@@ -212,6 +225,8 @@ def publication_self_test(directory, assets, commit, tag, marker):
 
 
 def self_test():
+    from unittest.mock import patch
+
     def rejects(action):
         try:
             action()
@@ -223,8 +238,18 @@ def self_test():
     marker = f"<!-- librepods-android-ci:{commit} -->"
     assert promote_latest("ahead") and promote_latest("identical") and not promote_latest("behind")
     rejects(lambda: promote_latest("diverged"))
-    with tempfile.TemporaryDirectory() as temporary:
+    with tempfile.TemporaryDirectory() as temporary, tempfile.TemporaryDirectory() as notes_temporary, \
+            patch(__name__ + ".RELEASE_NOTES_DIRECTORY", Path(notes_temporary)):
         directory = Path(temporary)
+        version = "2.0.0-alpha.1-pixel115"
+        notes = RELEASE_NOTES_DIRECTORY / f"{version}.md"
+        rejects(lambda: release_changes(version))
+        notes.write_text(" \n", encoding="utf-8")
+        rejects(lambda: release_changes(version))
+        notes.write_text("## Changes\n\n- Confirm AirPods settings without disconnecting.\n", encoding="utf-8")
+        assert release_changes(version) == notes.read_text().strip()
+        rejects(lambda: release_changes("../outside"))
+        rejects(lambda: release_changes("2.0.0-alpha.1-pixel116"))
         (directory / "LibrePods.apk").write_bytes(b"signed APK fixture")
         (directory / "aac-eld-source.tar.gz").write_bytes(b"source fixture")
         source = dict(source_commit=commit, source_checkout_dirty=False,
@@ -261,7 +286,10 @@ def self_test():
 if __name__ == "__main__":
     if sys.argv[1:] == ["--self-test"]:
         self_test()
+    elif len(sys.argv) == 3 and sys.argv[1] == "--check-notes":
+        release_changes(sys.argv[2])
+        print(f"Release notes ready: {sys.argv[2]}")
     elif len(sys.argv) == 2:
         publish(Path(sys.argv[1]))
     else:
-        raise SystemExit("Usage: publish_android_release.py ARTIFACT_DIRECTORY | --self-test")
+        raise SystemExit("Usage: publish_android_release.py ARTIFACT_DIRECTORY | --self-test | --check-notes VERSION")
