@@ -68,6 +68,15 @@ ReverseBannerTapped dictionaries can request relinquishing ownership. Unknown
 or malformed dictionaries stay passive; text fragments alone cannot trigger
 routing. The matching `0x0010` builders retain their existing wire bytes.
 
+Relay bodies are OPACK dictionaries (`0xE0+n` dictionary, `0x40+n` short
+string, `0x01` true, `0x30`/`0x31` int8/int16, `0xA0+n` back reference). A
+relay whose dictionary decodes completely and sets `SmartRoutingKeyShowNearbyUI`
+to true, from a connected host with the exact declared length, emits
+`ShowNearbyUi`; the service then shows the "Moved to …" island, named from
+`btName` when present. Upstream LibrePods sends one trailing zero byte after
+its dictionary, so a single zero pad is tolerated. This only shows the banner;
+it never changes ownership or audio routing.
+
 ### Host identity experiments
 
 Debug exposes two independent, default-Off choices, applied on the next AACP
