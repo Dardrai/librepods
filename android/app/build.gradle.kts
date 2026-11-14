@@ -235,6 +235,9 @@ tasks.register("verifyPixel") {
 }
 
 tasks.withType<Test>().configureEach {
+    // Robolectric retains framework sandboxes across classes; bound each worker's lifetime and heap.
+    maxHeapSize = "1g"
+    forkEvery = 50
     jvmArgs(
         "--add-opens=java.base/java.lang=ALL-UNNAMED",
         "--add-opens=java.base/java.util=ALL-UNNAMED",
