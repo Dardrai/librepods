@@ -17,11 +17,7 @@ import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothA2dp
 import android.bluetooth.BluetoothProfile
 import android.bluetooth.BluetoothSocket
-import android.bluetooth.le.BluetoothLeScanner
-import android.bluetooth.le.ScanCallback
-import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
-import android.bluetooth.le.ScanSettings
 import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
@@ -40,7 +36,6 @@ import android.os.Build
 import android.os.IBinder
 import android.os.Handler
 import android.os.Looper
-import android.os.PowerManager
 import android.os.SystemClock
 import android.os.ParcelUuid
 import android.os.ext.SdkExtensions
@@ -96,7 +91,6 @@ import me.kavishdevar.librepods.bluetooth.NearbyPairingController
 import me.kavishdevar.librepods.bluetooth.DeviceSettingsRefreshResult
 import me.kavishdevar.librepods.bluetooth.hasNearbyDevicesPermissions
 import me.kavishdevar.librepods.bluetooth.canLoadAppleDevice
-import me.kavishdevar.librepods.bluetooth.nearbyScanSettings
 import me.kavishdevar.librepods.shizuku.BackgroundAudioAccess
 import me.kavishdevar.librepods.shizuku.BluetoothVolumeSync
 import me.kavishdevar.librepods.core.data.apple.BuddyState
@@ -292,20 +286,13 @@ class LibrePodsService: Service() {
         if (result == PackageManager.PERMISSION_GRANTED) ensureBackgroundAudioAccess()
     }
     private val bleHandler = Handler(Looper.getMainLooper())
+    private val bleScan = BleScanController(this, bleHandler, { destroying }, { bleCaptureBlocked },
+        { appDataRepository.settings.value.bleScanMode }, ::stopSelf, ::handleScanResult)
     private val nearbyVisits = NearbyAirPods.Visits()
     private val nearbyInvitationProximity = NearbyAirPods.InvitationProximity()
     private var pairingModel: Int? = null
     private var nearbyPairing: NearbyPairingController? = null
-    private var bleGeneration = 0L
-    private var bleRequested = false
-    private var bleReady = false
     @Volatile private var bleCaptureBlocked = false
-    private var bleScanner: BluetoothLeScanner? = null
-    private var bleScanCallback: ScanCallback? = null
-    private var bleScanMode: Int? = null
-    private val bleScanStarts = ArrayDeque<Long>()
-    private var bleRetry: Runnable? = null
-    private val updateScreenScanMode = Runnable { if (bleRequested) startBleScanner(updateMode = true) }
     private val connectionHaptics by lazy { ConnectionHaptics(this) }
     private val nativeAudioCallback = object : AudioDeviceCallback() {
         override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>) {
@@ -487,8 +474,8 @@ class LibrePodsService: Service() {
         }
         serviceScope.launch {
             loadDevices()
-            bleReady = true
-            startBleScanner()
+            bleScan.ready = true
+            bleScan.start()
             devices.value.values.forEach { device ->
                 launch(Dispatchers.IO) { onDeviceConnected(device.bluetoothDevice) }
             }
@@ -1331,24 +1318,19 @@ class LibrePodsService: Service() {
                         return
                     }
                     Intent.ACTION_SCREEN_ON, Intent.ACTION_SCREEN_OFF -> {
-                        bleHandler.removeCallbacks(updateScreenScanMode)
-                        if (bleRequested) {
-                            // A quick lock/unlock keeps the working scan instead of spending two registrations.
-                            if (intent.action == Intent.ACTION_SCREEN_ON) startBleScanner(updateMode = true)
-                            else bleHandler.postDelayed(updateScreenScanMode, 30_000)
-                        }
+                        bleScan.onScreenChanged(intent.action == Intent.ACTION_SCREEN_ON)
                         return
                     }
                     BluetoothAdapter.ACTION_STATE_CHANGED -> {
                         companion?.bluetoothChanged()
                         if (intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR) == BluetoothAdapter.STATE_ON) {
-                            if (bleRequested) serviceScope.launch { loadDevices(); startBleScanner() }
+                            if (bleScan.requested) serviceScope.launch { loadDevices(); bleScan.start() }
                         } else {
                             devices.value.values.filterIsInstance<AppleDevice>().forEach {
                                 bluetoothVolumeSync.forget(it)
                                 companionBridge.forgetVolumeSync(it)
                             }
-                            stopActiveBleScan()
+                            bleScan.stopActive()
                             nearbyPairing?.cancelPending()
                             nearbyVisits.clear()
                             nearbyInvitationProximity.clear()
@@ -1506,96 +1488,7 @@ class LibrePodsService: Service() {
         if (destroying || bleCaptureBlocked == active) return
         bleCaptureBlocked = active
         nearbyPairing?.setBlocked(active)
-        if (active) stopActiveBleScan() else if (bleRequested) startBleScanner()
-    }
-
-    private fun scheduleBleRetry(delayMs: Long, updateMode: Boolean = false) {
-        bleRetry?.let(bleHandler::removeCallbacks)
-        bleRetry = Runnable {
-            bleRetry = null
-            if (bleRequested && !destroying) startBleScanner(updateMode)
-        }.also { bleHandler.postDelayed(it, delayMs) }
-    }
-
-    private fun startBleScanner(updateMode: Boolean = false) {
-        if (Looper.myLooper() != Looper.getMainLooper()) {
-            bleHandler.post { startBleScanner(updateMode) }
-            return
-        }
-        if (destroying) return
-        bleRequested = true
-        if (bleCaptureBlocked || !bleReady) return
-        if (!hasNearbyDevicesPermissions(this)) { stopActiveBleScan(); stopSelf(); return }
-        val interactive = getSystemService(PowerManager::class.java).isInteractive
-        val settings = nearbyScanSettings(interactive, appDataRepository.settings.value.bleScanMode)
-        val mode = settings.scanMode
-        if (bleScanCallback != null && (!updateMode || bleScanMode == mode)) {
-            bleRetry?.let(bleHandler::removeCallbacks)
-            bleRetry = null
-            return
-        }
-        val now = SystemClock.elapsedRealtime()
-        while (bleScanStarts.firstOrNull()?.let { now - it >= 30_000 } == true) bleScanStarts.removeFirst()
-        if (bleScanStarts.size >= 5) {
-            // Keep a healthy scan running until Android's rolling registration allowance recovers.
-            scheduleBleRetry(30_000 - (now - bleScanStarts.first()) + 1, updateMode)
-            return
-        }
-        val scanner = try {
-            val adapter = getSystemService(BluetoothManager::class.java).adapter ?: return
-            if (!adapter.isEnabled) return
-            adapter.bluetoothLeScanner ?: return
-        } catch (_: SecurityException) { stopActiveBleScan(); stopSelf(); return }
-        stopActiveBleScan()
-        val generation = ++bleGeneration
-        val filter = ScanFilter.Builder().setManufacturerData(0x004c, byteArrayOf()).build()
-        val callback = object : ScanCallback() {
-            override fun onScanResult(callbackType: Int, result: ScanResult) {
-                bleHandler.post {
-                    if (!destroying && generation == bleGeneration) try { handleScanResult(result) }
-                    catch (_: SecurityException) { stopActiveBleScan(); stopSelf() }
-                }
-            }
-            override fun onBatchScanResults(results: MutableList<ScanResult>) {
-                results.sortedBy { it.timestampNanos }.forEach { onScanResult(ScanSettings.CALLBACK_TYPE_ALL_MATCHES, it) }
-            }
-            override fun onScanFailed(errorCode: Int) {
-                bleHandler.post {
-                    if (generation != bleGeneration || destroying) return@post
-                    stopActiveBleScan()
-                    Log.w(TAG, "BLE scan failed: $errorCode")
-                    if (errorCode != ScanCallback.SCAN_FAILED_FEATURE_UNSUPPORTED) scheduleBleRetry(30_000)
-                }
-            }
-        }
-        bleScanner = scanner
-        bleScanCallback = callback
-        bleScanMode = mode
-        bleScanStarts.addLast(now)
-        try {
-            scanner.startScan(listOf(filter), settings, callback)
-            if (Log.isLoggable(NEARBY_SCAN_TAG, Log.DEBUG)) Log.d(NEARBY_SCAN_TAG, "BLE lid monitoring started: mode=$mode, reportDelay=0")
-        } catch (_: SecurityException) {
-            stopActiveBleScan()
-            stopSelf()
-            Log.w(TAG, "Nearby devices permission is unavailable")
-        } catch (_: Exception) {
-            stopActiveBleScan()
-            scheduleBleRetry(30_000)
-        }
-    }
-
-    private fun stopActiveBleScan() {
-        bleRetry?.let(bleHandler::removeCallbacks)
-        bleRetry = null
-        bleHandler.removeCallbacks(updateScreenScanMode)
-        bleGeneration++
-        val scanner = bleScanner
-        val callback = bleScanCallback
-        bleScanner = null
-        bleScanCallback = null
-        bleScanMode = null
-        if (scanner != null && callback != null) runCatching { scanner.stopScan(callback) }
+        if (active) bleScan.stopActive() else if (bleScan.requested) bleScan.start()
     }
 
     private fun stopBleScanner() {
@@ -1603,8 +1496,7 @@ class LibrePodsService: Service() {
             bleHandler.post { stopBleScanner() }
             return
         }
-        bleRequested = false
-        stopActiveBleScan()
+        bleScan.stop()
         nearbyInvitationProximity.clear()
         nearbyVisits.clear().forEach { nearbyPairing?.onNearbyDevice(it) }
     }
@@ -1683,7 +1575,7 @@ class LibrePodsService: Service() {
         return serviceScope.launch(Dispatchers.IO) {
             appDataRepository.settings.collect { settings ->
                 if (oldAppSettings.bleReportDelay != settings.bleReportDelay || oldAppSettings.bleScanMode != settings.bleScanMode) {
-                    startBleScanner(updateMode = true)
+                    bleScan.start(updateMode = true)
                 }
                 islandWindow.updateSettings(settings)
                 if (oldAppSettings.nightMode != settings.nightMode) nearbyPairing?.refreshTheme()
