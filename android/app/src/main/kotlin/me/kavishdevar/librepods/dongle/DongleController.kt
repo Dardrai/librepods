@@ -45,9 +45,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
 import me.kavishdevar.librepods.R
 import me.kavishdevar.librepods.core.bluetooth.aacp.packet.InformationPacket
-import me.kavishdevar.librepods.core.bluetooth.aacp.packet.hostClockPacket
 import me.kavishdevar.librepods.core.bluetooth.att.types.HearingAidSettings
-import me.kavishdevar.librepods.core.bluetooth.att.types.SavedHearingDiagnostics
 import me.kavishdevar.librepods.core.bluetooth.att.types.hearingAidSettingsWritable
 import me.kavishdevar.librepods.core.bluetooth.att.types.parseHearingAidSettingsResponse
 import me.kavishdevar.librepods.core.bluetooth.att.types.sendHearingAidSettings
@@ -56,7 +54,6 @@ import me.kavishdevar.librepods.core.devices.AccommodationsPreset
 import me.kavishdevar.librepods.core.devices.AccommodationsReport
 import me.kavishdevar.librepods.core.devices.AccommodationsRequestState
 import me.kavishdevar.librepods.core.devices.AccommodationsResult
-import me.kavishdevar.librepods.core.devices.AppleMetadata
 import me.kavishdevar.librepods.core.devices.HearingMode
 import me.kavishdevar.librepods.core.devices.HearingModes
 import me.kavishdevar.librepods.core.devices.SettingsReadStatus
@@ -79,53 +76,12 @@ import me.kavishdevar.librepods.shizuku.ShizukuAudioClient
 import me.kavishdevar.librepods.utils.MediaController
 import me.kavishdevar.librepods.dongle.DongleControlProtocol.AudioProfile.Flag as AudioProfileFlag
 
-internal data class DongleChoice(val address: String, val name: String, val usb: Boolean = false)
-
-internal data class DongleState(
-    val selected: Boolean = false,
-    val usb: Boolean = false,
-    val attached: Boolean = false,
-    val usbAudioAvailable: Boolean = false,
-    val usbPermissionRequired: Boolean = false,
-    val usbVolumeAvailable: Boolean = false,
-    val usbVolumeEnabled: Boolean = false,
-    val usbVolumePending: Boolean = false,
-    val usbVolumeRequested: Boolean = false,
-    val name: String = "AirPods Dongle",
-    val connected: Boolean = false,
-    val busy: Boolean = false,
-    val error: String? = null,
-    val status: DongleProtocol.Status? = null,
-    val metadata: AppleMetadata? = null,
-    val settings: Map<Int, DongleProtocol.Setting> = emptyMap(),
-    val requested: Map<Int, Long> = emptyMap(),
-    val savedChoices: Map<Int, Long> = emptyMap(),
-    val unconfirmed: Set<Int> = emptySet(),
-    val automaticPause: Boolean = false,
-    val hearingModes: HearingModes = HearingModes.empty(),
-    val hearingProfile: HearingAidSettings? = null,
-    val controlSession: Long = 0,
-    val accommodationsRequest: AccommodationsRequestState = AccommodationsRequestState(),
-    val hearingAidData: ByteArray = byteArrayOf(),
-    val hearingAidReadStatus: SettingsReadStatus = SettingsReadStatus.WAITING,
-    val transparencyData: ByteArray = byteArrayOf(),
-    val transparencyReadStatus: SettingsReadStatus = SettingsReadStatus.WAITING,
-    val transparencyResult: AccommodationsResult? = null,
-    val diagnostics: SavedHearingDiagnostics? = null,
-    val audio: DongleProtocol.AudioProfile? = null,
-    val performance: DongleProtocol.Performance? = null,
-    val finderOpen: Boolean = false,
-    val nearby: DongleProtocol.Nearby? = null,
-) {
-    val accommodationsReport: AccommodationsReport? get() = hearingModes.accommodationsReport(controlSession)
-}
-
 /**
  * One foreground-service-owned control link. Creating it never selects an audio route.
  *
  * Coordinates the transport and its polling loop; editing ownership lives in [DongleEditingLease],
- * sent-but-unanswered writes in [DonglePendingWrites], remembered choices in [DongleSavedChoiceStore]
- * and the hearing records in [DongleHearingRecords].
+ * sent-but-unanswered writes in [DonglePendingWrites], remembered choices in [DongleSavedChoiceStore],
+ * the hearing records in [DongleHearingRecords] and the polling loop's own reads in [DongleAutomaticReads].
  */
 @SuppressLint("MissingPermission")
 internal class DongleController(context: Context) : Closeable {
@@ -150,6 +106,7 @@ internal class DongleController(context: Context) : Closeable {
         volumeCheckpoint = ::volumeCheckpoint,
         requestRefresh = { refreshRequested.trySend(Unit) })
     private val hearing = DongleHearingRecords(mutableState, lease)
+    private val automaticReads = DongleAutomaticReads(mutableState, lease, hearing, callActive = { callActive })
     @Volatile private var socket: Closeable? = null
     private val usbManager = this.context.getSystemService(UsbManager::class.java)
     private val audioManager = this.context.getSystemService(AudioManager::class.java)
@@ -225,12 +182,6 @@ internal class DongleController(context: Context) : Closeable {
             it.customTransparencyAllowed, it.pending, it.uncertain)
     }
 
-    private var automaticHealthOwner: DongleEditorOwner? = null
-    private var hostClockOwner: DongleEditorOwner? = null
-    private var healthAttemptOwner: DongleEditorOwner? = null
-    private var healthAttempts = 0
-    private var healthRetryAfter = 0L
-    private var automaticSettingsOwner: DongleEditorOwner? = null
     private val liveSettings = ConcurrentHashMap<Int, LiveValueEditor<Long>>()
     private val transparencyEditor = lazy { recordEditor(DongleRecordKind.TRANSPARENCY) }
     private val hearingEditor = lazy { recordEditor(DongleRecordKind.HEARING) }
@@ -858,13 +809,8 @@ internal class DongleController(context: Context) : Closeable {
         hearing.clear()
         earReportRevision = null
         pendingWrites.clear()
-        automaticHealthOwner = null
-        hostClockOwner = null
-        automaticSettingsOwner = null
+        automaticReads.reset()
         lease.forgetLiveOperation()
-        healthAttemptOwner = null
-        healthAttempts = 0
-        healthRetryAfter = 0
         cancelEar()
         audioUpdated = 0
         mutableState.update {
@@ -889,8 +835,6 @@ internal class DongleController(context: Context) : Closeable {
         }
         refreshRequested.trySend(Unit)
     }
-
-    private fun healthRetryDue() = healthAttempts < MAXIMUM_HEALTH_ATTEMPTS && SystemClock.elapsedRealtime() >= healthRetryAfter
 
     private suspend fun refresh(client: DongleSession) {
         val status = client.refresh()
@@ -929,9 +873,7 @@ internal class DongleController(context: Context) : Closeable {
             return
         }
         val detailsWanted = lease.publish(client) {
-            controlsVisible || automaticSettingsOwner != lease.currentOwner() ||
-                hearing.supported() && automaticHealthOwner != lease.currentOwner() && healthRetryDue() ||
-                pendingWrites.awaitingConfirmation()
+            controlsVisible || automaticReads.wanted() || pendingWrites.awaitingConfirmation()
         }
         if (detailsWanted) refreshDetails(client, status)
         val volumeAuthority = status.capabilities and Capability.USB_HOST_VOLUME_AUTHORITY != 0
@@ -942,7 +884,7 @@ internal class DongleController(context: Context) : Closeable {
         followEars(client, status)
     }
 
-    /** Reads settings, metadata and hearing reports, then runs the automatic health reads once per owner. */
+    /** Reads settings, metadata and hearing reports, then the automatic health reads once per owner. */
     private suspend fun refreshDetails(client: DongleSession, status: DongleProtocol.Status) {
         val settings = client.settings()
         lease.publish(client) {
@@ -959,77 +901,7 @@ internal class DongleController(context: Context) : Closeable {
             }
         }
         hearing.refresh(client)
-        val owner = lease.currentOwner()
-        automaticSettingsOwner = owner
-        val healthWanted = owner != null && owner != automaticHealthOwner && hearing.supported() &&
-            !status.microphoneActive && !callActive && (owner != healthAttemptOwner || healthRetryDue())
-        if (healthWanted) readHealth(client, status, checkNotNull(owner))
-    }
-
-    private suspend fun readHealth(client: DongleSession, status: DongleProtocol.Status, owner: DongleEditorOwner) {
-        if (healthAttemptOwner != owner) {
-            healthAttemptOwner = owner
-            healthAttempts = 0
-            healthRetryAfter = 0
-        }
-        lease.withProtectedWork {
-            healthAttempts++
-            automaticHealthOwner = owner
-            var failed = false
-            lease.publish(client) { mutableState.update { it.copy(busy = true) } }
-            val sendHostClock: suspend () -> Unit = {
-                if (hostClockOwner != owner) {
-                    check(lease.writable(owner) && hearing.supported())
-                    val packet = checkNotNull(hostClockPacket())
-                    val response = client.transact(Rpc.Operation.SEND_AACP_PACKET, packet.rawPacket) {
-                        check(lease.writable(owner) && hearing.supported() && client.status?.microphoneActive == false)
-                    }
-                    check(response.isEmpty())
-                    lease.publish(client) {
-                        check(lease.owns(owner))
-                        hostClockOwner = owner
-                    }
-                }
-            }
-            val reads = listOf<suspend () -> Unit>(sendHostClock,
-                { hearing.readProfile(client) },
-                { hearing.readTransparency(client) },
-                { hearing.readDiagnostics(client) })
-            try {
-                client.withTarget(status) {
-                    lease.withVolumeCheckpoints(client) {
-                        for (read in reads) {
-                            try {
-                                read()
-                            } catch (cancelled: CancellationException) {
-                                throw cancelled
-                            } catch (busy: DongleBusyException) {
-                                throw busy
-                            } catch (_: Exception) {
-                                failed = true
-                            }
-                        }
-                    }
-                }
-            } catch (busy: DongleBusyException) {
-                lease.publish(client) {
-                    if (lease.owns(owner) && healthAttemptOwner == owner) {
-                        healthAttempts = (healthAttempts - 1).coerceAtLeast(0)
-                        automaticHealthOwner = null
-                        healthRetryAfter = SystemClock.elapsedRealtime() + HEALTH_RETRY_DELAY_MILLISECONDS
-                    }
-                }
-                throw busy
-            } finally {
-                lease.publish(client) {
-                    if (failed) {
-                        automaticHealthOwner = null
-                        healthRetryAfter = SystemClock.elapsedRealtime() + HEALTH_RETRY_DELAY_MILLISECONDS
-                    }
-                    mutableState.update { it.copy(busy = false) }
-                }
-            }
-        }
+        automaticReads.afterSettingsRead(client, status)
     }
 
     /** Pauses or resumes owned media when the ear-state report says the AirPods left or returned to the ears. */
@@ -1374,8 +1246,6 @@ internal class DongleController(context: Context) : Closeable {
         private const val FAST_POLL_MILLISECONDS = 600L
         private const val IDLE_POLL_MILLISECONDS = 5_000L
         private const val AUDIO_REFRESH_MILLISECONDS = 2_000L
-        private const val MAXIMUM_HEALTH_ATTEMPTS = 3
-        private const val HEALTH_RETRY_DELAY_MILLISECONDS = 5_000L
         private const val EAR_REPORT_MAXIMUM_AGE_MILLISECONDS = 2_500L
         private const val BRIDGE_PAUSE_TIMEOUT_MILLISECONDS = 2_000L
         /** The highest bitrate this client asks for, in bits per second. */

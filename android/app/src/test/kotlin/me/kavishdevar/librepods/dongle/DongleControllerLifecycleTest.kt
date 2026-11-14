@@ -700,7 +700,7 @@ class DongleControllerLifecycleTest {
         attach(client, client.refresh())
         controller.automaticPause(false)
         gameState().value = controller.state.value.copy(metadata = pro3Metadata())
-        field("automaticHealthOwner").set(controller, lease().currentOwner())
+        readsField("automaticHealthOwner").set(field("automaticReads").get(controller), lease().currentOwner())
         refresh(client)
         controller.setSetting(0x28, 1)
         awaitCommand()
@@ -801,7 +801,7 @@ class DongleControllerLifecycleTest {
         val client = DongleSession(firmware::exchange)
         attach(client, client.refresh()); controller.automaticPause(false)
         gameState().value = controller.state.value.copy(metadata = pro3Metadata())
-        field("automaticHealthOwner").set(controller, lease().currentOwner())
+        readsField("automaticHealthOwner").set(field("automaticReads").get(controller), lease().currentOwner())
         refresh(client)
         return client
     }
@@ -989,6 +989,7 @@ class DongleControllerLifecycleTest {
 
     private fun field(name: String) = DongleController::class.java.getDeclaredField(name).apply { isAccessible = true }
     private fun lease() = field("lease").get(controller) as DongleEditingLease
+    private fun readsField(name: String) = DongleAutomaticReads::class.java.getDeclaredField(name).apply { isAccessible = true }
     private fun hearingField(name: String) = DongleHearingRecords::class.java.getDeclaredField(name).apply { isAccessible = true }
     private fun hearingRecords() = field("hearing").get(controller)
     private fun serviceField(name: String) = LibrePodsService::class.java.getDeclaredField(name).apply { isAccessible = true }
