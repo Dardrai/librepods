@@ -60,7 +60,6 @@ import androidx.health.connect.client.permission.HealthPermission
 import androidx.health.connect.client.records.HeartRateRecord
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -100,7 +99,6 @@ import me.kavishdevar.librepods.bluetooth.DeviceSettingsRefreshResult
 import me.kavishdevar.librepods.bluetooth.hasNearbyDevicesPermissions
 import me.kavishdevar.librepods.bluetooth.canLoadAppleDevice
 import me.kavishdevar.librepods.bluetooth.nearbyScanSettings
-import me.kavishdevar.librepods.shizuku.A2dpRecoveryGuard
 import me.kavishdevar.librepods.shizuku.BackgroundAudioAccess
 import me.kavishdevar.librepods.shizuku.BluetoothVolumeSync
 import me.kavishdevar.librepods.core.data.apple.BuddyState
@@ -154,7 +152,6 @@ import java.io.PrintWriter
 
 private const val TAG = "LibrePodsService"
 private const val NEARBY_SCAN_TAG = "NearbyScan"
-private const val NEARBY_TAKEOVER_TAG = "NearbyTakeover"
 private const val STEM_ACTIONS_TAG = "StemActions"
 private const val STOP_MICROPHONE = "me.kavishdevar.librepods.STOP_MICROPHONE"
 private const val STOP_COMMUNICATION = "me.kavishdevar.librepods.STOP_COMMUNICATION"
@@ -217,7 +214,6 @@ class LibrePodsService: Service() {
     private val audioDevices = ConcurrentHashMap<MacAddress, AppleDevice>()
     private val audioJobs = ConcurrentHashMap<MacAddress, Job>()
     private val sensorSuspensions = ConcurrentHashMap<MacAddress, Channel<Boolean>>()
-    private val nearbyConnections = ConcurrentHashMap<MacAddress, Any>()
     private val companionOperations = ConcurrentHashMap<MacAddress, Any>()
     private val companionReleased = ConcurrentHashMap.newKeySet<MacAddress>()
     private val companionHoldLock = Any()
@@ -271,6 +267,25 @@ class LibrePodsService: Service() {
         !destroying && devices.value[device.macAddress] === device &&
             device.bluetoothDevice.bondState == BluetoothDevice.BOND_BONDED
     }, ::isNearbyDeviceAudioConnected)
+    private val nearbyConnector = NearbyConnector(
+        scope = serviceScope,
+        destroying = { destroying },
+        devices = devices,
+        deferral = nearbyDeferral,
+        audioManager = { getSystemService(AudioManager::class.java) },
+        dongleInhibits = { dongleControls.inhibitsAutomaticNative() },
+        beginLocalIntent = { companion?.beginLocalIntent() ?: { true } },
+        releaseHold = { setCompanionHold(it, false) },
+        handoffActive = { companionOperations.containsKey(it) },
+        attachAudio = ::attachExperimentalAudio,
+        audioOwner = { audioDevices[it] },
+        audioController = { audioControllers[it] },
+        callActive = ::callBlocksSettingsRefresh,
+        captureBusy = { microphoneOwners.isNotEmpty() || bleCaptureBlocked },
+        settingsRefreshActive = { settingsRefresher.anyActive() },
+        isAudioConnected = ::isNearbyDeviceAudioConnected,
+        attachControl = { onDeviceConnected(it) },
+    )
     private val backgroundAudioAccess by lazy { BackgroundAudioAccess(this) }
     private val bluetoothVolumeSync by lazy { BluetoothVolumeSync(this) }
     private var bluetoothVolumeSyncJob: Job? = null
@@ -734,7 +749,7 @@ class LibrePodsService: Service() {
 
     private fun companionBusy(device: AppleDevice): Boolean = callBlocksSettingsRefresh() ||
         microphoneOwners.isNotEmpty() || bleCaptureBlocked || settingsRefresher.anyActive() ||
-        nearbyConnections.isNotEmpty() || device.state.value.recordingState.isRecording ||
+        nearbyConnector.anyActive() || device.state.value.recordingState.isRecording ||
         device.state.value.microphoneState.isActive || gameControllers[device.macAddress]?.state?.value?.let {
             it.restoring || it.remoteRestorePending
         } == true
@@ -808,7 +823,7 @@ class LibrePodsService: Service() {
     private fun companionCallBusy(device: AppleDevice): Boolean = !companionCallAllowed(device.macAddress.value) ||
         companionCalls.state !in setOf("ringing", "active") ||
         getSystemService(AudioManager::class.java).mode !in setOf(AudioManager.MODE_NORMAL, AudioManager.MODE_RINGTONE, AudioManager.MODE_IN_CALL) ||
-        microphoneOwners.isNotEmpty() || bleCaptureBlocked || settingsRefresher.anyActive() || nearbyConnections.isNotEmpty() ||
+        microphoneOwners.isNotEmpty() || bleCaptureBlocked || settingsRefresher.anyActive() || nearbyConnector.anyActive() ||
         device.state.value.recordingState.isRecording || device.state.value.microphoneState.isActive ||
         runCatching {
             getSystemService(AudioManager::class.java).activeRecordingConfigurations.any {
@@ -1001,179 +1016,7 @@ class LibrePodsService: Service() {
 
     /** The same selected-pair action also works when the companion PC is unavailable. */
     suspend fun connectNearbyDevice(device: AppleDevice, stillRequested: () -> Boolean = { true },
-        companionRequest: Boolean = false): Boolean {
-        if (companionRequest && dongleControls.inhibitsAutomaticNative()) return false
-        var explicitCurrent: () -> Boolean = { true }
-        if (!companionRequest) {
-            explicitCurrent = withContext(Dispatchers.Main.immediate) {
-                companion?.beginLocalIntent() ?: { true }
-            }
-            if (!setCompanionHold(device.macAddress, false)) return false
-        }
-        val operation = Any()
-        if (nearbyConnections.putIfAbsent(device.macAddress, operation) != null) return false
-        val started = SystemClock.elapsedRealtime()
-        val pendingControl = AtomicReference<BluetoothSocket?>()
-        val controlRetired = AtomicBoolean(false)
-        var earlyControl: Job? = null
-        var keepControl: () -> Boolean = { false }
-        val caller = currentCoroutineContext()[Job]
-        val retiredReason = AtomicReference<String?>()
-        var outcome = "declined"
-        if (Log.isLoggable(NEARBY_TAKEOVER_TAG, Log.DEBUG)) Log.d(NEARBY_TAKEOVER_TAG, "Tap: device=${device.macAddress.toRedactedString()}")
-        try {
-            val controller = withContext(Dispatchers.Main.immediate) {
-                if (destroying || devices.value[device.macAddress] !== device ||
-                    device.bluetoothDevice.bondState != BluetoothDevice.BOND_BONDED) null
-                else {
-                    attachExperimentalAudio(device)
-                    audioControllers[device.macAddress]
-                }
-            } ?: return false
-            fun ownerFailure(): String? = runCatching {
-                when {
-                    companionRequest && dongleControls.inhibitsAutomaticNative() -> "dongle controls selected"
-                    !explicitCurrent() -> "newer choice"
-                    !stillRequested() -> "request retired"
-                    companionOperations.containsKey(device.macAddress) && !companionRequest -> "handoff active"
-                    destroying -> "service stopped"
-                    devices.value[device.macAddress] !== device -> "device replaced"
-                    audioDevices[device.macAddress] !== device || audioControllers[device.macAddress] !== controller -> "audio owner replaced"
-                    device.bluetoothDevice.bondState != BluetoothDevice.BOND_BONDED -> "unpaired"
-                    callBlocksSettingsRefresh() -> "call or communication mode active"
-                    microphoneOwners.isNotEmpty() || bleCaptureBlocked -> "microphone transport active"
-                    settingsRefresher.anyActive() -> "settings refresh active"
-                    device.state.value.recordingState.isRecording || device.state.value.microphoneState.isActive -> "microphone active"
-                    else -> null
-                }
-            }.getOrElse { "guard exception: ${it.javaClass.simpleName}" }
-            fun current(): Boolean {
-                val reason = ownerFailure() ?: when {
-                    nearbyConnections[device.macAddress] !== operation -> "request replaced"
-                    caller?.isActive == false -> "request cancelled"
-                    else -> null
-                }
-                if (reason != null && retiredReason.compareAndSet(null, reason))
-                    if (Log.isLoggable(NEARBY_TAKEOVER_TAG, Log.DEBUG)) Log.d(NEARBY_TAKEOVER_TAG, "Retired: reason=$reason elapsedMs=${SystemClock.elapsedRealtime() - started}")
-                return reason == null
-            }
-            if (!current() || !controller.canRefreshSettings()) return false
-            val alreadyConnected = isNearbyDeviceAudioConnected(device)
-            if (!alreadyConnected) {
-                val aacpUuid = ParcelUuid.fromString(A2dpRecoveryGuard.AACP_UUID)
-                fun advertisesAacp() = device.bluetoothDevice.uuids?.contains(aacpUuid) == true
-                // Authenticated BLE can find a saved pair before Android has restored its Classic service cache.
-                if (!advertisesAacp() && !device.bluetoothDevice.fetchUuidsWithSdp()) return false
-                if (!current()) return false
-                controller.bridge.connect()
-                if (withTimeoutOrNull(2_000) { controller.bridge.state.first { it.connected } } == null || !current()) return false
-                if (withTimeoutOrNull(2_000) {
-                        while (current() && !advertisesAacp()) delay(40)
-                        current() && advertisesAacp()
-                    } != true) return false
-            }
-            if (Log.isLoggable(NEARBY_TAKEOVER_TAG, Log.DEBUG)) Log.d(NEARBY_TAKEOVER_TAG, "Ready: elapsedMs=${SystemClock.elapsedRealtime() - started}")
-            if (device.connectionState.value !in setOf(ConnectionState.CONNECTED, ConnectionState.CONNECTING)) {
-                val published = CompletableDeferred<Unit>()
-                fun controlCurrent() = !controlRetired.get() && caller?.isCancelled != true &&
-                    earlyControl?.isActive != false && ownerFailure() == null &&
-                    (!alreadyConnected || isNearbyDeviceAudioConnected(device)) &&
-                    ((nearbyConnections[device.macAddress] === operation && caller?.isActive != false) ||
-                        isNearbyDeviceAudioConnected(device))
-                keepControl = ::controlCurrent
-                val control = serviceScope.launch(Dispatchers.IO) {
-                    var connected = false
-                    if (Log.isLoggable(NEARBY_TAKEOVER_TAG, Log.DEBUG)) Log.d(NEARBY_TAKEOVER_TAG, "Control start: elapsedMs=${SystemClock.elapsedRealtime() - started}")
-                    try {
-                        if (device.connectionState.value !in setOf(ConnectionState.CONNECTED, ConnectionState.CONNECTING)) {
-                            connected = device.connect(::controlCurrent) { socket ->
-                                pendingControl.set(socket)
-                                if (Log.isLoggable(NEARBY_TAKEOVER_TAG, Log.DEBUG)) Log.d(NEARBY_TAKEOVER_TAG, "Control socket: elapsedMs=${SystemClock.elapsedRealtime() - started}")
-                                published.complete(Unit)
-                                if (!controlCurrent()) device.aacp.cancelPendingConnect(socket)
-                            }
-                        }
-                    } catch (cancelled: CancellationException) {
-                        throw cancelled
-                    } catch (error: Exception) {
-                        Log.w(TAG, "Early control connection failed", error)
-                    } finally {
-                        published.complete(Unit)
-                        if (Log.isLoggable(NEARBY_TAKEOVER_TAG, Log.DEBUG)) Log.d(NEARBY_TAKEOVER_TAG, "Control complete: connected=$connected elapsedMs=${SystemClock.elapsedRealtime() - started}")
-                    }
-                }
-                earlyControl = control
-                serviceScope.launch(Dispatchers.IO) {
-                    try {
-                        withTimeoutOrNull(18_000) {
-                            while (!control.isCompleted && controlCurrent()) delay(40)
-                        }
-                    } finally {
-                        if (!control.isCompleted) {
-                            control.cancel()
-                            pendingControl.get()?.let { device.aacp.cancelPendingConnect(it) }
-                        }
-                    }
-                }
-                // Give the direct control socket a head start without serializing media behind its connection.
-                withTimeoutOrNull(200) { published.await() }
-                if (!current()) return false
-            }
-            if (alreadyConnected) {
-                // A previous handoff can leave control detached after Android reconnects its own route.
-                val attached = withTimeoutOrNull(18_000) {
-                    earlyControl?.join()
-                    while (current() && isNearbyDeviceAudioConnected(device) &&
-                        device.connectionState.value == ConnectionState.CONNECTING) delay(40)
-                    current() && isNearbyDeviceAudioConnected(device) &&
-                        device.connectionState.value == ConnectionState.CONNECTED && device.aacp.captureAudioSocket() != null
-                } == true
-                if (!attached) controlRetired.set(true)
-                outcome = "already connected"
-                return attached
-            }
-            val connected = controller.bridge.connectNativePlayback(device.macAddress.value, ::current)
-            outcome = if (connected) "retired" else "not connected"
-            if (!connected || !current()) return false
-            // Android publishes the usable audio output slightly after its Bluetooth profile connects.
-            outcome = "output unavailable"
-            val outputBudget = minOf(10_000L, 24_000L - (SystemClock.elapsedRealtime() - started)).coerceAtLeast(1L)
-            if (withTimeoutOrNull(outputBudget) {
-                    while (current() && !isNearbyDeviceAudioConnected(device)) delay(40)
-                    current() && isNearbyDeviceAudioConnected(device)
-                } != true) {
-                if (Log.isLoggable(NEARBY_TAKEOVER_TAG, Log.DEBUG)) {
-                    val outputs = runCatching {
-                        getSystemService(AudioManager::class.java).getDevices(AudioManager.GET_DEVICES_OUTPUTS)
-                            .joinToString { "type=${it.type}:selected=${it.address.equals(device.macAddress.value, true)}:addressPresent=${it.address.isNotBlank()}" }
-                    }.getOrElse { "query failed: ${it.javaClass.simpleName}" }
-                    Log.d(NEARBY_TAKEOVER_TAG, "Output unavailable: ownerFailure=${ownerFailure()} retired=${retiredReason.get()} " +
-                        "nativeState=${nearbyDeferral.mediaState(device.macAddress)} outputs=[$outputs]")
-                }
-                return false
-            }
-            outcome = "connected"
-            nearbyDeferral.observeMedia(device, BluetoothProfile.STATE_CONNECTED)
-            serviceScope.launch(Dispatchers.IO) {
-                earlyControl?.join()
-                if (devices.value[device.macAddress] === device && isNearbyDeviceAudioConnected(device))
-                    onDeviceConnected(device.bluetoothDevice)
-            }
-            return true
-        } catch (error: Exception) {
-            if (error is CancellationException) { outcome = "cancelled"; throw error }
-            outcome = "failed"
-            Log.w(TAG, "Nearby media connection failed", error)
-            return false
-        } finally {
-            Log.i("NearbyTakeover", "Complete: result=$outcome elapsedMs=${SystemClock.elapsedRealtime() - started}")
-            nearbyConnections.remove(device.macAddress, operation)
-            if (!keepControl()) {
-                earlyControl?.cancel()
-                pendingControl.get()?.let { device.aacp.cancelPendingConnect(it) }
-            }
-        }
-    }
+        companionRequest: Boolean = false): Boolean = nearbyConnector.connect(device, stillRequested, companionRequest)
 
     /** Null means that this exact device can currently refresh its control session. */
     fun deviceSettingsRefreshReadiness(device: AppleDevice): DeviceSettingsRefreshResult? = settingsRefresher.readiness(device)
