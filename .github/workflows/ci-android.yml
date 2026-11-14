@@ -93,6 +93,10 @@ jobs:
           "$output/audio-startup"
           javac --release 8 -d "$output" android/tools/spatial-audio-inspector/InspectorContract.java android/tools/spatial-audio-inspector/InspectorContractCheck.java
           java -cp "$output" me.kavishdevar.librepods.spatialinspector.InspectorContractCheck
+          javac --release 8 -d "$output" android/tools/head-tracker-lease/LeaseState.java android/tools/head-tracker-lease/LeaseStateCheck.java
+          java -cp "$output" me.kavishdevar.librepods.headtrackerlease.LeaseStateCheck
+          gcc -std=c11 -Wall -Wextra -Werror -UNDEBUG -DSIGNAL_GUARD_HOST_TEST android/tools/head-tracker-lease/signals.c -o "$output/lease-signals"
+          "$output/lease-signals"
       - name: Test native audio pipeline with sanitizers
         env:
           CC: clang

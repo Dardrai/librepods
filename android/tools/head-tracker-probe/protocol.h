@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -88,5 +89,26 @@ struct Control {
 
 // A stationary head: zero rotation vector/velocity and unchanged reset counter.
 constexpr std::array<uint8_t, 14> kStationaryInput{1};
+
+constexpr double kYawAmplitudeRad = 0.1;
+constexpr double kYawAngularFrequency = 1.57079632679489661923; // One cycle per four seconds.
+constexpr double kRotationLimitRad = 3.14159265; // Exact descriptor physical maximum, scaled by 10^-8.
+
+inline bool syntheticYawInput(double seconds, std::array<uint8_t, 14>* report) {
+    if (!report || !std::isfinite(seconds) || seconds < 0 || seconds > 60) return false;
+    auto result = kStationaryInput;
+    const double phase = kYawAngularFrequency * seconds;
+    const double normalized[] = {kYawAmplitudeRad * std::sin(phase) / kRotationLimitRad,
+                                kYawAmplitudeRad * kYawAngularFrequency * std::cos(phase) / 32.0};
+    const size_t offsets[] = {5, 11}; // Rotation Z, angular velocity Z; the other four axes stay zero.
+    for (size_t i = 0; i < 2; ++i) {
+        const int16_t encoded = static_cast<int16_t>(std::lround(normalized[i] * 32767));
+        const uint16_t bits = static_cast<uint16_t>(encoded);
+        result[offsets[i]] = static_cast<uint8_t>(bits);
+        result[offsets[i] + 1] = static_cast<uint8_t>(bits >> 8);
+    }
+    *report = result;
+    return true;
+}
 
 }  // namespace head_tracker_probe

@@ -120,6 +120,29 @@ class SpatialMotionCaptureTest {
         }
     }
 
+    @Test fun aPrimaryBudChangeStopsCaptureAndRetainsTheInitialRoleInMetadata() = runBlocking {
+        for (leftIsPrimary in listOf(true, false)) {
+            val target = Target()
+            target.states.value = target.states.value.copy(leftIsPrimary = leftIsPrimary)
+            val arrivals = AtomicLong(100)
+            val source = flow<MotionReport?> {
+                emit(null)
+                emit(report(1))
+                target.states.value = target.states.value.copy(leftIsPrimary = !leftIsPrimary)
+                emit(report(2))
+            }
+            val result = SpatialMotionCapture(temporary.newFolder(), source, arrivals::getAndIncrement)
+                .capture(SpatialMotionCaptureRequest(MAC, "yaw"), target.device, { true })
+            assertEquals(1, result.samples)
+            assertEquals("Stopped: primary bud changed.", result.reason)
+            val lines = requireNotNull(result.file).readLines()
+            assertEquals(2, lines.size)
+            assertEquals(leftIsPrimary, JSONObject(lines.first()).getBoolean("left_is_primary"))
+            assertSame(target.started.single(), target.stopped.single())
+            verify(target.device, never()).stopHeadTracking()
+        }
+    }
+
     @Test fun anOverlappingCaptureIsRejectedAndCancellationReleasesItsOwnerAndTheGate() = runBlocking {
         val target = Target()
         val collecting = CompletableDeferred<Unit>()

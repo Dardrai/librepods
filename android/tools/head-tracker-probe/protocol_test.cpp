@@ -2,6 +2,7 @@
 
 #include <cassert>
 #include <cstdio>
+#include <limits>
 
 using namespace head_tracker_probe;
 
@@ -41,6 +42,34 @@ int main() {
     assert(kStationaryInput[0] == 1 && kStationaryInput.size() == 14);
     for (size_t i = 1; i < kStationaryInput.size(); ++i) assert(kStationaryInput[i] == 0);
 
+    const auto signed16 = [](const std::array<uint8_t, 14>& bytes, size_t offset) {
+        int value = bytes[offset] | (int(bytes[offset + 1]) << 8);
+        return value >= 32768 ? value - 65536 : value;
+    };
+    std::array<uint8_t, 14> yaw{};
+    for (int tick = 0; tick <= 6000; ++tick) {
+        const double seconds = tick / 100.0;
+        assert(syntheticYawInput(seconds, &yaw));
+        assert(yaw[0] == 1 && yaw[13] == 0);
+        for (size_t offset : {1U, 2U, 3U, 4U, 7U, 8U, 9U, 10U}) assert(yaw[offset] == 0);
+        const double angle = signed16(yaw, 5) * kRotationLimitRad / 32767;
+        const double rate = signed16(yaw, 11) * 32.0 / 32767;
+        assert(std::isfinite(angle) && std::isfinite(rate));
+        assert(std::abs(angle) <= kYawAmplitudeRad + kRotationLimitRad / 65534);
+        assert(std::abs(rate) <= kYawAmplitudeRad * kYawAngularFrequency + 32.0 / 65534);
+        assert(std::abs(angle - kYawAmplitudeRad * std::sin(kYawAngularFrequency * seconds)) <= kRotationLimitRad / 65534 + 1e-12);
+        assert(std::abs(rate - kYawAmplitudeRad * kYawAngularFrequency * std::cos(kYawAngularFrequency * seconds)) <= 32.0 / 65534 + 1e-12);
+    }
+    assert(syntheticYawInput(0, &yaw) && signed16(yaw, 5) == 0 && signed16(yaw, 11) > 0);
+    assert(syntheticYawInput(1, &yaw) && signed16(yaw, 5) > 0 && signed16(yaw, 11) == 0);
+    assert(syntheticYawInput(2, &yaw) && signed16(yaw, 5) == 0 && signed16(yaw, 11) < 0);
+    assert(syntheticYawInput(3, &yaw) && signed16(yaw, 5) < 0 && signed16(yaw, 11) == 0);
+    const auto savedYaw = yaw;
+    for (double invalid : {-1.0, 60.1, std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN()}) {
+        assert(!syntheticYawInput(invalid, &yaw) && yaw == savedYaw);
+    }
+    assert(!syntheticYawInput(0, nullptr));
+
     // Read the actual HID items to catch accidental report-size/ID drift.
     unsigned bits[3][3]{};
     unsigned reportId = 0, reportSize = 0, reportCount = 0, collections = 0;
@@ -67,5 +96,5 @@ int main() {
     assert(bits[0][1] == 104 && bits[0][2] == 0);
     assert(bits[1][1] == 0 && bits[1][2] == 0);
     assert(bits[2][1] == 8 && bits[2][2] == 312);
-    std::puts("Head tracker identity, controls, stationary pose, HID report sizes: passed");
+    std::puts("Head tracker identity, controls, stationary/yaw poses, finite conversion/peaks, HID report sizes: passed");
 }

@@ -685,7 +685,7 @@ enum class StyledListItemOrientation{
 }
 
 @Composable
-private fun StyledListItemContent(
+internal fun StyledListItemContent(
     modifier: Modifier = Modifier,
     onClick: (() -> Unit)?,
     content: @Composable () -> Unit,

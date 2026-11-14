@@ -169,7 +169,7 @@ fun StyledListScope.styledToggle(
 }
 
 @Composable
-private fun StyledToggleContent(
+internal fun StyledToggleContent(
     modifier: Modifier,
     label: String,
     description: String? = null,

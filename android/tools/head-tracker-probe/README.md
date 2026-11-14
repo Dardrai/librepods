@@ -4,9 +4,9 @@ An isolated root command for testing whether the phone's existing dynamic sensor
 HAL discovers a standard Android HID head tracker. No APK, module, app integration,
 Bluetooth connection, dongle, settings change, SELinux change, mount or reboot.
 Running the build accesses no phone. Invoking the binary without the exact
-`--probe AUDIO_IDENTITY_MAC SECONDS` arguments prints usage and exits.
+`--probe AUDIO_IDENTITY_MAC SECONDS [--synthetic-yaw]` arguments prints usage and exits.
 
-The explicit live command creates **one synthetic stationary head tracker** for
+The explicit live command creates **one synthetic head tracker** for
 1–60 seconds. It can become associated with the audio device having the supplied
 Bluetooth identity address. Pause media before a discovery test: the audio system
 may consume its stationary pose after association. This is a sensor-discovery
@@ -38,7 +38,16 @@ is two bytes including ID: reporting in bit 0, power in bit 1, interval in bits
 rotation-vector values scaled to ±pi radians, three velocity values scaled to
 ±32 radians/second, and an eight-bit reference-reset counter.
 
-All emitted input values are zero. The head axes required for a future real
+Stationary is the default: all input values are zero. The optional
+`--synthetic-yaw` mode emits `rz=0.1*sin(pi*t/2)` radians and its matching derivative
+`vz=0.1*pi/2*cos(pi*t/2)` radians/second, a four-second cycle with about5.73degree
+peak rotation and0.15708rad/s peak speed. Only Z rotation/velocity are nonzero;
+the discontinuity counter stays zero because the reference frame does not reset.
+Values are rounded to the descriptor's signed16-bit physical scaling. Phase starts
+at the first host-enabled input and follows monotonic elapsed time across pauses.
+Inputs remain gated by the same GET/SET, START and OPEN requirements in both modes.
+
+The head axes required for a future real
 adapter are X left ear to right, Y back to nose, Z neck to top of head; orientation
 transforms reference to head and velocity is expressed in the head frame.
 No AirPods Pro 3 scale, axis, quaternion layout, clock, or calibration is assumed.
@@ -58,7 +67,10 @@ The build runs a host assert check, then builds one ARM64/API33 native executabl
 with only system shared-library dependencies. `receipt.json` records source and
 binary hashes. The host check validates malformed MAC/features, the exact BT ID
 layout, all 256 power/reporting/interval states, bounded timing, stationary bytes,
-and report bit lengths parsed from the actual descriptor. It does not run UHID or
+and report bit lengths parsed from the actual descriptor. Yaw checks scan60s at
+100Hz, validate little-endian fields and position/rate scaling to half an LSB,
+bound peaks, preserve zero axes/counter, and reject nonfinite/out-of-range times.
+It does not run UHID or
 prove that a device HAL accepts the descriptor.
 
 ## Bounded live test (separate explicit invocation)
@@ -69,10 +81,12 @@ permission, then run it in a foreground process owned by the test runner:
 
 ```text
 <temporary executable path> --probe <audio Bluetooth identity MAC> 30
+# Explicit synthetic motion, only for a separately controlled silent-rendering test:
+<temporary executable path> --probe <audio Bluetooth identity MAC> 30 --synthetic-yaw
 ```
 
 The helper initially sends no pose. It responds to feature requests, and sends
-stationary input only after all of: numbered feature/input reports confirmed by
+the selected synthetic input only after all of: numbered feature/input reports confirmed by
 `UHID_START`, `UHID_OPEN`, identity `GET_REPORT(2)`, and a valid feature
 `SET_REPORT(1)` enabling full power and all events. It follows the selected
 interval, never sends catch-up bursts, and stops inputs when controls or open

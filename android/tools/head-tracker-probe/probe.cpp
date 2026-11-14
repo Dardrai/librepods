@@ -30,7 +30,7 @@ static bool sendEvent(int fd, const uhid_event& event) {
     return false;
 }
 
-static int probe(const std::array<uint8_t, 6>& mac, unsigned seconds) {
+static int probe(const std::array<uint8_t, 6>& mac, unsigned seconds, bool syntheticYaw) {
     const int64_t start = nowNs();
     if (start < 0) { std::perror("clock_gettime"); return 1; }
     const int fd = open("/dev/uhid", O_RDWR | O_CLOEXEC | O_NONBLOCK);
@@ -50,7 +50,9 @@ static int probe(const std::array<uint8_t, 6>& mac, unsigned seconds) {
     create.u.create2.rd_size = sizeof(kDescriptor);
     std::memcpy(create.u.create2.rd_data, kDescriptor, sizeof(kDescriptor));
     if (!sendEvent(fd, create)) { close(fd); return 1; }
-    std::puts("Created one temporary SYNTHETIC stationary head tracker; no real motion input.");
+    std::printf("Created one temporary SYNTHETIC %s head tracker; no real motion input.\n",
+                syntheticYaw ? "yaw" : "stationary");
+    if (syntheticYaw) std::puts("Yaw: amplitude=0.1rad, period=4s, peak_rate=0.157079633rad/s, Z axis only.");
     std::fflush(stdout);
     const auto identity = identityReport(mac);
     Control control;
@@ -58,6 +60,7 @@ static int probe(const std::array<uint8_t, 6>& mac, unsigned seconds) {
     unsigned getIdentity = 0, getControls = 0, setControls = 0, inputs = 0;
     const int64_t deadline = start + seconds * 1000000000LL;
     int64_t nextInput = 0;
+    int64_t firstInputTime = -1;
     while (!stopRequested) {
         const int64_t now = nowNs();
         if (now < 0) { std::perror("clock_gettime"); failed = true; break; }
@@ -143,12 +146,23 @@ static int probe(const std::array<uint8_t, 6>& mac, unsigned seconds) {
         if (after < 0) { std::perror("clock_gettime"); failed = true; break; }
         if (after >= deadline || stopRequested) break;
         if (started && opened && control.enabled() && after >= nextInput) {
+            if (firstInputTime < 0) firstInputTime = after;
+            auto pose = kStationaryInput;
+            const double elapsed = double(after - firstInputTime) / 1e9;
+            if (syntheticYaw && !syntheticYawInput(elapsed, &pose)) {
+                std::fprintf(stderr, "Invalid synthetic yaw time; no input sent.\n"); failed = true; break;
+            }
             uhid_event input{};
             input.type = UHID_INPUT2;
-            input.u.input2.size = kStationaryInput.size();
-            std::memcpy(input.u.input2.data, kStationaryInput.data(), kStationaryInput.size());
+            input.u.input2.size = pose.size();
+            std::memcpy(input.u.input2.data, pose.data(), pose.size());
             if (!sendEvent(fd, input)) { failed = true; break; }
             ++inputs;
+            if (syntheticYaw && (inputs == 1 || inputs % 50 == 0)) {
+                std::printf("SYNTHETIC_YAW input=%u elapsed_s=%.3f rotation_z_le=%02x%02x velocity_z_le=%02x%02x\n",
+                            inputs, elapsed, pose[5], pose[6], pose[11], pose[12]);
+                std::fflush(stdout);
+            }
             nextInput = after + control.intervalNs();
         }
     }
@@ -163,8 +177,9 @@ static int probe(const std::array<uint8_t, 6>& mac, unsigned seconds) {
 }
 
 int main(int argc, char** argv) {
-    if (argc != 4 || std::strcmp(argv[1], "--probe") != 0) {
-        std::fprintf(stderr, "Usage: %s --probe AUDIO_IDENTITY_MAC SECONDS(1..60)\nCreates a temporary synthetic UHID device only when explicitly invoked.\n", argv[0]);
+    if ((argc != 4 && argc != 5) || std::strcmp(argv[1], "--probe") != 0 ||
+        (argc == 5 && std::strcmp(argv[4], "--synthetic-yaw") != 0)) {
+        std::fprintf(stderr, "Usage: %s --probe AUDIO_IDENTITY_MAC SECONDS(1..60) [--synthetic-yaw]\nCreates a temporary synthetic UHID device only when explicitly invoked; default pose is stationary.\n", argv[0]);
         return 2;
     }
     std::array<uint8_t, 6> mac{};
@@ -175,5 +190,5 @@ int main(int argc, char** argv) {
     if (errno || !argv[3][0] || *end || argv[3][0] == '-' || seconds < 1 || seconds > 60) {
         std::fprintf(stderr, "Duration must be 1..60 seconds.\n"); return 2;
     }
-    return probe(mac, static_cast<unsigned>(seconds));
+    return probe(mac, static_cast<unsigned>(seconds), argc == 5);
 }

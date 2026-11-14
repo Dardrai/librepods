@@ -55,6 +55,7 @@ internal class SpatialMotionCapture(
         try {
             check(device.macAddress.value.equals(request.expectedMac, ignoreCase = true)) { "The requested AirPods do not match." }
             check(isCurrent()) { "The expected AirPods are not connected." }
+            val leftIsPrimary = device.state.value.leftIsPrimary
             check(device.startHeadTracking(owner)) { "Motion capture is unavailable." }
             check(directory.isDirectory || directory.mkdirs()) { "Cannot create the private capture directory." }
             val output = File.createTempFile("${request.phase}-", ".jsonl", directory)
@@ -70,10 +71,13 @@ internal class SpatialMotionCapture(
                     put("duration_seconds", request.durationSeconds)
                     put("model_number", metadata.modelNumber)
                     put("firmware", metadata.version1)
+                    put("left_is_primary", leftIsPrimary)
                     put("started_arrival_ns", startedArrival)
                 }.toString())
                 onFile(output)
                 fun requireCurrent() {
+                    if (device.state.value.leftIsPrimary != leftIsPrimary)
+                        throw CaptureStopped("Stopped: primary bud changed.")
                     if (!isCurrent() || device.state.value.headTrackingState == BuddyState.INACTIVE)
                         throw CaptureStopped("Stopped: connection or motion request ended.")
                 }
