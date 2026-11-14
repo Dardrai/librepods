@@ -263,7 +263,12 @@ tasks.withType<dev.detekt.gradle.DetektCreateBaselineTask>().matching { it.name 
 }
 
 tasks.register("verifyPixel") {
-    dependsOn(":core:testDebugUnitTest", "testDebugUnitTest", "lintDebug", "assembleDebug", "assembleRelease")
+    dependsOn(
+        ":core:testDebugUnitTest", "testDebugUnitTest",
+        ":core:lintDebug", "lintDebug",
+        ":core:detektMain", "detektMain",
+        "assembleDebug", "assembleRelease"
+    )
 }
 
 tasks.withType<Test>().configureEach {
