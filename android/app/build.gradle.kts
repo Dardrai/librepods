@@ -149,6 +149,13 @@ android {
     lint {
         checkDependencies = false
         checkGeneratedSources = false
+        // Existing issues are recorded in lint-baseline.xml; any new warning or error fails.
+        baseline = file("lint-baseline.xml")
+        warningsAsErrors = true
+        abortOnError = true
+        // These depend on what is published upstream, not on the code, so they would fail
+        // unchanged commits whenever a new library version appears.
+        disable += setOf("NewerVersionAvailable", "GradleDependency", "AndroidGradlePluginVersion")
     }
     testOptions {
         unitTests.isIncludeAndroidResources = true
