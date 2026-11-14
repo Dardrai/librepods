@@ -222,8 +222,9 @@ entries:
 ```
 
 Regenerating to absorb new findings is only acceptable for a deliberate tool or
-rule upgrade (new detekt, lint or AGP version), and that change should be its own
-commit so the added entries are visible. detekt baseline entries are keyed by rule,
+rule upgrade (new detekt, lint or AGP version), or right after merging code from
+another repository that does not run these checks. Either way that change should be
+its own commit so the added entries are visible. detekt baseline entries are keyed by rule,
 file, enclosing declaration and a short signature (for caught exceptions, the
 variable name), not by line, so a new identical finding in a function or class
 that already has one can still be masked.

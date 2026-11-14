@@ -84,7 +84,7 @@
         errorLine2="                       ~~~~~~~~~~~~~~~~~~~~">
         <location
             file="build.gradle.kts"
-            line="77"
+            line="93"
             column="24"/>
     </issue>
 

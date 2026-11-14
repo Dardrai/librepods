@@ -279,6 +279,39 @@
     <issue
         id="PrivateApi"
         message="Accessing internal APIs via reflection is not supported and may not work on all devices or in the future"
+        errorLine1="        private val api = Class.forName(&quot;android.media.IAudioService&quot;)"
+        errorLine2="                          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/kotlin/me/kavishdevar/librepods/shizuku/RootHeadTrackerSink.kt"
+            line="201"
+            column="27"/>
+    </issue>
+
+    <issue
+        id="PrivateApi"
+        message="Accessing internal APIs via reflection is not supported and may not work on all devices or in the future"
+        errorLine1="        private val attributes = Class.forName(&quot;android.media.AudioDeviceAttributes&quot;)"
+        errorLine2="                                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/kotlin/me/kavishdevar/librepods/shizuku/RootHeadTrackerSink.kt"
+            line="202"
+            column="34"/>
+    </issue>
+
+    <issue
+        id="PrivateApi"
+        message="Accessing internal APIs via reflection is not supported and may not work on all devices or in the future"
+        errorLine1="        private val service = Class.forName(&quot;android.media.IAudioService\$Stub&quot;)"
+        errorLine2="                              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/kotlin/me/kavishdevar/librepods/shizuku/RootHeadTrackerSink.kt"
+            line="203"
+            column="31"/>
+    </issue>
+
+    <issue
+        id="PrivateApi"
+        message="Accessing internal APIs via reflection is not supported and may not work on all devices or in the future"
         errorLine1="        Class&lt;?> ruleType = Class.forName(PREFIX + &quot;AudioMixingRule&quot;);"
         errorLine2="                            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
         <location
@@ -514,7 +547,7 @@
         errorLine2="                             ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
         <location
             file="src/main/kotlin/me/kavishdevar/librepods/presentation/screens/settings/AppSettingsScreen.kt"
-            line="397"
+            line="363"
             column="30"/>
     </issue>
 
@@ -576,11 +609,33 @@
     <issue
         id="UseCompatLoadingForDrawables"
         message="Use `ContextCompat.getDrawable()`"
+        errorLine1="        view.background = themed.getDrawable(resource)"
+        errorLine2="                          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/kotlin/me/kavishdevar/librepods/presentation/overlays/PopupWindow.kt"
+            line="249"
+            column="27"/>
+    </issue>
+
+    <issue
+        id="UseCompatLoadingForDrawables"
+        message="Use `ContextCompat.getDrawable()`"
+        errorLine1="        view.background = themed.getDrawable(resource)"
+        errorLine2="                          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/kotlin/me/kavishdevar/librepods/presentation/overlays/PopupWindow.kt"
+            line="249"
+            column="27"/>
+    </issue>
+
+    <issue
+        id="UseCompatLoadingForDrawables"
+        message="Use `ContextCompat.getDrawable()`"
         errorLine1="        val track = context.getDrawable(R.drawable.island_battery_progress)!!.mutate().apply {"
         errorLine2="                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
         <location
             file="src/main/kotlin/me/kavishdevar/librepods/presentation/overlays/PopupWindow.kt"
-            line="285"
+            line="329"
             column="21"/>
     </issue>
 
@@ -591,7 +646,7 @@
         errorLine2="                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
         <location
             file="src/main/kotlin/me/kavishdevar/librepods/presentation/overlays/PopupWindow.kt"
-            line="288"
+            line="332"
             column="20"/>
     </issue>
 
@@ -602,7 +657,7 @@
         errorLine2="                                         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
         <location
             file="src/main/kotlin/me/kavishdevar/librepods/presentation/overlays/PopupWindow.kt"
-            line="293"
+            line="337"
             column="42"/>
     </issue>
 
@@ -1127,6 +1182,17 @@
             file="src/main/kotlin/me/kavishdevar/librepods/presentation/overlays/IslandWindow.kt"
             line="135"
             column="31"/>
+    </issue>
+
+    <issue
+        id="AutoboxingStateCreation"
+        message="Prefer `mutableIntStateOf` instead of `mutableStateOf`"
+        errorLine1="    var resumeCount by remember { mutableStateOf(0) }"
+        errorLine2="                                  ~~~~~~~~~~~~~~">
+        <location
+            file="src/main/kotlin/me/kavishdevar/librepods/presentation/screens/onboarding/PermissionsPage.kt"
+            line="109"
+            column="35"/>
     </issue>
 
     <issue
@@ -2586,17 +2652,6 @@
 
     <issue
         id="UnusedResources"
-        message="The resource `R.string.microphone` appears to be unused"
-        errorLine1="    &lt;string name=&quot;microphone&quot;>Microphone&lt;/string>"
-        errorLine2="            ~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/res/values/strings.xml"
-            line="93"
-            column="13"/>
-    </issue>
-
-    <issue
-        id="UnusedResources"
         message="The resource `R.string.customize_transparency_mode` appears to be unused"
         errorLine1="    &lt;string name=&quot;customize_transparency_mode&quot;>Customize Transparency Mode&lt;/string>"
         errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
@@ -3257,6 +3312,28 @@
 
     <issue
         id="UnusedResources"
+        message="The resource `R.string.email` appears to be unused"
+        errorLine1="    &lt;string name=&quot;email&quot;>E-Mail&lt;/string>"
+        errorLine2="            ~~~~~~~~~~~~">
+        <location
+            file="src/main/res/values/strings.xml"
+            line="222"
+            column="13"/>
+    </issue>
+
+    <issue
+        id="UnusedResources"
+        message="The resource `R.string.github_issues` appears to be unused"
+        errorLine1="    &lt;string name=&quot;github_issues&quot;>GitHub Issues&lt;/string>"
+        errorLine2="            ~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/res/values/strings.xml"
+            line="223"
+            column="13"/>
+    </issue>
+
+    <issue
+        id="UnusedResources"
         message="The resource `R.string.bypass_compatiblity_check_confirmation` appears to be unused"
         errorLine1="    &lt;string name=&quot;bypass_compatiblity_check_confirmation&quot;>Are you sure your device is supported natively/you have Xposed module enabled?&lt;/string>"
         errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
@@ -3334,6 +3411,28 @@
 
     <issue
         id="UnusedResources"
+        message="The resource `R.string.subject` appears to be unused"
+        errorLine1="    &lt;string name=&quot;subject&quot;>Subject&lt;/string>"
+        errorLine2="            ~~~~~~~~~~~~~~">
+        <location
+            file="src/main/res/values/strings.xml"
+            line="256"
+            column="13"/>
+    </issue>
+
+    <issue
+        id="UnusedResources"
+        message="The resource `R.string.describe_your_issue` appears to be unused"
+        errorLine1="    &lt;string name=&quot;describe_your_issue&quot;>Describe your issue&lt;/string>"
+        errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/res/values/strings.xml"
+            line="257"
+            column="13"/>
+    </issue>
+
+    <issue
+        id="UnusedResources"
         message="The resource `R.string.reconnecting` appears to be unused"
         errorLine1="    &lt;string name=&quot;reconnecting&quot;>Reconnecting&lt;/string>"
         errorLine2="            ~~~~~~~~~~~~~~~~~~~">
@@ -3367,12 +3466,34 @@
 
     <issue
         id="UnusedResources"
+        message="The resource `R.string.contact_email_supporting_text` appears to be unused"
+        errorLine1="    &lt;string name=&quot;contact_email_supporting_text&quot;>Get help directly from the developer. Might take time to reply, I\&apos;m a single person working on this :)&lt;/string>"
+        errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/res/values/strings.xml"
+            line="287"
+            column="13"/>
+    </issue>
+
+    <issue
+        id="UnusedResources"
+        message="The resource `R.string.contact_github_supporting_text` appears to be unused"
+        errorLine1="    &lt;string name=&quot;contact_github_supporting_text&quot;>Create an issue on the GitHub repository. Use this only when you are requesting features, or you are sure that you\&apos;ve found a bug. Try asking the community before opening an issue.&lt;/string>"
+        errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/res/values/strings.xml"
+            line="290"
+            column="13"/>
+    </issue>
+
+    <issue
+        id="UnusedResources"
         message="The resource `R.string.ble_report_delay_description` appears to be unused"
         errorLine1="    &lt;string name=&quot;ble_report_delay_description&quot;>Any value greater than 0 enables batching.&lt;/string>"
         errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
         <location
             file="src/main/res/values/strings.xml"
-            line="300"
+            line="302"
             column="13"/>
     </issue>
 
@@ -3383,7 +3504,7 @@
         errorLine2="            ~~~~~~~~~~~~~~~">
         <location
             file="src/main/res/values/strings.xml"
-            line="302"
+            line="304"
             column="13"/>
     </issue>
 
@@ -3394,7 +3515,7 @@
         errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
         <location
             file="src/main/res/values/strings.xml"
-            line="303"
+            line="305"
             column="13"/>
     </issue>
 
@@ -3405,7 +3526,7 @@
         errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~~~~">
         <location
             file="src/main/res/values/strings.xml"
-            line="304"
+            line="306"
             column="13"/>
     </issue>
 
@@ -3416,7 +3537,7 @@
         errorLine2="            ~~~~~~~~~~~~~~~~~">
         <location
             file="src/main/res/values/strings.xml"
-            line="305"
+            line="307"
             column="13"/>
     </issue>
 
@@ -3427,7 +3548,7 @@
         errorLine2="            ~~~~~~~~~~~~~~~~~">
         <location
             file="src/main/res/values/strings.xml"
-            line="306"
+            line="308"
             column="13"/>
     </issue>
 
@@ -3438,7 +3559,7 @@
         errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
         <location
             file="src/main/res/values/strings.xml"
-            line="322"
+            line="324"
             column="13"/>
     </issue>
 
@@ -3449,7 +3570,7 @@
         errorLine2="            ~~~~~~~~~~">
         <location
             file="src/main/res/values/strings.xml"
-            line="337"
+            line="339"
             column="13"/>
     </issue>
 
@@ -3460,7 +3581,7 @@
         errorLine2="            ~~~~~~~~~~~~~~~~~">
         <location
             file="src/main/res/values/strings.xml"
-            line="342"
+            line="344"
             column="13"/>
     </issue>
 
@@ -3471,7 +3592,7 @@
         errorLine2="            ~~~~~~~~~~~~~~~~~">
         <location
             file="src/main/res/values/strings.xml"
-            line="343"
+            line="345"
             column="13"/>
     </issue>
 
@@ -3482,7 +3603,7 @@
         errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~~~~~~">
         <location
             file="src/main/res/values/strings.xml"
-            line="434"
+            line="436"
             column="13"/>
     </issue>
 
@@ -3493,7 +3614,7 @@
         errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
         <location
             file="src/main/res/values/strings.xml"
-            line="479"
+            line="481"
             column="13"/>
     </issue>
 
@@ -3504,7 +3625,7 @@
         errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~~~~~~">
         <location
             file="src/main/res/values/strings.xml"
-            line="483"
+            line="485"
             column="13"/>
     </issue>
 
@@ -3515,7 +3636,7 @@
         errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~~~~~">
         <location
             file="src/main/res/values/strings.xml"
-            line="484"
+            line="486"
             column="13"/>
     </issue>
 
@@ -3526,7 +3647,7 @@
         errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
         <location
             file="src/main/res/values/strings.xml"
-            line="485"
+            line="487"
             column="13"/>
     </issue>
 
@@ -3822,7 +3943,7 @@
         errorLine2="                                        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
         <location
             file="src/main/kotlin/me/kavishdevar/librepods/presentation/overlays/PairingArtwork.kt"
-            line="136"
+            line="144"
             column="41"/>
     </issue>
 
@@ -3844,7 +3965,7 @@
         errorLine2="                             ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
         <location
             file="src/main/kotlin/me/kavishdevar/librepods/presentation/overlays/PopupWindow.kt"
-            line="333"
+            line="377"
             column="30"/>
     </issue>
 
@@ -3855,7 +3976,7 @@
         errorLine2="                               ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
         <location
             file="src/main/kotlin/me/kavishdevar/librepods/presentation/overlays/PopupWindow.kt"
-            line="334"
+            line="378"
             column="32"/>
     </issue>
 
@@ -3877,7 +3998,7 @@
         errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~">
         <location
             file="src/main/kotlin/me/kavishdevar/librepods/shizuku/ShizukuAudioClient.kt"
-            line="89"
+            line="93"
             column="13"/>
     </issue>
 
