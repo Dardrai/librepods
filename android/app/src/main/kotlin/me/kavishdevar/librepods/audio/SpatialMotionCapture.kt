@@ -23,7 +23,6 @@ import me.kavishdevar.librepods.core.utils.HeadTracking
 import java.io.File
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
-import org.json.JSONArray
 import org.json.JSONObject
 
 internal data class SpatialMotionCaptureRequest(val expectedMac: String, val phase: String, val durationSeconds: Int = 10) {
@@ -105,17 +104,7 @@ internal class SpatialMotionCapture(
                                 val arrived = arrivalNs()
                                 check(arrived > previousArrival) { "Host arrival clock must be positive and increasing." }
                                 previousArrival = arrived
-                                writer.appendLine(JSONObject().apply {
-                                    put("type", "sample")
-                                    put("arrival_ns", arrived)
-                                    put("report", JSONObject()
-                                        .put("timestamp_ns", report.timestampNs ?: JSONObject.NULL)
-                                        .put("attitude_q15", JSONArray(report.attitudeQ15))
-                                        .put("gyro_raw", JSONArray(report.gyroRaw))
-                                        .put("user_acceleration_raw", JSONArray(report.userAccelerationRaw))
-                                        .put("gravity_raw", JSONArray(report.gravityRaw))
-                                        .put("counter", report.counter ?: JSONObject.NULL))
-                                }.toString())
+                                writer.appendLine(motionCaptureSample(report, arrived).toString())
                                 samples++
                             }
                         } finally { guard.cancel() }

@@ -8,6 +8,14 @@ import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.sqrt
 
+internal enum class SpatialCalibrationFailure {
+    INSUFFICIENT_SAMPLES, SENSOR_TIME_CHANGED, SENSOR_COUNTER_CHANGED, UNSUPPORTED_ATTITUDE,
+    NEUTRAL_UNSTEADY, RETURN_UNSTEADY, RETURN_NOT_NEUTRAL, NEUTRAL_GRAVITY_INVALID,
+    RETURN_GRAVITY_INVALID, UP_TOO_SMALL, UP_AXIS_NOT_HORIZONTAL, UP_AXIS_INCONSISTENT, INVALID_BASIS,
+}
+
+internal data class SpatialCalibrationResult(val profile: SpatialPoseProfile?, val failure: SpatialCalibrationFailure?)
+
 /** Explicit, session-specific anatomical axes. Rows map raw-body vectors to right/front/up. */
 internal class SpatialPoseProfile private constructor(val headFromRaw: List<List<Double>>,
     internal val referenceTimestampNs: Long? = null, internal val referenceCounter: Long? = null) {
@@ -25,36 +33,45 @@ internal class SpatialPoseProfile private constructor(val headFromRaw: List<List
          * The settled final 500 ms of neutral/return validate world +Z as up in this sensor session.
          * UP gravity is intentionally unused: it can lag the attitude during movement.
          */
-        fun calibrate(neutral: List<MotionReport>, up: List<MotionReport>, returned: List<MotionReport>): SpatialPoseProfile? {
+        fun calibrate(neutral: List<MotionReport>, up: List<MotionReport>, returned: List<MotionReport>): SpatialPoseProfile? =
+            calibrateResult(neutral, up, returned).profile
+
+        fun calibrateResult(neutral: List<MotionReport>, up: List<MotionReport>, returned: List<MotionReport>): SpatialCalibrationResult {
+            fun failed(reason: SpatialCalibrationFailure) = SpatialCalibrationResult(null, reason)
             val ready = neutral.dropWhile { it.attitudeQ15.all { n -> n == 0 } }
-            if (ready.size < 5 || returned.size < 5 || up.size < 3) return null
+            if (ready.size < 5 || returned.size < 5 || up.size < 3) return failed(SpatialCalibrationFailure.INSUFFICIENT_SAMPLES)
             val all = ready + up + returned
-            if (all.zipWithNext().any { (a, b) ->
-                    val before = a.timestampNs; val after = b.timestampNs
-                    before == null || after == null || before <= 0 || after <= before || !counterFollows(a.counter, b.counter)
-                }) return null
-            val quaternions = all.map { attitude(it) ?: return null }
+            for ((a, b) in all.zipWithNext()) {
+                val before = a.timestampNs; val after = b.timestampNs
+                if (before == null || after == null || before <= 0 || after <= before)
+                    return failed(SpatialCalibrationFailure.SENSOR_TIME_CHANGED)
+                if (!counterFollows(a.counter, b.counter)) return failed(SpatialCalibrationFailure.SENSOR_COUNTER_CHANGED)
+            }
+            val quaternions = all.map { attitude(it) ?: return failed(SpatialCalibrationFailure.UNSUPPORTED_ATTITUDE) }
             val neutralTail = settledTail(ready); val returnTail = settledTail(returned)
-            if (neutralTail.size < 5 || returnTail.size < 5) return null
-            val base = meanHold(neutralTail.map { checkNotNull(attitude(it)) }) ?: return null
-            val finish = meanHold(returnTail.map { checkNotNull(attitude(it)) }) ?: return null
-            if ((base.inverse() * finish).rotationVector().norm() > radians(5.0)) return null
-            if (!levelGravity(neutralTail, base) || !levelGravity(returnTail, finish)) return null
+            if (neutralTail.size < 5 || returnTail.size < 5) return failed(SpatialCalibrationFailure.INSUFFICIENT_SAMPLES)
+            val base = meanHold(neutralTail.map { checkNotNull(attitude(it)) })
+                ?: return failed(SpatialCalibrationFailure.NEUTRAL_UNSTEADY)
+            val finish = meanHold(returnTail.map { checkNotNull(attitude(it)) })
+                ?: return failed(SpatialCalibrationFailure.RETURN_UNSTEADY)
+            if ((base.inverse() * finish).rotationVector().norm() > radians(5.0)) return failed(SpatialCalibrationFailure.RETURN_NOT_NEUTRAL)
+            if (!levelGravity(neutralTail, base)) return failed(SpatialCalibrationFailure.NEUTRAL_GRAVITY_INVALID)
+            if (!levelGravity(returnTail, finish)) return failed(SpatialCalibrationFailure.RETURN_GRAVITY_INVALID)
             val z = base.inverse().rotate(V(0.0, 0.0, 1.0))
             val axes = quaternions.drop(ready.size).take(up.size).mapNotNull { q ->
                 val delta = (base.inverse() * q).rotationVector()
                 val angle = delta.norm()
                 if (angle < radians(8.0)) return@mapNotNull null
                 val horizontal = delta - z * delta.dot(z)
-                if (horizontal.norm() / angle < cos(radians(10.0))) return null
+                if (horizontal.norm() / angle < cos(radians(10.0))) return failed(SpatialCalibrationFailure.UP_AXIS_NOT_HORIZONTAL)
                 horizontal.unit()
             }
-            if (axes.size < 3) return null
+            if (axes.size < 3) return failed(SpatialCalibrationFailure.UP_TOO_SMALL)
             val x = axes.reduce(V::plus).unit()
-            if (axes.any { angleBetween(it, x) > radians(5.0) }) return null
+            if (axes.any { angleBetween(it, x) > radians(5.0) }) return failed(SpatialCalibrationFailure.UP_AXIS_INCONSISTENT)
             val y = z.cross(x).unit()
-            val basis = fromBasis(listOf(x.list(), y.list(), z.list())) ?: return null
-            return SpatialPoseProfile(basis.headFromRaw, returned.last().timestampNs, returned.last().counter)
+            val basis = fromBasis(listOf(x.list(), y.list(), z.list())) ?: return failed(SpatialCalibrationFailure.INVALID_BASIS)
+            return SpatialCalibrationResult(SpatialPoseProfile(basis.headFromRaw, returned.last().timestampNs, returned.last().counter), null)
         }
 
         private fun meanHold(values: List<Q>): Q? {

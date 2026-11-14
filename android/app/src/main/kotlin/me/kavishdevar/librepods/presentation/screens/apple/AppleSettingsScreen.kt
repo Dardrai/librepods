@@ -46,8 +46,10 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.kyant.backdrop.backdrops.rememberLayerBackdrop
 import me.kavishdevar.librepods.R
+import me.kavishdevar.librepods.BuildConfig
 import me.kavishdevar.librepods.bluetooth.DeviceSettingsRefreshResult
 import me.kavishdevar.librepods.core.devices.AppleDevice
+import me.kavishdevar.librepods.core.devices.AirPodsModel
 import me.kavishdevar.librepods.core.devices.effectiveControl
 import me.kavishdevar.librepods.core.devices.legacyEndCallSinglePress
 import me.kavishdevar.librepods.core.devices.supportsCallControls
@@ -71,6 +73,7 @@ import me.kavishdevar.librepods.presentation.components.apple.PressAndHoldSettin
 import me.kavishdevar.librepods.presentation.components.primitives.StyledButton
 import me.kavishdevar.librepods.presentation.components.primitives.StyledListItem
 import me.kavishdevar.librepods.presentation.components.primitives.StyledListScope
+import me.kavishdevar.librepods.presentation.components.primitives.styledListItem
 import me.kavishdevar.librepods.presentation.components.primitives.StyledListItemOrientation
 import me.kavishdevar.librepods.presentation.components.primitives.StyledScaffold
 import me.kavishdevar.librepods.presentation.components.primitives.StyledToggle
@@ -101,12 +104,14 @@ fun AppleSettingsRoute(
     navigateToMicrophoneSettings: () -> Unit,
     navigateToRecordingScreen: () -> Unit,
     navigateToDebugScreen: () -> Unit,
-    navigateToHeartRateScreen: () -> Unit
+    navigateToHeartRateScreen: () -> Unit,
+    navigateToSpatialCalibration: () -> Unit = {},
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val gameMode by (viewModel.gameModeController?.state ?:
         remember { MutableStateFlow(NativeGameModeController.State()) }).collectAsState()
     val spatialSupported = supportsNativeSpatialAudio()
+    val calibrationSupported = BuildConfig.DEBUG && uiState.metadata.model == AirPodsModel.AIRPODS_PRO_3
 
     AppleSettingsScreen(
         uiState = uiState,
@@ -141,7 +146,14 @@ fun AppleSettingsRoute(
         navigateToHeartRateScreen = navigateToHeartRateScreen,
         navigateToDebugScreen = navigateToDebugScreen,
         gameMode = gameMode,
-        spatialAudioContent = if (spatialSupported) ({ NativeSpatialAudioSetting(viewModel) }) else null,
+        spatialAudioContent = if (spatialSupported) ({
+            NativeSpatialAudioSetting(viewModel)
+            if (calibrationSupported) {
+                styledListItem(contentText = stringResource(R.string.spatial_calibration_title),
+                    supportingText = stringResource(R.string.spatial_calibration_entry_description),
+                    orientation = StyledListItemOrientation.Vertical, onClick = navigateToSpatialCalibration)
+            }
+        }) else null,
     )
 }
 

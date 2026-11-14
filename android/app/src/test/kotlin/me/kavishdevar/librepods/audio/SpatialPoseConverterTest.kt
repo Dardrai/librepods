@@ -74,6 +74,41 @@ class SpatialPoseConverterTest {
         }
     }
 
+    @Test fun calibrationResultPreservesSuccessAndIdentifiesInputContinuityFailures() {
+        val p = phases()
+        val success = SpatialPoseProfile.calibrateResult(p.first, p.second, p.third)
+        assertNull(success.failure)
+        assertEquals(checkNotNull(calibrate()).headFromRaw, checkNotNull(success.profile).headFromRaw)
+        rejected(SpatialCalibrationFailure.INSUFFICIENT_SAMPLES, p.copy(first = p.first.take(4)))
+        rejected(SpatialCalibrationFailure.SENSOR_TIME_CHANGED,
+            p.copy(second = listOf(p.second.first().copy(timestampNs = p.first.last().timestampNs)) + p.second.drop(1)))
+        rejected(SpatialCalibrationFailure.SENSOR_COUNTER_CHANGED,
+            p.copy(second = listOf(p.second.first().copy(counter = 0)) + p.second.drop(1)))
+        rejected(SpatialCalibrationFailure.UNSUPPORTED_ATTITUDE,
+            p.copy(second = listOf(p.second.first().copy(attitudeQ15 = listOf(32767, 0, 0))) + p.second.drop(1)))
+    }
+
+    @Test fun calibrationResultDistinguishesHoldReturnGravityAndUpFailures() {
+        val p = phases()
+        fun moved(first: MotionReport) = report((neutral * axis(1.0, 0.0, 0.0, 8.0)) * mount.inverse(), first.timestampNs!!)
+        rejected(SpatialCalibrationFailure.NEUTRAL_UNSTEADY,
+            p.copy(first = listOf(moved(p.first.first())) + p.first.drop(1)))
+        rejected(SpatialCalibrationFailure.RETURN_UNSTEADY,
+            p.copy(third = listOf(moved(p.third.first())) + p.third.drop(1)))
+        rejected(SpatialCalibrationFailure.RETURN_NOT_NEUTRAL,
+            phases(returnHead = neutral * axis(1.0, 0.0, 0.0, 10.0)))
+        rejected(SpatialCalibrationFailure.NEUTRAL_GRAVITY_INVALID,
+            p.copy(first = p.first.map { it.copy(gravityRaw = listOf(0, 0, 0)) }))
+        rejected(SpatialCalibrationFailure.RETURN_GRAVITY_INVALID,
+            p.copy(third = p.third.map { it.copy(gravityRaw = listOf(0, 0, 0)) }))
+        rejected(SpatialCalibrationFailure.UP_TOO_SMALL,
+            phases(upHead = neutral * axis(1.0, 0.0, 0.0, 7.0)))
+        rejected(SpatialCalibrationFailure.UP_AXIS_NOT_HORIZONTAL,
+            phases(upHead = neutral * axis(0.0, 0.0, 1.0, 25.0)))
+        val sideways = report((neutral * axis(0.0, 1.0, 0.0, 25.0)) * mount.inverse(), p.second.first().timestampNs!!)
+        rejected(SpatialCalibrationFailure.UP_AXIS_INCONSISTENT, p.copy(second = listOf(sideways) + p.second.drop(1)))
+    }
+
     @Test fun calibrationRejectsReversedTiltedZeroOrUnstableNeutralAndReturnGravity() {
         val phases = phases()
         for (direction in listOf(listOf(0.0, 0.0, 1.0),
@@ -188,6 +223,12 @@ class SpatialPoseConverterTest {
         returnHead: TQ = neutral): SpatialPoseProfile? {
         val p = phases(rawFromHead, upHead, returnHead)
         return SpatialPoseProfile.calibrate(p.first, p.second, p.third)
+    }
+    private fun rejected(reason: SpatialCalibrationFailure,
+        p: Triple<List<MotionReport>, List<MotionReport>, List<MotionReport>>) {
+        val result = SpatialPoseProfile.calibrateResult(p.first, p.second, p.third)
+        assertEquals(reason, result.failure); assertNull(result.profile)
+        assertNull(SpatialPoseProfile.calibrate(p.first, p.second, p.third))
     }
     private fun phases(rawFromHead: TQ = mount, upHead: TQ = neutral * axis(1.0, 0.0, 0.0, 25.0),
         returnHead: TQ = neutral): Triple<List<MotionReport>, List<MotionReport>, List<MotionReport>> {

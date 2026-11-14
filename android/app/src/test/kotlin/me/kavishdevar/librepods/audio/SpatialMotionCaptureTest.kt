@@ -75,9 +75,12 @@ class SpatialMotionCaptureTest {
         assertEquals("A3063", lines.first().getString("model_number"))
         assertEquals(1_000L, lines.first().getLong("started_arrival_ns"))
         for ((index, line) in lines.drop(1).withIndex()) {
+            assertEquals(setOf("type", "arrival_ns", "report"), line.keys().asSequence().toSet())
             assertEquals("sample", line.getString("type"))
             assertEquals(1_001L + index, line.getLong("arrival_ns"))
             val raw = line.getJSONObject("report")
+            assertEquals(setOf("timestamp_ns", "attitude_q15", "gyro_raw", "user_acceleration_raw",
+                "gravity_raw", "counter"), raw.keys().asSequence().toSet())
             val expected = report(index.toLong())
             assertEquals(12_000_000L + index, raw.getLong("timestamp_ns"))
             assertEquals(index.toLong(), raw.getLong("counter"))

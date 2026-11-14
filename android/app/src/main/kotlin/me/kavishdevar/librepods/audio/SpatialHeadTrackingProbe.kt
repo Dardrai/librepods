@@ -8,6 +8,7 @@ import android.os.SystemClock
 import android.system.Os
 import android.system.OsConstants
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -34,8 +35,12 @@ import me.kavishdevar.librepods.core.devices.AppleDevice
 import me.kavishdevar.librepods.core.utils.HeadTracking
 import me.kavishdevar.librepods.shizuku.HeadTrackerUhidProtocol
 import me.kavishdevar.librepods.shizuku.ShizukuAudioClient
+import java.io.File
+import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import org.json.JSONArray
+import org.json.JSONObject
 
 internal data class SpatialHeadTrackingProbeRequest(val expectedMac: String, val durationSeconds: Int = 30) {
     init {
@@ -44,16 +49,20 @@ internal data class SpatialHeadTrackingProbeRequest(val expectedMac: String, val
     }
 }
 
-internal data class SpatialHeadTrackingProbeResult(val reason: String, val poses: Int, val cleanup: Bundle?)
+internal enum class SpatialCalibrationStage { PREPARING, NEUTRAL, LOOK_UP, RETURN, READY }
+internal data class SpatialCalibrationProgress(val stage: SpatialCalibrationStage, val secondsRemaining: Int)
+internal data class SpatialHeadTrackingProbeResult(val reason: String, val poses: Int, val cleanup: Bundle?,
+    val calibrated: Boolean = false, val calibrationFailure: SpatialCalibrationFailure? = null, val captureFile: File? = null)
 
-/** Explicit, foreground DEBUG proof. Calibration is never persisted or reused after a bud handover. */
+/** Explicit foreground DEBUG proof. Its profile is never persisted or reused after a bud handover. */
 internal class SpatialHeadTrackingProbe(
     private val context: Context,
     private val motion: Flow<MotionReport?> = HeadTracking.motion,
+    private val dispatcher: CoroutineDispatcher = Dispatchers.Default,
     private val client: () -> ShizukuAudioClient = { ShizukuAudioClient(context, requireRoot = true) },
 ) {
     suspend fun run(request: SpatialHeadTrackingProbeRequest, device: AppleDevice, isCurrent: () -> Boolean,
-        onStatus: (String) -> Unit): SpatialHeadTrackingProbeResult = withContext(Dispatchers.Default) {
+        onStatus: (String) -> Unit = {}, onProgress: (SpatialCalibrationProgress) -> Unit = {}): SpatialHeadTrackingProbeResult = withContext(dispatcher) {
         val live = AtomicBoolean(true)
         val owner = Any()
         val submitted = AtomicInteger()
@@ -62,27 +71,48 @@ internal class SpatialHeadTrackingProbe(
         var pipe: Array<ParcelFileDescriptor>? = null
         var cleanup: Bundle? = null
         var reason = "stopped"
+        var diagnosticReason = "stopped"
+        var calibrated = false
+        var calibrationFailure: SpatialCalibrationFailure? = null
+        var captureFile: File? = null
+        var captureHeader: JSONObject? = null
+        val sampleLock = Any()
+        val samples = Array(3) { mutableListOf<Pair<MotionReport, Long>>() }
         try {
-            check(BuildConfig.DEBUG) { "Debug build required." }
-            check(device.macAddress.value.equals(request.expectedMac, true) && isCurrent()) { "The expected AirPods are not connected." }
-            check(device.metadata.value.model == AirPodsModel.AIRPODS_PRO_3) { "This measured motion format is for AirPods Pro 3." }
-            val role = device.state.value.budRoleRaw.firstOrNull()
-            check(role == 1 || role == 2) { "Waiting for the current bud role. No probe started." }
-            fun current() = live.get() && isCurrent() && device.state.value.budRoleRaw.firstOrNull() == role
-            fun requireCurrent() {
-                check(current() && device.state.value.headTrackingState != BuddyState.INACTIVE) { "Connection, bud role or motion stream changed." }
-            }
-            check(!device.settings.value.headTrackingIntervalConfigured ||
-                device.settings.value.headTrackingInterval.inWholeMilliseconds <= 40) { "The saved motion interval is too slow for head tracking." }
-            val bridge = client().also { access = it; it.connect() }
-            withTimeout(5_000) { bridge.state.first { it.connected && bridge.hasRootPrivileges } }
-            val initial = bridge.inspectSpatialAudio(request.expectedMac, ::current)
-            check(initial.getBoolean("device_enabled") && initial.getBoolean("enabled")) { "Enable Fixed Spatial Audio first." }
-            check(device.startHeadTracking(owner)) { "Motion capture is unavailable." }
-            withTimeout(45_000) {
+            withTimeout(55_000) {
+                check(BuildConfig.DEBUG) { "Debug build required." }
+                check(device.macAddress.value.equals(request.expectedMac, true) && isCurrent()) { "The expected AirPods are not connected." }
+                check(device.metadata.value.model == AirPodsModel.AIRPODS_PRO_3) { "This measured motion format is for AirPods Pro 3." }
+                val roleRaw = device.state.value.budRoleRaw.toList()
+                val role = roleRaw.firstOrNull()
+                val leftIsPrimary = device.state.value.leftIsPrimary
+                check(role == 1 || role == 2) { "Waiting for the current bud role. No probe started." }
+                fun current() = live.get() && isCurrent() && device.state.value.budRoleRaw.firstOrNull() == role
+                fun requireCurrent() {
+                    check(current() && device.state.value.headTrackingState != BuddyState.INACTIVE) { "Connection, bud role or motion stream changed." }
+                }
+                check(!device.settings.value.headTrackingIntervalConfigured ||
+                    device.settings.value.headTrackingInterval.inWholeMilliseconds <= 40) { "The saved motion interval is too slow for head tracking." }
+                onProgress(SpatialCalibrationProgress(SpatialCalibrationStage.PREPARING, 0))
+                val bridge = client().also { access = it; it.connect() }
+                withTimeout(5_000) { bridge.state.first { it.connected && bridge.hasRootPrivileges } }
+                val initial = bridge.inspectSpatialAudio(request.expectedMac, ::current)
+                check(initial.getBoolean("device_enabled") && initial.getBoolean("enabled")) { "spatial_disabled" }
+                check(device.startHeadTracking(owner)) { "Motion capture is unavailable." }
+                val metadata = device.metadata.value
+                var previousArrival = SystemClock.elapsedRealtimeNanos()
+                captureHeader = JSONObject().apply {
+                    put("type", "capture"); put("expected_mac", request.expectedMac.uppercase(Locale.ROOT))
+                    put("phase", "head_tracking_calibration"); put("duration_seconds", 13)
+                    put("model_number", metadata.modelNumber); put("firmware", metadata.version1)
+                    put("model", metadata.model.name); put("known_role", role)
+                    put("bud_role_raw", JSONArray(roleRaw))
+                    put("left_is_primary", leftIsPrimary)
+                    put("started_arrival_ns", previousArrival)
+                    put("phase_seconds", JSONObject().put("neutral", 3).put("look_up", 5).put("return", 5))
+                    put("max_samples_per_phase", MAX_PHASE_SAMPLES)
+                }
                 coroutineScope {
-                    val samples = Array(3) { mutableListOf<MotionReport>() }
-                    val sampleLock = Any()
                     var phase = 0
                     var converter: SpatialPoseConverter? = null
                     var previousCounter: Long? = null
@@ -98,10 +128,12 @@ internal class SpatialHeadTrackingProbe(
                             if (report.counter != null && report.counter == previousCounter) return@collect
                             previousCounter = report.counter
                             val arrived = SystemClock.elapsedRealtimeNanos()
+                            check(arrived > 0 && arrived > previousArrival) { "Host arrival clock changed." }
+                            previousArrival = arrived
                             synchronized(sampleLock) {
                                 if (phase < 3) {
-                                    check(samples[phase].size < 500) { "Calibration sample limit reached." }
-                                    samples[phase] += report
+                                    check(samples[phase].size < MAX_PHASE_SAMPLES) { "Calibration sample limit reached." }
+                                    samples[phase] += report to arrived
                                 } else {
                                     val source = checkNotNull(converter)
                                     source.accept(report)?.let { latest.value = it to arrived }
@@ -112,22 +144,32 @@ internal class SpatialHeadTrackingProbe(
                     }
                     var writer: kotlinx.coroutines.Job? = null
                     try {
-                        onStatus("Hold your head level and face forward.")
-                        delay(2_000)
-                        synchronized(sampleLock) { phase = 1 }
-                        onStatus("Slowly look UP, then return to level.")
-                        delay(3_000)
-                        synchronized(sampleLock) { phase = 2 }
-                        onStatus("Hold level and face forward again.")
-                        delay(2_000)
+                        suspend fun countdown(stage: SpatialCalibrationStage, index: Int, seconds: Int, instruction: String) {
+                            synchronized(sampleLock) { phase = index }
+                            for (remaining in seconds downTo 1) {
+                                requireCurrent()
+                                onProgress(SpatialCalibrationProgress(stage, remaining))
+                                onStatus("$instruction\n$remaining seconds remaining.")
+                                delay(1_000)
+                            }
+                        }
+                        countdown(SpatialCalibrationStage.NEUTRAL, 0, 3, "Hold your head still, level and facing forward.")
+                        countdown(SpatialCalibrationStage.LOOK_UP, 1, 5, "Slowly look UP, then hold that position.")
+                        countdown(SpatialCalibrationStage.RETURN, 2, 5, "Return to your starting position and hold still.")
                         synchronized(sampleLock) {
-                            val profile = SpatialPoseProfile.calibrate(samples[0], samples[1], samples[2])
-                            check(profile != null) { "Calibration was not steady or the UP direction was unclear. No head tracking enabled." }
+                            val result = SpatialPoseProfile.calibrateResult(samples[0].map { it.first },
+                                samples[1].map { it.first }, samples[2].map { it.first })
+                            calibrationFailure = result.failure
+                            val profile = result.profile
+                            check(profile != null) { "calibration_rejected" }
                             converter = SpatialPoseConverter(profile, 0)
+                            calibrated = true
                             phase = 3
                         }
+                        onStatus("Calibration accepted. Preparing Android's head-tracking sensor…")
+                        onProgress(SpatialCalibrationProgress(SpatialCalibrationStage.PREPARING, 0))
                         // Keep this one motion owner across calibration and proof; restarting may reset its reference.
-                        withTimeout(1_000) { latest.filterNotNull().first() }
+                        withTimeout(3_000) { latest.filterNotNull().first() }
                         pipe = ParcelFileDescriptor.createPipe()
                         val output = checkNotNull(pipe)[1].fileDescriptor
                         Os.fcntlInt(output, OsConstants.F_SETFL, Os.fcntlInt(output, OsConstants.F_GETFL, 0) or OsConstants.O_NONBLOCK)
@@ -146,31 +188,78 @@ internal class SpatialHeadTrackingProbe(
                                     submitted.incrementAndGet()
                                 }
                         }
-                        onStatus("Calibration accepted. Preparing Android's head-tracking sensor…")
                         lease = bridge.startHeadTrackerProbe(request.expectedMac, checkNotNull(pipe)[0], request.durationSeconds,
                             ::current, { enabled, _ -> reporting.value = enabled }, { stopped.complete(it) })
                         onStatus("Head-tracking sensor ready for ${request.durationSeconds} seconds.\nKeep this screen open. Audio is started separately.")
+                        onProgress(SpatialCalibrationProgress(SpatialCalibrationStage.READY, request.durationSeconds))
                         reason = withTimeoutOrNull(request.durationSeconds * 1_000L) { stopped.await() } ?: "duration_complete"
+                        diagnosticReason = reason
                     } finally {
                         guard.cancel(); reader.cancel(); writer?.cancel()
                     }
                 }
             }
         } catch (_: TimeoutCancellationException) {
-            reason = "Diagnostic deadline reached."
+            diagnosticReason = "deadline"
+            reason = "Motion data took too long. Keep your AirPods connected and try again."
         } catch (cancelled: CancellationException) {
+            diagnosticReason = "cancelled"
+            reason = "Calibration stopped."
             throw cancelled
         } catch (error: Exception) {
-            reason = error.message ?: "Head-tracking probe failed."
+            diagnosticReason = error.message ?: "probe_failed"
+            reason = calibrationFailure?.let(::calibrationMessage) ?: when {
+                diagnosticReason.startsWith("Motion reference changed:") -> "Motion changed unexpectedly. Keep your AirPods in place and try again."
+                else -> error.message ?: "Head tracking could not start. Keep your AirPods connected and try again."
+            }
         } finally {
             live.set(false)
             withContext(NonCancellable + Dispatchers.IO) {
                 cleanup = runCatching { lease?.finish() }.getOrNull()
                 pipe?.forEach { runCatching { it.close() } }
                 runCatching { device.stopHeadTracking(owner) }
-                access?.close()
+                runCatching { access?.close() }
+                captureHeader?.let { header ->
+                    captureFile = runCatching {
+                        val directory = File(checkNotNull(context.filesDir), "spatial-head-tracker-calibrations")
+                        check(directory.isDirectory || directory.mkdirs())
+                        File.createTempFile("calibration-", ".jsonl", directory).also { output ->
+                            output.bufferedWriter().use { writer ->
+                                writer.appendLine(header.toString())
+                                synchronized(sampleLock) {
+                                    samples.forEachIndexed { index, phaseSamples ->
+                                        phaseSamples.forEach { (report, arrival) ->
+                                            writer.appendLine(motionCaptureSample(report, arrival)
+                                                .put("calibration_phase", PHASE_NAMES[index]).toString())
+                                        }
+                                    }
+                                }
+                                writer.appendLine(JSONObject().put("type", "calibration_result")
+                                    .put("calibrated", calibrated).put("calibration_failure", calibrationFailure?.name ?: JSONObject.NULL)
+                                    .put("reason", diagnosticReason).put("poses", submitted.get())
+                                    .put("ended_bud_role_raw", JSONArray(device.state.value.budRoleRaw)).toString())
+                            }
+                        }
+                    }.getOrNull()
+                }
             }
         }
-        SpatialHeadTrackingProbeResult(reason, submitted.get(), cleanup)
+        SpatialHeadTrackingProbeResult(reason, submitted.get(), cleanup, calibrated, calibrationFailure, captureFile)
+    }
+
+    private fun calibrationMessage(failure: SpatialCalibrationFailure): String = when (failure) {
+        SpatialCalibrationFailure.NEUTRAL_UNSTEADY, SpatialCalibrationFailure.NEUTRAL_GRAVITY_INVALID ->
+            "Hold your head still and level at the start, then try again."
+        SpatialCalibrationFailure.RETURN_UNSTEADY, SpatialCalibrationFailure.RETURN_NOT_NEUTRAL,
+        SpatialCalibrationFailure.RETURN_GRAVITY_INVALID -> "Return to your starting position and hold still until calibration finishes."
+        SpatialCalibrationFailure.UP_TOO_SMALL -> "Look a little farther up, then return to your starting position."
+        SpatialCalibrationFailure.UP_AXIS_NOT_HORIZONTAL, SpatialCalibrationFailure.UP_AXIS_INCONSISTENT,
+        SpatialCalibrationFailure.INVALID_BASIS -> "Look straight up without turning sideways, then return to level."
+        else -> "Not enough steady motion data. Keep your AirPods connected and try again."
+    }
+
+    companion object {
+        private const val MAX_PHASE_SAMPLES = 1000
+        private val PHASE_NAMES = listOf("neutral", "look_up", "return")
     }
 }

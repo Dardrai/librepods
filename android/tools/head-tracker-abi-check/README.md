@@ -148,19 +148,26 @@ separate from motion-format/calibration tests.
 
 ## Foreground real-motion DEBUG proof
 
-The nonexported `TestActivity` accepts one explicit `spatial_head_tracking_probe`
-intent with an exact `expected_mac` and `duration_seconds` from5–30. Both the app
-controller and root service require a DEBUG build. A recreated activity, service
-reconnection or later resume cannot replay the request. Closing the screen stops
-the source and finishes its root lease. Nothing runs from normal app startup.
+The DEBUG preview opens from AirPods → Audio → Head Tracking. The normal
+`StyledScaffold` handles system bars and the camera cutout. An explicit Start
+begins three seconds facing forward, five seconds looking up and holding, then
+five seconds returning to level. Distinct system haptics mark the two movements;
+countdown ticks do not vibrate. Both the app controller and root service require
+a DEBUG build. Opening or restoring the screen never starts another attempt.
+Back, Cancel, route loss and leaving the app retire its foreground owner.
+The old `TestActivity` head-probe intent is ignored; it cannot bypass Start.
 
 `SpatialHeadTrackingProbe` reuses the existing `HeadTracking.motion` flow and
 owner-aware `AppleDevice.startHeadTracking(owner)`. It requires a connected Pro3,
-a known current primary-bud role and an unchanged AACP audio socket. It refuses
+a known current primary-bud role and an unchanged AACP audio socket. Its caller
+requires exactly one connected Apple device because the existing motion flow is
+shared. It refuses
 calls, recordings or a configured motion interval slower than40ms. The source
 owner remains continuous through a guided neutral → nose-UP → neutral calibration
 and the bounded proof. Calibration is memory-only and never selected by a model
-number or reused for another role/connection. Stable gravity is used only to
+number or reused for another role/connection. A 55-second controller deadline
+covers preparation, calibration and the separate maximum30-second root lease.
+Stable gravity is used only to
 validate the calibration holds, never to drive a moving pose.
 
 The converter composes the measured active Q15 orientation with the calibrated
@@ -178,3 +185,11 @@ handshake, successful app writes and user hearing a difference are distinct
 observations. Preserve the baseline settings and an independent restoration
 snapshot before live root testing; inspect native flags and sensor removal after
 it ends, including on failure.
+
+Each explicit attempt saves a unique private JSONL calibration trace, bounded to
+1000 samples per phase. It shares the raw capture's `type`/`arrival_ns`/`report`
+schema and adds phase, known bud role and exact internal rejection reason. The
+UI receives typed progress and actionable retry text rather than private paths,
+raw status or statistics. The trace contains motion data, never microphone or
+audio samples. No trace is uploaded by the app. Audio-idle Binder queries run on
+a separate 10 Hz guard, not in the pose or root-owner callbacks.

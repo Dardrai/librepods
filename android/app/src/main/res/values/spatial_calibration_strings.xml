@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- shortcut: preview calibration copy uses English fallback until translations are contributed. -->
+<resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="MissingTranslation">
+    <string name="spatial_calibration_title">Head Tracking</string>
+    <string name="spatial_calibration_entry_description">Set up head tracking</string>
+    <string name="spatial_calibration_intro_title">Set up your head position</string>
+    <string name="spatial_calibration_intro_body">Pause your music before starting. Wear your AirPods and hold your phone still at eye level. You’ll look up once, then face forward again.</string>
+    <string name="spatial_calibration_haptic_hint">Gentle vibrations will cue each movement. Keep your AirPods in throughout setup.</string>
+    <string name="spatial_calibration_start">Start</string>
+    <string name="spatial_calibration_start_again">Start Again</string>
+    <string name="spatial_calibration_not_now">Not Now</string>
+    <string name="spatial_calibration_done">Done</string>
+    <string name="spatial_calibration_retry">Try Again</string>
+    <string name="spatial_calibration_go_back">Go Back</string>
+    <string name="spatial_calibration_preparing">Getting ready</string>
+    <string name="spatial_calibration_preparing_body">Keep your AirPods in and your phone steady.</string>
+    <string name="spatial_calibration_neutral">Face forward</string>
+    <string name="spatial_calibration_neutral_body">Keep your head level and relaxed. Hold your phone still at eye level.</string>
+    <string name="spatial_calibration_look_up">Look up and hold</string>
+    <string name="spatial_calibration_look_up_body">Slowly lift your chin, then hold still. Keep your phone in place. The next vibration means return to level.</string>
+    <string name="spatial_calibration_return">Return to level</string>
+    <string name="spatial_calibration_return_body">Face your phone again and hold still until setup finishes.</string>
+    <string name="spatial_calibration_preview">Try head tracking</string>
+    <string name="spatial_calibration_preview_body">Gently turn your head left and right. Keep this screen open while the movement check runs.</string>
+    <string name="spatial_calibration_paused">Setup paused</string>
+    <string name="spatial_calibration_paused_body">Start again when you’re ready. Keep your phone still and follow the movement cues.</string>
+    <string name="spatial_calibration_complete">Calibration complete</string>
+    <string name="spatial_calibration_complete_body">The movement check has finished. Your starting settings have been restored.</string>
+    <string name="spatial_calibration_preview_failed">Calibration worked</string>
+    <string name="spatial_calibration_preview_failed_body">The movement check couldn’t finish. Check that your AirPods are connected, then try again.</string>
+    <string name="spatial_calibration_stopping_failed">Setup couldn’t finish</string>
+    <string name="spatial_calibration_stopping_failed_body">The movement check hasn’t finished closing. Go back before starting setup again.</string>
+    <string name="spatial_calibration_fixed_off">Turn on Fixed Spatial Audio</string>
+    <string name="spatial_calibration_fixed_off_body">Turn on Fixed Spatial Audio in AirPods settings, then start again.</string>
+    <string name="spatial_calibration_retry_title">Let’s try that again</string>
+    <string name="spatial_calibration_retry_still">Keep your head level and still while facing your phone at the start.</string>
+    <string name="spatial_calibration_retry_return">Return to the same level position you started in, then hold still.</string>
+    <string name="spatial_calibration_retry_lift">Gently lift your chin a little farther when asked to look up.</string>
+    <string name="spatial_calibration_retry_straight">Look straight up without turning or tilting to either side.</string>
+    <string name="spatial_calibration_retry_connection">Check that your AirPods are connected, keep them in place, and try again.</string>
+    <plurals name="spatial_calibration_seconds">
+        <item quantity="one">%d second remaining</item>
+        <item quantity="other">%d seconds remaining</item>
+    </plurals>
+</resources>

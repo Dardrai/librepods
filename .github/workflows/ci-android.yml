@@ -187,6 +187,7 @@ jobs:
             android/app/build/reports/tests/
             android/app/build/test-results/
             android/app/build/overlay-previews/
+            android/app/build/calibration-previews/
             android/app/build/reports/lint-results-debug.*
             android/app/build/reports/codec-packaging.json
           if-no-files-found: ignore

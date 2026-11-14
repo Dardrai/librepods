@@ -4,6 +4,10 @@ import android.app.Application
 import android.content.Intent
 import android.content.ServiceConnection
 import android.os.Bundle
+import android.view.ViewGroup
+import androidx.core.graphics.Insets
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -36,7 +40,7 @@ class SpatialMotionCaptureActivityTest {
         assertNoCapture(request(), Bundle())
     }
 
-    @Test fun headTrackingAlsoRequiresAnExactBoundedExplicitRequestAndCannotReplay() {
+    @Test fun legacyHeadTrackingIntentsCannotBypassTheInAppStartButton() {
         val head = Intent().putExtra("spatial_head_tracking_probe", true)
             .putExtra("expected_mac", "00:11:22:33:44:55").putExtra("duration_seconds", 30)
         assertNoCapture(Intent(head).putExtra("expected_mac", "../invalid"))
@@ -44,6 +48,19 @@ class SpatialMotionCaptureActivityTest {
         assertNoCapture(Intent(head).putExtra("duration_seconds", 0))
         assertNoCapture(Intent(head).putExtra("spatial_motion_capture", true))
         assertNoCapture(head, Bundle())
+    }
+
+    @Test fun rawCaptureTextRespectsSystemBarsAndTheCameraCutout() {
+        val controller = Robolectric.buildActivity(TestActivity::class.java, request()).create().start().resume()
+        try {
+            val content = controller.get().findViewById<ViewGroup>(android.R.id.content).getChildAt(0)
+            val insets = WindowInsetsCompat.Builder()
+                .setInsets(WindowInsetsCompat.Type.systemBars(), Insets.of(0, 80, 0, 48))
+                .setInsets(WindowInsetsCompat.Type.displayCutout(), Insets.of(0, 120, 0, 0)).build()
+            ViewCompat.dispatchApplyWindowInsets(content, insets)
+            assertTrue(content.paddingTop > 120)
+            assertTrue(content.paddingBottom > 48)
+        } finally { controller.pause().stop().destroy() }
     }
 
     @Test fun serviceReconnectionCannotReplayAnAlreadyHandledExplicitRequest() {

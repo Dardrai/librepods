@@ -25,6 +25,8 @@ import android.content.ServiceConnection
 import android.media.AudioManager
 import android.os.IBinder
 import android.widget.TextView
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -37,8 +39,6 @@ import me.kavishdevar.librepods.LibrePodsApplication
 import me.kavishdevar.librepods.audio.MicrophonePhase
 import me.kavishdevar.librepods.audio.SpatialMotionCapture
 import me.kavishdevar.librepods.audio.SpatialMotionCaptureRequest
-import me.kavishdevar.librepods.audio.SpatialHeadTrackingProbe
-import me.kavishdevar.librepods.audio.SpatialHeadTrackingProbeRequest
 import me.kavishdevar.librepods.core.devices.AppleDevice
 import me.kavishdevar.librepods.core.devices.ComponentStatus
 import me.kavishdevar.librepods.core.devices.ConnectionState
@@ -48,7 +48,6 @@ import java.io.File
 
 class TestActivity: ComponentActivity() {
     private var captureRequest: SpatialMotionCaptureRequest? = null
-    private var headTrackerRequest: SpatialHeadTrackingProbeRequest? = null
     private var captureJob: Job? = null
     private var attempted = false
     private var serviceHandled = false
@@ -60,7 +59,7 @@ class TestActivity: ComponentActivity() {
             if (!lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED) || serviceHandled) return
             serviceHandled = true
             val service = (binder as? LibrePodsService.LocalBinder)?.getService() ?: return
-            val expectedMac = captureRequest?.expectedMac ?: headTrackerRequest?.expectedMac ?: return
+            val expectedMac = captureRequest?.expectedMac ?: return
             val device = service.devices.value.values.filterIsInstance<AppleDevice>().singleOrNull {
                 it.macAddress.value.equals(expectedMac, ignoreCase = true) && it.connectionState.value == ConnectionState.CONNECTED
             }
@@ -83,13 +82,6 @@ class TestActivity: ComponentActivity() {
                 return connected.size == 1 && connected.single() === device && device.aacp.ownsAudioSocket(socket) && !inCase && audioIdle
             }
             captureJob = lifecycleScope.launch {
-                headTrackerRequest?.let { probe ->
-                    val result = SpatialHeadTrackingProbe(this@TestActivity).run(probe, device, ::current, ::showStatus)
-                    showStatus("Head tracking: ${result.reason}\n${result.poses} poses submitted\n" +
-                        "Head preference restored: ${result.cleanup?.getBoolean("restored")}\n" +
-                        "Sensor closed: ${result.cleanup?.getBoolean("sink_closed")}")
-                    return@launch
-                }
                 val request = captureRequest ?: return@launch
                 showStatus("Capture phase: ${request.phase}\nKeep this screen open for ${request.durationSeconds} seconds.")
                 val result = SpatialMotionCapture(File(filesDir, "spatial-motion-captures")).capture(request, device, ::current) { file ->
@@ -112,22 +104,21 @@ class TestActivity: ComponentActivity() {
         enableEdgeToEdge()
         val rawCapture = runCatching { intent.getBooleanExtra("spatial_motion_capture", false) }.getOrDefault(false)
         val headProbe = runCatching { intent.getBooleanExtra("spatial_head_tracking_probe", false) }.getOrDefault(false)
-        if (!BuildConfig.DEBUG || rawCapture == headProbe) {
+        if (!BuildConfig.DEBUG || !rawCapture || headProbe) {
             setContent { }
             return
         }
-        statusView = TextView(this).apply { textSize = 20f; setPadding(32, 64, 32, 32) }
+        statusView = TextView(this).apply { textSize = 20f }
         setContentView(statusView)
+        val padding = (24 * resources.displayMetrics.density).toInt()
+        ViewCompat.setOnApplyWindowInsetsListener(requireNotNull(statusView)) { view, insets ->
+            val safe = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
+            view.setPadding(safe.left + padding, safe.top + padding, safe.right + padding, safe.bottom + padding)
+            insets
+        }
+        ViewCompat.requestApplyInsets(requireNotNull(statusView))
         if (savedInstanceState != null) {
             showStatus("Capture stopped. Start a new explicit request to record another phase.")
-            return
-        }
-        if (headProbe) {
-            headTrackerRequest = runCatching {
-                SpatialHeadTrackingProbeRequest(
-                    requireNotNull(intent.getStringExtra("expected_mac")) { "An expected MAC is required." },
-                    intent.getIntExtra("duration_seconds", 30))
-            }.getOrElse { showStatus("Invalid head-tracking request: ${it.message}"); null }
             return
         }
         captureRequest = runCatching {
@@ -141,7 +132,7 @@ class TestActivity: ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
-        if (captureRequest == null && headTrackerRequest == null || attempted) return
+        if (captureRequest == null || attempted) return
         attempted = true
         // Bind only the already running service; a diagnostic never starts or reconnects audio.
         bound = runCatching { bindService(Intent(this, LibrePodsService::class.java), connection, 0) }.getOrDefault(false)

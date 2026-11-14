@@ -32,6 +32,7 @@ import me.kavishdevar.librepods.presentation.screens.apple.CallControlScreen
 import me.kavishdevar.librepods.presentation.screens.apple.DebugRoute
 import me.kavishdevar.librepods.presentation.screens.apple.EqualizerRoute
 import me.kavishdevar.librepods.presentation.screens.apple.HeadTrackingScreen
+import me.kavishdevar.librepods.presentation.screens.apple.SpatialCalibrationRoute
 import me.kavishdevar.librepods.presentation.screens.apple.HearingAidAdjustmentsScreen
 import me.kavishdevar.librepods.presentation.screens.apple.HearingAidScreen
 import me.kavishdevar.librepods.presentation.screens.apple.HearingProtectionScreen
@@ -156,6 +157,7 @@ fun RenderScreenContent(
                 navigateToRightLongPress = { navigate(Screen.LongPress(screen.macAddress, "right")) },
                 navigateToEqualizer = { navigate(Screen.Equalizer(screen.macAddress)) },
                 navigateToHeadTracking = { navigate(Screen.HeadTracking(screen.macAddress)) },
+                navigateToSpatialCalibration = { navigate(Screen.SpatialCalibration(screen.macAddress)) },
                 navigateToAccessibility = { navigate(Screen.Accessibility(screen.macAddress)) },
                 navigateToVersion = { navigate(Screen.VersionInfo(screen.macAddress)) },
                 navigateToCallControlScreen = { navigate(Screen.CallControl(screen.macAddress, it)) },
@@ -230,6 +232,14 @@ fun RenderScreenContent(
                 viewModel = appleViewModel,
                 navigateBack = navigateBack,
             )
+        }
+
+        is Screen.SpatialCalibration -> {
+            val device = devices[screen.macAddress] as? AppleDevice ?: return
+            SpatialCalibrationRoute(device, navigateBack = { navigateBack?.invoke() },
+                isSelected = { devices.values.filterIsInstance<AppleDevice>().filter {
+                    it.connectionState.value == me.kavishdevar.librepods.core.devices.ConnectionState.CONNECTED
+                }.singleOrNull() === device })
         }
 
         is Screen.Accessibility -> {
