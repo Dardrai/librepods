@@ -253,11 +253,6 @@ class LibrePodsService: Service() {
     private val companionCalls by lazy { CompanionCallMonitor(this, serviceScope) { state, fresh -> companion?.onCallState(state, fresh) } }
     private var companionCallMonitorJob: Job? = null
     private val companionSettingsWriters = ConcurrentHashMap<MacAddress, Mutex>()
-    private data class NearbyMedia(val device: AppleDevice, val state: Int, val deferUntil: Long,
-        val localCloseUntil: Long = 0)
-    private data class NearbyCase(val device: AppleDevice, val closedLocally: Boolean, val deferUntil: Long = 0)
-    private val nearbyMedia = ConcurrentHashMap<MacAddress, NearbyMedia>()
-    private val nearbyCases = ConcurrentHashMap<MacAddress, NearbyCase>()
     private var microphonePermissionMonitor: Job? = null
     private val audioControllers get() = (application as LibrePodsApplication).experimentalAudioControllers
     private val communicationControllers get() = (application as LibrePodsApplication).communicationAudioControllers
@@ -272,6 +267,10 @@ class LibrePodsService: Service() {
         ::callBlocksSettingsRefresh, { companionReleased.contains(it) || companionOperations.containsKey(it) },
         ::isNearbyDeviceAudioConnected, { appDataRepository.settings.value.islandSettings.keepCompactVisible },
         { showIsland(device = it, type = IslandType.CONNECTED) }, { islandWindow.close() })
+    private val nearbyDeferral = NearbyConnectDeferral({ device ->
+        !destroying && devices.value[device.macAddress] === device &&
+            device.bluetoothDevice.bondState == BluetoothDevice.BOND_BONDED
+    }, ::isNearbyDeviceAudioConnected)
     private val backgroundAudioAccess by lazy { BackgroundAudioAccess(this) }
     private val bluetoothVolumeSync by lazy { BluetoothVolumeSync(this) }
     private var bluetoothVolumeSyncJob: Job? = null
@@ -297,7 +296,6 @@ class LibrePodsService: Service() {
     private val bleScanStarts = ArrayDeque<Long>()
     private var bleRetry: Runnable? = null
     private val updateScreenScanMode = Runnable { if (bleRequested) startBleScanner(updateMode = true) }
-    private val pairedLids = mutableMapOf<MacAddress, Boolean>()
     private val pairedObservations = mutableMapOf<MacAddress, Long>()
     private val connectionHaptics by lazy { ConnectionHaptics(this) }
     private val nativeAudioCallback = object : AudioDeviceCallback() {
@@ -598,9 +596,8 @@ class LibrePodsService: Service() {
         stopBleScanner()
         recentProximityReports.clear()
         caseBatteryObservations.clear()
-        nearbyMedia.clear()
+        nearbyDeferral.clearDeferrals()
         connectionHaptics.clear()
-        nearbyCases.clear()
 
         super.onDestroy()
     }
@@ -988,71 +985,7 @@ class LibrePodsService: Service() {
     }.getOrDefault(false)
 
     /** A presentation hint only: the Nearby label still requires the real audio-output predicate. */
-    fun shouldDeferNearbyConnect(device: AppleDevice): Boolean = runCatching {
-        if (destroying || devices.value[device.macAddress] !== device ||
-            device.bluetoothDevice.bondState != BluetoothDevice.BOND_BONDED) false
-        else if (isNearbyDeviceAudioConnected(device)) {
-            nearbyCases.computeIfPresent(device.macAddress) { _, case ->
-                if (case.device === device) case.copy(deferUntil = 0) else case
-            }
-            nearbyMedia.computeIfPresent(device.macAddress) { _, media ->
-                if (media.device === device) media.copy(deferUntil = 0) else media
-            }
-            false
-        }
-        else {
-            val now = SystemClock.elapsedRealtime()
-            val media = nearbyMedia[device.macAddress]?.takeIf { it.device === device }
-            val case = nearbyCases[device.macAddress]?.takeIf { it.device === device }
-            (case?.deferUntil ?: 0) > now || (media?.deferUntil ?: 0) > now
-        }
-    }.getOrDefault(false)
-
-    private fun observeNearbyMedia(device: AppleDevice, state: Int) {
-        if (destroying || devices.value[device.macAddress] !== device ||
-            device.bluetoothDevice.bondState != BluetoothDevice.BOND_BONDED ||
-            state !in BluetoothProfile.STATE_DISCONNECTED..BluetoothProfile.STATE_DISCONNECTING) return
-        val now = SystemClock.elapsedRealtime()
-        val previous = nearbyMedia[device.macAddress]?.takeIf { it.device === device }
-        if (previous?.state == state) return
-        val connected = isNearbyDeviceAudioConnected(device)
-        val failedReconnect = state == BluetoothProfile.STATE_DISCONNECTED && previous?.state == BluetoothProfile.STATE_CONNECTING
-        // A close advertisement can arrive just after Android tears down its local profile.
-        val localUntil = if (failedReconnect) 0 else if (state in setOf(BluetoothProfile.STATE_DISCONNECTED, BluetoothProfile.STATE_DISCONNECTING) &&
-            (previous?.state == BluetoothProfile.STATE_CONNECTED || connected)) now + 2_000
-            else previous?.localCloseUntil ?: 0
-        val deferUntil = when (state) {
-            BluetoothProfile.STATE_CONNECTING -> now + 18_000
-            BluetoothProfile.STATE_CONNECTED -> if (connected) 0 else now + 1_000
-            else -> 0
-        }
-        nearbyMedia[device.macAddress] = NearbyMedia(device, state, deferUntil, localUntil)
-        if (failedReconnect) {
-            nearbyCases.computeIfPresent(device.macAddress) { _, case ->
-                if (case.device === device) case.copy(closedLocally = false, deferUntil = 0) else case
-            }
-        }
-    }
-
-    /** Called only for the already authenticated, ordered lid reports. */
-    private fun observeNearbyCase(device: AppleDevice, open: Boolean): Boolean {
-        if (destroying || devices.value[device.macAddress] !== device ||
-            device.bluetoothDevice.bondState != BluetoothDevice.BOND_BONDED) return false
-        if (pairedLids.put(device.macAddress, open) == open) return false
-        val now = SystemClock.elapsedRealtime()
-        val previous = nearbyCases[device.macAddress]?.takeIf { it.device === device }
-        val media = nearbyMedia[device.macAddress]?.takeIf { it.device === device }
-        val local = isNearbyDeviceAudioConnected(device) || media?.state == BluetoothProfile.STATE_CONNECTED ||
-            (media?.localCloseUntil ?: 0) > now
-        // A close must not expose Connect between rapid lid reports or extend an existing opening's deadline.
-        val activeDeadline = previous?.deferUntil?.takeIf { it > now } ?: 0
-        val deferUntil = if (activeDeadline > 0) activeDeadline
-            else if (open && previous?.closedLocally == true) now + 4_000 else 0
-        nearbyCases[device.macAddress] = NearbyCase(device, !open && local, deferUntil)
-        if (open && deferUntil > 0 && Log.isLoggable(NEARBY_TAKEOVER_TAG, Log.DEBUG))
-            Log.d(NEARBY_TAKEOVER_TAG, "Deferring Connect briefly after a local case close")
-        return open
-    }
+    fun shouldDeferNearbyConnect(device: AppleDevice): Boolean = nearbyDeferral.shouldDefer(device)
 
     /** An explicit tap connects the selected media profile; an AACP socket alone is not audio ownership. */
     suspend fun connectCompanionPhone(): Boolean {
@@ -1215,12 +1148,12 @@ class LibrePodsService: Service() {
                             .joinToString { "type=${it.type}:selected=${it.address.equals(device.macAddress.value, true)}:addressPresent=${it.address.isNotBlank()}" }
                     }.getOrElse { "query failed: ${it.javaClass.simpleName}" }
                     Log.d(NEARBY_TAKEOVER_TAG, "Output unavailable: ownerFailure=${ownerFailure()} retired=${retiredReason.get()} " +
-                        "nativeState=${nearbyMedia[device.macAddress]?.state} outputs=[$outputs]")
+                        "nativeState=${nearbyDeferral.mediaState(device.macAddress)} outputs=[$outputs]")
                 }
                 return false
             }
             outcome = "connected"
-            observeNearbyMedia(device, BluetoothProfile.STATE_CONNECTED)
+            nearbyDeferral.observeMedia(device, BluetoothProfile.STATE_CONNECTED)
             serviceScope.launch(Dispatchers.IO) {
                 earlyControl?.join()
                 if (devices.value[device.macAddress] === device && isNearbyDeviceAudioConnected(device))
@@ -1529,7 +1462,7 @@ class LibrePodsService: Service() {
             retireHeadGestures(it)
             clearHeartRateAlert(it)
         }
-        (devices.value[mac] as? AppleDevice)?.let { observeNearbyMedia(it, BluetoothProfile.STATE_DISCONNECTED) }
+        (devices.value[mac] as? AppleDevice)?.let { nearbyDeferral.observeMedia(it, BluetoothProfile.STATE_DISCONNECTED) }
         detachExperimentalAudio(mac)
         Log.i(TAG, "Device disconnected: ${mac.toRedactedString()}")
         devices.value[mac]?.let { if (it is AppleDevice) it.disconnectControl() else it.disconnect() }
@@ -1584,9 +1517,7 @@ class LibrePodsService: Service() {
                             nearbyVisits.clear()
                             nearbyInvitationProximity.clear()
                             recentProximityReports.clear()
-                            pairedLids.clear()
-                            nearbyMedia.clear()
-                            nearbyCases.clear()
+                            nearbyDeferral.clear()
                             connectionHaptics.clear()
                             islandWindow.clearPairingOpening()
                             islandWindow.close()
@@ -1607,9 +1538,7 @@ class LibrePodsService: Service() {
                             pairedObservations.remove(address)
                             caseBatteryObservations.remove(address)
                             recentProximityReports.clear()
-                            pairedLids.remove(address)
-                            nearbyMedia.remove(address)
-                            nearbyCases.remove(address)
+                            nearbyDeferral.forget(address)
                             islandWindow.clearPairingOpening(address.value)
                             islandWindow.closePaired(address.value)
                         }
@@ -1631,7 +1560,7 @@ class LibrePodsService: Service() {
                             }
                             checkBluetoothVolumeSync()
                             (devices.value[MacAddress(bluetoothDevice.address)] as? AppleDevice)?.let {
-                                observeNearbyMedia(it, intent.getIntExtra(BluetoothProfile.EXTRA_STATE, -1))
+                                nearbyDeferral.observeMedia(it, intent.getIntExtra(BluetoothProfile.EXTRA_STATE, -1))
                                 islandWindow.updatePairedBattery(it)
                             }
                         }
@@ -1718,7 +1647,7 @@ class LibrePodsService: Service() {
         val device = owned ?: return
         val previousObservation = pairedObservations[device.macAddress]
         if (previousObservation != null && observed <= previousObservation) return
-        if (previousObservation != null && observed - previousObservation >= 30_000_000_000L) pairedLids.remove(device.macAddress)
+        if (previousObservation != null && observed - previousObservation >= 30_000_000_000L) nearbyDeferral.forgetLid(device.macAddress)
         val keys = device.state.value.magicKeys
         val irk = keys[MagicKeyType.IRK] ?: return
         val encryption = keys[MagicKeyType.ENC_KEY] ?: return
@@ -1731,7 +1660,7 @@ class LibrePodsService: Service() {
         pairedObservations[device.macAddress] = observed
         val opening = report.lidOpen?.let { open ->
             islandWindow.observePairedCaseLid(device.macAddress.value, open, observed)
-            observeNearbyCase(device, open)
+            nearbyDeferral.observeCase(device, open)
         } == true
         device.receiveNearbyBattery(report.batteries)
         islandWindow.updatePairedBattery(device, report.model)
@@ -1939,8 +1868,7 @@ class LibrePodsService: Service() {
                         controlStates = it.cache.controlStates), it.settings, it.metadata)
                 }
                 if (destroying || bluetoothDevice.bondState != BluetoothDevice.BOND_BONDED) return@withLock null
-                nearbyMedia.remove(address)
-                nearbyCases.remove(address)
+                nearbyDeferral.resetDevice(address)
                 _devices.update { it + (address to device) }
                 runCatching { companionPreferences.restore(address.value) }
                 val notificationManager = getSystemService(NotificationManager::class.java)

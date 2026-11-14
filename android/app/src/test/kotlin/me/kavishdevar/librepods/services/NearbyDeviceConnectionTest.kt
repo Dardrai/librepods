@@ -1041,8 +1041,8 @@ class NearbyDeviceConnectionTest {
         `when`(bluetooth.bondState).thenReturn(BluetoothDevice.BOND_NONE)
         receive(Intent(BluetoothDevice.ACTION_BOND_STATE_CHANGED).putExtra(BluetoothDevice.EXTRA_DEVICE, bluetooth))
         assertFalse(service.shouldDeferNearbyConnect(device))
-        assertTrue((field("nearbyMedia").get(service) as Map<*, *>).isEmpty())
-        assertTrue((field("nearbyCases").get(service) as Map<*, *>).isEmpty())
+        assertTrue((deferralField("nearbyMedia").get(deferral()) as Map<*, *>).isEmpty())
+        assertTrue((deferralField("nearbyCases").get(deferral()) as Map<*, *>).isEmpty())
     }
 
     @Test fun replacingTheDeviceInstanceRetiresItsHintsAndRejectsOldLidObservations() {
@@ -1059,9 +1059,10 @@ class NearbyDeviceConnectionTest {
         assertFalse(caseLid(false))
     }
 
-    private fun caseLid(open: Boolean): Boolean = LibrePodsService::class.java
-        .getDeclaredMethod("observeNearbyCase", AppleDevice::class.java, Boolean::class.javaPrimitiveType)
-        .apply { isAccessible = true }.invoke(service, device, open) as Boolean
+    private fun caseLid(open: Boolean): Boolean = deferral().observeCase(device, open)
+
+    private fun deferral() = field("nearbyDeferral").get(service) as NearbyConnectDeferral
+    private fun deferralField(name: String) = NearbyConnectDeferral::class.java.getDeclaredField(name).apply { isAccessible = true }
 
     private suspend fun attachNativeAudio(): Unit = suspendCoroutineUninterceptedOrReturn { continuation ->
         LibrePodsService::class.java.getDeclaredMethod("onDeviceConnected", BluetoothDevice::class.java, Continuation::class.java)
