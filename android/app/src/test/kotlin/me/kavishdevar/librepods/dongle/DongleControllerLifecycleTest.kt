@@ -272,8 +272,8 @@ class DongleControllerLifecycleTest {
         val client = DongleSession(firmware::exchange, closeTransport = firmware::close)
         attach(client, client.refresh())
         var profile = ByteArray(104).also { it[0] = 2; it[1] = 2; it[2] = 0x60 }
-        field("profileData").set(controller, profile.copyOf())
-        field("profileCharacteristic").set(controller, DongleAtt.Characteristic(0x20, 0x12))
+        hearingField("profileData").set(hearingRecords(), profile.copyOf())
+        hearingField("profileCharacteristic").set(hearingRecords(), DongleAtt.Characteristic(0x20, 0x12))
         @Suppress("UNCHECKED_CAST")
         val state = field("mutableState").get(controller) as MutableStateFlow<DongleState>
         val hearing = byteArrayOf(4, 0, 4, 0, 9, 0, 0x2c, 1, 1, 0, 0)
@@ -367,7 +367,7 @@ class DongleControllerLifecycleTest {
         state.value = state.value.copy(controlSession = 99, hearingModes = me.kavishdevar.librepods.core.devices.HearingModes.empty()
             .withReport(hearing).withReport(gate).withReport(pme))
         @Suppress("UNCHECKED_CAST")
-        val revisions = field("cachedRevisions").get(controller) as MutableMap<Int, Long>
+        val revisions = hearingField("cachedRevisions").get(hearingRecords()) as MutableMap<Int, Long>
         revisions.putAll(mapOf(2 to 1L, 3 to 1L, 4 to 1L))
         val expected = state.value.accommodationsReport!!
         firmware.cachedReply = { slot ->
@@ -412,7 +412,7 @@ class DongleControllerLifecycleTest {
         state.value = state.value.copy(controlSession = 99, hearingModes = me.kavishdevar.librepods.core.devices.HearingModes.empty()
             .withReport(hearing).withReport(gate).withReport(pme))
         @Suppress("UNCHECKED_CAST")
-        val revisions = field("cachedRevisions").get(controller) as MutableMap<Int, Long>
+        val revisions = hearingField("cachedRevisions").get(hearingRecords()) as MutableMap<Int, Long>
         revisions.putAll(mapOf(2 to 1L, 3 to 1L, 4 to 1L))
         val expected = state.value.accommodationsReport!!
         firmware.cachedReply = { slot -> ByteArray(8).also { DongleProtocol.put32(it, 4, revision) } +
@@ -452,7 +452,7 @@ class DongleControllerLifecycleTest {
         state.value = state.value.copy(controlSession = 99,
             hearingModes = HearingModes.empty().withReport(hearing).withReport(gate).withReport(pme))
         @Suppress("UNCHECKED_CAST")
-        val revisions = field("cachedRevisions").get(controller) as MutableMap<Int, Long>
+        val revisions = hearingField("cachedRevisions").get(hearingRecords()) as MutableMap<Int, Long>
         revisions.putAll(mapOf(2 to 1L, 3 to 1L, 4 to 1L))
         firmware.cachedReply = { slot -> ByteArray(8).also { DongleProtocol.put32(it, 4, 1) } +
             when (slot) { 2 -> hearing; 3 -> gate; 4 -> pme; else -> error("Unexpected slot") } }
@@ -989,6 +989,8 @@ class DongleControllerLifecycleTest {
 
     private fun field(name: String) = DongleController::class.java.getDeclaredField(name).apply { isAccessible = true }
     private fun lease() = field("lease").get(controller) as DongleEditingLease
+    private fun hearingField(name: String) = DongleHearingRecords::class.java.getDeclaredField(name).apply { isAccessible = true }
+    private fun hearingRecords() = field("hearing").get(controller)
     private fun serviceField(name: String) = LibrePodsService::class.java.getDeclaredField(name).apply { isAccessible = true }
 
     private class FinderFirmware {
