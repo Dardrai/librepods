@@ -795,7 +795,7 @@ class LibrePodsService: Service() {
                 device, serviceScope,
                 hostBlocked = {
                     destroying || callBlocksSettingsRefresh() || microphoneOwners.isNotEmpty() ||
-                        settingsRefreshes.isNotEmpty() || bleCaptureBlocked || companionOperations.containsKey(address) ||
+                        settingsRefresher.anyActive() || bleCaptureBlocked || handoffHost.operationActive(address) ||
                         getSystemService(AudioManager::class.java).activeRecordingConfigurations.isNotEmpty() ||
                         communicationControllers.values.any { it.ownsSession || it.hasPreparedRoute }
                 },
