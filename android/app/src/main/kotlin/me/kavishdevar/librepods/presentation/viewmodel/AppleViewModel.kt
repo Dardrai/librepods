@@ -45,6 +45,7 @@ import kotlinx.coroutines.sync.withLock
 import me.kavishdevar.librepods.bluetooth.DeviceSettingsRefreshResult
 import me.kavishdevar.librepods.audio.ExperimentalAudioController
 import me.kavishdevar.librepods.audio.CommunicationAudioController
+import me.kavishdevar.librepods.audio.NativeHeadTrackingController
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommandIdentifier
 import me.kavishdevar.librepods.core.bluetooth.att.ATTHandle
 import me.kavishdevar.librepods.core.bluetooth.att.types.parseTransparencySettingsResponse
@@ -114,12 +115,14 @@ class AppleViewModel(
     private val audioControllerProvider: () -> ExperimentalAudioController? = { null },
     private val gameModeControllerProvider: () -> NativeGameModeController? = { null },
     private val communicationControllerProvider: () -> CommunicationAudioController? = { null },
+    private val headTrackingControllerProvider: () -> NativeHeadTrackingController? = { null },
 ) : ViewModel(), DeviceViewModel {
     val accommodationsPreferenceKey: String? get() = accommodationsPairKey(device.macAddress.value)
     val transparencyTransportAvailable: Boolean get() = device.transparencyTransportAvailable
     val audioController: ExperimentalAudioController? get() = audioControllerProvider()
     val gameModeController: NativeGameModeController? get() = gameModeControllerProvider()
     val communicationController: CommunicationAudioController? get() = communicationControllerProvider()
+    internal val headTrackingController: NativeHeadTrackingController? get() = headTrackingControllerProvider()
     init { BluetoothIdentitySettings.initialize(device.context) }
 
     val events = device.events

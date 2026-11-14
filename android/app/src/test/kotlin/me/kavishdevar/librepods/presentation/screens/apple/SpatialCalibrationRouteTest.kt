@@ -3,6 +3,7 @@ package me.kavishdevar.librepods.presentation.screens.apple
 import android.app.Application
 import android.bluetooth.BluetoothSocket
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.lifecycle.Lifecycle
@@ -11,6 +12,7 @@ import androidx.lifecycle.LifecycleRegistry
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.flow.MutableStateFlow
+import me.kavishdevar.librepods.audio.NativeHeadTrackingController
 import me.kavishdevar.librepods.core.bluetooth.MacAddress
 import me.kavishdevar.librepods.core.bluetooth.aacp.AACPManager
 import me.kavishdevar.librepods.core.devices.AppleDevice
@@ -84,6 +86,41 @@ class SpatialCalibrationRouteTest {
         compose.waitUntil(5_000) { starts.get() == 2 }
         compose.onNodeWithTag("spatial_calibration_primary").performClick()
         compose.waitUntil(5_000) { ends.get() == 2 }
+    }
+
+    @Test fun setupPausesOnlyItsOwnNormalTrackingOwnerWithoutChangingTheNativeChoice() {
+        val target = Target()
+        val owner = Owner()
+        val visible = mutableStateOf(true)
+        val controller = mock(NativeHeadTrackingController::class.java)
+        val paused = mutableListOf<Pair<Any, Boolean>>()
+        doAnswer {
+            paused += it.getArgument<Any>(0) to it.getArgument<Boolean>(1)
+            null
+        }.`when`(controller).setCalibrationActive(any() ?: Any(), anyBoolean())
+        compose.setContent {
+            CompositionLocalProvider(LocalLifecycleOwner provides owner) {
+                LibrePodsTheme(designSystem = DesignSystem.Apple) {
+                    if (visible.value) SpatialCalibrationRoute(target.device, {}, calibrationController = controller)
+                }
+            }
+        }
+        compose.waitForIdle()
+        assertTrue(paused.isNotEmpty())
+        assertTrue(paused.last().second)
+        val token = paused.first().first
+        compose.runOnIdle { owner.registry.currentState = Lifecycle.State.CREATED }
+        compose.waitForIdle()
+        assertFalse(paused.last().second)
+        compose.runOnIdle { owner.registry.currentState = Lifecycle.State.RESUMED }
+        compose.waitForIdle()
+        assertTrue(paused.last().second)
+        compose.runOnIdle { visible.value = false }
+        compose.waitForIdle()
+        assertFalse(paused.last().second)
+        assertTrue(paused.all { it.first === token })
+        verify(controller, never()).setEnabled(anyBoolean())
+        verify(target.aacp, never()).captureAudioSocket()
     }
 
     private class Owner : LifecycleOwner {

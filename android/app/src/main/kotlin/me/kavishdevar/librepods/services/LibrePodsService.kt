@@ -1,5 +1,7 @@
 package me.kavishdevar.librepods.services
 
+import me.kavishdevar.librepods.BuildConfig
+
 import me.kavishdevar.librepods.core.data.recording.Recording
 import me.kavishdevar.librepods.core.utils.redactMac
 import android.Manifest
@@ -275,6 +277,7 @@ class LibrePodsService: Service() {
     private val audioControllers get() = (application as LibrePodsApplication).experimentalAudioControllers
     private val communicationControllers get() = (application as LibrePodsApplication).communicationAudioControllers
     private val gameControllers get() = (application as LibrePodsApplication).nativeGameModeControllers
+    private val headTrackingControllers get() = (application as LibrePodsApplication).nativeHeadTrackingControllers
     private val microphoneStarts = ConcurrentHashMap<MacAddress, Job>()
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -1367,6 +1370,20 @@ class LibrePodsService: Service() {
         }
         audioDevices[address] = device
         audioControllers[address] = controller
+        if (BuildConfig.DEBUG && Build.VERSION.SDK_INT >= 33) {
+            headTrackingControllers[address] = me.kavishdevar.librepods.audio.NativeHeadTrackingController(
+                device, serviceScope,
+                hostBlocked = {
+                    destroying || callBlocksSettingsRefresh() || microphoneOwners.isNotEmpty() ||
+                        settingsRefreshes.isNotEmpty() || bleCaptureBlocked || companionOperations.containsKey(address) ||
+                        getSystemService(AudioManager::class.java).activeRecordingConfigurations.isNotEmpty() ||
+                        communicationControllers.values.any { it.ownsSession || it.hasPreparedRoute }
+                },
+                deviceCurrent = {
+                    !destroying && audioDevices[address] === device &&
+                        audioDevices.values.count { it.connectionState.value == ConnectionState.CONNECTED } == 1
+                })
+        }
         val game = if (Build.VERSION.SDK_INT == 37)
             me.kavishdevar.librepods.utils.NativeGameModeController(device, serviceScope) {
                 destroying || audioDevices[address] !== device || callBlocksSettingsRefresh() ||
@@ -1510,6 +1527,7 @@ class LibrePodsService: Service() {
     }
 
     private fun detachExperimentalAudio(address: MacAddress) {
+        headTrackingControllers.remove(address)?.close()
         communicationControllers.remove(address)?.let { call ->
             communicationArmed.remove(address, call)
             call.close()

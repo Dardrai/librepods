@@ -26,6 +26,7 @@ import kotlinx.coroutines.launch
 import me.kavishdevar.librepods.BuildConfig
 import me.kavishdevar.librepods.LibrePodsApplication
 import me.kavishdevar.librepods.audio.MicrophonePhase
+import me.kavishdevar.librepods.audio.NativeHeadTrackingController
 import me.kavishdevar.librepods.audio.SpatialCalibrationProgress
 import me.kavishdevar.librepods.audio.SpatialHeadTrackingProbe
 import me.kavishdevar.librepods.audio.SpatialHeadTrackingProbeRequest
@@ -40,6 +41,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 @Composable
 internal fun SpatialCalibrationRoute(device: AppleDevice, navigateBack: () -> Unit,
     isSelected: () -> Boolean = { true },
+    calibrationController: NativeHeadTrackingController? = null,
     runProbe: suspend (Context, SpatialHeadTrackingProbeRequest, AppleDevice, () -> Boolean,
         (SpatialCalibrationProgress) -> Unit) -> SpatialHeadTrackingProbeResult = { context, request, target, current, progress ->
         SpatialHeadTrackingProbe(context).run(request, target, current, onProgress = progress)
@@ -47,6 +49,12 @@ internal fun SpatialCalibrationRoute(device: AppleDevice, navigateBack: () -> Un
 ) {
     val context = LocalContext.current
     val app = context.applicationContext as? LibrePodsApplication
+    val headTracking = calibrationController ?: app?.nativeHeadTrackingControllers?.get(device.macAddress)
+    val calibrationOwner = remember(device) { Any() }
+    DisposableEffect(headTracking, calibrationOwner) {
+        headTracking?.setCalibrationActive(calibrationOwner, true)
+        onDispose { headTracking?.setCalibrationActive(calibrationOwner, false) }
+    }
     val view = LocalView.current
     val scope = rememberCoroutineScope()
     val selected by rememberUpdatedState(isSelected)
@@ -61,8 +69,14 @@ internal fun SpatialCalibrationRoute(device: AppleDevice, navigateBack: () -> Un
     DisposableEffect(screenLive) {
         onDispose { screenLive.set(false); cancel() }
     }
-    LifecycleEventEffect(Lifecycle.Event.ON_STOP) { foreground.set(false); cancel() }
-    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { foreground.set(true) }
+    LifecycleEventEffect(Lifecycle.Event.ON_STOP) {
+        foreground.set(false); cancel()
+        headTracking?.setCalibrationActive(calibrationOwner, false)
+    }
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
+        foreground.set(true)
+        headTracking?.setCalibrationActive(calibrationOwner, true)
+    }
     DisposableEffect(view, running) {
         val before = view.keepScreenOn
         if (running) view.keepScreenOn = true

@@ -276,6 +276,85 @@ class ShizukuAudioClientLifecycleTest {
         }
     }
 
+    @Test fun normalHeadTrackingUsesExplicitOnOnlyOnceAndFinishDoesNotDisableThePreference() = runBlocking<Unit> {
+        val previousCaller = Binder.getCallingUid()
+        val client = ShizukuAudioClient(context); val bridge = Bridge()
+        val owners = CopyOnWriteArrayList<IPlaybackRecoveryOwner>()
+        val choices = CopyOnWriteArrayList<Boolean>()
+        `when`(bridge.remote.openHeadTracking(eq("AA:BB:CC:DD:EE:FF"), any(), any(), any(), anyBoolean()))
+            .thenAnswer { owners += it.getArgument<IPlaybackRecoveryOwner>(1); choices += it.getArgument<Boolean>(4); headTrackerReady() }
+        `when`(bridge.remote.finishHeadTrackerProbe(any())).thenReturn(Bundle().apply { putBoolean("cleanup_complete", true) })
+        `when`(bridge.remote.inspectSpatialAudio(anyString(), any())).thenReturn(Bundle().apply { putBoolean("known", true) })
+        `when`(bridge.remote.disableHeadTracking(anyString(), any())).thenReturn(Bundle().apply { putBoolean("applied", true) })
+        accept.invoke(client, bridge.binder, 0, true)
+        try {
+            for (explicitOn in listOf(true, false)) {
+                val pipe = ParcelFileDescriptor.createPipe()
+                try {
+                    val opening = async(Dispatchers.IO) {
+                        client.openHeadTracking("aa:bb:cc:dd:ee:ff", pipe[0], explicitOn, { true }, { _, _ -> }, {})
+                    }
+                    val lease = opening.await()
+                    ShadowBinder.setCallingUid(0)
+                    assertTrue(owners.last().isCurrent)
+                    assertTrue(client.inspectSpatialAudio("AA:BB:CC:DD:EE:FF") { true }.getBoolean("known"))
+                    lease.finish(); assertFalse(owners.last().isCurrent)
+                } finally { pipe[1].close() }
+            }
+            assertEquals(listOf(true, false), choices)
+            verify(bridge.remote, never()).startHeadTrackerProbe(anyString(), any(), any(), any(), anyInt())
+            verify(bridge.remote, never()).disableHeadTracking(anyString(), any())
+            assertTrue(client.disableHeadTracking("AA:BB:CC:DD:EE:FF") { true }.getBoolean("applied"))
+            verify(bridge.remote).disableHeadTracking(eq("AA:BB:CC:DD:EE:FF"), any())
+        } finally { client.close(); ShadowBinder.setCallingUid(previousCaller); shadowOf(Looper.getMainLooper()).idle() }
+    }
+
+    @Test fun explicitHeadTrackingOffRefusesStaleSelectionAndRootlessBridge() = runBlocking<Unit> {
+        val client = ShizukuAudioClient(context); val bridge = Bridge()
+        try {
+            accept.invoke(client, bridge.binder, 0, true)
+            assertEquals("owner_changed", client.disableHeadTracking("AA:BB:CC:DD:EE:FF") { false }.getString("reason"))
+            assertEquals("invalid_address", client.disableHeadTracking("invalid") { true }.getString("reason"))
+            verify(bridge.remote, never()).disableHeadTracking(anyString(), any())
+            disconnect.invoke(client, "retired", bridge.binder)
+            accept.invoke(client, bridge.binder, 2000, false)
+            assertEquals("root_required", client.disableHeadTracking("AA:BB:CC:DD:EE:FF") { true }.getString("reason"))
+            val pipe = ParcelFileDescriptor.createPipe(); val descriptor = pipe[0].fileDescriptor
+            try {
+                assertTrue(runCatching {
+                    client.openHeadTracking("AA:BB:CC:DD:EE:FF", pipe[0], false, { true }, { _, _ -> }, {})
+                }.isFailure)
+                assertFalse(descriptor.valid())
+                verify(bridge.remote, never()).openHeadTracking(anyString(), any(), any(), any(), anyBoolean())
+            } finally { pipe[1].close() }
+        } finally { client.close(); shadowOf(Looper.getMainLooper()).idle() }
+    }
+
+    @Test fun cancelledNormalOpenFinishesItsLateProviderWithoutSendingExplicitOff() = runBlocking<Unit> {
+        val previousCaller = Binder.getCallingUid()
+        val client = ShizukuAudioClient(context); val bridge = Bridge(); val pipe = ParcelFileDescriptor.createPipe()
+        val captured = AtomicReference<IPlaybackRecoveryOwner>()
+        val entered = CountDownLatch(1); val reply = CountDownLatch(1)
+        `when`(bridge.remote.openHeadTracking(anyString(), any(), any(), any(), eq(true))).thenAnswer {
+            captured.set(it.getArgument(1)); entered.countDown(); check(reply.await(5, TimeUnit.SECONDS)); headTrackerReady()
+        }
+        `when`(bridge.remote.finishHeadTrackerProbe(any())).thenReturn(Bundle())
+        accept.invoke(client, bridge.binder, 0, true)
+        val pending = launch(Dispatchers.IO) {
+            runCatching { client.openHeadTracking("AA:BB:CC:DD:EE:FF", pipe[0], true, { true }, { _, _ -> }, {}) }
+        }
+        try {
+            assertTrue(entered.await(5, TimeUnit.SECONDS)); ShadowBinder.setCallingUid(0)
+            pending.cancel(); assertFalse(captured.get().isCurrent)
+            reply.countDown(); pending.join()
+            verify(bridge.remote).finishHeadTrackerProbe(captured.get())
+            verify(bridge.remote, never()).disableHeadTracking(anyString(), any())
+        } finally {
+            reply.countDown(); pending.cancel(); pending.join(); pipe[1].close(); client.close()
+            ShadowBinder.setCallingUid(previousCaller); shadowOf(Looper.getMainLooper()).idle()
+        }
+    }
+
     private fun headTrackerReady() = Bundle().apply { putBoolean("ready", true); putBoolean("hal_handshake", true) }
 
     private suspend fun drainClientCallbacks(client: ShizukuAudioClient) {

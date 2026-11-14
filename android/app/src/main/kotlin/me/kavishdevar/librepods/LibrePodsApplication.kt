@@ -37,6 +37,7 @@ class LibrePodsApplication: Application(), XposedServiceHelper.OnServiceListener
     val experimentalAudioControllers = ConcurrentHashMap<MacAddress, ExperimentalAudioController>()
     val communicationAudioControllers = ConcurrentHashMap<MacAddress, CommunicationAudioController>()
     val nativeGameModeControllers = ConcurrentHashMap<MacAddress, NativeGameModeController>()
+    val nativeHeadTrackingControllers = ConcurrentHashMap<MacAddress, me.kavishdevar.librepods.audio.NativeHeadTrackingController>()
     lateinit var database: LibrePodsDatabase
         private set
 

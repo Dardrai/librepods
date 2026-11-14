@@ -25,6 +25,8 @@ import androidx.compose.ui.res.stringResource
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.MutableStateFlow
+import me.kavishdevar.librepods.audio.NativeHeadTrackingState
 import me.kavishdevar.librepods.R
 import me.kavishdevar.librepods.core.devices.ConnectionState
 import me.kavishdevar.librepods.presentation.components.primitives.StyledListScope
@@ -81,6 +83,8 @@ private fun NativeSpatialAudioRow(viewModel: AppleViewModel, index: Int, count: 
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { access.connect(); resumes++ }
     val bridge by access.state.collectAsState()
     val rootReady = bridge.connected && access.hasRootPrivileges
+    val headTracking by (viewModel.headTrackingController?.state ?:
+        remember { MutableStateFlow(NativeHeadTrackingState()) }).collectAsState()
     val connected = connection == ConnectionState.CONNECTED && token != null
     var snapshot by remember(live) { mutableStateOf<FixedSpatialState?>(null) }
     var requested by remember(live) { mutableStateOf<Boolean?>(null) }
@@ -88,13 +92,13 @@ private fun NativeSpatialAudioRow(viewModel: AppleViewModel, index: Int, count: 
     val scope = rememberCoroutineScope()
     val current = remember(live) { { live.get() && token != null && viewModel.ownsSpatialAudio(token) } }
 
-    LaunchedEffect(live, rootReady, resumes) {
-        if (rootReady && connected && current()) {
+    LaunchedEffect(live, rootReady, resumes, headTracking.enabled, headTracking.busy) {
+        if (rootReady && connected && current() && !headTracking.busy) {
             val result = access.inspectSpatialAudio(viewModel.spatialAudioAddress, current)
             if (current()) snapshot = FixedSpatialState.read(result)
         }
     }
-    SpatialAudioSettingContent(snapshot, connected, rootReady, busy, requested, index = index, count = count,
+    SpatialAudioSettingContent(snapshot, connected, rootReady, busy || headTracking.busy, requested, index = index, count = count,
         requestRoot = access::requestPermission,
         openSystemSettings = { context.startActivity(Intent(Settings.ACTION_SOUND_SETTINGS)) },
         change = { enabled ->

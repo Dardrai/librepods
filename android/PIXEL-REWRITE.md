@@ -42,7 +42,7 @@ pair, local behavior choices and correctly owner-bound BLE keys once. Existing
 rewrite database rows are preserved. Unconfirmed device control values are not
 migrated as device reports. The Android Bluetooth bond stays with Android.
 
-The current fork version is `2.0.0-alpha.1-pixel94`, code `200000179`.
+The current fork version is `2.0.0-alpha.1-pixel137`, code `200000222`.
 
 ### Root Bluetooth access
 

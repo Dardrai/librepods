@@ -3,6 +3,10 @@
 <resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="MissingTranslation">
     <string name="spatial_calibration_title">Head Tracking</string>
     <string name="spatial_calibration_entry_description">Set up head tracking</string>
+    <string name="spatial_head_tracking_description">Sounds stay in place as you move your head in compatible spatial audio.</string>
+    <string name="spatial_head_tracking_recalibrate">Recalibrate Head Tracking</string>
+    <string name="spatial_head_tracking_paused">Head tracking paused. Turn it off and on to retry, or recalibrate.</string>
+    <string name="spatial_head_tracking_needs_spatial">Turn on Fixed Spatial Audio to use head tracking.</string>
     <string name="spatial_calibration_intro_title">Set up your head position</string>
     <string name="spatial_calibration_intro_body">Pause your music before starting. Wear your AirPods and hold your phone still at eye level. You’ll look up once, then face forward again.</string>
     <string name="spatial_calibration_haptic_hint">Gentle vibrations will cue each movement. Keep your AirPods in throughout setup.</string>
@@ -25,7 +29,9 @@
     <string name="spatial_calibration_paused">Setup paused</string>
     <string name="spatial_calibration_paused_body">Start again when you’re ready. Keep your phone still and follow the movement cues.</string>
     <string name="spatial_calibration_complete">Calibration complete</string>
-    <string name="spatial_calibration_complete_body">The movement check has finished. Your starting settings have been restored.</string>
+    <string name="spatial_calibration_complete_body">Your head position is saved for these AirPods. Go back to AirPods settings to turn on Head Tracking.</string>
+    <string name="spatial_calibration_save_failed">Setup wasn’t saved</string>
+    <string name="spatial_calibration_save_failed_body">Your head position was measured, but the app couldn’t save it. Try again.</string>
     <string name="spatial_calibration_preview_failed">Calibration worked</string>
     <string name="spatial_calibration_preview_failed_body">The movement check couldn’t finish. Check that your AirPods are connected, then try again.</string>
     <string name="spatial_calibration_stopping_failed">Setup couldn’t finish</string>

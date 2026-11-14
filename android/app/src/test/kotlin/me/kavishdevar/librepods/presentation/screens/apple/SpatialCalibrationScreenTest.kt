@@ -135,6 +135,25 @@ class SpatialCalibrationScreenTest {
         compose.onNodeWithText("Go Back").performScrollTo().assertIsDisplayed()
     }
 
+    @Test fun aStorageFailureDoesNotClaimTheCalibrationWasSavedOrAutomaticallyRetry() {
+        var retries = 0
+        val failed = SpatialHeadTrackingProbeResult("profile_save_failed", 0, null, calibrated = true)
+        assertFalse(spatialCalibrationCompleted(failed))
+        compose.setContent {
+            LibrePodsTheme(designSystem = DesignSystem.Apple) {
+                SpatialCalibrationScreen(null, false, failed, { retries++ }, {}, {})
+            }
+        }
+        compose.onNodeWithText("Setup wasn’t saved").assertIsDisplayed()
+        compose.onNodeWithText("Your head position was measured, but the app couldn’t save it. Try again.")
+            .assertIsDisplayed()
+        compose.onNodeWithText("Calibration complete").assertDoesNotExist()
+        compose.onNodeWithText("profile_save_failed").assertDoesNotExist()
+        assertEquals(0, retries)
+        compose.onNodeWithText("Try Again").performScrollTo().performClick()
+        assertEquals(1, retries)
+    }
+
     @Test fun appleLightAndDarkKeepInstructionsAndActionsReachableAtDoubleTextSize() {
         val dark = mutableStateOf(false)
         val progress = mutableStateOf<SpatialCalibrationProgress?>(null)

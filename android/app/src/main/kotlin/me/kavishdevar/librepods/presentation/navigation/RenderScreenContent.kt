@@ -81,6 +81,7 @@ private fun createAppleViewModelFactory(
                 audioControllerProvider = { application.experimentalAudioControllers[device.macAddress] },
                 gameModeControllerProvider = { application.nativeGameModeControllers[device.macAddress] },
                 communicationControllerProvider = { application.communicationAudioControllers[device.macAddress] },
+                headTrackingControllerProvider = { application.nativeHeadTrackingControllers[device.macAddress] },
             )
         }
     }

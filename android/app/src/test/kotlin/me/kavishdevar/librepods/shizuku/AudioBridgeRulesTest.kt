@@ -6,6 +6,13 @@ import org.junit.Assert.assertFalse
 import org.junit.Test
 
 class AudioBridgeRulesTest {
+    @Test fun normalHeadTrackingRequiresRootButOnlyTemporaryProbesRequireDebug() {
+        assertTrue(AudioBridgeRules.mayOpenHeadTracker(root = true, debugProbe = false, debugBuild = false))
+        assertTrue(AudioBridgeRules.mayOpenHeadTracker(root = true, debugProbe = true, debugBuild = true))
+        assertFalse(AudioBridgeRules.mayOpenHeadTracker(root = true, debugProbe = true, debugBuild = false))
+        assertFalse(AudioBridgeRules.mayOpenHeadTracker(root = false, debugProbe = false, debugBuild = true))
+    }
+
     @Test fun refusesOtherCallersAndPrivilegedUids() {
         AudioBridgeRules.requireCaller(10123, 10123)
         assertThrows(IllegalArgumentException::class.java) { AudioBridgeRules.requireCaller(10123, 10124) }

@@ -103,6 +103,25 @@ Profile and transport guards remain active with automatic updates.
 Automatic settings reads do not start diagnostics, performance checks, sounds,
 hearing tests or microphone capture. Those actions remain explicit.
 
+The DEBUG head-tracking preview reuses the existing foreground service. Calibration
+stores only a validated anatomical basis, matched to the exact AirPods address,
+full bud-role report, model number, firmware and coordinate format. A different
+role or firmware requires its own calibration; old sensor clocks are never reused.
+Refitting a bud can change its frame, so Recalibrate remains available. Opening
+setup pauses only the background tracker's owner and never starts calibration.
+Its Start action, timed instructions, haptics and cancellation remain explicit.
+
+Android's selected-device head-tracking preference is the normal preview's durable
+user choice. Only an explicit On can enable it; automatic provider recreation
+requires it already On. Explicit Off works without a current profile and does not
+wait behind Bluetooth source cleanup. Idle HAL reporting releases only this motion
+owner while retaining the registered sensor. Calls, recording, source/role changes
+and loss of root stop the provider safely; external Off is authoritative. The
+temporary 30-second diagnostic lease keeps its separate conditional restoration.
+Neither path changes the codec, volume, audio buffers or global spatial setting.
+Brief forward-clock report gaps re-prime rates without changing the orientation
+reference. Invalid references and long gaps stop tracking; they are not extrapolated.
+
 Pairing invitations follow the app's Light, Dark or System appearance. An effective
 theme change repaints the existing card and switches its matching artwork without
 replacing the pairing session, current stage, actions, battery readings or expiry

@@ -104,7 +104,8 @@ internal data class SpatialPose(val timestampNs: Long, val discontinuity: Int,
 
 /** Pure positive-w conversion for a caller-validated session; no stream, device, or audio ownership.
  * The caller retires this instance on role, transport or known reference changes. Invalid input after
- * startup also retires it. Rates are head-body finite differences over intervalNs (normally ~20 ms),
+ * startup also retires it. A forward 100–250 ms report gap only re-primes the rate; it emits no pose.
+ * Rates are head-body finite differences over intervalNs (normally ~20 ms),
  * not instantaneous raw-gyro rates. No prediction or latency compensation is applied.
  */
 internal class SpatialPoseConverter(private val profile: SpatialPoseProfile, private val discontinuity: Int) {
@@ -140,10 +141,17 @@ internal class SpatialPoseConverter(private val profile: SpatialPoseProfile, pri
             return null
         }
         val dt = time - previousTime
-        if (dt !in 1..100_000_000L) return retire("sensor_time_changed")
+        if (dt <= 0) return retire("sensor_time_changed")
         if (!counterFollows(previousCounter, report.counter)) return retire("sensor_counter_changed")
+        if (dt >= 250_000_000L) return retire("sensor_gap")
         val omega = (old.inverse() * head).rotationVector() * (1e9 / dt)
         if (!omega.norm().isFinite() || omega.norm() > 32.0) return retire("reference_discontinuity")
+        if (dt > 100_000_000L) {
+            // Recovery needs evidence of missing reports, not a clock/counter/reference reset.
+            if (previousCounter == null || report.counter == null) return retire("sensor_gap")
+            previous = head; previousTime = time; previousCounter = report.counter
+            return null
+        }
         val rotation = head.rotationVector()
         if (!rotation.norm().isFinite()) return retire("unsupported_attitude")
         previous = head; previousTime = time; previousCounter = report.counter

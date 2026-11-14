@@ -8,6 +8,9 @@ internal object AudioBridgeRules {
     fun mayReconnectRoot(granted: Boolean?, explicitlyAuthorized: Boolean, attempted: Boolean = false): Boolean =
         granted == true || (!attempted && granted == null && explicitlyAuthorized)
 
+    fun mayOpenHeadTracker(root: Boolean, debugProbe: Boolean, debugBuild: Boolean): Boolean =
+        root && (!debugProbe || debugBuild)
+
     fun requireCaller(expectedUid: Int, callingUid: Int) {
         require(expectedUid >= 10000 && callingUid == expectedUid) {
             "Audio bridge caller does not own LibrePods"

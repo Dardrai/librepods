@@ -662,7 +662,7 @@ class ShizukuAudioClient @JvmOverloads constructor(context: Context,
     internal suspend fun inspectSpatialAudio(address: String, stillCurrent: () -> Boolean): Bundle =
         spatialAudioCall(address, stillCurrent) { remote, owner -> remote.inspectSpatialAudio(address, owner) }
 
-    internal class HeadTrackerProbeLease internal constructor(
+    internal class HeadTrackerLease internal constructor(
         val readiness: Bundle,
         private val inspectOwned: suspend () -> Bundle,
         private val finishOwned: suspend () -> Bundle,
@@ -674,10 +674,22 @@ class ShizukuAudioClient @JvmOverloads constructor(context: Context,
     /** DEBUG only. Consumes the read end of an HTP1 pose pipe; never requests privileged access. */
     internal suspend fun startHeadTrackerProbe(address: String, poses: ParcelFileDescriptor, seconds: Int,
         stillCurrent: () -> Boolean, onReportingChanged: (Boolean, Long) -> Unit,
-        onStopped: (String) -> Unit): HeadTrackerProbeLease {
+        onStopped: (String) -> Unit): HeadTrackerLease =
+        openHeadTracker(address, poses, seconds, false, stillCurrent, onReportingChanged, onStopped)
+
+    /** Native preference is durable; automatic reconnects may only consume an already-enabled choice. */
+    internal suspend fun openHeadTracking(address: String, poses: ParcelFileDescriptor,
+        enablePreference: Boolean = false, stillCurrent: () -> Boolean,
+        onReportingChanged: (Boolean, Long) -> Unit, onStopped: (String) -> Unit): HeadTrackerLease =
+        openHeadTracker(address, poses, null, enablePreference, stillCurrent, onReportingChanged, onStopped)
+
+    private suspend fun openHeadTracker(address: String, poses: ParcelFileDescriptor, seconds: Int?,
+        enablePreference: Boolean, stillCurrent: () -> Boolean, onReportingChanged: (Boolean, Long) -> Unit,
+        onStopped: (String) -> Unit): HeadTrackerLease {
         var request: PlaybackRequest? = null
         try {
-            check(BuildConfig.DEBUG && hasRootPrivileges && seconds in 1..30) { "Head-tracker probe is unavailable" }
+            check(AudioBridgeRules.mayOpenHeadTracker(hasRootPrivileges, seconds != null, BuildConfig.DEBUG) &&
+                (seconds == null || seconds in 1..30)) { "Head tracker is unavailable" }
             val remote = checkNotNull(bridge)
             val selected = A2dpRecoveryGuard(address).address
             // The lease outlives this short start coroutine; its predicate belongs to the source owner.
@@ -715,14 +727,15 @@ class ShizukuAudioClient @JvmOverloads constructor(context: Context,
             }
             val ready = withContext(Dispatchers.IO) { ipc.withLock {
                 check(matching()) { "Head-tracker owner changed" }
-                remote.startHeadTrackerProbe(selected, selectedRequest.owner, poses, events, seconds)
+                if (seconds != null) remote.startHeadTrackerProbe(selected, selectedRequest.owner, poses, events, seconds)
+                else remote.openHeadTracking(selected, selectedRequest.owner, poses, events, enablePreference)
             } }
             check(ready.getBoolean("ready") && ready.getBoolean("hal_handshake") && matching()) {
                 "Head-tracker probe could not start: ${ready.getString("reason") ?: "unavailable"}"
             }
             selectedRequest.updateCurrent(live)
             check(startJob?.isActive != false && matching()) { "Head-tracker owner changed" }
-            return HeadTrackerProbeLease(ready,
+            return HeadTrackerLease(ready,
                 { withContext(Dispatchers.IO) { remote.headTrackerProbeState(selectedRequest.owner) } },
                 { finishHeadTrackerProbe(selectedRequest) })
         } catch (error: Exception) {
@@ -733,6 +746,10 @@ class ShizukuAudioClient @JvmOverloads constructor(context: Context,
             throw error
         } finally { runCatching { poses.close() } }
     }
+
+    /** Explicit Off is independent of the desired-On predicate used by the former provider. */
+    internal suspend fun disableHeadTracking(address: String, stillCurrent: () -> Boolean): Bundle =
+        spatialAudioCall(address, stillCurrent) { remote, owner -> remote.disableHeadTracking(address, owner) }
 
     private suspend fun finishHeadTrackerProbe(request: PlaybackRequest): Bundle = try {
         withContext(NonCancellable + Dispatchers.IO) { ipc.withLock {

@@ -21,6 +21,8 @@ import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
+import me.kavishdevar.librepods.audio.NativeHeadTrackingController
+import me.kavishdevar.librepods.audio.NativeHeadTrackingState
 import me.kavishdevar.librepods.core.devices.AppleState
 import me.kavishdevar.librepods.core.devices.ConnectionState
 import me.kavishdevar.librepods.presentation.components.primitives.StyledList
@@ -237,6 +239,49 @@ class NativeSpatialAudioSettingTest {
                     }
                 }
             }
+        }
+    }
+
+    @Test fun changingHeadTrackingRefreshesTheFixedModeWithoutReopeningItsScreen() {
+        val viewModel = mock(AppleViewModel::class.java)
+        val socket = mock(BluetoothSocket::class.java)
+        val controller = mock(NativeHeadTrackingController::class.java)
+        val head = MutableStateFlow(NativeHeadTrackingState(enabled = false, calibrated = true, available = true))
+        val nativeHead = AtomicBoolean(false)
+        val address = "AA:BB:CC:DD:EE:FF"
+        `when`(viewModel.connectionState).thenReturn(MutableStateFlow(ConnectionState.CONNECTED))
+        `when`(viewModel.uiState).thenReturn(MutableStateFlow(AppleUiState(state = AppleState(controlSession = 1))))
+        `when`(viewModel.captureSpatialAudioOwner()).thenReturn(socket)
+        `when`(viewModel.ownsSpatialAudio(socket)).thenReturn(true)
+        `when`(viewModel.spatialAudioAddress).thenReturn(address)
+        `when`(viewModel.headTrackingController).thenReturn(controller)
+        `when`(controller.state).thenReturn(head)
+        mockConstruction(ShizukuAudioClient::class.java) { client, _ ->
+            `when`(client.state).thenReturn(MutableStateFlow(BridgeState(connected = true, backend = "root")))
+            `when`(client.hasRootPrivileges).thenReturn(true)
+            runBlocking {
+                `when`(client.inspectSpatialAudio(eq(address) ?: address, anyCurrent())).thenAnswer {
+                    report().apply { putBoolean("head_tracker_enabled", nativeHead.get()) }
+                }
+            }
+        }.use {
+            compose.setContent {
+                LibrePodsTheme(designSystem = DesignSystem.Apple) {
+                    StyledList { NativeSpatialAudioSetting(viewModel) }
+                }
+            }
+            awaitSpatialToggle(true)
+            compose.runOnIdle {
+                nativeHead.set(true)
+                head.value = head.value.copy(enabled = true)
+            }
+            awaitSpatialToggle(false)
+            compose.onAllNodesWithText("Fixed Spatial Audio", useUnmergedTree = true).assertCountEquals(1)
+            compose.runOnIdle {
+                nativeHead.set(false)
+                head.value = head.value.copy(enabled = false)
+            }
+            awaitSpatialToggle(true)
         }
     }
 

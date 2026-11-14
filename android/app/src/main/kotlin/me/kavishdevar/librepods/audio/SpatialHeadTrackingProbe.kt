@@ -54,7 +54,7 @@ internal data class SpatialCalibrationProgress(val stage: SpatialCalibrationStag
 internal data class SpatialHeadTrackingProbeResult(val reason: String, val poses: Int, val cleanup: Bundle?,
     val calibrated: Boolean = false, val calibrationFailure: SpatialCalibrationFailure? = null, val captureFile: File? = null)
 
-/** Explicit foreground DEBUG proof. Its profile is never persisted or reused after a bud handover. */
+/** Explicit foreground DEBUG proof. Validated bases and bounded diagnostic reports remain private. */
 internal class SpatialHeadTrackingProbe(
     private val context: Context,
     private val motion: Flow<MotionReport?> = HeadTracking.motion,
@@ -67,7 +67,7 @@ internal class SpatialHeadTrackingProbe(
         val owner = Any()
         val submitted = AtomicInteger()
         var access: ShizukuAudioClient? = null
-        var lease: ShizukuAudioClient.HeadTrackerProbeLease? = null
+        var lease: ShizukuAudioClient.HeadTrackerLease? = null
         var pipe: Array<ParcelFileDescriptor>? = null
         var cleanup: Bundle? = null
         var reason = "stopped"
@@ -82,12 +82,14 @@ internal class SpatialHeadTrackingProbe(
             withTimeout(55_000) {
                 check(BuildConfig.DEBUG) { "Debug build required." }
                 check(device.macAddress.value.equals(request.expectedMac, true) && isCurrent()) { "The expected AirPods are not connected." }
-                check(device.metadata.value.model == AirPodsModel.AIRPODS_PRO_3) { "This measured motion format is for AirPods Pro 3." }
+                val metadata = device.metadata.value
+                check(metadata.model == AirPodsModel.AIRPODS_PRO_3) { "This measured motion format is for AirPods Pro 3." }
                 val roleRaw = device.state.value.budRoleRaw.toList()
                 val role = roleRaw.firstOrNull()
                 val leftIsPrimary = device.state.value.leftIsPrimary
                 check(role == 1 || role == 2) { "Waiting for the current bud role. No probe started." }
-                fun current() = live.get() && isCurrent() && device.state.value.budRoleRaw.firstOrNull() == role
+                fun current() = live.get() && isCurrent() && device.state.value.budRoleRaw == roleRaw &&
+                    device.metadata.value.let { it.model == metadata.model && it.modelNumber == metadata.modelNumber && it.version1 == metadata.version1 }
                 fun requireCurrent() {
                     check(current() && device.state.value.headTrackingState != BuddyState.INACTIVE) { "Connection, bud role or motion stream changed." }
                 }
@@ -99,7 +101,6 @@ internal class SpatialHeadTrackingProbe(
                 val initial = bridge.inspectSpatialAudio(request.expectedMac, ::current)
                 check(initial.getBoolean("device_enabled") && initial.getBoolean("enabled")) { "spatial_disabled" }
                 check(device.startHeadTracking(owner)) { "Motion capture is unavailable." }
-                val metadata = device.metadata.value
                 var previousArrival = SystemClock.elapsedRealtimeNanos()
                 captureHeader = JSONObject().apply {
                     put("type", "capture"); put("expected_mac", request.expectedMac.uppercase(Locale.ROOT))
@@ -156,7 +157,7 @@ internal class SpatialHeadTrackingProbe(
                         countdown(SpatialCalibrationStage.NEUTRAL, 0, 3, "Hold your head still, level and facing forward.")
                         countdown(SpatialCalibrationStage.LOOK_UP, 1, 5, "Slowly look UP, then hold that position.")
                         countdown(SpatialCalibrationStage.RETURN, 2, 5, "Return to your starting position and hold still.")
-                        synchronized(sampleLock) {
+                        val calibratedProfile = synchronized(sampleLock) {
                             val result = SpatialPoseProfile.calibrateResult(samples[0].map { it.first },
                                 samples[1].map { it.first }, samples[2].map { it.first })
                             calibrationFailure = result.failure
@@ -165,7 +166,11 @@ internal class SpatialHeadTrackingProbe(
                             converter = SpatialPoseConverter(profile, 0)
                             calibrated = true
                             phase = 3
+                            profile
                         }
+                        val saved = runCatching { SpatialPoseProfileStore(context).save(SpatialPoseProfileKey(request.expectedMac,
+                            roleRaw, metadata.modelNumber, metadata.version1), calibratedProfile) }.getOrDefault(false)
+                        check(saved) { "profile_save_failed" }
                         onStatus("Calibration accepted. Preparing Android's head-tracking sensor…")
                         onProgress(SpatialCalibrationProgress(SpatialCalibrationStage.PREPARING, 0))
                         // Keep this one motion owner across calibration and proof; restarting may reset its reference.

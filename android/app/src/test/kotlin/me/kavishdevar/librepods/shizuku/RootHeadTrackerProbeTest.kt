@@ -207,4 +207,136 @@ class RootHeadTrackerProbeTest {
             waitUntil { probe.state(owner).getBoolean("cleanup_complete") }
         } finally { release.countDown(); pipe[1].close(); probe.close() }
     }
+
+    @Test fun normalOnWaitsForDiscoveryThenFinishKeepsDurablePreferenceAndClosesProvider() {
+        val platform = Platform(); val owner = Owner(); val sink = Sink().apply { halHandshake = false }
+        val opened = CountDownLatch(1)
+        val probe = RootHeadTrackerProbe(platform, { _, _, _ -> opened.countDown(); sink },
+            { _, action -> action() }, { true }) { System.nanoTime() / 1_000_000 }
+        val pipe = ParcelFileDescriptor.createPipe()
+        val opener = Thread { probe.openNormal(address, owner, pipe[0], Events(), true) }.apply { start() }
+        try {
+            assertTrue(opened.await(1, TimeUnit.SECONDS)); assertTrue(platform.writes.isEmpty())
+            sink.halHandshake = true; opener.join(2_000); assertFalse(opener.isAlive)
+            val ready = probe.state(owner)
+            assertTrue(ready.getBoolean("ready")); assertTrue(ready.getBoolean("normal_session"))
+            assertFalse(ready.containsKey("remaining_ms")); assertTrue(ready.getBoolean("head_tracker_enabled"))
+            assertTrue(ready.getBoolean("route_selected")); assertTrue(ready.getBoolean("device_enabled"))
+            val finished = probe.finish(owner)
+            assertTrue(finished.getBoolean("cleanup_complete")); assertTrue(finished.getBoolean("sink_closed"))
+            assertEquals("durable_choice", finished.getString("restore_reason"))
+            assertEquals(listOf(true), platform.writes); assertTrue(platform.state.headTrackerEnabled!!)
+        } finally { sink.halHandshake = true; opener.join(2_000); pipe[1].close(); probe.close() }
+    }
+
+    @Test fun automaticNormalOpenNeverEnablesAnOffPreference() {
+        val platform = Platform(); val opens = AtomicInteger()
+        val probe = RootHeadTrackerProbe(platform, { _, _, _ -> opens.incrementAndGet(); Sink() },
+            { _, action -> action() }, { true }) { System.nanoTime() / 1_000_000 }
+        val pipe = ParcelFileDescriptor.createPipe()
+        try {
+            val result = probe.openNormal(address, Owner(), pipe[0], Events(), false)
+            assertFalse(result.getBoolean("ready")); assertEquals("native_disabled", result.getString("reason"))
+            assertEquals(0, opens.get()); assertTrue(platform.writes.isEmpty())
+        } finally { pipe[1].close(); probe.close() }
+    }
+
+    @Test fun normalReportingOffKeepsProviderAndExternalNativeOffClosesWithoutReenable() {
+        val platform = Platform().apply { state = initial.copy(headTrackerEnabled = true) }
+        val sink = Sink(); val owner = Owner(); val events = Events(); val probe = probe(platform, sink)
+        val pipe = ParcelFileDescriptor.createPipe()
+        try {
+            assertTrue(probe.openNormal(address, owner, pipe[0], events, false).getBoolean("ready"))
+            sink.reporting = RootHeadTrackerSink.Reporting(true, 20_000_000)
+            waitUntil { events.reporting.contains(true) }
+            sink.reporting = RootHeadTrackerSink.Reporting(false, 20_000_000)
+            waitUntil { events.reporting.lastOrNull() == false }
+            Thread.sleep(300)
+            assertTrue(probe.state(owner).getBoolean("ready")); assertFalse(sink.isClosed)
+            platform.state = platform.state.copy(headTrackerEnabled = false)
+            waitUntil { probe.state(owner).getBoolean("cleanup_complete") }
+            assertEquals("native_disabled", probe.state(owner).getString("reason"))
+            assertFalse(probe.state(owner).getBoolean("head_tracker_enabled"))
+            assertTrue(platform.writes.isEmpty()); assertTrue(sink.isClosed)
+        } finally { pipe[1].close(); probe.close() }
+    }
+
+    @Test fun normalOwnerRouteAndRootLossCloseProviderWhileKeepingChoice() {
+        for (trigger in listOf("owner", "route", "root", "permission", "spatial")) {
+            val platform = Platform().apply { state = initial.copy(headTrackerEnabled = true) }
+            val sink = Sink(); val owner = Owner(); val permitted = AtomicBoolean(true)
+            val probe = probe(platform, sink, permitted::get); val pipe = ParcelFileDescriptor.createPipe()
+            try {
+                assertTrue(probe.openNormal(address, owner, pipe[0], Events(), false).getBoolean("ready"))
+                when (trigger) {
+                    "owner" -> owner.current = false
+                    "route" -> platform.state = platform.state.copy(routeSelected = false)
+                    "permission" -> permitted.set(false)
+                    "spatial" -> platform.state = platform.state.copy(enabled = false, deviceEnabled = false)
+                    "root" -> probe.close()
+                }
+                waitUntil { probe.state(owner).getBoolean("cleanup_complete") }
+                assertTrue(sink.isClosed); assertTrue(platform.state.headTrackerEnabled!!)
+                assertTrue(platform.writes.isEmpty())
+            } finally { pipe[1].close(); probe.close() }
+        }
+    }
+
+    @Test fun failedNormalOnRollsBackBeforeItCanCommitTheDurableChoice() {
+        val platform = Platform().apply { throwAfterEnable = true }; val probe = probe(platform)
+        val pipe = ParcelFileDescriptor.createPipe()
+        try {
+            val result = probe.openNormal(address, Owner(), pipe[0], Events(), true)
+            assertFalse(result.getBoolean("ready")); assertTrue(result.getBoolean("restored"))
+            assertEquals(listOf(true, false), platform.writes)
+        } finally { pipe[1].close(); probe.close() }
+    }
+
+    @Test fun explicitOffDisablesAlreadyTruePreferenceEvenAfterNormalSessionHasClosed() {
+        val platform = Platform().apply { state = initial.copy(headTrackerEnabled = true) }
+        val owner = Owner(); val probe = probe(platform); val pipe = ParcelFileDescriptor.createPipe()
+        try {
+            assertTrue(probe.openNormal(address, owner, pipe[0], Events(), false).getBoolean("ready"))
+            probe.finish(owner); assertTrue(platform.state.headTrackerEnabled!!)
+            platform.state = platform.state.copy(enabled = false, deviceEnabled = false, routeSelected = false)
+            val off = probe.disable(address, owner)
+            assertTrue(off.getBoolean("applied")); assertFalse(off.getBoolean("head_tracker_enabled"))
+            assertFalse(platform.state.deviceEnabled!!); assertFalse(platform.state.enabled)
+            assertEquals(listOf(false), platform.writes)
+            assertFalse(probe.finish(owner).getBoolean("ready")); assertEquals(listOf(false), platform.writes)
+        } finally { pipe[1].close(); probe.close() }
+    }
+
+    @Test fun explicitOffRefusesStaleOwnerUnknownDeviceAndRevokedPermission() {
+        for (trigger in listOf("owner", "pair", "permission", "address")) {
+            val platform = Platform().apply { state = initial.copy(headTrackerEnabled = true) }
+            val owner = Owner().apply { current = trigger != "owner" }
+            if (trigger == "pair") platform.state = platform.state.copy(nativePair = false)
+            val probe = probe(platform, permitted = { trigger != "permission" })
+            try {
+                assertFalse(probe.disable(if (trigger == "address") "invalid" else address, owner).getBoolean("applied"))
+                assertTrue(platform.writes.isEmpty())
+            } finally { probe.close() }
+        }
+    }
+
+    @Test fun blockedOffOwnerHasOneBoundedPollerAndCannotWriteAfterTimeout() {
+        val platform = Platform().apply { state = initial.copy(headTrackerEnabled = true) }
+        val probe = probe(platform); val release = CountDownLatch(1); val calls = AtomicInteger()
+        val owner = object : IPlaybackRecoveryOwner.Stub() {
+            override fun isCurrent(): Boolean {
+                calls.incrementAndGet()
+                while (release.count > 0) try { release.await() } catch (_: InterruptedException) { }
+                return true
+            }
+        }
+        try {
+            val started = System.nanoTime()
+            assertFalse(probe.disable(address, owner).getBoolean("applied"))
+            assertTrue(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started) < 1_500)
+            repeat(3) { assertFalse(probe.disable(address, owner).getBoolean("applied")) }
+            assertEquals(1, calls.get()); assertTrue(platform.writes.isEmpty())
+            release.countDown(); Thread.sleep(30); assertTrue(platform.writes.isEmpty())
+        } finally { release.countDown(); probe.close() }
+    }
 }

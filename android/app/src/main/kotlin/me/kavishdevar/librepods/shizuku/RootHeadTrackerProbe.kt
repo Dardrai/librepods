@@ -10,10 +10,12 @@ import java.util.Timer
 import java.util.TimerTask
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.SynchronousQueue
+import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 
-/** Temporary DEBUG lease; only the selected device's head-tracker preference may be written. */
+/** Shared owner-bound provider. DEBUG choices roll back; normal confirmed choices are durable. */
 internal class RootHeadTrackerProbe(
     private val platform: SpatialAudioAccess.Platform,
     private val openSink: (String, IPlaybackRecoveryOwner, ParcelFileDescriptor) -> HeadTrackerSinkSession,
@@ -24,17 +26,25 @@ internal class RootHeadTrackerProbe(
     private val lock = Any()
     private var active: Lease? = null
     private var last: Lease? = null
-    private var closed = false
+    @Volatile private var closed = false
+    private val preferenceChecks = ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS, SynchronousQueue<Runnable>(),
+        { action -> Thread(action, "head-tracker-preference-owner").apply { isDaemon = true } }, ThreadPoolExecutor.AbortPolicy())
 
     fun start(address: String, owner: IPlaybackRecoveryOwner, poses: ParcelFileDescriptor,
-        events: IHeadTrackerEvents, seconds: Int): Bundle {
+        events: IHeadTrackerEvents, seconds: Int): Bundle = open(address, owner, poses, events, seconds, false)
+
+    fun openNormal(address: String, owner: IPlaybackRecoveryOwner, poses: ParcelFileDescriptor,
+        events: IHeadTrackerEvents, enablePreference: Boolean): Bundle = open(address, owner, poses, events, null, enablePreference)
+
+    private fun open(address: String, owner: IPlaybackRecoveryOwner, poses: ParcelFileDescriptor,
+        events: IHeadTrackerEvents, seconds: Int?, enablePreference: Boolean): Bundle {
         val lease = try {
-            require(seconds in 1..30) { "invalid_duration" }
+            require(seconds == null || seconds in 1..30) { "invalid_duration" }
             val selected = A2dpRecoveryGuard(address).address
             synchronized(lock) {
                 active?.refreshCompletion()
                 check(!closed && active == null) { "busy" }
-                Lease(selected, owner, poses, events, seconds).also { active = it; last = it }
+                Lease(selected, owner, poses, events, seconds, enablePreference).also { active = it; last = it }
             }
         } catch (error: Exception) {
             runCatching { poses.close() }
@@ -45,6 +55,35 @@ internal class RootHeadTrackerProbe(
             if (!lease.prepared.await(3_000, TimeUnit.MILLISECONDS)) lease.stop("startup_timeout")
         } catch (_: InterruptedException) { Thread.currentThread().interrupt(); lease.stop("cancelled") }
         return lease.state()
+    }
+
+    /** User Off is authoritative even when a previous provider captured an already-enabled flag. */
+    fun disable(address: String, owner: IPlaybackRecoveryOwner): Bundle = try {
+        val selected = A2dpRecoveryGuard(address).address
+        val deadline = now() + 3_000
+        fun requireOwner() {
+            check(!closed && now() < deadline && permitted()) { "permission_denied" }
+            val ownerCheck = preferenceChecks.submit<Boolean> { owner.asBinder().isBinderAlive && owner.isCurrent }
+            val current = try { ownerCheck.get(minOf(500, (deadline - now()).coerceAtLeast(1)), TimeUnit.MILLISECONDS) }
+                finally { ownerCheck.cancel(true) }
+            check(current && owner.asBinder().isBinderAlive && now() < deadline) { "owner_changed" }
+        }
+        var result: Bundle? = null
+        mutate(false) {
+            check(!closed && now() < deadline && permitted()) { "permission_denied" }
+            val before = platform.read(selected)
+            check(before.nativePair && before.device() != null && before.mutationApi) { "device_unavailable" }
+            requireOwner()
+            platform.setHeadTrackerEnabled(selected, false)
+            synchronized(lock) { active?.takeIf { it.address == selected } }?.stop("native_disabled")
+            val after = platform.read(selected)
+            check(now() < deadline && after.headTrackerEnabled == false && after.deviceEnabled == before.deviceEnabled) { "state_changed" }
+            result = after.bundle("ok").apply { putBoolean("applied", true) }
+        }
+        checkNotNull(result)
+    } catch (error: Exception) {
+        failure(error.message?.takeIf { it in setOf("owner_changed", "permission_denied", "device_unavailable", "state_changed") }
+            ?: "unavailable")
     }
 
     fun state(owner: IPlaybackRecoveryOwner): Bundle = owned(owner)?.state() ?: failure("no_owned_probe")
@@ -62,15 +101,17 @@ internal class RootHeadTrackerProbe(
     }
 
     private inner class Lease(val address: String, val owner: IPlaybackRecoveryOwner,
-        val poses: ParcelFileDescriptor, val events: IHeadTrackerEvents, seconds: Int) : IBinder.DeathRecipient {
+        val poses: ParcelFileDescriptor, val events: IHeadTrackerEvents, seconds: Int?,
+        private val enablePreference: Boolean) : IBinder.DeathRecipient {
+        private val normal = seconds == null
         val prepared = CountDownLatch(1)
         private val done = CountDownLatch(1)
         private val stopping = AtomicBoolean()
         private val cleanupLock = Any()
         private val started = now()
-        private val deadline = started + seconds * 1_000L
+        private val deadline = seconds?.let { started + it * 1_000L } ?: Long.MAX_VALUE
         private val startupDeadline = minOf(started + 3_000, deadline)
-        private val timer = Timer("head-tracker-deadline", true)
+        private val timer = if (normal) null else Timer("head-tracker-deadline", true)
         @Volatile private var sink: HeadTrackerSinkSession? = null
         @Volatile private var ready = false
         @Volatile private var reason = "preparing"
@@ -103,7 +144,7 @@ internal class RootHeadTrackerProbe(
         override fun binderDied() = stop("owner_died")
 
         fun start() {
-            timer.schedule(object : TimerTask() { override fun run() = stop("deadline") },
+            timer?.schedule(object : TimerTask() { override fun run() = stop("deadline") },
                 (deadline - now()).coerceAtLeast(0))
             thread(name = "head-tracker-probe", isDaemon = true) { run() }
         }
@@ -120,6 +161,8 @@ internal class RootHeadTrackerProbe(
             val state = platform.read(address)
             observed = state
             requireLive(starting)
+            if (normal && (!starting || !enablePreference))
+                check(state.headTrackerEnabled == true) { "native_disabled" }
             check(state.nativePair && state.routeSelected) { "route_changed" }
             check(state.supported && state.compatible == true && state.mutationApi &&
                 state.deviceEnabled == true && state.enabled && state.headTrackerEnabled != null) { "spatial_disabled" }
@@ -191,13 +234,13 @@ internal class RootHeadTrackerProbe(
             } catch (error: Exception) {
                 if (!stopping.get()) stop(error.message?.takeIf { it in setOf("deadline", "permission_denied",
                     "owner_changed", "cancelled", "route_changed", "spatial_disabled", "state_changed",
-                    "sink_stopped", "head_tracker_not_discovered") } ?: "unavailable")
+                    "sink_stopped", "head_tracker_not_discovered", "native_disabled") } ?: "unavailable")
             } finally {
                 stop(reason)
                 runCatching { poses.close() }
                 restorePreference()
                 if (linked) runCatching { owner.asBinder().unlinkToDeath(this, 0) }
-                timer.cancel()
+                timer?.cancel()
                 val sinkDeadline = System.nanoTime() + 500_000_000L
                 runCatching { while ((sink?.isClosed == false || !ownerPollerEnded) && System.nanoTime() < sinkDeadline) Thread.sleep(10) }
                 workerEnded = true
@@ -209,6 +252,7 @@ internal class RootHeadTrackerProbe(
         }
 
         private fun restorePreference() = synchronized(cleanupLock) {
+            if (normal && ready) { restoreReason = "durable_choice"; return@synchronized }
             if (!attempted) { restored = true; return@synchronized }
             if (restoreReason !in setOf("pending", "restore_failed")) return@synchronized
             val captured = before ?: return@synchronized
@@ -251,10 +295,14 @@ internal class RootHeadTrackerProbe(
                 putBoolean("cleanup_complete", cleanupComplete); putBoolean("restored", restored)
                 putString("restore_reason", restoreReason); putBoolean("sink_closed", sink?.isClosed != false)
                 putBoolean("owner_poller_retired", ownerPollerEnded)
+                putBoolean("normal_session", normal)
                 putBoolean("hal_handshake", handshake)
                 putBoolean("reporting_enabled", sink?.reporting?.enabled == true && !stopping.get())
                 putLong("report_interval_nanos", sink?.reporting?.intervalNanos ?: 0)
-                putLong("remaining_ms", (deadline - now()).coerceAtLeast(0))
+                if (!normal) putLong("remaining_ms", (deadline - now()).coerceAtLeast(0))
+                observed?.headTrackerEnabled?.let { putBoolean("head_tracker_enabled", it) }
+                observed?.deviceEnabled?.let { putBoolean("device_enabled", it) }
+                observed?.let { putBoolean("route_selected", it.routeSelected) }
                 observed?.headTrackerAvailable?.let { putBoolean("head_tracker_available", it) }
                 observed?.actualHeadTrackingMode?.let { putInt("actual_head_tracking_mode", it) }
             }
@@ -264,6 +312,7 @@ internal class RootHeadTrackerProbe(
     override fun close() {
         val lease = synchronized(lock) { closed = true; active }
         lease?.stop("root_closed"); lease?.awaitCleanup(); lease?.retryCleanup()
+        preferenceChecks.shutdownNow()
     }
 
     companion object {

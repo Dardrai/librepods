@@ -152,33 +152,53 @@ class ShizukuAudioService @JvmOverloads constructor(context: Context,
         spatialAudioCall(true) { it.restore(address, owner) }
 
     override fun startHeadTrackerProbe(address: String, owner: IPlaybackRecoveryOwner,
-        poses: ParcelFileDescriptor, events: IHeadTrackerEvents, seconds: Int): Bundle {
+        poses: ParcelFileDescriptor, events: IHeadTrackerEvents, seconds: Int): Bundle =
+        openHeadTracker(address, owner, poses, events, seconds, false)
+
+    override fun openHeadTracking(address: String, owner: IPlaybackRecoveryOwner,
+        poses: ParcelFileDescriptor, events: IHeadTrackerEvents, enablePreference: Boolean): Bundle =
+        openHeadTracker(address, owner, poses, events, null, enablePreference)
+
+    private fun headTrackerAccess(): RootHeadTrackerProbe = synchronized(lock) {
+        check(!cleanupFailed.get()) { "helper_unavailable" }
+        headTrackerProbe ?: RootHeadTrackerProbe(SpatialAudioAccess.Framework(shellContext),
+            { selected, selectedOwner, input ->
+                val sink = synchronized(lock) {
+                    headTrackerSink ?: RootHeadTrackerSink {}.also { headTrackerSink = it }
+                }
+                sink.open(selected, selectedOwner, input) {}
+            }, ::headTrackerMutation, ::headTrackerPermission).also { headTrackerProbe = it }
+    }
+
+    private fun openHeadTracker(address: String, owner: IPlaybackRecoveryOwner,
+        poses: ParcelFileDescriptor, events: IHeadTrackerEvents, seconds: Int?, enablePreference: Boolean): Bundle {
         try { enforceCaller() } catch (error: Exception) { poses.close(); throw error }
-        if (!BuildConfig.DEBUG || Process.myUid() != 0 || !headTrackerPermission()) {
+        if (!AudioBridgeRules.mayOpenHeadTracker(Process.myUid() == 0, seconds != null, BuildConfig.DEBUG) ||
+            !headTrackerPermission()) {
             poses.close()
             return RootHeadTrackerProbe.failure("probe_unavailable")
         }
         val identity = Binder.clearCallingIdentity()
         return try {
-            val probe = synchronized(lock) {
-                check(!cleanupFailed.get()) { "helper_unavailable" }
-                headTrackerProbe ?: RootHeadTrackerProbe(SpatialAudioAccess.Framework(shellContext),
-                    { selected, selectedOwner, input ->
-                        val sink = synchronized(lock) {
-                            headTrackerSink ?: RootHeadTrackerSink {}.also { headTrackerSink = it }
-                        }
-                        sink.open(selected, selectedOwner, input) {}
-                    },
-                    ::headTrackerMutation, ::headTrackerPermission).also { headTrackerProbe = it }
-            }
-            probe.start(address, owner, poses, events, seconds)
+            val probe = headTrackerAccess()
+            if (seconds != null) probe.start(address, owner, poses, events, seconds)
+            else probe.openNormal(address, owner, poses, events, enablePreference)
         } catch (_: Exception) { poses.close(); RootHeadTrackerProbe.failure("unavailable") }
+        finally { Binder.restoreCallingIdentity(identity) }
+    }
+
+    override fun disableHeadTracking(address: String, owner: IPlaybackRecoveryOwner): Bundle {
+        enforceCaller()
+        if (Process.myUid() != 0 || !headTrackerPermission()) return RootHeadTrackerProbe.failure("permission_denied")
+        val identity = Binder.clearCallingIdentity()
+        return try { headTrackerAccess().disable(address, owner) }
+        catch (_: Exception) { RootHeadTrackerProbe.failure("unavailable") }
         finally { Binder.restoreCallingIdentity(identity) }
     }
 
     override fun headTrackerProbeState(owner: IPlaybackRecoveryOwner): Bundle {
         enforceCaller()
-        if (!BuildConfig.DEBUG || Process.myUid() != 0) return RootHeadTrackerProbe.failure("probe_unavailable")
+        if (Process.myUid() != 0) return RootHeadTrackerProbe.failure("probe_unavailable")
         val identity = Binder.clearCallingIdentity()
         return try { headTrackerProbe?.state(owner) ?: RootHeadTrackerProbe.failure("no_owned_probe") }
         finally { Binder.restoreCallingIdentity(identity) }
@@ -186,7 +206,7 @@ class ShizukuAudioService @JvmOverloads constructor(context: Context,
 
     override fun finishHeadTrackerProbe(owner: IPlaybackRecoveryOwner): Bundle {
         enforceCaller()
-        if (!BuildConfig.DEBUG || Process.myUid() != 0) return RootHeadTrackerProbe.failure("probe_unavailable")
+        if (Process.myUid() != 0) return RootHeadTrackerProbe.failure("probe_unavailable")
         val identity = Binder.clearCallingIdentity()
         return try { headTrackerProbe?.finish(owner) ?: RootHeadTrackerProbe.failure("no_owned_probe") }
         finally { Binder.restoreCallingIdentity(identity) }

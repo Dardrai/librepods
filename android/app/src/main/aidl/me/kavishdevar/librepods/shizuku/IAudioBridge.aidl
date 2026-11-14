@@ -52,5 +52,8 @@ interface IAudioBridge {
         in ParcelFileDescriptor poses, IHeadTrackerEvents events, int seconds) = 35;
     Bundle headTrackerProbeState(IPlaybackRecoveryOwner owner) = 36;
     Bundle finishHeadTrackerProbe(IPlaybackRecoveryOwner owner) = 37;
+    Bundle openHeadTracking(String address, IPlaybackRecoveryOwner owner,
+        in ParcelFileDescriptor poses, IHeadTrackerEvents events, boolean enablePreference) = 38;
+    Bundle disableHeadTracking(String address, IPlaybackRecoveryOwner owner) = 39;
     void destroy() = 16777114;
 }

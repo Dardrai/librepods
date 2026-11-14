@@ -48,8 +48,10 @@ import com.kyant.backdrop.backdrops.rememberLayerBackdrop
 import me.kavishdevar.librepods.R
 import me.kavishdevar.librepods.BuildConfig
 import me.kavishdevar.librepods.bluetooth.DeviceSettingsRefreshResult
+import me.kavishdevar.librepods.audio.NativeHeadTrackingState
 import me.kavishdevar.librepods.core.devices.AppleDevice
 import me.kavishdevar.librepods.core.devices.AirPodsModel
+import me.kavishdevar.librepods.core.devices.ConnectionState
 import me.kavishdevar.librepods.core.devices.effectiveControl
 import me.kavishdevar.librepods.core.devices.legacyEndCallSinglePress
 import me.kavishdevar.librepods.core.devices.supportsCallControls
@@ -112,6 +114,10 @@ fun AppleSettingsRoute(
         remember { MutableStateFlow(NativeGameModeController.State()) }).collectAsState()
     val spatialSupported = supportsNativeSpatialAudio()
     val calibrationSupported = BuildConfig.DEBUG && uiState.metadata.model == AirPodsModel.AIRPODS_PRO_3
+    val headTrackingController = viewModel.headTrackingController
+    val headTracking by (headTrackingController?.state ?:
+        remember { MutableStateFlow(NativeHeadTrackingState()) }).collectAsState()
+    val connection by viewModel.connectionState.collectAsState()
 
     AppleSettingsScreen(
         uiState = uiState,
@@ -149,9 +155,15 @@ fun AppleSettingsRoute(
         spatialAudioContent = if (spatialSupported) ({
             NativeSpatialAudioSetting(viewModel)
             if (calibrationSupported) {
-                styledListItem(contentText = stringResource(R.string.spatial_calibration_title),
-                    supportingText = stringResource(R.string.spatial_calibration_entry_description),
-                    orientation = StyledListItemOrientation.Vertical, onClick = navigateToSpatialCalibration)
+                NativeHeadTrackingSetting(headTracking,
+                    connected = connection == ConnectionState.CONNECTED,
+                    change = { headTrackingController?.setEnabled(it) }, setup = navigateToSpatialCalibration)
+                if (headTracking.calibrated || headTracking.enabled == true) {
+                    styledListItem(contentText = stringResource(if (headTracking.calibrated)
+                        R.string.spatial_head_tracking_recalibrate else R.string.spatial_calibration_entry_description),
+                        onClick = navigateToSpatialCalibration,
+                        enabled = connection == ConnectionState.CONNECTED && !headTracking.busy)
+                }
             }
         }) else null,
     )

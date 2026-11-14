@@ -170,7 +170,7 @@ class SpatialPoseConverterTest {
         for (bad in listOf(
             next.copy(timestampNs = null), next.copy(timestampNs = 0),
             next.copy(timestampNs = first.timestampNs), next.copy(timestampNs = first.timestampNs!! - 1),
-            next.copy(timestampNs = first.timestampNs!! + 100_000_001),
+            next.copy(timestampNs = first.timestampNs!! + 250_000_000),
             next.copy(counter = first.counter), next.copy(counter = 0), next.copy(counter = null),
             next.copy(attitudeQ15 = listOf(0, 0, 0)),
             next.copy(attitudeQ15 = listOf(32767, 0, 0)), next.copy(attitudeQ15 = listOf(32767, 32767, 0)),
@@ -183,6 +183,45 @@ class SpatialPoseConverterTest {
         }
         val fresh = SpatialPoseConverter(checkNotNull(calibrate()), 1)
         assertNull(fresh.accept(first)); assertNotNull(fresh.accept(next))
+    }
+
+    @Test fun forwardShortGapsReprimeRateWithoutChangingAbsoluteReferenceOrDiscontinuity() {
+        val first = report(neutral * mount.inverse(), 1_000_000_000)
+        val raised = neutral * axis(1.0, 0.0, 0.0, 20.0)
+        val after = raised * axis(1.0, 0.0, 0.0, Math.toDegrees(0.01))
+        for (gap in listOf(100_000_001L, 119_563_000L, 249_999_999L)) {
+            val converter = SpatialPoseConverter(checkNotNull(calibrate()), 17)
+            assertNull(converter.accept(first))
+            val gapReport = report(raised * mount.inverse(), first.timestampNs!! + gap).copy(counter = first.counter!! + 24)
+            assertNull(converter.accept(gapReport)); assertFalse(converter.invalidated)
+            val next = report(after * mount.inverse(), gapReport.timestampNs!! + tick).copy(counter = gapReport.counter!! + 4)
+            val pose = checkNotNull(converter.accept(next))
+            assertEquals(17, pose.discontinuity); assertEquals(tick, pose.intervalNs)
+            vector(after.rotvec(), pose.rotationVector.map(Float::toDouble), 0.0004)
+            vector(listOf(0.5, 0.0, 0.0), pose.angularVelocity.map(Float::toDouble), 0.02)
+        }
+    }
+
+    @Test fun gapRecoveryNeverAcceptsClockCounterOrBranchResetsAndLongGapsRemainLatched() {
+        val first = report(neutral * mount.inverse(), 1_000_000_000)
+        val gap = first.copy(timestampNs = first.timestampNs!! + 119_563_000, counter = first.counter!! + 24)
+        val cases = listOf(
+            gap.copy(timestampNs = first.timestampNs) to "sensor_time_changed",
+            gap.copy(counter = first.counter) to "sensor_counter_changed",
+            gap.copy(counter = 0) to "sensor_counter_changed",
+            gap.copy(counter = null) to "sensor_counter_changed",
+            gap.copy(attitudeQ15 = listOf(32767, 0, 0)) to "unsupported_attitude",
+            gap.copy(timestampNs = first.timestampNs!! + 250_000_000) to "sensor_gap")
+        for ((bad, reason) in cases) {
+            val converter = SpatialPoseConverter(checkNotNull(calibrate()), 0)
+            assertNull(converter.accept(first)); assertNull(converter.accept(bad))
+            assertEquals(reason, converter.invalidReason)
+            assertNull(converter.accept(gap.copy(timestampNs = gap.timestampNs!! + tick, counter = gap.counter!! + 4)))
+        }
+        val withoutCounters = SpatialPoseConverter(checkNotNull(SpatialPoseProfile.fromBasis(checkNotNull(calibrate()).headFromRaw)), 0)
+        assertNull(withoutCounters.accept(first.copy(counter = null)))
+        assertNull(withoutCounters.accept(gap.copy(counter = null)))
+        assertEquals("sensor_gap", withoutCounters.invalidReason)
     }
 
     @Test fun naturalCounterWrapIsValidButExplicitRoleOrReferenceRetirementCannotRestart() {

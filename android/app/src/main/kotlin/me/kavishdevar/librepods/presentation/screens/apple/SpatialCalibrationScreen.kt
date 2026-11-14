@@ -90,6 +90,7 @@ internal fun SpatialCalibrationScreen(
         !it.getBoolean("restored") || !it.getBoolean("sink_closed") || !it.getBoolean("cleanup_complete", true)
     } == true
     val needsSpatialAudio = !running && result?.reason == "spatial_disabled"
+    val saveFailed = !running && result?.reason == "profile_save_failed"
     val leaveBeforeRetry = cleanupUnverified || needsSpatialAudio
     val title = when {
         running -> when (stage) {
@@ -102,6 +103,7 @@ internal fun SpatialCalibrationScreen(
         result == null -> R.string.spatial_calibration_intro_title
         cleanupUnverified -> R.string.spatial_calibration_stopping_failed
         needsSpatialAudio -> R.string.spatial_calibration_fixed_off
+        saveFailed -> R.string.spatial_calibration_save_failed
         paused -> R.string.spatial_calibration_paused
         completed -> R.string.spatial_calibration_complete
         result.calibrated -> R.string.spatial_calibration_preview_failed
@@ -118,6 +120,7 @@ internal fun SpatialCalibrationScreen(
         result == null -> R.string.spatial_calibration_intro_body
         cleanupUnverified -> R.string.spatial_calibration_stopping_failed_body
         needsSpatialAudio -> R.string.spatial_calibration_fixed_off_body
+        saveFailed -> R.string.spatial_calibration_save_failed_body
         paused -> R.string.spatial_calibration_paused_body
         completed -> R.string.spatial_calibration_complete_body
         result.calibrated -> R.string.spatial_calibration_preview_failed_body
