@@ -3,7 +3,6 @@
   <ManuallySuppressedIssues/>
   <CurrentIssues>
     <ID>ComplexCondition:AirPodsQSService.kt:AirPodsQSService$!destroyed &amp;&amp; generation == pickerGeneration &amp;&amp; !isLocked &amp;&amp; (dongle?.isCurrent(currentSource.dongleControls) == true || device != null &amp;&amp; !currentSource.dongleControls.state.value.usesDongleListeningControls &amp;&amp; devices.value[device.macAddress] === device &amp;&amp; canControl(device))</ID>
-    <ID>ComplexCondition:AudioSettings.kt:adaptiveVolumeCapability || conversationAwarenessCapability || loudSoundReductionCapability || gameModeVisible || spatialAudioContent != null</ID>
     <ID>ComplexCondition:BluetoothVolumeSync.kt:BluetoothVolumeSync$(currentBehavior != behavior &amp;&amp; !(allowAbsolute &amp;&amp; currentBehavior == 3)) || current.maximum != initial.maximum</ID>
     <ID>ComplexCondition:BluetoothVolumeSync.kt:BluetoothVolumeSync$value.maximum &lt;= 0 || value.volume !in 0..value.maximum || route?.role != 2 || route.type != 8 || !route.address.equals(selected, true)</ID>
     <ID>ComplexCondition:CallPcmConsumer.kt:CallPcmConsumer$closed || stopped || muted || epoch == 0L</ID>
@@ -101,7 +100,12 @@
     <ID>ComplexCondition:NativeGameSnapshot.kt:NativeGameSnapshot.Companion$input.size == 86 &amp;&amp; (listOf(79, 82, 83, 84).any { input[it] !in 0L..1L } || input[80] !in 0L..65535L || input[81] !in 0L..65535L || input[85] !in 0L..7L)</ID>
     <ID>ComplexCondition:NativeGameSnapshot.kt:NativeGameSnapshot.Companion$listOf(1, 2, 9, 11, 13, 14, 56, 57).any { input[it] !in 0L..1L } || input[3] !in 0L..11L || input[4] !in 1L..3L || input[7] !in 0L..7L || input[10] !in 0L..2047L || input[12] !in 0L..2047L || input[17] !in 0L..65535L || input[31] !in 0L..65535L || input[30] !in 0L..65535L || input[32] !in 0L..65535L || input[33] !in 0L..255L || input[34] !in 0L..255L || input[35] !in 0L..63L || input[43] !in 0L..6L || input[45] !in 9L..11L || input[46] !in 0L..500L || input[53] !in 0L..65535L || input[54] !in 0L..255L || input[55] !in 0L..65535L || input[62] !in 0L..6L || input[71] !in 9L..11L || input[72] !in 9L..11L || input[73] !in 0L..500L || ((18..23) + (36..41) + (65..70)).any { input[it] !in 0L..255L }</ID>
     <ID>ComplexCondition:NativeGameTransportClient.kt:NativeGameTransportClient$serial &lt;= 0 || closed || serverNonce == null || requestId == Long.MAX_VALUE</ID>
-    <ID>ComplexCondition:NativeSpatialAudioSetting.kt:FixedSpatialState.Companion$known &amp;&amp; nativeEnabled != null &amp;&amp; device != null &amp;&amp; tracking != null</ID>
+    <ID>ComplexCondition:NativeHeadTrackingController.kt:NativeHeadTrackingController$!access.hasRootPrivileges &amp;&amp; current() &amp;&amp; pending.get() === choice &amp;&amp; SystemClock.elapsedRealtime() - choice.started &lt; 5_000</ID>
+    <ID>ComplexCondition:NativeHeadTrackingController.kt:NativeHeadTrackingController$choice?.enabled != false &amp;&amp; !calibrating() &amp;&amp; current() &amp;&amp; BuildConfig.DEBUG &amp;&amp; device.metadata.value.model == AirPodsModel.AIRPODS_PRO_3</ID>
+    <ID>ComplexCondition:NativeHeadTrackingController.kt:NativeHeadTrackingController$metadata.model != AirPodsModel.AIRPODS_PRO_3 || role.firstOrNull() !in listOf(1, 2) || metadata.modelNumber.isBlank() || metadata.version1.isBlank()</ID>
+    <ID>ComplexCondition:NativeHeadTrackingController.kt:NativeHeadTrackingController$session != null &amp;&amp; (!eligible || sessionSocket !== socket || sessionKey != key || sessionLive?.get() != true || session?.isActive != true)</ID>
+    <ID>ComplexCondition:NativeHeadTrackingController.kt:NativeHeadTrackingController$session == null &amp;&amp; eligible &amp;&amp; mutableState.value.available &amp;&amp; (explicitOn || nativeOn == true &amp;&amp; SystemClock.elapsedRealtime() &gt;= retryAfter.get() &amp;&amp; !(failedSocket === socket &amp;&amp; failedKey == key))</ID>
+    <ID>ComplexCondition:NativeSpatialAudioSetting.kt:rootReady &amp;&amp; connected &amp;&amp; current() &amp;&amp; !headTracking.busy</ID>
     <ID>ComplexCondition:NearbyPairingController.kt:NearbyPairingController$!consentReady() || candidates.ambiguous || receivedAt &gt; now || now &gt;= pending.deadline || device.bondState != BluetoothDevice.BOND_BONDING || device.type !in setOf(BluetoothDevice.DEVICE_TYPE_CLASSIC, BluetoothDevice.DEVICE_TYPE_DUAL) || !NearbyAirPods.matchesName(model, device.name) || selected?.device?.address?.let { it != device.address } == true</ID>
     <ID>ComplexCondition:NearbyPairingController.kt:NearbyPairingController$(bondState !in setOf(BluetoothDevice.BOND_NONE, BluetoothDevice.BOND_BONDING) &amp;&amp; !(bondState == BluetoothDevice.BOND_BONDED &amp;&amp; device.address in bondingSeen)) || device.name?.let { !NearbyAirPods.matchesName(session.modelId ?: 0, it) } == true</ID>
     <ID>ComplexCondition:NearbyPairingController.kt:NearbyPairingController$hint == null || receivedAt &lt; hint.receivedAt || !hint.isCurrent(now) || hint.pending != null || pendingConsent != null || selected?.consentRequested == true</ID>
@@ -131,8 +135,7 @@
     <ID>ComplexCondition:ShizukuAudioClient.kt:ShizukuAudioClient$closed || bridge == null || settingsRefresh || playbackRequest != null || communicationRequest != null</ID>
     <ID>ComplexCondition:ShizukuAudioClient.kt:ShizukuAudioClient$closed || requireRoot || bridge != null || connecting</ID>
     <ID>ComplexCondition:ShizukuAudioService.kt:ShizukuAudioService$mutation &amp;&amp; (spatialMutating || volumeChecking || playbackRecovery != null || playbackRelease != null || callConnection != null || !probeIsQuiet())</ID>
-    <ID>ComplexCondition:SpatialPoseConverter.kt:SpatialPoseProfile.Companion$all.zipWithNext().any { (a, b) -&gt; val before = a.timestampNs; val after = b.timestampNs before == null || after == null || before &lt;= 0 || after &lt;= before || !counterFollows(a.counter, b.counter) }</ID>
-    <ID>ComplexCondition:SpatialPoseConverter.kt:SpatialPoseProfile.Companion$axes.any { abs(it.norm() - 1) &gt; 1e-5 } || abs(axes[0].dot(axes[1])) &gt; 1e-5 || abs(axes[0].dot(axes[2])) &gt; 1e-5 || abs(axes[1].dot(axes[2])) &gt; 1e-5 || abs(axes[0].cross(axes[1]).dot(axes[2]) - 1) &gt; 1e-5</ID>
+    <ID>ComplexCondition:SpatialPoseProfileStore.kt:SpatialPoseProfileStore$key.formatVersion != 1 || key.rawRole.size !in 1..64 || key.rawRole.first() !in 1..2 || key.rawRole.any { it !in 0..255 } || key.modelNumber.isBlank() || key.firmware.isBlank() || key.modelNumber.length &gt; 256 || key.firmware.length &gt; 256</ID>
     <ID>ComplexCondition:StyledSlider.kt:currentEnabled &amp;&amp; !dragCanceled &amp;&amp; userChangeStarted &amp;&amp; (currentValue == lastUserValue || currentValue == dragObservedValue)</ID>
     <ID>ComplexCondition:UpdateHearingTestScreen.kt:index !in 0..7 || !value.isFinite() || value !in 0f..90f || !hearingAidSettingsWritable(data)</ID>
     <ID>ComplexCondition:UsbAbsoluteVolumeBroker.kt:UsbAbsoluteVolumeBroker$now() &gt;= current.deadline || !runCatching { current.policy.stillOwned() }.getOrDefault(false) || route?.target != current.target || !route.soleUsbOutput || !route.selected || !route.normalMode</ID>
@@ -186,7 +189,6 @@
     <ID>CyclomaticComplexMethod:DongleUsbVolume.kt:DongleUsbVolume$fun probe</ID>
     <ID>CyclomaticComplexMethod:DongleUsbVolume.kt:DongleUsbVolume$private suspend fun run</ID>
     <ID>CyclomaticComplexMethod:GameNativeGateway.kt:NativeGameTransportRules$fun validPayload</ID>
-    <ID>CyclomaticComplexMethod:HeadTrackerUhidProtocol.kt:HeadTrackerUhidProtocol$fun handle: ByteArray?</ID>
     <ID>CyclomaticComplexMethod:HfpCallSuppression.kt:HfpCallSuppression$@Synchronized override fun acquire: Bundle</ID>
     <ID>CyclomaticComplexMethod:HfpCallTransport.kt:HfpCallTransport$suspend fun discover: IHfpCallControl?</ID>
     <ID>CyclomaticComplexMethod:IslandListeningMode.kt:IslandListeningMode$fun observeReport: Int?</ID>
@@ -219,6 +221,7 @@
     <ID>CyclomaticComplexMethod:NativeGameProbeReceiver.kt:NativeGameProbeReceiver$override fun onReceive</ID>
     <ID>CyclomaticComplexMethod:NativeGameSnapshot.kt:NativeGameSnapshot.Companion$fun parse: NativeGameSnapshot?</ID>
     <ID>CyclomaticComplexMethod:NativeGameTransportClient.kt:NativeGameTransportClient$private fun accept</ID>
+    <ID>CyclomaticComplexMethod:NativeHeadTrackingController.kt:NativeHeadTrackingController$private suspend fun runSensor</ID>
     <ID>CyclomaticComplexMethod:NativePlaybackRelease.kt:NativePlaybackRelease$@SuppressLint("MissingPermission", "SoonBlockedPrivateApi") fun run: Boolean</ID>
     <ID>CyclomaticComplexMethod:NativePlaybackRelease.kt:NativePlaybackRelease.Companion$internal fun releaseProfiles: Boolean</ID>
     <ID>CyclomaticComplexMethod:NativeQuickControls.kt:NativeQuickControls$private fun source: LiveValueSource&lt;Long&gt;</ID>
@@ -233,15 +236,15 @@
     <ID>CyclomaticComplexMethod:PopupWindow.kt:PopupWindow$private fun renderBattery</ID>
     <ID>CyclomaticComplexMethod:QuickSettingsState.kt:internal fun nativeQuickSettings: List&lt;QuickSettingState&gt;</ID>
     <ID>CyclomaticComplexMethod:QuickSettingsState.kt:private fun quickSettings: List&lt;QuickSettingState&gt;</ID>
+    <ID>CyclomaticComplexMethod:RootHeadTrackerProbe.kt:RootHeadTrackerProbe$fun disable: Bundle</ID>
     <ID>CyclomaticComplexMethod:RootHeadTrackerProbe.kt:RootHeadTrackerProbe.Lease$private fun run</ID>
-    <ID>CyclomaticComplexMethod:RootHeadTrackerSink.kt:RootHeadTrackerSink.Session$private fun run</ID>
     <ID>CyclomaticComplexMethod:RootUsbAbsoluteVolume.kt:RootUsbAbsoluteVolume$private fun proof: Proof</ID>
     <ID>CyclomaticComplexMethod:SettingsRefresher.kt:SettingsRefresher$suspend fun refresh: DeviceSettingsRefreshResult</ID>
     <ID>CyclomaticComplexMethod:ShizukuAudioClient.kt:ShizukuAudioClient$@androidx.annotation.WorkerThread fun checkVolumeSync: Boolean</ID>
     <ID>CyclomaticComplexMethod:ShizukuAudioClient.kt:ShizukuAudioClient$internal suspend fun prepareCommunication: CommunicationLease</ID>
     <ID>CyclomaticComplexMethod:ShizukuAudioClient.kt:ShizukuAudioClient$internal suspend fun prepareMicrophoneProbe: MicrophoneProbeLease</ID>
-    <ID>CyclomaticComplexMethod:ShizukuAudioClient.kt:ShizukuAudioClient$internal suspend fun startHeadTrackerProbe: HeadTrackerProbeLease</ID>
     <ID>CyclomaticComplexMethod:ShizukuAudioClient.kt:ShizukuAudioClient$private suspend fun nativePlayback: Boolean</ID>
+    <ID>CyclomaticComplexMethod:ShizukuAudioClient.kt:ShizukuAudioClient$private suspend fun openHeadTracker: HeadTrackerLease</ID>
     <ID>CyclomaticComplexMethod:ShizukuAudioClient.kt:ShizukuAudioClient$private suspend fun spatialAudioCall: Bundle</ID>
     <ID>CyclomaticComplexMethod:ShizukuAudioClient.kt:ShizukuAudioClient$suspend fun confirmPairing: Boolean</ID>
     <ID>CyclomaticComplexMethod:ShizukuAudioService.kt:ShizukuAudioService$override fun prepareCommunication: Bundle</ID>
@@ -249,9 +252,6 @@
     <ID>CyclomaticComplexMethod:ShizukuAudioService.kt:ShizukuAudioService$private fun spatialAudioCall: Bundle</ID>
     <ID>CyclomaticComplexMethod:SpatialAudioAccess.kt:SpatialAudioAccess$@Synchronized fun setFixedEnabled: Bundle</ID>
     <ID>CyclomaticComplexMethod:SpatialHeadTrackingProbe.kt:SpatialHeadTrackingProbe$suspend fun run: SpatialHeadTrackingProbeResult</ID>
-    <ID>CyclomaticComplexMethod:SpatialMotionCapture.kt:SpatialMotionCapture$suspend fun capture: SpatialMotionCaptureResult</ID>
-    <ID>CyclomaticComplexMethod:SpatialPoseConverter.kt:SpatialPoseConverter$fun accept: SpatialPose?</ID>
-    <ID>CyclomaticComplexMethod:SpatialPoseConverter.kt:SpatialPoseProfile.Companion$fun calibrate: SpatialPoseProfile?</ID>
     <ID>CyclomaticComplexMethod:UsbAbsoluteVolumeBroker.kt:UsbAbsoluteVolumeBroker$@Synchronized fun renew: Result</ID>
     <ID>CyclomaticComplexMethod:UsbAbsoluteVolumeSystemPolicy.kt:UsbAbsoluteVolumeSystemPolicy$override fun acquire: Bundle</ID>
     <ID>CyclomaticComplexMethod:WearMediaController.kt:WearMediaController$fun onComponentStateChange</ID>
@@ -262,15 +262,16 @@
     <ID>EmptyElseBlock:KotlinModule.kt:KotlinModule$if (!active) return@intercept chain.proceed()</ID>
     <ID>EmptyElseBlock:ListeningModeDialog.kt:ListeningModeSnapshot$if (adaptive) add(4)</ID>
     <ID>EmptyElseBlock:ListeningModeDialog.kt:ListeningModeSnapshot$if (allowOff) add(1)</ID>
-    <ID>EmptyElseBlock:RootHeadTrackerSink.kt:RootHeadTrackerSink.Session$if (stopReason == null) stopReason = reason</ID>
     <ID>HasPlatformType:CompanionPreferences.kt:CompanionPreferences.Record$fun frame</ID>
     <ID>ImplicitDefaultLocale:BatteryIndicator.kt:String.format( "%08X", color.toArgb() )</ID>
     <ID>ImplicitDefaultLocale:CompanionProtocol.kt:CompanionProtocol$"%02x".format(it.toInt() and 255)</ID>
+    <ID>ImplicitDefaultLocale:SpatialPoseProfileStore.kt:SpatialPoseProfileStore$"%02x".format(it.toInt() and 255)</ID>
     <ID>ImplicitDefaultLocale:StyledListItem.kt:String.format("#%08X", color.toArgb())</ID>
     <ID>ImplicitDefaultLocale:StyledListItem.kt:String.format("%08X", color.toArgb())</ID>
     <ID>InstanceOfCheckForException:CompanionHandoffController.kt:CompanionHandoffController$error is IOException</ID>
     <ID>InstanceOfCheckForException:DongleController.kt:DongleController$error is DongleUsbControlsUnavailable</ID>
     <ID>InstanceOfCheckForException:DongleProtocol.kt:DongleSession$error !is DongleBusyException</ID>
+    <ID>InstanceOfCheckForException:NativeHeadTrackingController.kt:NativeHeadTrackingController$error is NativeHeadTrackingPoseFault</ID>
     <ID>InstanceOfCheckForException:RootDongleHid.kt:RootDongleHid.Connection$error !is RuntimeException</ID>
     <ID>InstanceOfCheckForException:RootDongleHid.kt:RootDongleHid.Connection$error is Exception</ID>
     <ID>InstanceOfCheckForException:ShizukuAudioService.kt:ShizukuAudioService$error is RuntimeException</ID>
@@ -310,16 +311,15 @@
     <ID>LongMethod:MediaController.kt:MediaController.&lt;no name provided&gt;$override fun onPlaybackConfigChanged</ID>
     <ID>LongMethod:MicrophoneRouteProbeReceiver.kt:MicrophoneRouteProbeReceiver$private suspend fun runProbe</ID>
     <ID>LongMethod:NativeGameModeEngine.kt:NativeGameModeEngine$suspend fun tick: NativeGameModeController.State</ID>
+    <ID>LongMethod:NativeHeadTrackingController.kt:NativeHeadTrackingController$private suspend fun runSensor</ID>
     <ID>LongMethod:NearbyConnector.kt:NearbyConnector$suspend fun connect: Boolean</ID>
     <ID>LongMethod:NearbyPairingController.kt:NearbyPairingController$private fun confirmSelectedConsent</ID>
     <ID>LongMethod:NearbyPairingController.kt:NearbyPairingController.&lt;no name provided&gt;$override fun onReceive</ID>
     <ID>LongMethod:NoiseControlWidgetConfigurationActivity.kt:NoiseControlWidgetConfigurationActivity$override fun onCreate</ID>
     <ID>LongMethod:ReleaseNotesScreen.kt:fun createTopWavyRectPath: Path</ID>
     <ID>LongMethod:RootHeadTrackerProbe.kt:RootHeadTrackerProbe.Lease$private fun run</ID>
-    <ID>LongMethod:RootHeadTrackerSink.kt:RootHeadTrackerSink.Session$private fun run</ID>
     <ID>LongMethod:SettingsRefresher.kt:SettingsRefresher$suspend fun refresh: DeviceSettingsRefreshResult</ID>
     <ID>LongMethod:SpatialHeadTrackingProbe.kt:SpatialHeadTrackingProbe$suspend fun run: SpatialHeadTrackingProbeResult</ID>
-    <ID>LongMethod:SpatialMotionCapture.kt:SpatialMotionCapture$suspend fun capture: SpatialMotionCaptureResult</ID>
     <ID>LongParameterList:BleScanController.kt:BleScanController</ID>
     <ID>LongParameterList:CommunicationAudioController.kt:CommunicationAudioController</ID>
     <ID>LongParameterList:CompanionHandoffHost.kt:CompanionHandoffHost</ID>
@@ -339,15 +339,21 @@
     <ID>LongParameterList:NativeGameModePolicy.kt:NativeGameModePolicy$fun freshReport</ID>
     <ID>LongParameterList:NativeGameModePolicy.kt:NativeGameModePolicy$fun freshRestoreReport</ID>
     <ID>LongParameterList:NativeGameTransportClient.kt:NativeGameTransportClient$suspend fun beginClock</ID>
+    <ID>LongParameterList:NativeHeadTrackingController.kt:NativeHeadTrackingController</ID>
+    <ID>LongParameterList:NativeHeadTrackingController.kt:NativeHeadTrackingController$private suspend fun runSensor</ID>
+    <ID>LongParameterList:NativeHeadTrackingController.kt:internal suspend fun streamNativeHeadTracking</ID>
     <ID>LongParameterList:NearbyConnector.kt:NearbyConnector</ID>
     <ID>LongParameterList:NearbyPairingController.kt:NearbyPairingController$private fun handleBondEvent</ID>
     <ID>LongParameterList:NearbyPairingController.kt:NearbyPairingController$private fun pair</ID>
     <ID>LongParameterList:PairedBatteryTracker.kt:PairedBatteryTracker$fun acceptOwnedReport: ProximityReport?</ID>
     <ID>LongParameterList:QuickSettingsState.kt:internal fun nativeQuickSettings: List&lt;QuickSettingState&gt;</ID>
     <ID>LongParameterList:QuickSettingsState.kt:private fun quickSettings: List&lt;QuickSettingState&gt;</ID>
+    <ID>LongParameterList:RootHeadTrackerProbe.kt:RootHeadTrackerProbe$private fun open: Bundle</ID>
     <ID>LongParameterList:SettingsRefresher.kt:SettingsRefresher</ID>
     <ID>LongParameterList:ShizukuAudioClient.kt:ShizukuAudioClient$internal suspend fun prepareCommunication: CommunicationLease</ID>
-    <ID>LongParameterList:ShizukuAudioClient.kt:ShizukuAudioClient$internal suspend fun startHeadTrackerProbe: HeadTrackerProbeLease</ID>
+    <ID>LongParameterList:ShizukuAudioClient.kt:ShizukuAudioClient$internal suspend fun startHeadTrackerProbe: HeadTrackerLease</ID>
+    <ID>LongParameterList:ShizukuAudioClient.kt:ShizukuAudioClient$private suspend fun openHeadTracker: HeadTrackerLease</ID>
+    <ID>LongParameterList:ShizukuAudioService.kt:ShizukuAudioService$private fun openHeadTracker: Bundle</ID>
     <ID>LongParameterList:UsbAbsoluteVolumeBroker.kt:UsbAbsoluteVolumeBroker$@Synchronized fun acquire: Result</ID>
     <ID>LongParameterList:WearMediaController.kt:WearMediaController</ID>
     <ID>LoopWithTooManyJumpStatements:CompanionHandoffController.kt:CompanionHandoffController$while</ID>
@@ -356,15 +362,14 @@
     <ID>LoopWithTooManyJumpStatements:LivePcmConsumer.kt:BoundedPcmDelivery$while</ID>
     <ID>LoopWithTooManyJumpStatements:LiveRecordEditor.kt:LiveRecordEditor$while</ID>
     <ID>LoopWithTooManyJumpStatements:LiveValueEditor.kt:LiveValueEditor$while</ID>
+    <ID>LoopWithTooManyJumpStatements:NativeHeadTrackingController.kt:NativeHeadTrackingController$while</ID>
     <ID>LoopWithTooManyJumpStatements:RichText.kt:while</ID>
-    <ID>LoopWithTooManyJumpStatements:RootHeadTrackerSink.kt:RootHeadTrackerSink.Session$while</ID>
     <ID>LoopWithTooManyJumpStatements:SwipeBack.kt:while</ID>
     <ID>NestedBlockDepth:A2dpPlaybackRecovery.kt:A2dpPlaybackRecovery$@SuppressLint("MissingPermission") internal fun connectProfile: Boolean</ID>
     <ID>NestedBlockDepth:DongleUsbVolume.kt:DongleUsbVolume$private suspend fun run</ID>
     <ID>NestedBlockDepth:KotlinModule.kt:KotlinModule$@SuppressLint("UnsafeDynamicallyLoadedCode") override fun onPackageLoaded</ID>
     <ID>NestedBlockDepth:NativeGameModeEngine.kt:NativeGameModeEngine$suspend fun tick: NativeGameModeController.State</ID>
     <ID>NestedBlockDepth:NearbyPairingController.kt:NearbyPairingController$private fun startScan</ID>
-    <ID>NestedBlockDepth:RootHeadTrackerSink.kt:RootHeadTrackerSink.Session$private fun run</ID>
     <ID>NoNameShadowing:AboutCard.kt:serialNumbers</ID>
     <ID>NoNameShadowing:CompanionPreferences.kt:CompanionPreferences$device</ID>
     <ID>NoNameShadowing:DongleController.kt:DongleController${ it.observe() }</ID>
@@ -404,6 +409,7 @@
     <ID>SuspendFunSwallowedCancellation:MicrophoneRouteProbeReceiver.kt:MicrophoneRouteProbeReceiver$catch (failure: Exception) { Log.w(TAG, "Root microphone cleanup failed: ${failure.javaClass.simpleName}") }</ID>
     <ID>SuspendFunSwallowedCancellation:NativeGameProbeReceiver.kt:NativeGameProbeReceiver$catch (failure: Exception) { Log.w(TAG, "$operation failed: ${failure.message}") }</ID>
     <ID>SuspendFunSwallowedCancellation:NativeGameProbeReceiver.kt:NativeGameProbeReceiver$runCatching</ID>
+    <ID>SuspendFunSwallowedCancellation:NativeHeadTrackingController.kt:NativeHeadTrackingController$runCatching</ID>
     <ID>SuspendFunSwallowedCancellation:NearbyConnector.kt:NearbyConnector$catch (error: Exception) { if (error is CancellationException) { outcome = "cancelled"; throw error } outcome = "failed" Log.w(TAG, "Nearby media connection failed", error) return false }</ID>
     <ID>SuspendFunSwallowedCancellation:NearbyPairingController.kt:NearbyPairingController$catch (error: Exception) { if (error is CancellationException) throw error Log.w(TAG, "Consent confirmation unavailable", error) }</ID>
     <ID>SuspendFunSwallowedCancellation:SettingsRefresher.kt:SettingsRefresher$catch (cancelled: CancellationException) { request?.let { device.aacp.cancelControlSessionRefresh(it) } throw cancelled }</ID>
@@ -418,6 +424,7 @@
     <ID>SuspendFunSwallowedCancellation:ShizukuAudioClient.kt:ShizukuAudioClient$catch (failure: Exception) { // No AACP input has started before this method returns a verified lease. withContext(NonCancellable + Dispatchers.IO) { runCatching { finishCommunication(request, true) } } throw failure }</ID>
     <ID>SuspendFunSwallowedCancellation:ShizukuAudioClient.kt:ShizukuAudioClient$catch (failure: Exception) { withContext(NonCancellable + Dispatchers.IO) { runCatching { finishMicrophoneProbe(request) } } throw failure }</ID>
     <ID>SuspendFunSwallowedCancellation:ShizukuAudioClient.kt:ShizukuAudioClient$runCatching</ID>
+    <ID>SuspendFunSwallowedCancellation:SpatialHeadTrackingProbe.kt:SpatialHeadTrackingProbe$catch (cancelled: CancellationException) { diagnosticReason = "cancelled" reason = "Calibration stopped." throw cancelled }</ID>
     <ID>SuspendFunSwallowedCancellation:SpatialHeadTrackingProbe.kt:SpatialHeadTrackingProbe$runCatching</ID>
     <ID>SuspendFunSwallowedCancellation:SwipeBack.kt:catch (_: CancellationException) { // A gesture may interrupt the animation without disposing this scene's receiver. currentCoroutineContext().ensureActive() }</ID>
     <ID>SuspendFunSwallowedCancellation:SwipeBack.kt:catch (_: CancellationException) { animatedOffset.animateTo( 0f, tween(150) ) }</ID>
@@ -475,7 +482,7 @@
     <ID>SwallowedException:NativeGameTransportServer.kt:NativeGameTransportServer.&lt;no name provided&gt;$_: RuntimeException</ID>
     <ID>SwallowedException:NativeGameTransportServer.kt:NativeGameTransportServer.Companion$_: PackageManager.NameNotFoundException</ID>
     <ID>SwallowedException:NativeGameTransportServer.kt:NativeGameTransportServer.Companion$_: RuntimeException</ID>
-    <ID>SwallowedException:PermissionsPage.kt:_: Exception</ID>
+    <ID>SwallowedException:NativeHeadTrackingController.kt:NativeHeadTrackingController$_: Exception</ID>
     <ID>SwallowedException:PopupWindow.kt:PopupWindow$error: RuntimeException</ID>
     <ID>SwallowedException:RecordingScreen.kt:_: Exception</ID>
     <ID>SwallowedException:RootHeadTrackerProbe.kt:RootHeadTrackerProbe.Lease$_: Exception</ID>
@@ -579,6 +586,8 @@
     <ID>TooGenericExceptionCaught:NativeGameTransportServer.kt:NativeGameTransportServer$failure: RuntimeException</ID>
     <ID>TooGenericExceptionCaught:NativeGameTransportServer.kt:NativeGameTransportServer.&lt;no name provided&gt;$_: RuntimeException</ID>
     <ID>TooGenericExceptionCaught:NativeGameTransportServer.kt:NativeGameTransportServer.Companion$_: RuntimeException</ID>
+    <ID>TooGenericExceptionCaught:NativeHeadTrackingController.kt:NativeHeadTrackingController$_: Exception</ID>
+    <ID>TooGenericExceptionCaught:NativeHeadTrackingController.kt:NativeHeadTrackingController$error: Exception</ID>
     <ID>TooGenericExceptionCaught:NearbyConnector.kt:NearbyConnector$error: Exception</ID>
     <ID>TooGenericExceptionCaught:NearbyPairingController.kt:NearbyPairingController$error: Exception</ID>
     <ID>TooGenericExceptionCaught:NoiseControlWidgetConfigurationActivity.kt:NoiseControlWidgetConfigurationActivity$failure: Exception</ID>
@@ -586,7 +595,6 @@
     <ID>TooGenericExceptionCaught:PairingArtwork.kt:PairingArtwork$error: Exception</ID>
     <ID>TooGenericExceptionCaught:PairingArtwork.kt:PairingArtwork$error: RuntimeException</ID>
     <ID>TooGenericExceptionCaught:PcmWaveWriter.kt:PcmWaveWriter$e: Exception</ID>
-    <ID>TooGenericExceptionCaught:PermissionsPage.kt:_: Exception</ID>
     <ID>TooGenericExceptionCaught:PipePcmConsumer.kt:PipePcmConsumer$failure: Exception</ID>
     <ID>TooGenericExceptionCaught:PipePcmConsumer.kt:PipePcmConsumer.Companion$failure: Exception</ID>
     <ID>TooGenericExceptionCaught:PopupWindow.kt:PopupWindow$e: RuntimeException</ID>
@@ -599,8 +607,6 @@
     <ID>TooGenericExceptionCaught:RootHeadTrackerProbe.kt:RootHeadTrackerProbe$error: Exception</ID>
     <ID>TooGenericExceptionCaught:RootHeadTrackerProbe.kt:RootHeadTrackerProbe.Lease$_: Exception</ID>
     <ID>TooGenericExceptionCaught:RootHeadTrackerProbe.kt:RootHeadTrackerProbe.Lease$error: Exception</ID>
-    <ID>TooGenericExceptionCaught:RootHeadTrackerSink.kt:RootHeadTrackerSink$error: Throwable</ID>
-    <ID>TooGenericExceptionCaught:RootHeadTrackerSink.kt:RootHeadTrackerSink.Session$error: Exception</ID>
     <ID>TooGenericExceptionCaught:RootUsbAbsoluteVolume.kt:RootUsbAbsoluteVolume$_: Exception</ID>
     <ID>TooGenericExceptionCaught:SettingsRefresher.kt:SettingsRefresher$error: Exception</ID>
     <ID>TooGenericExceptionCaught:ShizukuAudioClient.kt:ShizukuAudioClient$_: Exception</ID>
@@ -612,7 +618,6 @@
     <ID>TooGenericExceptionCaught:SpatialAudioAccess.kt:SpatialAudioAccess$_: Exception</ID>
     <ID>TooGenericExceptionCaught:SpatialAudioAccess.kt:SpatialAudioAccess$error: Exception</ID>
     <ID>TooGenericExceptionCaught:SpatialHeadTrackingProbe.kt:SpatialHeadTrackingProbe$error: Exception</ID>
-    <ID>TooGenericExceptionCaught:SpatialMotionCapture.kt:SpatialMotionCapture$error: Exception</ID>
     <ID>TooGenericExceptionCaught:UsbAbsoluteVolumeSystemPolicy.kt:UsbAbsoluteVolumeSystemPolicy.NativeOwned$error: Throwable</ID>
     <ID>TooGenericExceptionCaught:UsbAbsoluteVolumeTransport.kt:UsbAbsoluteVolumeTransport$_: RuntimeException</ID>
     <ID>TooGenericExceptionCaught:UsbAudioDevices.kt:UsbAudioDevices$failure: Exception</ID>
@@ -707,11 +712,11 @@
     <ID>UnusedImport:LibrePodsService.kt:import me.kavishdevar.librepods.core.utils.redactMac</ID>
     <ID>UnusedImport:LibrePodsService.kt:import me.kavishdevar.librepods.data.xposed.XposedRemotePrefProvider</ID>
     <ID>UnusedImport:ListeningModeDialog.kt:import kotlinx.coroutines.flow.collect</ID>
+    <ID>UnusedImport:NativeHeadTrackingController.kt:import kotlinx.coroutines.flow.collect</ID>
     <ID>UnusedImport:RenderScreenContent.kt:import androidx.compose.ui.res.stringResource</ID>
     <ID>UnusedImport:RenderScreenContent.kt:import me.kavishdevar.librepods.R</ID>
     <ID>UnusedImport:RenderScreenContent.kt:import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommandIdentifier</ID>
     <ID>UnusedImport:SpatialHeadTrackingProbe.kt:import kotlinx.coroutines.flow.collect</ID>
-    <ID>UnusedImport:SpatialMotionCapture.kt:import kotlinx.coroutines.flow.collect</ID>
     <ID>UnusedImport:StyledButton.kt:import androidx.compose.material3.MaterialTheme</ID>
     <ID>UnusedImport:TransparencySettingsScreen.kt:import androidx.compose.foundation.layout.fillMaxWidth</ID>
     <ID>UnusedParameter:AppInfoCard.kt:navigateToReleaseNotesScreen: (() -&gt; Unit)? = null</ID>
@@ -739,6 +744,8 @@
     <ID>UnusedPrivateProperty:CompanionPreferenceAdapter.kt:CompanionPreferenceAdapter$private val apple: AppleRepository</ID>
     <ID>UnusedPrivateProperty:EldFailureWatchdog.kt:EldFailureWatchdog$private val read: () -&gt; EldEncoderHealth?</ID>
     <ID>UnusedPrivateProperty:LiveAccommodationsEditor.kt:LiveAccommodationsEditor$private val write: suspend (Any, AccommodationsReport, Long, AccommodationsSelection, Boolean) -&gt; AccommodationsResult</ID>
+    <ID>UnusedPrivateProperty:NativeHeadTrackingController.kt:NativeHeadTrackingController$private val hostBlocked: () -&gt; Boolean</ID>
+    <ID>UnusedPrivateProperty:NativeHeadTrackingController.kt:NativeHeadTrackingController$private val profiles: SpatialPoseProfileStore</ID>
     <ID>UnusedPrivateProperty:NativeQuickGameMode.kt:NativeQuickGameMode$private val failed: () -&gt; Unit</ID>
     <ID>UnusedPrivateProperty:PairingConsentGate.kt:PairingConsentGate$private val onConsent: (BluetoothDevice, Long, Consent) -&gt; Unit</ID>
     <ID>VarCouldBeVal:AppSettingsViewModel.kt:AppSettingsViewModel$private var _showResetDialog = MutableStateFlow(false)</ID>
