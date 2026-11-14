@@ -2,6 +2,7 @@ plugins {
     alias(libs.plugins.android.library)
     alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.protobuf)
+    alias(libs.plugins.detekt)
     id("kotlin-parcelize")
 }
 
@@ -62,6 +63,30 @@ android {
     testOptions {
         unitTests.isReturnDefaultValues = true
     }
+}
+
+detekt {
+    buildUponDefaultConfig = true
+    config.setFrom(rootProject.layout.projectDirectory.file("config/detekt/detekt.yml"))
+    // Release has no sources of its own, so the debug variant covers everything; detektMain then
+    // runs detektDebug, which reads detekt-baseline-debug.xml next to this file.
+    ignoredBuildTypes = listOf("release")
+    baseline = layout.projectDirectory.file("detekt-baseline.xml")
+    basePath = rootProject.layout.projectDirectory
+}
+
+// Type resolution also needs the module's Java side (hand-written Java, AIDL stubs, BuildConfig,
+// protobuf Java classes). The plugin only sets the Kotlin compile classpath as a convention, and
+// adding to it replaces that convention, so both parts are listed here.
+fun ConfigurableFileCollection.withDebugJavaClasses() = from(
+    tasks.named<org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile>("compileDebugKotlin").map { it.libraries },
+    tasks.named<JavaCompile>("compileDebugJavaWithJavac").flatMap { it.destinationDirectory }
+)
+tasks.withType<dev.detekt.gradle.Detekt>().matching { it.name == "detektDebug" }.configureEach {
+    classpath.withDebugJavaClasses()
+}
+tasks.withType<dev.detekt.gradle.DetektCreateBaselineTask>().matching { it.name == "detektBaselineDebug" }.configureEach {
+    classpath.withDebugJavaClasses()
 }
 
 dependencies {
