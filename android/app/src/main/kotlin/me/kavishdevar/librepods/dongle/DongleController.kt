@@ -116,6 +116,8 @@ internal class DongleController(context: Context) : Closeable {
     private val mutableState = MutableStateFlow(DongleState(selected = preferences.contains("address"),
         automaticPause = preferences.getBoolean("automatic_pause", false), usbVolumeRequested = volumeRequested()))
     val state = mutableState.asStateFlow()
+    private val lease = DongleEditingLease(lifecycle, io, mutableState, session = { session }, callActive = { callActive },
+        volumeCheckpoint = ::volumeCheckpoint, requestRefresh = { refreshRequested.trySend(Unit) })
     @Volatile private var socket: Closeable? = null
     private val usbManager = this.context.getSystemService(UsbManager::class.java)
     private val audioManager = this.context.getSystemService(AudioManager::class.java)
@@ -177,38 +179,33 @@ internal class DongleController(context: Context) : Closeable {
     private val controlObservers = java.util.Collections.newSetFromMap(java.util.IdentityHashMap<Any, Boolean>())
     private var volumeObservation: Pair<DongleUsbVolume.Target, DongleUsbVolume.Observation>? = null
     private var audioUpdated = 0L
-    private data class EditorOwner(val client: DongleSession, val generation: Long,
-        val address: List<Int>, val controlSession: Long)
-    private enum class RecordKind { HEARING, TRANSPARENCY, ACCOMMODATIONS }
-    private data class RecordOwner(val transport: EditorOwner, val guards: List<Any?>)
+    private data class RecordOwner(val transport: DongleEditorOwner, val guards: List<Any?>)
     private fun recordGuards(): List<Any?> = mutableState.value.hearingModes.let {
         listOf(it.enrolled, it.clinicalReportsKnown, it.hearingAidEnabled, it.mediaAssistEnabled,
             it.customTransparencyAllowed, it.pending, it.uncertain)
     }
-    @Volatile private var liveOperation: Pair<EditorOwner, RecordKind>? = null
-    private val protectedWork = AtomicInteger()
-    private var automaticHealthOwner: EditorOwner? = null
-    private var hostClockOwner: EditorOwner? = null
-    private var healthAttemptOwner: EditorOwner? = null
+    private var automaticHealthOwner: DongleEditorOwner? = null
+    private var hostClockOwner: DongleEditorOwner? = null
+    private var healthAttemptOwner: DongleEditorOwner? = null
     private var healthAttempts = 0
     private var healthRetryAfter = 0L
-    private var automaticSettingsOwner: EditorOwner? = null
+    private var automaticSettingsOwner: DongleEditorOwner? = null
     private val liveSettings = ConcurrentHashMap<Int, LiveValueEditor<Long>>()
-    private val transparencyEditor = lazy { recordEditor(RecordKind.TRANSPARENCY) }
-    private val hearingEditor = lazy { recordEditor(RecordKind.HEARING) }
+    private val transparencyEditor = lazy { recordEditor(DongleRecordKind.TRANSPARENCY) }
+    private val hearingEditor = lazy { recordEditor(DongleRecordKind.HEARING) }
     private val accommodationsEditor = lazy {
         LiveAccommodationsEditor(scope, read = {
             val value = mutableState.value
             val report = value.accommodationsReport
-            val captured = editorOwner()
-            val own = liveOperation == (captured to RecordKind.ACCOMMODATIONS)
-            val owner = captured?.takeIf { writable(it) && report != null &&
+            val captured = lease.currentOwner()
+            val own = lease.liveOperation == (captured to DongleRecordKind.ACCOMMODATIONS)
+            val owner = captured?.takeIf { lease.writable(it) && report != null &&
                 (value.accommodationsRequest.editable(report) || own) }
             val source = profileData?.let { AccommodationsAudiogram.parse(it, value.controlSession) }
             LiveAccommodationsSource(owner, report, value.hearingModes.receivedAccommodations(value.controlSession, source),
                 value.accommodationsRequest, owner != null && (!value.busy || own), source)
         }, write = { captured, report, revision, choice, changeCurves ->
-            val owner = captured as? EditorOwner
+            val owner = captured as? DongleEditorOwner
             if (owner == null) AccommodationsResult.NOT_SENT else accommodationsAwaited(owner, report, choice.phone,
                 choice.media, choice.preset.takeIf { changeCurves }, revision, choice.audiogram && changeCurves).result ?: AccommodationsResult.NOT_SENT
         })
@@ -216,19 +213,19 @@ internal class DongleController(context: Context) : Closeable {
     private val usbVolume = lazy {
         DongleUsbVolume(context, scope, bridge, ::volumeTarget, canStart = {
             val value = mutableState.value
-            protectedWork.get() == 0 && !value.busy && liveOperation == null && value.status?.flags?.and(4 or 64 or 16) == 0 &&
+            lease.protectedWorkIdle() && !value.busy && lease.liveOperation == null && value.status?.flags?.and(4 or 64 or 16) == 0 &&
                 !callActive && value.audio?.flags?.and(7) == 0 &&
                 runCatching { !audioManager.isMusicActive && audioManager.activeRecordingConfigurations.isEmpty() }.getOrDefault(false)
         }, read = { selected -> io.withLock {
             check(volumeTarget() == selected)
-            val owner = selected.owner as EditorOwner
+            val owner = selected.owner as DongleEditorOwner
             owner.client.withTarget(checkNotNull(mutableState.value.status)) {
                 val at = SystemClock.elapsedRealtime()
                 cacheVolumeObservation(selected, DongleUsbVolume.Observation(owner.client.readPhysicalVolume(), at))
             }
         } }, action = { selected, action, usbGeneration, token, level, guard -> io.withLock {
             check(volumeTarget() == selected)
-            val owner = selected.owner as EditorOwner
+            val owner = selected.owner as DongleEditorOwner
             owner.client.withTarget(checkNotNull(mutableState.value.status)) {
                 val at = SystemClock.elapsedRealtime()
                 val value = owner.client.volumeAuthority(action, usbGeneration, token, level,
@@ -254,7 +251,7 @@ internal class DongleController(context: Context) : Closeable {
         val value = mutableState.value
         val status = value.status ?: return null
         if (!value.usb || !value.connected || !value.usbAudioAvailable || status.capabilities and 128 == 0 || status.microphoneActive || callActive) return null
-        val owner = editorOwner() ?: return null
+        val owner = lease.currentOwner() ?: return null
         val serial = preferences.getString("address", null)?.takeIf { it.startsWith("usb:serial:") }?.removePrefix("usb:serial:") ?: return null
         return DongleUsbVolume.Target(owner, serial, value.controlSession, status.generation, status.capabilities)
     }
@@ -317,16 +314,16 @@ internal class DongleController(context: Context) : Closeable {
     }
     private val audioEditor = lazy {
         LiveValueEditor(scope, {
-            val owner = editorOwner()?.takeIf { mutableState.value.status?.microphoneActive == false && !callActive }
-            LiveValueSource(owner, mutableState.value.audio?.let { DongleAudioIntent(it.requestedCodec, it.rateMode, it.requestedBitrate) }, writable(owner))
+            val owner = lease.ownerAvailableForEdits()
+            LiveValueSource(owner, mutableState.value.audio?.let { DongleAudioIntent(it.requestedCodec, it.rateMode, it.requestedBitrate) }, lease.writable(owner))
         }, { value: DongleAudioIntent -> value.codec in 0..3 && value.rateMode in 0..1 && value.bitrate in 0L..512_000L },
             write = { captured, value ->
-                val owner = captured as? EditorOwner
+                val owner = captured as? DongleEditorOwner
                 if (owner == null) false else try {
-                    ownedCommand(owner, bindTarget = false) { client ->
+                    lease.ownedCommand(owner, bindTarget = false) { client ->
                         val profile = client.requestAudio(value.codec, value.rateMode, value.bitrate, checkNotNull(mutableState.value.status))
                         val status = checkNotNull(client.status)
-                        publish(client) {
+                        lease.publish(client) {
                             if (mutableState.value.status?.sameConnection(status) != true) clearReports()
                             mutableState.update { it.copy(status = status) }
                             recordAudio(profile)
@@ -338,17 +335,17 @@ internal class DongleController(context: Context) : Closeable {
     }
     private val gameEditor = lazy {
         LiveValueEditor(scope, {
-            val owner = editorOwner()?.takeIf { mutableState.value.status?.microphoneActive == false && !callActive }
-            LiveValueSource(owner, mutableState.value.audio?.gameRequested, writable(owner))
+            val owner = lease.ownerAvailableForEdits()
+            LiveValueSource(owner, mutableState.value.audio?.gameRequested, lease.writable(owner))
         }, ::gameModeAllowed, write = { captured, value ->
-            val owner = captured as? EditorOwner
+            val owner = captured as? DongleEditorOwner
             if (owner == null || !gameModeAllowed(value)) false else try {
-                ownedCommand(owner) { client ->
+                lease.ownedCommand(owner) { client ->
                     client.transact(7, byteArrayOf(4, if (value) 1 else 0)) {
-                        check(writable(owner) && gameModeAllowed(value)) { "Game Mode is unavailable" }
+                        check(lease.writable(owner) && gameModeAllowed(value)) { "Game Mode is unavailable" }
                     }
                     val profile = DongleProtocol.audio(client.transact(7, byteArrayOf(9)))
-                    publish(client) { recordAudio(profile) }
+                    lease.publish(client) { recordAudio(profile) }
                 }; true
             } catch (cancelled: CancellationException) { currentCoroutineContext().ensureActive(); false }
             catch (_: Exception) { reportLiveFailure(owner); false }
@@ -369,81 +366,43 @@ internal class DongleController(context: Context) : Closeable {
         if (accommodationsEditor.isInitialized()) accommodationsEditor.value.observe()
     } } }
 
-    private fun editorOwner(): EditorOwner? = runCatching { lifecycle.publish(lifecycle.current()) {
-        val current = mutableState.value
-        val client = session ?: return@publish null
-        val status = current.status ?: return@publish null
-        if (!current.connected || !status.controlsReady || client.controlEpoch != lifecycle.current()) null
-        else EditorOwner(client, status.generation, status.address.toList(), current.controlSession)
-    } }.getOrNull()
-    private fun owns(owner: EditorOwner): Boolean = editorOwner() == owner
-    private fun writable(owner: EditorOwner?, kind: RecordKind? = null): Boolean {
-        val value = mutableState.value
-        return owner != null && owns(owner) && value.status?.microphoneActive == false && !callActive &&
-            (kind == null || !value.busy || liveOperation == (owner to kind))
+    /** Keeps an active USB volume authority alive between the RPCs of a settings workflow. */
+    private fun volumeCheckpoint(client: DongleSession): suspend () -> Long? = {
+        if (!usbVolume.isInitialized()) null else usbVolume.value.keepAliveForSettings { selected, usbGeneration, token ->
+            val owner = selected.owner as? DongleEditorOwner
+            check(owner != null && owner.client === client && lease.owns(owner) && volumeTarget() == selected)
+            val observedAt = SystemClock.elapsedRealtime()
+            val physical = client.volumeAuthority(1, usbGeneration, token) { check(volumeTarget() == selected) }
+            cacheVolumeObservation(selected, DongleUsbVolume.Observation(physical, observedAt))
+        }?.let { it - SystemClock.elapsedRealtime() }
     }
-    private suspend fun <T> ownedCommand(owner: EditorOwner, kind: RecordKind? = null, bindTarget: Boolean = true,
-        block: suspend (DongleSession) -> T): T {
-        if (kind != null) protectedWork.incrementAndGet()
-        try {
-        return io.withLock {
-        check(owns(owner)) { "AirPods connection changed" }
-        val target = checkNotNull(mutableState.value.status)
-        val client = owner.client
-        publish(client) {
-            check(writable(owner))
-            liveOperation = kind?.let { owner to it }
-            mutableState.update { it.copy(busy = true, error = null) }
-        }
-        try {
-            if (bindTarget) client.withTarget(target) { withVolumeCheckpoints(client) { block(client) } }
-            else withVolumeCheckpoints(client) { block(client) }
-        }
-        finally { runCatching { publish(client) {
-            liveOperation = null
-            mutableState.update { it.copy(busy = false) }
-        } }; refreshRequested.trySend(Unit) }
-    }
-        } finally { if (kind != null) { protectedWork.decrementAndGet(); refreshRequested.trySend(Unit) } }
-    }
-
-    private suspend fun <T> withVolumeCheckpoints(client: DongleSession, block: suspend () -> T): T =
-        client.withRpcCheckpoints({
-            if (!usbVolume.isInitialized()) null else usbVolume.value.keepAliveForSettings { selected, usbGeneration, token ->
-                val owner = selected.owner as? EditorOwner
-                check(owner != null && owner.client === client && owns(owner) && volumeTarget() == selected)
-                val observedAt = SystemClock.elapsedRealtime()
-                val physical = client.volumeAuthority(1, usbGeneration, token) { check(volumeTarget() == selected) }
-                cacheVolumeObservation(selected, DongleUsbVolume.Observation(physical, observedAt))
-            }?.let { it - SystemClock.elapsedRealtime() }
-        }, block)
     fun liveSettingEditor(id: Int): LiveValueEditor<Long> = liveSettings.getOrPut(id) {
         fun source(): LiveValueSource<Long> {
-            val owner = editorOwner()?.takeIf { mutableState.value.status?.microphoneActive == false && !callActive }
+            val owner = lease.ownerAvailableForEdits()
             val current = mutableState.value
             return LiveValueSource(owner, current.requested[id] ?: current.settings[id]?.value?.let { currentDongleSetting(id, it) }
-                ?: current.savedChoices[id], writable(owner) && current.canEditSetting(id))
+                ?: current.savedChoices[id], lease.writable(owner) && current.canEditSetting(id))
         }
         LiveValueEditor(scope, ::source, { validLiveSetting(id, it) }, write = { captured, value ->
-            val owner = captured as? EditorOwner ?: return@LiveValueEditor false
-            try { ownedCommand(owner) { client -> setSettingNow(client, id, value) }; true }
+            val owner = captured as? DongleEditorOwner ?: return@LiveValueEditor false
+            try { lease.ownedCommand(owner) { client -> setSettingNow(client, id, value) }; true }
             catch (cancelled: CancellationException) { currentCoroutineContext().ensureActive(); false }
             catch (_: Exception) { reportLiveFailure(owner); false }
         })
     }
-    private fun reportLiveFailure(owner: EditorOwner) { runCatching { publish(owner.client) {
+    private fun reportLiveFailure(owner: DongleEditorOwner) { runCatching { lease.publish(owner.client) {
         mutableState.update { it.copy(error = "The request was not confirmed.") }
     } } }
     private suspend fun setSettingNow(client: DongleSession, id: Int, value: Long) {
         val before = mutableState.value
         check(before.canWriteSetting(id, value))
-        val owner = checkNotNull(editorOwner())
+        val owner = checkNotNull(lease.currentOwner())
         val baseline = before.settings[id]
         val peer = savedChoiceStore.peer(before.status)
         client.setting(id, value) {
-            check(writable(owner) && mutableState.value.canWriteSetting(id, value) && savedChoiceStore.peer(mutableState.value.status) == peer)
+            check(lease.writable(owner) && mutableState.value.canWriteSetting(id, value) && savedChoiceStore.peer(mutableState.value.status) == peer)
         }
-        publish(client) {
+        lease.publish(client) {
             check(peer != null && savedChoiceStore.peer(mutableState.value.status) == peer)
             val persist = savedChoiceStore.persists(id, before.metadata?.model)
             val stored = !persist || savedChoiceStore.save(peer, id, value)
@@ -453,30 +412,30 @@ internal class DongleController(context: Context) : Closeable {
                 error = if (!stored) "The setting was sent, but the choice could not be saved." else it.error) }
         }
     }
-    private fun recordEditor(kind: RecordKind): LiveRecordEditor {
+    private fun recordEditor(kind: DongleRecordKind): LiveRecordEditor {
         fun source(): LiveRecordSource {
-            val owner = editorOwner()?.takeIf { mutableState.value.status?.microphoneActive == false && !callActive }
+            val owner = lease.ownerAvailableForEdits()
             val value = mutableState.value
-            val data = if (kind == RecordKind.HEARING) profileData ?: byteArrayOf() else value.transparencyData
-            val ready = writable(owner, kind) && hearingSupported() &&
-                (kind != RecordKind.HEARING || value.hearingModes.enrolled == true && value.hearingModes.clinicalReportsKnown)
-            return LiveRecordSource(owner?.takeIf { kind != RecordKind.HEARING ||
+            val data = if (kind == DongleRecordKind.HEARING) profileData ?: byteArrayOf() else value.transparencyData
+            val ready = lease.writable(owner, kind) && hearingSupported() &&
+                (kind != DongleRecordKind.HEARING || value.hearingModes.enrolled == true && value.hearingModes.clinicalReportsKnown)
+            return LiveRecordSource(owner?.takeIf { kind != DongleRecordKind.HEARING ||
                 value.hearingModes.enrolled == true && value.hearingModes.clinicalReportsKnown &&
                 value.hearingModes.pending == null && value.hearingModes.uncertain == null }?.let { RecordOwner(it, recordGuards()) }, data, ready)
         }
-        fun valid(data: ByteArray) = if (kind == RecordKind.HEARING) hearingAidSettingsWritable(data)
+        fun valid(data: ByteArray) = if (kind == DongleRecordKind.HEARING) hearingAidSettingsWritable(data)
             else data.size == 104 && parseTransparencySettingsResponse(data) != null
         fun matches(actual: ByteArray, target: ByteArray) = actual.contentEquals(target) ||
-            kind == RecordKind.HEARING && valid(actual) && valid(target) &&
+            kind == DongleRecordKind.HEARING && valid(actual) && valid(target) &&
                 actual.copyOfRange(0, 2).contentEquals(target.copyOfRange(0, 2)) &&
                 actual.copyOfRange(4, 104).contentEquals(target.copyOfRange(4, 104))
         return LiveRecordEditor(scope, ::source, ::valid, ::matches, write = { captured, expected, requested ->
             val recordOwner = captured as? RecordOwner
             val owner = recordOwner?.transport
             if (owner == null || source().owner != captured) false else try {
-                ownedCommand(owner, kind) { client ->
+                lease.ownedCommand(owner, kind) { client ->
                     check(source().owner == captured)
-                    if (kind == RecordKind.TRANSPARENCY) updateTransparencyNow(client, expected, requested) { source().owner == captured }
+                    if (kind == DongleRecordKind.TRANSPARENCY) updateTransparencyNow(client, expected, requested) { source().owner == captured }
                     else updateHearingNow(client, expected, requested) { source().owner == captured }
                 }
                 true
@@ -602,7 +561,7 @@ internal class DongleController(context: Context) : Closeable {
                 }
                 while (isActive && lifecycle.current() == mine) {
                     try { io.withLock { refresh(client) } }
-                    catch (_: DongleBusyException) { publish(client) { mutableState.update { it.copy(error = CONTROL_BUSY) } } }
+                    catch (_: DongleBusyException) { lease.publish(client) { mutableState.update { it.copy(error = CONTROL_BUSY) } } }
                     withTimeoutOrNull(pollInterval()) { refreshRequested.receive() }
                 }
             } catch (cancelled: CancellationException) { throw cancelled }
@@ -666,10 +625,6 @@ internal class DongleController(context: Context) : Closeable {
             finally { runCatching { lifecycle.publish(mine) { mutableState.update { it.copy(busy = false) } } } }
         }
     }
-    private fun <T> publish(client: DongleSession, block: () -> T): T = lifecycle.publish(client.controlEpoch) {
-        if (session !== client) throw CancellationException("Dongle session changed")
-        block()
-    }
     private suspend fun <T> guarded(transport: Closeable, timeoutMs: Long, block: suspend () -> T): T {
         val timer = scope.launch { delay(timeoutMs); runCatching { transport.close() } }
         return try { block() } finally { timer.cancel() }
@@ -678,7 +633,7 @@ internal class DongleController(context: Context) : Closeable {
     private fun clearReports() {
         if (usbVolume.isInitialized()) usbVolume.value.retire()
         cachedRevisions.clear(); pendingWrites.clear(); profileData = null; profileCharacteristic = null; accommodationsWriteBase = null
-        automaticHealthOwner = null; hostClockOwner = null; automaticSettingsOwner = null; liveOperation = null
+        automaticHealthOwner = null; hostClockOwner = null; automaticSettingsOwner = null; lease.forgetLiveOperation()
         healthAttemptOwner = null; healthAttempts = 0; healthRetryAfter = 0
         cancelEar()
         audioUpdated = 0
@@ -701,7 +656,7 @@ internal class DongleController(context: Context) : Closeable {
     }
     private suspend fun refresh(client: DongleSession) {
         val status = client.refresh()
-        publish(client) {
+        lease.publish(client) {
             val before = mutableState.value.status
             if (before == null || before.generation != status.generation || before.address != status.address) clearReports()
             if (before != null && before.address != status.address) {
@@ -713,56 +668,55 @@ internal class DongleController(context: Context) : Closeable {
             if (status.microphoneActive) cancelEar()
             mutableState.update { if (it.error == CONTROL_BUSY) it.copy(error = null) else it }
         }
-        val finderOwner = publish(client) { finderEpoch.takeIf { finderWanted && mutableState.value.finderOpen } }
+        val finderOwner = lease.publish(client) { finderEpoch.takeIf { finderWanted && mutableState.value.finderOpen } }
         if (status.capabilities and 0x10 != 0 && finderOwner != null) {
             try {
                 val nearby = DongleProtocol.nearby(client.transact(7, byteArrayOf(7)))
-                publish(client) { if (finderWanted && finderEpoch == finderOwner) mutableState.update { it.copy(nearby = nearby) } }
+                lease.publish(client) { if (finderWanted && finderEpoch == finderOwner) mutableState.update { it.copy(nearby = nearby) } }
             } catch (_: DongleBusyException) {
-                publish(client) { mutableState.update { it.copy(error = CONTROL_BUSY) } }
+                lease.publish(client) { mutableState.update { it.copy(error = CONTROL_BUSY) } }
             }
         }
         if (status.capabilities and 0x10 != 0 && (controlsVisible || mutableState.value.automaticPause || volumeRequested()) &&
             SystemClock.elapsedRealtime() - audioUpdated >= 2_000) {
             readAudio(client)
         }
-        if (!status.controlsReady) { publish(client) { cancelEar() }; return }
-        val detailsWanted = publish(client) { controlsVisible || automaticSettingsOwner != editorOwner() ||
-            hearingSupported() && automaticHealthOwner != editorOwner() && healthAttempts < 3 && SystemClock.elapsedRealtime() >= healthRetryAfter ||
+        if (!status.controlsReady) { lease.publish(client) { cancelEar() }; return }
+        val detailsWanted = lease.publish(client) { controlsVisible || automaticSettingsOwner != lease.currentOwner() ||
+            hearingSupported() && automaticHealthOwner != lease.currentOwner() && healthAttempts < 3 && SystemClock.elapsedRealtime() >= healthRetryAfter ||
             pendingWrites.awaitingConfirmation() }
         if (detailsWanted) {
             val settings = client.settings()
-            publish(client) {
+            lease.publish(client) {
                 pendingWrites.dropAnswered(settings)
                 mutableState.update { it.copy(settings = settings, requested = pendingWrites.requestedValues(),
                     unconfirmed = pendingWrites.unconfirmed()) }
             }
             if (mutableState.value.metadata == null) client.cached(1)?.let { cached ->
                 runCatching { InformationPacket.parse(cached.packet).metadata }.getOrNull()?.let { metadata ->
-                    publish(client) { mutableState.update { it.copy(metadata = metadata) } }
+                    lease.publish(client) { mutableState.update { it.copy(metadata = metadata) } }
                 }
             }
             refreshHearing(client)
-            val owner = editorOwner()
+            val owner = lease.currentOwner()
             automaticSettingsOwner = owner
             if (owner != null && owner != automaticHealthOwner && hearingSupported() && !status.microphoneActive && !callActive &&
                 (owner != healthAttemptOwner || healthAttempts < 3 && SystemClock.elapsedRealtime() >= healthRetryAfter)) {
                 if (healthAttemptOwner != owner) { healthAttemptOwner = owner; healthAttempts = 0; healthRetryAfter = 0 }
-                protectedWork.incrementAndGet()
-                try {
+                lease.withProtectedWork {
                 healthAttempts++
                 automaticHealthOwner = owner
                 var failed = false
-                publish(client) { mutableState.update { it.copy(busy = true) } }
-                try { client.withTarget(status) { withVolumeCheckpoints(client) {
+                lease.publish(client) { mutableState.update { it.copy(busy = true) } }
+                try { client.withTarget(status) { lease.withVolumeCheckpoints(client) {
                     for (read in listOf<suspend () -> Unit>(
                         { if (hostClockOwner != owner) {
-                            check(writable(owner) && hearingSupported())
+                            check(lease.writable(owner) && hearingSupported())
                             val packet = checkNotNull(hostClockPacket())
                             check(client.transact(2, packet.rawPacket) {
-                                check(writable(owner) && hearingSupported() && client.status?.microphoneActive == false)
+                                check(lease.writable(owner) && hearingSupported() && client.status?.microphoneActive == false)
                             }.isEmpty())
-                            publish(client) { check(owns(owner)); hostClockOwner = owner }
+                            lease.publish(client) { check(lease.owns(owner)); hostClockOwner = owner }
                         } },
                         { readProfile(client) }, { readTransparency(client) }, { readDiagnosticsNow(client) })) {
                         try { read() } catch (cancelled: CancellationException) { throw cancelled }
@@ -770,17 +724,17 @@ internal class DongleController(context: Context) : Closeable {
                         catch (_: Exception) { failed = true }
                     }
                 } } } catch (busy: DongleBusyException) {
-                    publish(client) { if (owns(owner) && healthAttemptOwner == owner) {
+                    lease.publish(client) { if (lease.owns(owner) && healthAttemptOwner == owner) {
                         healthAttempts = (healthAttempts - 1).coerceAtLeast(0)
                         automaticHealthOwner = null
                         healthRetryAfter = SystemClock.elapsedRealtime() + 5_000
                     } }
                     throw busy
-                } finally { publish(client) {
+                } finally { lease.publish(client) {
                     if (failed) { automaticHealthOwner = null; healthRetryAfter = SystemClock.elapsedRealtime() + 5_000 }
                     mutableState.update { it.copy(busy = false) }
                 } }
-                } finally { protectedWork.decrementAndGet(); refreshRequested.trySend(Unit) }
+                }
             }
         }
         if (mutableState.value.usb && status.capabilities and 128 != 0 && (controlsVisible || volumeRequested())) {
@@ -788,7 +742,7 @@ internal class DongleController(context: Context) : Closeable {
         }
         if (!mutableState.value.automaticPause || mutableState.value.usb) return
         val ear = client.cached(5)
-        val (action, pauseOwner) = publish(client) {
+        val (action, pauseOwner) = lease.publish(client) {
             val newEar = ear == null || cachedRevisions[5] != ear.revision
             if (ear != null) cachedRevisions[5] = ear.revision else cachedRevisions.remove(5)
             if (!newEar && mutableState.value.automaticPause && !status.microphoneActive) return@publish null
@@ -807,13 +761,13 @@ internal class DongleController(context: Context) : Closeable {
                             !callActive && mutableState.value.audio?.input != 1 && pauseEpoch == pauseOwner && lifecycle.current() == client.controlEpoch &&
                             mutableState.value.status?.generation == generation
                     }
-                    publish(client) { if (pauseEpoch == pauseOwner) earClaim.acquired(acquired) }
+                    lease.publish(client) { if (pauseEpoch == pauseOwner) earClaim.acquired(acquired) }
                 }
             }
             DongleEarClaim.Action.RESUME -> {
                 if (mediaOwnershipCurrent(client, status, pauseOwner)) bridge.finishOwnedMedia(true)
             }
-            DongleEarClaim.Action.CANCEL -> publish(client) { bridge.cancelOwnedMedia() }
+            DongleEarClaim.Action.CANCEL -> lease.publish(client) { bridge.cancelOwnedMedia() }
             DongleEarClaim.Action.NONE -> Unit
         }
     }
@@ -823,23 +777,23 @@ internal class DongleController(context: Context) : Closeable {
         if (profile.input == 1) cancelEar()
     }
     private suspend fun readAudio(client: DongleSession): DongleProtocol.AudioProfile =
-        DongleProtocol.audio(client.transact(7, byteArrayOf(9))).also { profile -> publish(client) { recordAudio(profile) } }
+        DongleProtocol.audio(client.transact(7, byteArrayOf(9))).also { profile -> lease.publish(client) { recordAudio(profile) } }
 
     private suspend fun mediaOwnershipCurrent(client: DongleSession, target: DongleProtocol.Status, owner: Long): Boolean {
         try {
             if (target.capabilities and 0x10 != 0) client.withTarget(target) { readAudio(client) }
         } catch (cancelled: CancellationException) { throw cancelled }
-        catch (_: Exception) { publish(client) { cancelEar() }; return false }
-        return publish(client) { pauseEpoch == owner && !callActive && mutableState.value.automaticPause &&
+        catch (_: Exception) { lease.publish(client) { cancelEar() }; return false }
+        return lease.publish(client) { pauseEpoch == owner && !callActive && mutableState.value.automaticPause &&
             mutableState.value.audio?.input != 1 }
     }
     private suspend fun refreshHearing(client: DongleSession) {
-        publish(client) { if (mutableState.value.controlSession == 0L) mutableState.update {
+        lease.publish(client) { if (mutableState.value.controlSession == 0L) mutableState.update {
             it.copy(controlSession = accommodationsSessions.incrementAndGet()) } }
-        var modes = publish(client) { mutableState.value.hearingModes }
+        var modes = lease.publish(client) { mutableState.value.hearingModes }
         for (slot in 2..4) {
             val cached = client.cached(slot)
-            publish(client) {
+            lease.publish(client) {
                 if (cached == null) {
                     if (cachedRevisions.remove(slot) != null) modes = HearingModes.empty()
                 } else if (cachedRevisions[slot] != cached.revision) {
@@ -850,7 +804,7 @@ internal class DongleController(context: Context) : Closeable {
                 }
             }
         }
-        publish(client) {
+        lease.publish(client) {
             val base = accommodationsWriteBase
             val request = mutableState.value.accommodationsRequest
             val report = modes.accommodationsReport(mutableState.value.controlSession)
@@ -899,8 +853,8 @@ internal class DongleController(context: Context) : Closeable {
                 val client = checkNotNull(session) { "Dongle is disconnected" }
                 lifecycle.publish(mine) { check(session === client) }
                 if (bindTarget) client.withTarget(checkNotNull(target) { "Read the dongle settings first" }) {
-                    withVolumeCheckpoints(client) { block(client) }
-                } else withVolumeCheckpoints(client) { block(client) }
+                    lease.withVolumeCheckpoints(client) { block(client) }
+                } else lease.withVolumeCheckpoints(client) { block(client) }
             } } catch (cancelled: CancellationException) { throw cancelled }
             catch (_: Exception) { runCatching { lifecycle.publish(mine) { mutableState.update {
                 it.copy(error = "The request was not confirmed.")
@@ -911,18 +865,18 @@ internal class DongleController(context: Context) : Closeable {
     private fun hearingSupported() = mutableState.value.metadata?.modelNumber in setOf(
         "A2931", "A2699", "A2698", "A3047", "A3048", "A3049", "A3063", "A3064", "A3065")
     private suspend fun readProfile(client: DongleSession): ByteArray {
-        publish(client) { mutableState.update { it.copy(hearingAidReadStatus = SettingsReadStatus.READING) } }
+        lease.publish(client) { mutableState.update { it.copy(hearingAidReadStatus = SettingsReadStatus.READING) } }
         try {
         val read = checkNotNull(att(client).read(HearingDiagnosticUuids.fitting)) { "Hearing profile is unavailable" }
         val profile = checkNotNull(parseHearingAidSettingsResponse(read.second)) { "Unsupported hearing profile" }
-        publish(client) {
+        lease.publish(client) {
             profileCharacteristic = read.first; profileData = read.second.copyOf()
             mutableState.update { it.copy(hearingProfile = profile, hearingAidData = read.second.copyOf(),
                 hearingAidReadStatus = SettingsReadStatus.AVAILABLE) }
         }
         return read.second
         } catch (error: Exception) {
-            runCatching { publish(client) {
+            runCatching { lease.publish(client) {
                 profileData = null; profileCharacteristic = null
                 mutableState.update { it.copy(hearingProfile = null, hearingAidData = byteArrayOf(),
                     hearingAidReadStatus = if (error is CancellationException) SettingsReadStatus.WAITING else SettingsReadStatus.UNAVAILABLE) }
@@ -933,14 +887,14 @@ internal class DongleController(context: Context) : Closeable {
     fun readHearing() = command { client -> readProfile(client); refreshHearing(client) }
 
     private suspend fun readTransparency(client: DongleSession): Pair<DongleAtt.Characteristic, ByteArray> {
-        publish(client) { mutableState.update { it.copy(transparencyReadStatus = SettingsReadStatus.READING) } }
+        lease.publish(client) { mutableState.update { it.copy(transparencyReadStatus = SettingsReadStatus.READING) } }
         try {
         val read = checkNotNull(att(client).read(transparencyUuid)) { "Custom Transparency is unavailable" }
         check(read.second.size == 104 && parseTransparencySettingsResponse(read.second) != null)
-        publish(client) { mutableState.update { it.copy(transparencyData = read.second.copyOf(), transparencyReadStatus = SettingsReadStatus.AVAILABLE) } }
+        lease.publish(client) { mutableState.update { it.copy(transparencyData = read.second.copyOf(), transparencyReadStatus = SettingsReadStatus.AVAILABLE) } }
         return read
         } catch (error: Exception) {
-            runCatching { publish(client) { mutableState.update { it.copy(transparencyData = byteArrayOf(),
+            runCatching { lease.publish(client) { mutableState.update { it.copy(transparencyData = byteArrayOf(),
                 transparencyReadStatus = if (error is CancellationException) SettingsReadStatus.WAITING else SettingsReadStatus.UNAVAILABLE) } } }
             throw error
         }
@@ -960,7 +914,7 @@ internal class DongleController(context: Context) : Closeable {
             val readback = att(client).read(characteristic)
             check(readback.size == 104 && parseTransparencySettingsResponse(readback) != null)
             if (readback.contentEquals(requested)) {
-                publish(client) { mutableState.update { it.copy(transparencyData = readback.copyOf(), transparencyReadStatus = SettingsReadStatus.AVAILABLE) } }
+                lease.publish(client) { mutableState.update { it.copy(transparencyData = readback.copyOf(), transparencyReadStatus = SettingsReadStatus.AVAILABLE) } }
                 return
             }
             check(readback.contentEquals(baseline) && attempt < 4) { "Custom Transparency was not confirmed" }
@@ -974,12 +928,12 @@ internal class DongleController(context: Context) : Closeable {
     }
     suspend fun accommodationsAwaited(expected: AccommodationsReport, phone: Boolean?, media: Boolean?,
         preset: AccommodationsPreset?, editRevision: Long = 0, audiogram: Boolean = false): AccommodationsRequestState {
-        val owner = editorOwner() ?: return AccommodationsRequestState(false, AccommodationsResult.NOT_SENT, expected.receptionRevision)
+        val owner = lease.currentOwner() ?: return AccommodationsRequestState(false, AccommodationsResult.NOT_SENT, expected.receptionRevision)
         return accommodationsAwaited(owner, expected, phone, media, preset, editRevision, audiogram)
     }
-    private suspend fun accommodationsAwaited(owner: EditorOwner, expected: AccommodationsReport, phone: Boolean?, media: Boolean?,
+    private suspend fun accommodationsAwaited(owner: DongleEditorOwner, expected: AccommodationsReport, phone: Boolean?, media: Boolean?,
         preset: AccommodationsPreset?, editRevision: Long, audiogram: Boolean): AccommodationsRequestState {
-        try { ownedCommand(owner, RecordKind.ACCOMMODATIONS) { client ->
+        try { lease.ownedCommand(owner, DongleRecordKind.ACCOMMODATIONS) { client ->
             accommodationsNow(client, expected, phone, media, preset, editRevision, audiogram)
         } } catch (cancelled: CancellationException) {
             currentCoroutineContext().ensureActive()
@@ -1012,7 +966,7 @@ internal class DongleController(context: Context) : Closeable {
         val clinical = readProfile(client)
         if (previous != null && !previous.clinical.contentEquals(clinical)) {
             accommodationsWriteBase = null
-            publish(client) { mutableState.update { it.copy(accommodationsRequest = AccommodationsRequestState(false,
+            lease.publish(client) { mutableState.update { it.copy(accommodationsRequest = AccommodationsRequestState(false,
                 AccommodationsResult.UNCONFIRMED, original.receptionRevision, editRevision = editRevision + 1)) } }
             return
         }
@@ -1031,11 +985,11 @@ internal class DongleController(context: Context) : Closeable {
         check(!client.refresh().microphoneActive)
         val transparencyChanges = !requestedTransparency.contentEquals(transparency.second)
         if (!plan.changesRequired && !transparencyChanges) {
-            publish(client) { mutableState.update { it.copy(accommodationsRequest = it.accommodationsRequest.copy(
+            lease.publish(client) { mutableState.update { it.copy(accommodationsRequest = it.accommodationsRequest.copy(
                 pending = false, result = AccommodationsResult.NO_CHANGE, baselineRevision = original.receptionRevision)) } }
             return
         }
-        publish(client) { mutableState.update { it.copy(accommodationsRequest = it.accommodationsRequest.copy(
+        lease.publish(client) { mutableState.update { it.copy(accommodationsRequest = it.accommodationsRequest.copy(
             pending = true, result = null, baselineRevision = original.receptionRevision)) } }
         var attempted = false
         var result = AccommodationsResult.NOT_SENT
@@ -1063,18 +1017,18 @@ internal class DongleController(context: Context) : Closeable {
             if (result == AccommodationsResult.SENT) {
                 val revision = editRevision + 1
                 accommodationsWriteBase = AccommodationsWriteBase(client, snapshot.controlSession, revision, plan, clinical.copyOf())
-                publish(client) { mutableState.update { it.copy(accommodationsRequest = it.accommodationsRequest.copy(
+                lease.publish(client) { mutableState.update { it.copy(accommodationsRequest = it.accommodationsRequest.copy(
                     requested = plan.selection.copy(preset = plan.selection.preset.takeUnless { selectedAudiogram },
                         audiogram = selectedAudiogram), editRevision = revision)) } }
             } else {
                 accommodationsWriteBase = null
-                publish(client) { mutableState.update { it.copy(accommodationsRequest = it.accommodationsRequest.copy(requested = null)) } }
+                lease.publish(client) { mutableState.update { it.copy(accommodationsRequest = it.accommodationsRequest.copy(requested = null)) } }
             }
         } finally {
             if (attempted && result !in listOf(AccommodationsResult.CONFIRMED, AccommodationsResult.SENT, AccommodationsResult.NO_CHANGE))
                 result = AccommodationsResult.UNCONFIRMED
             if (result == AccommodationsResult.UNCONFIRMED) accommodationsWriteBase = null
-            runCatching { publish(client) { mutableState.update { it.copy(accommodationsRequest = it.accommodationsRequest.copy(
+            runCatching { lease.publish(client) { mutableState.update { it.copy(accommodationsRequest = it.accommodationsRequest.copy(
                 pending = false, result = result, baselineRevision = original.receptionRevision,
                 requested = it.accommodationsRequest.requested.takeUnless { result == AccommodationsResult.UNCONFIRMED },
                 editRevision = it.accommodationsRequest.editRevision + if (result == AccommodationsResult.UNCONFIRMED) 1 else 0)) } } }
@@ -1082,8 +1036,8 @@ internal class DongleController(context: Context) : Closeable {
     }
 
     fun updateTransparency(expected: ByteArray, requested: ByteArray) {
-        val owner = editorOwner() ?: return
-        scope.launch { try { ownedCommand(owner, RecordKind.TRANSPARENCY) { client ->
+        val owner = lease.currentOwner() ?: return
+        scope.launch { try { lease.ownedCommand(owner, DongleRecordKind.TRANSPARENCY) { client ->
             updateTransparencyNow(client, expected, requested)
         } } catch (cancelled: CancellationException) { throw cancelled }
         catch (_: Exception) { reportLiveFailure(owner) } }
@@ -1107,7 +1061,7 @@ internal class DongleController(context: Context) : Closeable {
             check(current.sameConnection(target) && !current.microphoneActive && canSend())
             confirmed = true
         } finally {
-            runCatching { publish(client) { mutableState.update { it.copy(
+            runCatching { lease.publish(client) { mutableState.update { it.copy(
                 transparencyData = if (confirmed) it.transparencyData else byteArrayOf(),
                 transparencyReadStatus = if (confirmed) it.transparencyReadStatus else SettingsReadStatus.UNAVAILABLE,
                 transparencyResult = if (confirmed) AccommodationsResult.CONFIRMED else if (attempted) AccommodationsResult.UNCONFIRMED else AccommodationsResult.NOT_SENT) } } }
@@ -1126,7 +1080,7 @@ internal class DongleController(context: Context) : Closeable {
             check(transparency != null && customTransparencyEnabled(transparency) == false)
         } else null
         check(!client.refresh().microphoneActive)
-        publish(client) { mutableState.update { it.copy(hearingModes = original.withRequestState(mode, original.uncertain)) } }
+        lease.publish(client) { mutableState.update { it.copy(hearingModes = original.withRequestState(mode, original.uncertain)) } }
         var attempted = false
         var confirmed = false
         try {
@@ -1143,7 +1097,7 @@ internal class DongleController(context: Context) : Closeable {
             if (fitting != null) check(fitting.contentEquals(readProfile(client)))
             confirmed = true
         } finally {
-            runCatching { publish(client) { mutableState.update { it.copy(hearingModes = it.hearingModes.withRequestState(null,
+            runCatching { lease.publish(client) { mutableState.update { it.copy(hearingModes = it.hearingModes.withRequestState(null,
                 if (attempted && !confirmed) mode else null)) } } }
         }
     }
@@ -1173,7 +1127,7 @@ internal class DongleController(context: Context) : Closeable {
             check(canSend() && hearingAidSettingsWritable(readback))
             val payload = readback.copyOfRange(4, 104)
             if (payload.contentEquals(requested.copyOfRange(4, 104))) {
-                publish(client) {
+                lease.publish(client) {
                     check(canSend())
                     profileData = readback.copyOf()
                     mutableState.update { it.copy(hearingProfile = checkNotNull(parseHearingAidSettingsResponse(readback)),
@@ -1195,7 +1149,7 @@ internal class DongleController(context: Context) : Closeable {
         }
         val data = checkNotNull(att(client).read(HearingDiagnosticUuids.savedResults)).second
         val parsed = checkNotNull(parseSavedHearingDiagnostics(data, product))
-        publish(client) { mutableState.update { it.copy(diagnostics = parsed) } }
+        lease.publish(client) { mutableState.update { it.copy(diagnostics = parsed) } }
     }
     fun audioProfile(codec: Int, rateMode: Int, bitrate: Long) {
         val editor = liveAudioEditor()
@@ -1207,7 +1161,7 @@ internal class DongleController(context: Context) : Closeable {
     }
     fun readPerformance() = command { client ->
         val snapshot = DongleProtocol.performance(client.transact(7, byteArrayOf(5)))
-        publish(client) { mutableState.update { it.copy(performance = snapshot) } }
+        lease.publish(client) { mutableState.update { it.copy(performance = snapshot) } }
     }
     fun startFinder() = lifecycle.publish(lifecycle.current()) {
         if (mutableState.value.busy) return@publish
@@ -1215,10 +1169,10 @@ internal class DongleController(context: Context) : Closeable {
         finderWanted = true
         refreshRequested.trySend(Unit)
         command { client ->
-            if (!publish(client) { finderWanted && finderEpoch == owner }) return@command
+            if (!lease.publish(client) { finderWanted && finderEpoch == owner }) return@command
             try {
                 val available = DongleProtocol.nearby(client.transact(7, byteArrayOf(7)))
-                val proceed = publish(client) {
+                val proceed = lease.publish(client) {
                     if (!finderWanted || finderEpoch != owner) false
                     else if (!available.identityAvailable) {
                         finderWanted = false
@@ -1228,11 +1182,11 @@ internal class DongleController(context: Context) : Closeable {
                 }
                 if (!proceed) return@command
                 val nearby = DongleProtocol.nearby(client.transact(7, byteArrayOf(6)))
-                publish(client) {
+                lease.publish(client) {
                     if (finderWanted && finderEpoch == owner) mutableState.update { it.copy(finderOpen = true, nearby = nearby) }
                 }
             } catch (error: Exception) {
-                publish(client) { if (finderEpoch == owner) {
+                lease.publish(client) { if (finderEpoch == owner) {
                     finderWanted = false
                     finderEpoch++
                     mutableState.update { it.copy(finderOpen = false, nearby = null) }
@@ -1251,7 +1205,7 @@ internal class DongleController(context: Context) : Closeable {
         val target = mutableState.value.status ?: return@publish
         scope.launch { io.withLock {
             // A cancelled in-flight Start finishes before this owner-bound Stop; a newer Start supersedes it.
-            if (lifecycle.current() == mine && publish(client) { finderEpoch == owner && !finderWanted }) {
+            if (lifecycle.current() == mine && lease.publish(client) { finderEpoch == owner && !finderWanted }) {
                 runCatching {
                     val current = client.refresh()
                     check(current.address == target.address) { "Selected AirPods changed" }

@@ -191,7 +191,7 @@ class DongleControllerLifecycleTest {
             assertFalse("Queued protected work must block volume before entering the I/O lock", canStart())
         } finally { io.unlock() }
         withTimeout(2000) {
-            while ((field("protectedWork").get(controller) as java.util.concurrent.atomic.AtomicInteger).get() != 0) delay(1)
+            while (!lease().protectedWorkIdle()) delay(1)
         }
         assertTrue(canStart())
     }
@@ -700,8 +700,7 @@ class DongleControllerLifecycleTest {
         attach(client, client.refresh())
         controller.automaticPause(false)
         gameState().value = controller.state.value.copy(metadata = pro3Metadata())
-        field("automaticHealthOwner").set(controller, DongleController::class.java.getDeclaredMethod("editorOwner")
-            .apply { isAccessible = true }.invoke(controller))
+        field("automaticHealthOwner").set(controller, lease().currentOwner())
         refresh(client)
         controller.setSetting(0x28, 1)
         awaitCommand()
@@ -802,8 +801,7 @@ class DongleControllerLifecycleTest {
         val client = DongleSession(firmware::exchange)
         attach(client, client.refresh()); controller.automaticPause(false)
         gameState().value = controller.state.value.copy(metadata = pro3Metadata())
-        field("automaticHealthOwner").set(controller, DongleController::class.java.getDeclaredMethod("editorOwner")
-            .apply { isAccessible = true }.invoke(controller))
+        field("automaticHealthOwner").set(controller, lease().currentOwner())
         refresh(client)
         return client
     }
@@ -990,6 +988,7 @@ class DongleControllerLifecycleTest {
     }
 
     private fun field(name: String) = DongleController::class.java.getDeclaredField(name).apply { isAccessible = true }
+    private fun lease() = field("lease").get(controller) as DongleEditingLease
     private fun serviceField(name: String) = LibrePodsService::class.java.getDeclaredField(name).apply { isAccessible = true }
 
     private class FinderFirmware {
