@@ -78,7 +78,6 @@ import me.kavishdevar.librepods.shizuku.ShizukuAudioClient
 import me.kavishdevar.librepods.utils.MediaController
 
 internal data class DongleChoice(val address: String, val name: String, val usb: Boolean = false)
-private val accommodationsSessions = AtomicLong(0)
 internal data class DongleState(
     val selected: Boolean = false, val usb: Boolean = false, val attached: Boolean = false,
     val usbAudioAvailable: Boolean = false, val usbPermissionRequired: Boolean = false,
@@ -118,6 +117,7 @@ internal class DongleController(context: Context) : Closeable {
     val state = mutableState.asStateFlow()
     private val lease = DongleEditingLease(lifecycle, io, mutableState, session = { session }, callActive = { callActive },
         volumeCheckpoint = ::volumeCheckpoint, requestRefresh = { refreshRequested.trySend(Unit) })
+    private val hearing = DongleHearingRecords(mutableState, lease)
     @Volatile private var socket: Closeable? = null
     private val usbManager = this.context.getSystemService(UsbManager::class.java)
     private val audioManager = this.context.getSystemService(AudioManager::class.java)
@@ -163,14 +163,9 @@ internal class DongleController(context: Context) : Closeable {
     private var activeUsbPath: String? = null
     private var session: DongleSession? = null
     private var connection: Job? = null
-    private val cachedRevisions = mutableMapOf<Int, Long>()
+    /** Report revision of the last ear-state cached report seen. */
+    private var earReportRevision: Long? = null
     private val pendingWrites = DonglePendingWrites(SystemClock::elapsedRealtime)
-    private data class AccommodationsWriteBase(val client: DongleSession, val session: Long, val revision: Long,
-        val plan: AccommodationsPlan, val clinical: ByteArray)
-    private var accommodationsWriteBase: AccommodationsWriteBase? = null
-    private var profileData: ByteArray? = null
-    private var profileCharacteristic: DongleAtt.Characteristic? = null
-    private val transparencyUuid = UUID.fromString("d5621cc1-f7ab-45db-9403-9eaf744d5390")
     @Volatile private var finderWanted = false
     private var finderEpoch = 0L
     @Volatile private var pauseEpoch = 0L
@@ -201,7 +196,7 @@ internal class DongleController(context: Context) : Closeable {
             val own = lease.liveOperation == (captured to DongleRecordKind.ACCOMMODATIONS)
             val owner = captured?.takeIf { lease.writable(it) && report != null &&
                 (value.accommodationsRequest.editable(report) || own) }
-            val source = profileData?.let { AccommodationsAudiogram.parse(it, value.controlSession) }
+            val source = hearing.profileData?.let { AccommodationsAudiogram.parse(it, value.controlSession) }
             LiveAccommodationsSource(owner, report, value.hearingModes.receivedAccommodations(value.controlSession, source),
                 value.accommodationsRequest, owner != null && (!value.busy || own), source)
         }, write = { captured, report, revision, choice, changeCurves ->
@@ -416,27 +411,26 @@ internal class DongleController(context: Context) : Closeable {
         fun source(): LiveRecordSource {
             val owner = lease.ownerAvailableForEdits()
             val value = mutableState.value
-            val data = if (kind == DongleRecordKind.HEARING) profileData ?: byteArrayOf() else value.transparencyData
-            val ready = lease.writable(owner, kind) && hearingSupported() &&
+            val data = if (kind == DongleRecordKind.HEARING) hearing.profileData ?: byteArrayOf() else value.transparencyData
+            val ready = lease.writable(owner, kind) && hearing.supported() &&
                 (kind != DongleRecordKind.HEARING || value.hearingModes.enrolled == true && value.hearingModes.clinicalReportsKnown)
             return LiveRecordSource(owner?.takeIf { kind != DongleRecordKind.HEARING ||
                 value.hearingModes.enrolled == true && value.hearingModes.clinicalReportsKnown &&
                 value.hearingModes.pending == null && value.hearingModes.uncertain == null }?.let { RecordOwner(it, recordGuards()) }, data, ready)
         }
         fun valid(data: ByteArray) = if (kind == DongleRecordKind.HEARING) hearingAidSettingsWritable(data)
-            else data.size == 104 && parseTransparencySettingsResponse(data) != null
+            else DongleHearingRecords.validTransparency(data)
         fun matches(actual: ByteArray, target: ByteArray) = actual.contentEquals(target) ||
             kind == DongleRecordKind.HEARING && valid(actual) && valid(target) &&
-                actual.copyOfRange(0, 2).contentEquals(target.copyOfRange(0, 2)) &&
-                actual.copyOfRange(4, 104).contentEquals(target.copyOfRange(4, 104))
+                DongleHearingRecords.hearingProfileMatches(actual, target)
         return LiveRecordEditor(scope, ::source, ::valid, ::matches, write = { captured, expected, requested ->
             val recordOwner = captured as? RecordOwner
             val owner = recordOwner?.transport
             if (owner == null || source().owner != captured) false else try {
                 lease.ownedCommand(owner, kind) { client ->
                     check(source().owner == captured)
-                    if (kind == DongleRecordKind.TRANSPARENCY) updateTransparencyNow(client, expected, requested) { source().owner == captured }
-                    else updateHearingNow(client, expected, requested) { source().owner == captured }
+                    if (kind == DongleRecordKind.TRANSPARENCY) hearing.updateTransparency(client, expected, requested) { source().owner == captured }
+                    else hearing.updateHearing(client, expected, requested) { source().owner == captured }
                 }
                 true
             } catch (cancelled: CancellationException) { currentCoroutineContext().ensureActive(); false }
@@ -632,13 +626,13 @@ internal class DongleController(context: Context) : Closeable {
 
     private fun clearReports() {
         if (usbVolume.isInitialized()) usbVolume.value.retire()
-        cachedRevisions.clear(); pendingWrites.clear(); profileData = null; profileCharacteristic = null; accommodationsWriteBase = null
+        hearing.clear(); earReportRevision = null; pendingWrites.clear()
         automaticHealthOwner = null; hostClockOwner = null; automaticSettingsOwner = null; lease.forgetLiveOperation()
         healthAttemptOwner = null; healthAttempts = 0; healthRetryAfter = 0
         cancelEar()
         audioUpdated = 0
         mutableState.update { it.copy(metadata = null, settings = emptyMap(), requested = emptyMap(), savedChoices = emptyMap(), unconfirmed = emptySet(),
-            hearingModes = HearingModes.empty(), controlSession = accommodationsSessions.incrementAndGet(),
+            hearingModes = HearingModes.empty(), controlSession = hearing.nextControlSession(),
             accommodationsRequest = AccommodationsRequestState(), transparencyData = byteArrayOf(), transparencyResult = null,
             hearingProfile = null, hearingAidData = byteArrayOf(), hearingAidReadStatus = SettingsReadStatus.WAITING,
             transparencyReadStatus = SettingsReadStatus.WAITING, diagnostics = null, audio = null, performance = null) }
@@ -683,7 +677,7 @@ internal class DongleController(context: Context) : Closeable {
         }
         if (!status.controlsReady) { lease.publish(client) { cancelEar() }; return }
         val detailsWanted = lease.publish(client) { controlsVisible || automaticSettingsOwner != lease.currentOwner() ||
-            hearingSupported() && automaticHealthOwner != lease.currentOwner() && healthAttempts < 3 && SystemClock.elapsedRealtime() >= healthRetryAfter ||
+            hearing.supported() && automaticHealthOwner != lease.currentOwner() && healthAttempts < 3 && SystemClock.elapsedRealtime() >= healthRetryAfter ||
             pendingWrites.awaitingConfirmation() }
         if (detailsWanted) {
             val settings = client.settings()
@@ -697,10 +691,10 @@ internal class DongleController(context: Context) : Closeable {
                     lease.publish(client) { mutableState.update { it.copy(metadata = metadata) } }
                 }
             }
-            refreshHearing(client)
+            hearing.refresh(client)
             val owner = lease.currentOwner()
             automaticSettingsOwner = owner
-            if (owner != null && owner != automaticHealthOwner && hearingSupported() && !status.microphoneActive && !callActive &&
+            if (owner != null && owner != automaticHealthOwner && hearing.supported() && !status.microphoneActive && !callActive &&
                 (owner != healthAttemptOwner || healthAttempts < 3 && SystemClock.elapsedRealtime() >= healthRetryAfter)) {
                 if (healthAttemptOwner != owner) { healthAttemptOwner = owner; healthAttempts = 0; healthRetryAfter = 0 }
                 lease.withProtectedWork {
@@ -711,14 +705,14 @@ internal class DongleController(context: Context) : Closeable {
                 try { client.withTarget(status) { lease.withVolumeCheckpoints(client) {
                     for (read in listOf<suspend () -> Unit>(
                         { if (hostClockOwner != owner) {
-                            check(lease.writable(owner) && hearingSupported())
+                            check(lease.writable(owner) && hearing.supported())
                             val packet = checkNotNull(hostClockPacket())
                             check(client.transact(2, packet.rawPacket) {
-                                check(lease.writable(owner) && hearingSupported() && client.status?.microphoneActive == false)
+                                check(lease.writable(owner) && hearing.supported() && client.status?.microphoneActive == false)
                             }.isEmpty())
                             lease.publish(client) { check(lease.owns(owner)); hostClockOwner = owner }
                         } },
-                        { readProfile(client) }, { readTransparency(client) }, { readDiagnosticsNow(client) })) {
+                        { hearing.readProfile(client) }, { hearing.readTransparency(client) }, { hearing.readDiagnostics(client) })) {
                         try { read() } catch (cancelled: CancellationException) { throw cancelled }
                         catch (busy: DongleBusyException) { throw busy }
                         catch (_: Exception) { failed = true }
@@ -743,8 +737,8 @@ internal class DongleController(context: Context) : Closeable {
         if (!mutableState.value.automaticPause || mutableState.value.usb) return
         val ear = client.cached(5)
         val (action, pauseOwner) = lease.publish(client) {
-            val newEar = ear == null || cachedRevisions[5] != ear.revision
-            if (ear != null) cachedRevisions[5] = ear.revision else cachedRevisions.remove(5)
+            val newEar = ear == null || earReportRevision != ear.revision
+            earReportRevision = ear?.revision
             if (!newEar && mutableState.value.automaticPause && !status.microphoneActive) return@publish null
             val inEars = ear?.takeIf { it.ageMs <= 2_500 }?.let { DongleProtocol.ears(it.packet) }
             earClaim.observe(status.generation, inEars, mutableState.value.automaticPause && !status.microphoneActive &&
@@ -786,36 +780,6 @@ internal class DongleController(context: Context) : Closeable {
         catch (_: Exception) { lease.publish(client) { cancelEar() }; return false }
         return lease.publish(client) { pauseEpoch == owner && !callActive && mutableState.value.automaticPause &&
             mutableState.value.audio?.input != 1 }
-    }
-    private suspend fun refreshHearing(client: DongleSession) {
-        lease.publish(client) { if (mutableState.value.controlSession == 0L) mutableState.update {
-            it.copy(controlSession = accommodationsSessions.incrementAndGet()) } }
-        var modes = lease.publish(client) { mutableState.value.hearingModes }
-        for (slot in 2..4) {
-            val cached = client.cached(slot)
-            lease.publish(client) {
-                if (cached == null) {
-                    if (cachedRevisions.remove(slot) != null) modes = HearingModes.empty()
-                } else if (cachedRevisions[slot] != cached.revision) {
-                    cachedRevisions[slot] = cached.revision
-                    val next = modes.withReport(cached.packet)
-                    if (next === modes) { modes = HearingModes.empty(); cachedRevisions.keys.removeAll(2..4) }
-                    else modes = next
-                }
-            }
-        }
-        lease.publish(client) {
-            val base = accommodationsWriteBase
-            val request = mutableState.value.accommodationsRequest
-            val report = modes.accommodationsReport(mutableState.value.controlSession)
-            if (base != null && !request.pending && report != null && report.receptionRevision > request.baselineRevision) {
-                val outcome = base.plan.result(report, AccommodationsSendOutcome.COMPLETE)
-                accommodationsWriteBase = null
-                mutableState.update { it.copy(accommodationsRequest = AccommodationsRequestState(false,
-                    outcome, request.baselineRevision, editRevision = request.editRevision + 1)) }
-            }
-            mutableState.update { it.copy(hearingModes = modes) }
-        }
     }
     private fun cancelEar() { pauseEpoch++; earClaim.cancel(); bridge.cancelOwnedMedia() }
     fun mediaRouteChanged() = lifecycle.publish(lifecycle.current()) {
@@ -861,66 +825,9 @@ internal class DongleController(context: Context) : Closeable {
             } } } } finally { runCatching { lifecycle.publish(mine) { mutableState.update { it.copy(busy = false) } } } }
         }
     }
-    private fun att(client: DongleSession) = DongleAtt { client.transact(1, it) }
-    private fun hearingSupported() = mutableState.value.metadata?.modelNumber in setOf(
-        "A2931", "A2699", "A2698", "A3047", "A3048", "A3049", "A3063", "A3064", "A3065")
-    private suspend fun readProfile(client: DongleSession): ByteArray {
-        lease.publish(client) { mutableState.update { it.copy(hearingAidReadStatus = SettingsReadStatus.READING) } }
-        try {
-        val read = checkNotNull(att(client).read(HearingDiagnosticUuids.fitting)) { "Hearing profile is unavailable" }
-        val profile = checkNotNull(parseHearingAidSettingsResponse(read.second)) { "Unsupported hearing profile" }
-        lease.publish(client) {
-            profileCharacteristic = read.first; profileData = read.second.copyOf()
-            mutableState.update { it.copy(hearingProfile = profile, hearingAidData = read.second.copyOf(),
-                hearingAidReadStatus = SettingsReadStatus.AVAILABLE) }
-        }
-        return read.second
-        } catch (error: Exception) {
-            runCatching { lease.publish(client) {
-                profileData = null; profileCharacteristic = null
-                mutableState.update { it.copy(hearingProfile = null, hearingAidData = byteArrayOf(),
-                    hearingAidReadStatus = if (error is CancellationException) SettingsReadStatus.WAITING else SettingsReadStatus.UNAVAILABLE) }
-            } }
-            throw error
-        }
-    }
-    fun readHearing() = command { client -> readProfile(client); refreshHearing(client) }
+    fun readHearing() = command { client -> hearing.readProfile(client); hearing.refresh(client) }
 
-    private suspend fun readTransparency(client: DongleSession): Pair<DongleAtt.Characteristic, ByteArray> {
-        lease.publish(client) { mutableState.update { it.copy(transparencyReadStatus = SettingsReadStatus.READING) } }
-        try {
-        val read = checkNotNull(att(client).read(transparencyUuid)) { "Custom Transparency is unavailable" }
-        check(read.second.size == 104 && parseTransparencySettingsResponse(read.second) != null)
-        lease.publish(client) { mutableState.update { it.copy(transparencyData = read.second.copyOf(), transparencyReadStatus = SettingsReadStatus.AVAILABLE) } }
-        return read
-        } catch (error: Exception) {
-            runCatching { lease.publish(client) { mutableState.update { it.copy(transparencyData = byteArrayOf(),
-                transparencyReadStatus = if (error is CancellationException) SettingsReadStatus.WAITING else SettingsReadStatus.UNAVAILABLE) } } }
-            throw error
-        }
-    }
-
-    fun readAccommodations() = command { client ->
-        client.acquireSettingsLease()
-        refreshHearing(client)
-        readTransparency(client)
-    }
-
-    private suspend fun writeTransparency(client: DongleSession, characteristic: DongleAtt.Characteristic,
-        baseline: ByteArray, requested: ByteArray) {
-        check(baseline.contentEquals(att(client).read(characteristic))) { "Custom Transparency changed" }
-        att(client).write(characteristic, requested)
-        repeat(5) { attempt ->
-            val readback = att(client).read(characteristic)
-            check(readback.size == 104 && parseTransparencySettingsResponse(readback) != null)
-            if (readback.contentEquals(requested)) {
-                lease.publish(client) { mutableState.update { it.copy(transparencyData = readback.copyOf(), transparencyReadStatus = SettingsReadStatus.AVAILABLE) } }
-                return
-            }
-            check(readback.contentEquals(baseline) && attempt < 4) { "Custom Transparency was not confirmed" }
-            delay(75)
-        }
-    }
+    fun readAccommodations() = command { client -> hearing.readAccommodations(client) }
 
     fun accommodations(expected: AccommodationsReport, phone: Boolean?, media: Boolean?, preset: AccommodationsPreset?, editRevision: Long = 0,
         audiogram: Boolean = false) {
@@ -934,7 +841,7 @@ internal class DongleController(context: Context) : Closeable {
     private suspend fun accommodationsAwaited(owner: DongleEditorOwner, expected: AccommodationsReport, phone: Boolean?, media: Boolean?,
         preset: AccommodationsPreset?, editRevision: Long, audiogram: Boolean): AccommodationsRequestState {
         try { lease.ownedCommand(owner, DongleRecordKind.ACCOMMODATIONS) { client ->
-            accommodationsNow(client, expected, phone, media, preset, editRevision, audiogram)
+            hearing.writeAccommodations(client, expected, phone, media, preset, editRevision, audiogram)
         } } catch (cancelled: CancellationException) {
             currentCoroutineContext().ensureActive()
             return AccommodationsRequestState(false, AccommodationsResult.NOT_SENT, expected.receptionRevision)
@@ -946,161 +853,14 @@ internal class DongleController(context: Context) : Closeable {
         }
         return mutableState.value.accommodationsRequest
     }
-    private suspend fun accommodationsNow(client: DongleSession, expected: AccommodationsReport,
-        phone: Boolean?, media: Boolean?, preset: AccommodationsPreset?, editRevision: Long, audiogram: Boolean) {
-        val snapshot = mutableState.value
-        check(!(preset != null && audiogram) && editRevision == snapshot.accommodationsRequest.editRevision)
-        client.acquireSettingsLease()
-        val target = client.refresh()
-        check(!target.microphoneActive)
-        refreshHearing(client)
-        val original = checkNotNull(mutableState.value.accommodationsReport)
-        val receivedPlan = expected.plan(phone ?: expected.phoneEnabled, media ?: expected.mediaEnabled, preset)
-        check(receivedPlan.canStart(original) && mutableState.value.accommodationsRequest.editable(original))
-        val previous = accommodationsWriteBase?.takeIf {
-            it.client === client && it.session == snapshot.controlSession && it.revision == editRevision &&
-                snapshot.accommodationsRequest.requested != null && it.plan.canStart(original)
-        }
-        var plan = previous?.plan?.followup(phone, media, preset) ?: receivedPlan
-        val transparency = readTransparency(client)
-        val clinical = readProfile(client)
-        if (previous != null && !previous.clinical.contentEquals(clinical)) {
-            accommodationsWriteBase = null
-            lease.publish(client) { mutableState.update { it.copy(accommodationsRequest = AccommodationsRequestState(false,
-                AccommodationsResult.UNCONFIRMED, original.receptionRevision, editRevision = editRevision + 1)) } }
-            return
-        }
-        val source = AccommodationsAudiogram.parse(clinical, snapshot.controlSession)
-        if (audiogram) plan = plan.withAudiogram(checkNotNull(source))
-        val requestedTransparency = when {
-            audiogram -> checkNotNull(source?.transparency(transparency.second))
-            preset != null -> checkNotNull(accommodationsTransparencyPreset(transparency.second, preset))
-            else -> transparency.second
-        }
-        val selectedAudiogram = preset == null && (audiogram ||
-            (previous?.let { snapshot.accommodationsRequest.requested?.audiogram } ?:
-                (ReceivedAccommodations.parse(plan.packet(), snapshot.controlSession, 1, source)?.audiogram == true)))
-        refreshHearing(client)
-        check(mutableState.value.accommodationsReport?.let(plan::canStart) == true)
-        check(!client.refresh().microphoneActive)
-        val transparencyChanges = !requestedTransparency.contentEquals(transparency.second)
-        if (!plan.changesRequired && !transparencyChanges) {
-            lease.publish(client) { mutableState.update { it.copy(accommodationsRequest = it.accommodationsRequest.copy(
-                pending = false, result = AccommodationsResult.NO_CHANGE, baselineRevision = original.receptionRevision)) } }
-            return
-        }
-        lease.publish(client) { mutableState.update { it.copy(accommodationsRequest = it.accommodationsRequest.copy(
-            pending = true, result = null, baselineRevision = original.receptionRevision)) } }
-        var attempted = false
-        var result = AccommodationsResult.NOT_SENT
-        try {
-            if (plan.changesRequired) { attempted = true; client.transact(2, plan.packet()) }
-            if (transparencyChanges) {
-                attempted = true
-                writeTransparency(client, transparency.first, transparency.second, requestedTransparency)
-            }
-            check(client.refresh().sameConnection(target))
-            val actualTransparency = readTransparency(client).second
-            val actualClinical = readProfile(client)
-            check(requestedTransparency.contentEquals(actualTransparency) && clinical.contentEquals(actualClinical))
-            refreshHearing(client)
-            val current = mutableState.value.accommodationsReport
-            val reported = plan.result(current, if (plan.changesRequired) AccommodationsSendOutcome.COMPLETE else AccommodationsSendOutcome.NOT_ATTEMPTED)
-            val fresh = current != null && current.receptionRevision > original.receptionRevision
-            result = when {
-                reported == AccommodationsResult.CONFIRMED -> AccommodationsResult.CONFIRMED
-                fresh && reported != AccommodationsResult.NO_CHANGE -> AccommodationsResult.UNCONFIRMED
-                previous != null || plan.changesRequired -> AccommodationsResult.SENT
-                else -> AccommodationsResult.CONFIRMED
-            }
-            check(result != AccommodationsResult.UNCONFIRMED)
-            if (result == AccommodationsResult.SENT) {
-                val revision = editRevision + 1
-                accommodationsWriteBase = AccommodationsWriteBase(client, snapshot.controlSession, revision, plan, clinical.copyOf())
-                lease.publish(client) { mutableState.update { it.copy(accommodationsRequest = it.accommodationsRequest.copy(
-                    requested = plan.selection.copy(preset = plan.selection.preset.takeUnless { selectedAudiogram },
-                        audiogram = selectedAudiogram), editRevision = revision)) } }
-            } else {
-                accommodationsWriteBase = null
-                lease.publish(client) { mutableState.update { it.copy(accommodationsRequest = it.accommodationsRequest.copy(requested = null)) } }
-            }
-        } finally {
-            if (attempted && result !in listOf(AccommodationsResult.CONFIRMED, AccommodationsResult.SENT, AccommodationsResult.NO_CHANGE))
-                result = AccommodationsResult.UNCONFIRMED
-            if (result == AccommodationsResult.UNCONFIRMED) accommodationsWriteBase = null
-            runCatching { lease.publish(client) { mutableState.update { it.copy(accommodationsRequest = it.accommodationsRequest.copy(
-                pending = false, result = result, baselineRevision = original.receptionRevision,
-                requested = it.accommodationsRequest.requested.takeUnless { result == AccommodationsResult.UNCONFIRMED },
-                editRevision = it.accommodationsRequest.editRevision + if (result == AccommodationsResult.UNCONFIRMED) 1 else 0)) } } }
-        }
-    }
-
     fun updateTransparency(expected: ByteArray, requested: ByteArray) {
         val owner = lease.currentOwner() ?: return
         scope.launch { try { lease.ownedCommand(owner, DongleRecordKind.TRANSPARENCY) { client ->
-            updateTransparencyNow(client, expected, requested)
+            hearing.updateTransparency(client, expected, requested)
         } } catch (cancelled: CancellationException) { throw cancelled }
         catch (_: Exception) { reportLiveFailure(owner) } }
     }
-    private suspend fun updateTransparencyNow(client: DongleSession, expected: ByteArray, requested: ByteArray,
-        canSend: () -> Boolean = { true }) {
-        client.acquireSettingsLease()
-        val target = client.refresh()
-        check(!target.microphoneActive && expected.size == 104 && requested.size == 104)
-        val settings = checkNotNull(parseTransparencySettingsResponse(requested))
-        refreshHearing(client)
-        check(!settings.enabled || mutableState.value.hearingModes.customTransparencyAllowed)
-        val read = readTransparency(client)
-        check(expected.contentEquals(read.second))
-        check(canSend())
-        var attempted = false
-        var confirmed = false
-        try {
-            if (!requested.contentEquals(expected)) { attempted = true; writeTransparency(client, read.first, expected, requested) }
-            val current = client.refresh()
-            check(current.sameConnection(target) && !current.microphoneActive && canSend())
-            confirmed = true
-        } finally {
-            runCatching { lease.publish(client) { mutableState.update { it.copy(
-                transparencyData = if (confirmed) it.transparencyData else byteArrayOf(),
-                transparencyReadStatus = if (confirmed) it.transparencyReadStatus else SettingsReadStatus.UNAVAILABLE,
-                transparencyResult = if (confirmed) AccommodationsResult.CONFIRMED else if (attempted) AccommodationsResult.UNCONFIRMED else AccommodationsResult.NOT_SENT) } } }
-        }
-    }
-    fun hearingMode(mode: HearingMode, enabled: Boolean) = command { client ->
-        check(hearingSupported()) { "Hearing assistance is unavailable on this model" }
-        client.acquireSettingsLease()
-        val generation = client.refresh().generation
-        refreshHearing(client)
-        val original = mutableState.value.hearingModes
-        val plan = checkNotNull(original.plan(mode, enabled)) { "Read hearing settings first" }
-        val fitting = if (enabled) readProfile(client).also {
-            check(hearingAidSettingsWritable(it)) { "AirPods have no writable hearing fitting" }
-            val transparency = att(client).read(UUID.fromString("d5621cc1-f7ab-45db-9403-9eaf744d5390"))?.second
-            check(transparency != null && customTransparencyEnabled(transparency) == false)
-        } else null
-        check(!client.refresh().microphoneActive)
-        lease.publish(client) { mutableState.update { it.copy(hearingModes = original.withRequestState(mode, original.uncertain)) } }
-        var attempted = false
-        var confirmed = false
-        try {
-            for (packet in plan.packets) { attempted = true; client.transact(2, packet) }
-            val deadline = SystemClock.elapsedRealtime() + 10_000
-            var matched = false
-            while (SystemClock.elapsedRealtime() < deadline) {
-                check(client.refresh().generation == generation)
-                refreshHearing(client)
-                if (mutableState.value.hearingModes.confirms(plan)) { matched = true; break }
-                delay(100)
-            }
-            check(matched)
-            if (fitting != null) check(fitting.contentEquals(readProfile(client)))
-            confirmed = true
-        } finally {
-            runCatching { lease.publish(client) { mutableState.update { it.copy(hearingModes = it.hearingModes.withRequestState(null,
-                if (attempted && !confirmed) mode else null)) } } }
-        }
-    }
+    fun hearingMode(mode: HearingMode, enabled: Boolean) = command { client -> hearing.changeHearingMode(client, mode, enabled) }
     fun updateHearing(transform: (HearingAidSettings) -> HearingAidSettings) {
         val editor = liveHearingEditor()
         editor.edit(editor.state.value.revision) { original ->
@@ -1110,47 +870,7 @@ internal class DongleController(context: Context) : Closeable {
             requested
         }
     }
-    private suspend fun updateHearingNow(client: DongleSession, baseline: ByteArray, requested: ByteArray,
-        canSend: () -> Boolean = { true }) {
-        check(hearingSupported() && hearingAidSettingsWritable(baseline) && hearingAidSettingsWritable(requested))
-        client.acquireSettingsLease()
-        check(!client.refresh().microphoneActive)
-        refreshHearing(client)
-        check(mutableState.value.hearingModes.enrolled == true && mutableState.value.hearingModes.clinicalReportsKnown)
-        val characteristic = checkNotNull(profileCharacteristic)
-        check(baseline.contentEquals(att(client).read(characteristic))) { "Hearing profile changed" }
-        check(canSend())
-        att(client).write(characteristic, requested)
-        repeat(5) { attempt ->
-            check(canSend())
-            val readback = att(client).read(characteristic)
-            check(canSend() && hearingAidSettingsWritable(readback))
-            val payload = readback.copyOfRange(4, 104)
-            if (payload.contentEquals(requested.copyOfRange(4, 104))) {
-                lease.publish(client) {
-                    check(canSend())
-                    profileData = readback.copyOf()
-                    mutableState.update { it.copy(hearingProfile = checkNotNull(parseHearingAidSettingsResponse(readback)),
-                        hearingAidData = readback.copyOf(), hearingAidReadStatus = SettingsReadStatus.AVAILABLE) }
-                }
-                return
-            }
-            check(payload.contentEquals(baseline.copyOfRange(4, 104)) && attempt < 4) { "Hearing profile was not confirmed" }
-            delay(75)
-        }
-    }
-    fun readDiagnostics() = command { client -> readDiagnosticsNow(client) }
-    private suspend fun readDiagnosticsNow(client: DongleSession) {
-        val product = when (mutableState.value.metadata?.modelNumber) {
-            "A2931", "A2699", "A2698" -> 0x2014
-            "A3047", "A3048", "A3049" -> 0x2024
-            "A3063", "A3064", "A3065" -> 0x2027
-            else -> error("Saved hardware checks are unavailable on this model")
-        }
-        val data = checkNotNull(att(client).read(HearingDiagnosticUuids.savedResults)).second
-        val parsed = checkNotNull(parseSavedHearingDiagnostics(data, product))
-        lease.publish(client) { mutableState.update { it.copy(diagnostics = parsed) } }
-    }
+    fun readDiagnostics() = command { client -> hearing.readDiagnostics(client) }
     fun audioProfile(codec: Int, rateMode: Int, bitrate: Long) {
         val editor = liveAudioEditor()
         editor.edit(editor.state.value.revision, DongleAudioIntent(codec, rateMode, bitrate))
