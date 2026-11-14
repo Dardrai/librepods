@@ -64,10 +64,8 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
@@ -221,10 +219,6 @@ class LibrePodsService: Service() {
     private val audioDevices = ConcurrentHashMap<MacAddress, AppleDevice>()
     private val audioJobs = ConcurrentHashMap<MacAddress, Job>()
     private val sensorSuspensions = ConcurrentHashMap<MacAddress, Channel<Boolean>>()
-    private class SettingsRefresh(val device: AppleDevice, val controller: ExperimentalAudioController) {
-        val failure = AtomicReference<DeviceSettingsRefreshResult?>()
-    }
-    private val settingsRefreshes = ConcurrentHashMap<MacAddress, SettingsRefresh>()
     private val nearbyConnections = ConcurrentHashMap<MacAddress, Any>()
     private val companionOperations = ConcurrentHashMap<MacAddress, Any>()
     private val companionReleased = ConcurrentHashMap.newKeySet<MacAddress>()
@@ -278,6 +272,9 @@ class LibrePodsService: Service() {
     private val microphoneStarts = ConcurrentHashMap<MacAddress, Job>()
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val settingsRefresher = SettingsRefresher(serviceScope, { destroying }, { audioControllers[it] },
+        ::refreshDeviceIsCurrent, ::callBlocksSettingsRefresh, { microphoneOwners.isNotEmpty() || bleCaptureBlocked },
+        { companionOperations.isNotEmpty() })
     private val backgroundAudioAccess by lazy { BackgroundAudioAccess(this) }
     private val bluetoothVolumeSync by lazy { BluetoothVolumeSync(this) }
     private var bluetoothVolumeSyncJob: Job? = null
@@ -665,7 +662,7 @@ class LibrePodsService: Service() {
                     val caller = currentCoroutineContext()[Job]
                     fun current() = caller?.isActive == true && refreshDeviceIsCurrent(device) &&
                         audioControllers[device.macAddress] === controller && !callBlocksSettingsRefresh() &&
-                        !settingsRefreshes.containsKey(device.macAddress) && microphoneOwners.isEmpty() &&
+                        !settingsRefresher.isRefreshing(device.macAddress) && microphoneOwners.isEmpty() &&
                         !bleCaptureBlocked && !device.state.value.recordingState.isRecording &&
                         !device.state.value.microphoneState.isActive
                     if (!current() || !controller.tryBeginSettingsRefresh()) return@launch
@@ -745,7 +742,7 @@ class LibrePodsService: Service() {
     }
 
     private fun companionBusy(device: AppleDevice): Boolean = callBlocksSettingsRefresh() ||
-        microphoneOwners.isNotEmpty() || bleCaptureBlocked || settingsRefreshes.isNotEmpty() ||
+        microphoneOwners.isNotEmpty() || bleCaptureBlocked || settingsRefresher.anyActive() ||
         nearbyConnections.isNotEmpty() || device.state.value.recordingState.isRecording ||
         device.state.value.microphoneState.isActive || gameControllers[device.macAddress]?.state?.value?.let {
             it.restoring || it.remoteRestorePending
@@ -820,7 +817,7 @@ class LibrePodsService: Service() {
     private fun companionCallBusy(device: AppleDevice): Boolean = !companionCallAllowed(device.macAddress.value) ||
         companionCalls.state !in setOf("ringing", "active") ||
         getSystemService(AudioManager::class.java).mode !in setOf(AudioManager.MODE_NORMAL, AudioManager.MODE_RINGTONE, AudioManager.MODE_IN_CALL) ||
-        microphoneOwners.isNotEmpty() || bleCaptureBlocked || settingsRefreshes.isNotEmpty() || nearbyConnections.isNotEmpty() ||
+        microphoneOwners.isNotEmpty() || bleCaptureBlocked || settingsRefresher.anyActive() || nearbyConnections.isNotEmpty() ||
         device.state.value.recordingState.isRecording || device.state.value.microphoneState.isActive ||
         runCatching {
             getSystemService(AudioManager::class.java).activeRecordingConfigurations.any {
@@ -922,7 +919,7 @@ class LibrePodsService: Service() {
         val releaseStarted = AtomicBoolean(false)
         fun current() = requested() && companionDevice(address) === device &&
             companionOperations[device.macAddress] === operation && !callBlocksSettingsRefresh() &&
-            microphoneOwners.isEmpty() && !bleCaptureBlocked && settingsRefreshes.isEmpty() &&
+            microphoneOwners.isEmpty() && !bleCaptureBlocked && !settingsRefresher.anyActive() &&
             (gameControllers[device.macAddress] === game || releaseStarted.get() && gameControllers[device.macAddress] == null) &&
             !device.state.value.recordingState.isRecording && !device.state.value.microphoneState.isActive
         try {
@@ -1119,7 +1116,7 @@ class LibrePodsService: Service() {
                     device.bluetoothDevice.bondState != BluetoothDevice.BOND_BONDED -> "unpaired"
                     callBlocksSettingsRefresh() -> "call or communication mode active"
                     microphoneOwners.isNotEmpty() || bleCaptureBlocked -> "microphone transport active"
-                    settingsRefreshes.isNotEmpty() -> "settings refresh active"
+                    settingsRefresher.anyActive() -> "settings refresh active"
                     device.state.value.recordingState.isRecording || device.state.value.microphoneState.isActive -> "microphone active"
                     else -> null
                 }
@@ -1253,19 +1250,9 @@ class LibrePodsService: Service() {
     }
 
     /** Null means that this exact device can currently refresh its control session. */
-    fun deviceSettingsRefreshReadiness(device: AppleDevice): DeviceSettingsRefreshResult? {
-        if (destroying) return DeviceSettingsRefreshResult.UNAVAILABLE
-        if (settingsRefreshes.containsKey(device.macAddress)) return DeviceSettingsRefreshResult.ALREADY_RUNNING
-        if (companionOperations.isNotEmpty()) return DeviceSettingsRefreshResult.ALREADY_RUNNING
-        if (!refreshDeviceIsCurrent(device) || device.aacp.captureAudioSocket() == null)
-            return DeviceSettingsRefreshResult.NOT_CONNECTED
-        if (callBlocksSettingsRefresh()) return DeviceSettingsRefreshResult.CALL_ACTIVE
-        val controller = audioControllers[device.macAddress] ?: return DeviceSettingsRefreshResult.UNAVAILABLE
-        if (microphoneOwners.isNotEmpty() || bleCaptureBlocked || device.state.value.recordingState.isRecording ||
-            device.state.value.microphoneState.isActive || !controller.canRefreshSettings())
-            return DeviceSettingsRefreshResult.AUDIO_BUSY
-        return null
-    }
+    fun deviceSettingsRefreshReadiness(device: AppleDevice): DeviceSettingsRefreshResult? = settingsRefresher.readiness(device)
+
+    suspend fun refreshDeviceSettings(device: AppleDevice): DeviceSettingsRefreshResult = settingsRefresher.refresh(device)
 
     private fun refreshDeviceIsCurrent(device: AppleDevice): Boolean = runCatching {
         !destroying && devices.value[device.macAddress] === device && audioDevices[device.macAddress] === device &&
@@ -1284,80 +1271,6 @@ class LibrePodsService: Service() {
         return false
     }
 
-    private fun refreshFailure(operation: SettingsRefresh): DeviceSettingsRefreshResult? {
-        if (destroying) return DeviceSettingsRefreshResult.UNAVAILABLE
-        val device = operation.device
-        if (settingsRefreshes[device.macAddress] !== operation || !refreshDeviceIsCurrent(device) ||
-            audioControllers[device.macAddress] !== operation.controller) return DeviceSettingsRefreshResult.NOT_CONNECTED
-        if (callBlocksSettingsRefresh()) return DeviceSettingsRefreshResult.CALL_ACTIVE
-        if (microphoneOwners.isNotEmpty() || bleCaptureBlocked || device.state.value.recordingState.isRecording ||
-            device.state.value.microphoneState.isActive) return DeviceSettingsRefreshResult.AUDIO_BUSY
-        return null
-    }
-
-    suspend fun refreshDeviceSettings(device: AppleDevice): DeviceSettingsRefreshResult {
-        var reserved: SettingsRefresh? = null
-        var watchdog: Job? = null
-        var request: me.kavishdevar.librepods.core.bluetooth.aacp.AACPManager.ControlSessionRefresh? = null
-        try {
-            val unavailable = withContext(Dispatchers.Main.immediate) {
-                deviceSettingsRefreshReadiness(device)?.let { return@withContext it }
-                val controller = audioControllers[device.macAddress] ?: return@withContext DeviceSettingsRefreshResult.UNAVAILABLE
-                if (!controller.tryBeginSettingsRefresh()) return@withContext DeviceSettingsRefreshResult.AUDIO_BUSY
-                val operation = SettingsRefresh(device, controller)
-                if (settingsRefreshes.putIfAbsent(device.macAddress, operation) != null) {
-                    controller.endSettingsRefresh()
-                    return@withContext DeviceSettingsRefreshResult.ALREADY_RUNNING
-                }
-                reserved = operation
-                null
-            }
-            unavailable?.let { return it }
-            val operation = checkNotNull(reserved)
-            refreshFailure(operation)?.let { return it }
-            val refresh = device.aacp.prepareControlSessionRefresh() ?: return DeviceSettingsRefreshResult.NOT_CONNECTED
-            request = refresh
-            val caller = currentCoroutineContext()[Job]
-            val deadline = SystemClock.elapsedRealtime() + 10_000
-            // This independent job closes a blocked socket.connect(), including caller cancellation.
-            watchdog = serviceScope.launch(Dispatchers.IO) {
-                while (isActive) {
-                    val failure = refreshFailure(operation) ?: when {
-                        caller?.isActive == false || SystemClock.elapsedRealtime() >= deadline -> DeviceSettingsRefreshResult.FAILED
-                        else -> null
-                    }
-                    if (failure != null) {
-                        operation.failure.compareAndSet(null, failure)
-                        device.aacp.cancelControlSessionRefresh(refresh)
-                        break
-                    }
-                    delay(100)
-                }
-            }
-            val reopened = withContext(Dispatchers.IO) {
-                device.aacp.refreshControlSession(refresh) { operation.failure.get() == null && refreshFailure(operation) == null }
-            }
-            watchdog.cancelAndJoin()
-            return operation.failure.get() ?: refreshFailure(operation) ?:
-                if (reopened) DeviceSettingsRefreshResult.RECONNECTED else DeviceSettingsRefreshResult.FAILED
-        } catch (cancelled: CancellationException) {
-            request?.let { device.aacp.cancelControlSessionRefresh(it) }
-            throw cancelled
-        } catch (error: Exception) {
-            request?.let { device.aacp.cancelControlSessionRefresh(it) }
-            Log.w(TAG, "Settings refresh failed: ${error.javaClass.simpleName}")
-            return reserved?.failure?.get() ?: DeviceSettingsRefreshResult.FAILED
-        } finally {
-            withContext(NonCancellable + Dispatchers.Main.immediate) {
-                watchdog?.cancelAndJoin()
-                reserved?.let { operation ->
-                    settingsRefreshes.remove(device.macAddress, operation)
-                    operation.controller.endSettingsRefresh()
-                }
-            }
-        }
-    }
-
     private fun attachExperimentalAudio(device: AppleDevice) {
         val address = device.macAddress
         if (audioDevices[address] === device) return
@@ -1370,7 +1283,7 @@ class LibrePodsService: Service() {
         val game = if (Build.VERSION.SDK_INT == 37)
             me.kavishdevar.librepods.utils.NativeGameModeController(device, serviceScope) {
                 destroying || audioDevices[address] !== device || callBlocksSettingsRefresh() ||
-                    microphoneOwners.isNotEmpty() || settingsRefreshes.isNotEmpty() || bleCaptureBlocked ||
+                    microphoneOwners.isNotEmpty() || settingsRefresher.anyActive() || bleCaptureBlocked ||
                     companionOperations.containsKey(address) || device.settingsOperationPending ||
                     device.state.value.hearingModes.pending != null || device.state.value.accommodationsRequest.pending
             }.also { gameControllers[address] = it }
@@ -1476,7 +1389,7 @@ class LibrePodsService: Service() {
             gameControllers[address] === game && device.aacp.ownsAudioSocket(socket) &&
             (callPermit == null || callPermit()) &&
             (!callBlocksSettingsRefresh() || callPermit?.invoke() == true) &&
-            !bleCaptureBlocked && settingsRefreshes.isEmpty()
+            !bleCaptureBlocked && !settingsRefresher.anyActive()
         if (!current() || microphoneStarts.containsKey(address)) return false
         if (game == null || game.state.value.let { !it.desiredOn && !it.active && !it.restoring && !it.remoteRestorePending })
             return start()
@@ -1561,7 +1474,7 @@ class LibrePodsService: Service() {
         if (active) companion?.invalidate()
         if (active && address in microphoneOwners) return
         if (active) {
-            check(settingsRefreshes.isEmpty()) { "Wait for the settings refresh to finish." }
+            check(!settingsRefresher.anyActive()) { "Wait for the settings refresh to finish." }
             check(!destroying && microphonePermissionAllowed(address)) { "Allow microphone access first." }
             if (address !in microphoneOwners) {
                 check(ProcessLifecycleOwner.get().lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED) ||
