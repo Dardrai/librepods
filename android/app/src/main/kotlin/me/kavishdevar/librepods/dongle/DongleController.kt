@@ -161,8 +161,7 @@ internal class DongleController(context: Context) : Closeable {
     private var session: DongleSession? = null
     private var connection: Job? = null
     private val cachedRevisions = mutableMapOf<Int, Long>()
-    private data class Pending(val value: Long, val revision: Long, val expires: Long?)
-    private val pending = mutableMapOf<Int, Pending>()
+    private val pendingWrites = DonglePendingWrites(SystemClock::elapsedRealtime)
     private data class AccommodationsWriteBase(val client: DongleSession, val session: Long, val revision: Long,
         val plan: AccommodationsPlan, val clinical: ByteArray)
     private var accommodationsWriteBase: AccommodationsWriteBase? = null
@@ -449,11 +448,8 @@ internal class DongleController(context: Context) : Closeable {
                 before.metadata?.model == me.kavishdevar.librepods.core.devices.AirPodsModel.AIRPODS_PRO_3)
             val stored = !persist || runCatching { preferences.edit().putLong("choice:$peer:$id", value).commit() }.getOrDefault(false)
             val saved = if (persist && stored) mutableState.value.savedChoices + (id to value) else mutableState.value.savedChoices
-            if (baseline != null || id == 0x28 || id == 0x34 || !stored)
-                pending[id] = Pending(value, baseline?.revision ?: 0L,
-                    if (id == 0x28 || id == 0x34 || !stored) null else SystemClock.elapsedRealtime() + 10_000)
-            else pending.remove(id)
-            mutableState.update { it.copy(savedChoices = saved, requested = pending.mapValues { entry -> entry.value.value },
+            pendingWrites.recordSent(id, value, baseline, stored)
+            mutableState.update { it.copy(savedChoices = saved, requested = pendingWrites.requestedValues(),
                 error = if (!stored) "The setting was sent, but the choice could not be saved." else it.error) }
         }
     }
@@ -692,7 +688,7 @@ internal class DongleController(context: Context) : Closeable {
 
     private fun clearReports() {
         if (usbVolume.isInitialized()) usbVolume.value.retire()
-        cachedRevisions.clear(); pending.clear(); profileData = null; profileCharacteristic = null; accommodationsWriteBase = null
+        cachedRevisions.clear(); pendingWrites.clear(); profileData = null; profileCharacteristic = null; accommodationsWriteBase = null
         automaticHealthOwner = null; hostClockOwner = null; automaticSettingsOwner = null; liveOperation = null
         healthAttemptOwner = null; healthAttempts = 0; healthRetryAfter = 0
         cancelEar()
@@ -705,7 +701,7 @@ internal class DongleController(context: Context) : Closeable {
     }
     private fun pollInterval(): Long = lifecycle.publish(lifecycle.current()) {
         if (controlsVisible || mutableState.value.automaticPause || volumeRequested() || finderWanted ||
-            pending.values.any { it.expires?.let { end -> SystemClock.elapsedRealtime() < end } == true }) 600L else 5_000L
+            pendingWrites.awaitingConfirmation()) 600L else 5_000L
     }
     fun controlsVisible(visible: Boolean, owner: Any = this) {
         synchronized(lifecycle) {
@@ -724,7 +720,7 @@ internal class DongleController(context: Context) : Closeable {
                 mutableState.update { it.copy(finderOpen = false, nearby = null) }
             }
             mutableState.update { it.copy(status = status, usbVolumeRequested = volumeRequested(), savedChoices = savedChoices(status),
-                unconfirmed = pending.filterValues { entry -> entry.expires?.let { SystemClock.elapsedRealtime() >= it } == true }.keys) }
+                unconfirmed = pendingWrites.unconfirmed()) }
             if (status.microphoneActive) cancelEar()
             mutableState.update { if (it.error == CONTROL_BUSY) it.copy(error = null) else it }
         }
@@ -744,16 +740,13 @@ internal class DongleController(context: Context) : Closeable {
         if (!status.controlsReady) { publish(client) { cancelEar() }; return }
         val detailsWanted = publish(client) { controlsVisible || automaticSettingsOwner != editorOwner() ||
             hearingSupported() && automaticHealthOwner != editorOwner() && healthAttempts < 3 && SystemClock.elapsedRealtime() >= healthRetryAfter ||
-            pending.values.any { it.expires?.let { end -> SystemClock.elapsedRealtime() < end } == true } }
+            pendingWrites.awaitingConfirmation() }
         if (detailsWanted) {
             val settings = client.settings()
             publish(client) {
-                pending.entries.removeAll { (id, request) ->
-                    // A newer receipt replaces intent; it does not prove that this write caused it.
-                    settings[id]?.revision?.let { it != request.revision } == true
-                }
-                mutableState.update { it.copy(settings = settings, requested = pending.mapValues { e -> e.value.value },
-                    unconfirmed = pending.filterValues { entry -> entry.expires?.let { SystemClock.elapsedRealtime() >= it } == true }.keys) }
+                pendingWrites.dropAnswered(settings)
+                mutableState.update { it.copy(settings = settings, requested = pendingWrites.requestedValues(),
+                    unconfirmed = pendingWrites.unconfirmed()) }
             }
             if (mutableState.value.metadata == null) client.cached(1)?.let { cached ->
                 runCatching { InformationPacket.parse(cached.packet).metadata }.getOrNull()?.let { metadata ->
