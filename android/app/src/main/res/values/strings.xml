@@ -285,6 +285,8 @@
     <string name="configure_widget">Configure Widget</string>
     <string name="welcome_to_appname">Welcome to</string>
     <string name="contact_email_supporting_text">Get help directly from the developer. Might take time to reply, I\'m a single person working on this :)</string>
+    <string name="contact_github_title">GitHub</string>
+    <string name="contact_github_description">View the source code, releases and project updates.</string>
     <string name="contact_github_supporting_text">Create an issue on the GitHub repository. Use this only when you are requesting features, or you are sure that you\'ve found a bug. Try asking the community before opening an issue.</string>
     <string name="error_opening_github_link">Error opening GitHub link</string>
     <string name="scanMode">Scan mode</string>

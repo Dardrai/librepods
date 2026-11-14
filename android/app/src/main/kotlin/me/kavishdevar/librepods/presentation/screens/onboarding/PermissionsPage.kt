@@ -1,7 +1,11 @@
 package me.kavishdevar.librepods.presentation.screens.onboarding
 
+import android.Manifest
 import android.content.Intent
 import android.provider.Settings
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -31,15 +35,21 @@ import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.material3.toShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
+import androidx.health.connect.client.HealthConnectClient
+import androidx.health.connect.client.PermissionController
 import androidx.health.connect.client.permission.HealthPermission
 import androidx.health.connect.client.records.HeartRateRecord
 import androidx.lifecycle.Lifecycle
@@ -48,12 +58,21 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.google.accompanist.permissions.isGranted
 import com.google.accompanist.permissions.rememberMultiplePermissionsState
 import com.google.accompanist.permissions.rememberPermissionState
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import me.kavishdevar.librepods.R
+import me.kavishdevar.librepods.bluetooth.nearbyDevicesPermissions
+import me.kavishdevar.librepods.presentation.screens.settings.PrivilegedAccessSetting
+import me.kavishdevar.librepods.presentation.screens.settings.rememberPrivilegedAccessClient
 import me.kavishdevar.librepods.presentation.components.primitives.StyledList
 import me.kavishdevar.librepods.presentation.components.primitives.StyledListItem
 import me.kavishdevar.librepods.presentation.components.primitives.styledListItem
 import me.kavishdevar.librepods.presentation.components.primitives.StyledListItemOrientation
 import me.kavishdevar.librepods.presentation.icons.MaterialIcons
+
+private enum class PermissionStep { BLUETOOTH, NOTIFICATIONS, PHONE, MICROPHONE, HEALTH, OVERLAY, PRIVILEGED }
 
 @Composable
 fun PermissionsPage(
@@ -61,80 +80,119 @@ fun PermissionsPage(
     onForward: () -> Unit
 ) {
 
-    var grantingAll = false
-
     val context = LocalContext.current
+    var grantAllStep by rememberSaveable { mutableStateOf<PermissionStep?>(null) }
+    var pendingStep by rememberSaveable { mutableStateOf<PermissionStep?>(null) }
+    fun advance(completed: PermissionStep) {
+        if (pendingStep == completed) pendingStep = null
+        if (grantAllStep == completed) grantAllStep = PermissionStep.entries.getOrNull(completed.ordinal + 1)
+    }
+    fun request(step: PermissionStep, launch: () -> Unit) {
+        if (pendingStep != null) return
+        pendingStep = step
+        try {
+            launch()
+        } catch (_: Exception) {
+            pendingStep = null
+            grantAllStep = null
+            Toast.makeText(context, R.string.permission_request_failed, Toast.LENGTH_LONG).show()
+        }
+    }
+
+    val access = rememberPrivilegedAccessClient()
+    val accessState by access.state.collectAsState()
+    var privilegedRequested by rememberSaveable { mutableStateOf(false) }
     val canDrawOverlays = remember { mutableStateOf(Settings.canDrawOverlays(context)) }
-
-    val healthPermissions = rememberPermissionState(
-        HealthPermission.getWritePermission(HeartRateRecord::class)
-    ) {
-        if (grantingAll) {
-            if (!canDrawOverlays.value) {
-                val intent = Intent(
-                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                    "package:${context.packageName}".toUri()
-                )
-                context.startActivity(intent)
-            }
-        }
+    var healthAvailable by remember { mutableStateOf(HealthConnectClient.getSdkStatus(context) == HealthConnectClient.SDK_AVAILABLE) }
+    var healthGranted by remember { mutableStateOf(false) }
+    var healthLoaded by remember { mutableStateOf(false) }
+    var resumeCount by remember { mutableStateOf(0) }
+    val healthPermission = remember { HealthPermission.getWritePermission(HeartRateRecord::class) }
+    val healthClient = remember(healthAvailable) {
+        if (healthAvailable) runCatching { HealthConnectClient.getOrCreate(context) }.getOrNull() else null
     }
-
+    LaunchedEffect(healthClient, resumeCount) {
+        healthLoaded = false
+        healthGranted = try {
+            withTimeoutOrNull(3_000) {
+                withContext(Dispatchers.IO) {
+                    healthClient?.permissionController?.getGrantedPermissions()?.contains(healthPermission) == true
+                }
+            } == true
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            false
+        }
+        healthLoaded = true
+    }
+    val healthPermissions = rememberLauncherForActivityResult(
+        PermissionController.createRequestPermissionResultContract()
+    ) { granted ->
+        healthGranted = healthPermission in granted
+        advance(PermissionStep.HEALTH)
+    }
+    val overlayPermission = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        canDrawOverlays.value = Settings.canDrawOverlays(context)
+        advance(PermissionStep.OVERLAY)
+    }
+    fun requestOverlay() {
+        overlayPermission.launch(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, "package:${context.packageName}".toUri()))
+    }
     val phonePermissionState = rememberMultiplePermissionsState(
-        listOf(
-            "android.permission.READ_PHONE_STATE",
-            "android.permission.ANSWER_PHONE_CALLS"
-        )
-    ) {
-        if (grantingAll) {
-            if (!healthPermissions.status.isGranted) healthPermissions.launchPermissionRequest()
-            else if (!canDrawOverlays.value) canDrawOverlays.value = Settings.canDrawOverlays(context)
-        }
+        listOf(Manifest.permission.READ_PHONE_STATE, Manifest.permission.ANSWER_PHONE_CALLS)
+    ) { advance(PermissionStep.PHONE) }
+    val notificationPermissionState = rememberPermissionState(Manifest.permission.POST_NOTIFICATIONS) {
+        advance(PermissionStep.NOTIFICATIONS)
     }
-
-
-    val notificationPermissionState = rememberPermissionState("android.permission.POST_NOTIFICATIONS") {
-        if (grantingAll) {
-            if (!phonePermissionState.allPermissionsGranted) phonePermissionState.launchMultiplePermissionRequest()
-            else if (!healthPermissions.status.isGranted) healthPermissions.launchPermissionRequest()
-            else if (!canDrawOverlays.value) canDrawOverlays.value = Settings.canDrawOverlays(context)
-        }
+    val microphonePermissionState = rememberPermissionState(Manifest.permission.RECORD_AUDIO) {
+        advance(PermissionStep.MICROPHONE)
     }
-
     val bluetoothPermissionsState = rememberMultiplePermissionsState(
-        listOf(
-            "android.permission.BLUETOOTH_CONNECT",
-            "android.permission.BLUETOOTH_SCAN",
-            "android.permission.BLUETOOTH",
-            "android.permission.BLUETOOTH_ADMIN",
-            "android.permission.BLUETOOTH_ADVERTISE"
-        )
-    ) {
-        if (grantingAll) {
-            if (!notificationPermissionState.status.isGranted) notificationPermissionState.launchPermissionRequest()
-            else if (!phonePermissionState.allPermissionsGranted) phonePermissionState.launchMultiplePermissionRequest()
-            else if (!healthPermissions.status.isGranted) healthPermissions.launchPermissionRequest()
-            else if (!canDrawOverlays.value) canDrawOverlays.value = Settings.canDrawOverlays(context)
+        nearbyDevicesPermissions + Manifest.permission.BLUETOOTH_ADVERTISE
+    ) { advance(PermissionStep.BLUETOOTH) }
+
+    LaunchedEffect(grantAllStep, grantAllStep == PermissionStep.HEALTH && healthLoaded) {
+        if (grantAllStep == pendingStep) return@LaunchedEffect
+        when (grantAllStep) {
+            PermissionStep.BLUETOOTH -> if (bluetoothPermissionsState.allPermissionsGranted) advance(PermissionStep.BLUETOOTH)
+                else request(PermissionStep.BLUETOOTH) { bluetoothPermissionsState.launchMultiplePermissionRequest() }
+            PermissionStep.NOTIFICATIONS -> if (notificationPermissionState.status.isGranted) advance(PermissionStep.NOTIFICATIONS)
+                else request(PermissionStep.NOTIFICATIONS) { notificationPermissionState.launchPermissionRequest() }
+            PermissionStep.PHONE -> if (phonePermissionState.allPermissionsGranted) advance(PermissionStep.PHONE)
+                else request(PermissionStep.PHONE) { phonePermissionState.launchMultiplePermissionRequest() }
+            PermissionStep.MICROPHONE -> if (microphonePermissionState.status.isGranted) advance(PermissionStep.MICROPHONE)
+                else request(PermissionStep.MICROPHONE) { microphonePermissionState.launchPermissionRequest() }
+            PermissionStep.HEALTH -> if (healthLoaded) {
+                if (healthClient == null || healthGranted) advance(PermissionStep.HEALTH)
+                else request(PermissionStep.HEALTH) { healthPermissions.launch(setOf(healthPermission)) }
+            }
+            PermissionStep.OVERLAY -> if (canDrawOverlays.value) advance(PermissionStep.OVERLAY)
+                else request(PermissionStep.OVERLAY) { requestOverlay() }
+            PermissionStep.PRIVILEGED -> {
+                privilegedRequested = true
+                access.requestPermission()
+                advance(PermissionStep.PRIVILEGED)
+            }
+            null -> Unit
         }
     }
 
     val lifecycleOwner = LocalLifecycleOwner.current
-
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 canDrawOverlays.value = Settings.canDrawOverlays(context)
+                healthAvailable = HealthConnectClient.getSdkStatus(context) == HealthConnectClient.SDK_AVAILABLE
+                resumeCount++
             }
         }
-
         lifecycleOwner.lifecycle.addObserver(observer)
-
-        onDispose {
-            lifecycleOwner.lifecycle.removeObserver(observer)
-        }
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     val scrollState = rememberScrollState()
+    val canRequest = grantAllStep == null && pendingStep == null
 
     Box(
         modifier = Modifier.background(
@@ -157,10 +215,10 @@ fun PermissionsPage(
 
                 styledListItem(
                     contentText = stringResource(R.string.bluetooth),
-                    onClick = if (!bluetoothPermissionsState.allPermissionsGranted) {
+                    onClick = if (canRequest && !bluetoothPermissionsState.allPermissionsGranted) {
                         {
-                            grantingAll = false
-                            bluetoothPermissionsState.launchMultiplePermissionRequest()
+                            grantAllStep = null
+                            request(PermissionStep.BLUETOOTH) { bluetoothPermissionsState.launchMultiplePermissionRequest() }
                         }
                     } else null,
                     supportingText = stringResource(R.string.permission_description_bluetooth),
@@ -200,10 +258,10 @@ fun PermissionsPage(
 
                 styledListItem(
                     contentText = stringResource(R.string.notifications),
-                    onClick = if (!notificationPermissionState.status.isGranted) {
+                    onClick = if (canRequest && !notificationPermissionState.status.isGranted) {
                         {
-                            grantingAll = false
-                            notificationPermissionState.launchPermissionRequest()
+                            grantAllStep = null
+                            request(PermissionStep.NOTIFICATIONS) { notificationPermissionState.launchPermissionRequest() }
                         }
                     } else null,
                     supportingText = stringResource(R.string.permission_description_notification),
@@ -230,10 +288,10 @@ fun PermissionsPage(
                 )
                 styledListItem(
                     contentText = stringResource(R.string.phone),
-                    onClick = if (!phonePermissionState.allPermissionsGranted) {
+                    onClick = if (canRequest && !phonePermissionState.allPermissionsGranted) {
                         {
-                            grantingAll = false
-                            phonePermissionState.launchMultiplePermissionRequest()
+                            grantAllStep = null
+                            request(PermissionStep.PHONE) { phonePermissionState.launchMultiplePermissionRequest() }
                         }
                     } else null,
                     supportingText = stringResource(R.string.permission_description_phone),
@@ -260,15 +318,26 @@ fun PermissionsPage(
                 )
             }
 
-            val animatedHealthConnectIconColor by animateColorAsState(if (healthPermissions.status.isGranted) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant)
-            val animatedHealthConnectContainerColor by animateColorAsState(if (healthPermissions.status.isGranted) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant)
-
             StyledListItem(
+                contentText = stringResource(R.string.microphone),
+                supportingText = stringResource(R.string.permission_description_microphone),
+                orientation = StyledListItemOrientation.Vertical,
+                onClick = if (canRequest && !microphonePermissionState.status.isGranted) ({
+                    grantAllStep = null
+                    request(PermissionStep.MICROPHONE) { microphonePermissionState.launchPermissionRequest() }
+                }) else null,
+            )
+            PrivilegedAccessSetting(access, requestStarted = privilegedRequested, enabled = canRequest)
+
+            val animatedHealthConnectIconColor by animateColorAsState(if (healthGranted) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant)
+            val animatedHealthConnectContainerColor by animateColorAsState(if (healthGranted) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant)
+
+            if (healthClient != null) StyledListItem(
                 contentText = stringResource(R.string.permission_healthconnect),
-                onClick = if (!healthPermissions.status.isGranted) {
+                onClick = if (canRequest && healthLoaded && !healthGranted) {
                     {
-                        grantingAll = false
-                        healthPermissions.launchPermissionRequest()
+                        grantAllStep = null
+                        request(PermissionStep.HEALTH) { healthPermissions.launch(setOf(healthPermission)) }
                     }
                 } else null,
                 supportingText = stringResource(R.string.permission_description_healthconnect),
@@ -298,14 +367,10 @@ fun PermissionsPage(
 
             StyledListItem(
                 contentText = stringResource(R.string.permission_overlay),
-                onClick = if (!canDrawOverlays.value) {
+                onClick = if (canRequest && !canDrawOverlays.value) {
                     {
-                        grantingAll = false
-                        val intent = Intent(
-                            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                            "package:${context.packageName}".toUri()
-                        )
-                        context.startActivity(intent)
+                        grantAllStep = null
+                        request(PermissionStep.OVERLAY) { requestOverlay() }
                     }
                 } else null,
                 supportingText = stringResource(R.string.permission_description_overlay),
@@ -338,7 +403,7 @@ fun PermissionsPage(
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 FilledIconButton(
-                    onClick = onBackward,
+                    onClick = { grantAllStep = null; onBackward() },
                     modifier = Modifier
                         .minimumInteractiveComponentSize()
                         .size(IconButtonDefaults.mediumContainerSize(IconButtonDefaults.IconButtonWidthOption.Narrow)),
@@ -351,21 +416,17 @@ fun PermissionsPage(
                     )
                 }
                 Button(
-                    onClick = {
-                        grantingAll = true
-                        if (!bluetoothPermissionsState.allPermissionsGranted) bluetoothPermissionsState.launchMultiplePermissionRequest()
-                        else if (!notificationPermissionState.status.isGranted) notificationPermissionState.launchPermissionRequest()
-                        else if (!phonePermissionState.allPermissionsGranted) phonePermissionState.launchMultiplePermissionRequest()
-                        else if (!canDrawOverlays.value) canDrawOverlays.value =
-                            Settings.canDrawOverlays(context)
-                    },
+                    onClick = { grantAllStep = PermissionStep.BLUETOOTH },
                     modifier = Modifier
                         .height(IconButtonDefaults.mediumContainerSize(IconButtonDefaults.IconButtonWidthOption.Narrow).height)
                         .weight(1f),
-                    enabled = !bluetoothPermissionsState.allPermissionsGranted || !notificationPermissionState.status.isGranted || !phonePermissionState.allPermissionsGranted || !canDrawOverlays.value
+                    enabled = grantAllStep == null && pendingStep == null && (!bluetoothPermissionsState.allPermissionsGranted ||
+                        !notificationPermissionState.status.isGranted || !phonePermissionState.allPermissionsGranted ||
+                        !microphonePermissionState.status.isGranted || (healthClient != null && !healthGranted) ||
+                        !canDrawOverlays.value || !accessState.connected)
                 ) {
                     Text(
-                        text = "Grant all",
+                        text = stringResource(R.string.grant_all_permissions),
                         style = MaterialTheme.typography.labelMedium
                     )
                 }
@@ -377,7 +438,7 @@ fun PermissionsPage(
                             IconButtonDefaults.mediumContainerSize(IconButtonDefaults.IconButtonWidthOption.Narrow)
                         ),
                     shape = IconButtonDefaults.mediumRoundShape,
-                    enabled = bluetoothPermissionsState.allPermissionsGranted
+                    enabled = bluetoothPermissionsState.allPermissionsGranted && grantAllStep == null && pendingStep == null
                 ) {
                     Icon(
                         Icons.AutoMirrored.Default.ArrowForward,

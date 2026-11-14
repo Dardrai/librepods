@@ -1,5 +1,14 @@
 # Apple settings interactions
 
+Onboarding requests permissions only after an explicit action. Grant All visits
+each missing permission once, keeps an in-flight request across recreation and
+continues after optional denials. Only Nearby Devices is required to finish.
+Microphone access does not start capture. Health Connect uses its own contract
+when the provider is available; overlay access opens Android Settings and is
+checked on return. Optional Bluetooth access reuses the settings screen's root
+helper with Shizuku fallback. Resume may reconnect an already authorized helper,
+but never requests a fresh superuser grant just by rendering the screen.
+
 The Apple interface follows the shared LibrePods section order and existing
 `StyledScaffold`, inset groups, sliders and switches. Behavioral fixes preserve
 those primitives, both appearances, native focus and accessibility semantics.
