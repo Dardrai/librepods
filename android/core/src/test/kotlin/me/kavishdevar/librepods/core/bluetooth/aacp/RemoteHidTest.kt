@@ -21,6 +21,16 @@ class RemoteHidTest {
         it.jsonObject.getValue("service").jsonPrimitive.content == "devmotion6"
     }.jsonObject.getValue("frame").let(::hex)
 
+    @Test fun genericPositiveWEncodingPreservesTheExistingAirPods3Helper() {
+        val base = checkNotNull(MotionReport.parse(hex(fixture.getValue("motion").jsonObject.getValue("report"))))
+        for (vector in listOf(listOf(0, 0, 0), listOf(8192, -16384, 4096),
+            listOf(32767, 3000, 0), listOf(32767, 32767, 0))) {
+            val report = base.copy(attitudeQ15 = vector)
+            assertEquals(report.airPods3Quaternion(), report.quaternionQ15PositiveW())
+        }
+        assertNull(base.copy(attitudeQ15 = listOf(32767, 32767, 0)).quaternionQ15PositiveW())
+    }
+
     @Test fun capturedAnnouncementsAndCommandsMatchTheWindowsContractAtEveryReadBoundary() {
         for (announcement in fixture.getValue("announcements").jsonArray) {
             val a = announcement.jsonObject
@@ -61,6 +71,7 @@ class RemoteHidTest {
                 .setServiceValue(16).setPayload(ByteString.copyFrom(packet.payload))).build()
             assertEquals(report, SensorReports().receive(wx, 16).motion?.report)
             assertEquals(listOf(1.0, 0.0, 0.0, 0.0), report.airPods3Quaternion())
+            assertEquals(report.airPods3Quaternion(), report.quaternionQ15PositiveW())
             assertEquals(listOf(-3.66, 2.44, 1.22), report.airPods3Rates(listOf(0.0, 1.0, 0.0)))
             assertNull(report.airPods3Rates(listOf(0.0, 0.0, 1.0)))
             assertNull(report.airPods3Rates(listOf(Double.NaN, 0.0, 0.0)))

@@ -22,7 +22,10 @@ data class MotionReport(
     }
 
     /** Captured on ordinary AirPods 3; do not apply this calibration to another model. */
-    fun airPods3Quaternion(): List<Double>? {
+    fun airPods3Quaternion(): List<Double>? = quaternionQ15PositiveW()
+
+    /** Encoding arithmetic only: the caller must establish this model/session's positive-w branch. */
+    fun quaternionQ15PositiveW(): List<Double>? {
         val v = attitudeQ15.map { it / 32768.0 }
         val norm = v.sumOf { it*it }
         if (norm > 1.01) return null

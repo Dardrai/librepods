@@ -72,6 +72,7 @@ class ShizukuAudioClient @JvmOverloads constructor(context: Context,
     private var microphoneProbeRequest: PlaybackRequest? = null
     private var communicationRequest: PlaybackRequest? = null
     private var spatialRequest: PlaybackRequest? = null
+    private var headTrackerRequest: PlaybackRequest? = null
     private val usbHidConnections = mutableSetOf<IUsbHidConnection>()
     @Volatile private var bridge: IAudioBridge? = null
     @Volatile private var backendUid: Int? = null
@@ -661,6 +662,87 @@ class ShizukuAudioClient @JvmOverloads constructor(context: Context,
     internal suspend fun inspectSpatialAudio(address: String, stillCurrent: () -> Boolean): Bundle =
         spatialAudioCall(address, stillCurrent) { remote, owner -> remote.inspectSpatialAudio(address, owner) }
 
+    internal class HeadTrackerProbeLease internal constructor(
+        val readiness: Bundle,
+        private val inspectOwned: suspend () -> Bundle,
+        private val finishOwned: suspend () -> Bundle,
+    ) {
+        suspend fun state(): Bundle = inspectOwned()
+        suspend fun finish(): Bundle = finishOwned()
+    }
+
+    /** DEBUG only. Consumes the read end of an HTP1 pose pipe; never requests privileged access. */
+    internal suspend fun startHeadTrackerProbe(address: String, poses: ParcelFileDescriptor, seconds: Int,
+        stillCurrent: () -> Boolean, onReportingChanged: (Boolean, Long) -> Unit,
+        onStopped: (String) -> Unit): HeadTrackerProbeLease {
+        var request: PlaybackRequest? = null
+        try {
+            check(BuildConfig.DEBUG && hasRootPrivileges && seconds in 1..30) { "Head-tracker probe is unavailable" }
+            val remote = checkNotNull(bridge)
+            val selected = A2dpRecoveryGuard(address).address
+            // The lease outlives this short start coroutine; its predicate belongs to the source owner.
+            val live = { !closed && bridge === remote && backendUid == 0 && stillCurrent() }
+            val startJob = currentCoroutineContext()[Job]
+            val selectedRequest = PlaybackRequest(remote, selected,
+                { startJob?.isActive != false && live() }, null, 0).also { request = it }
+            synchronized(lock) {
+                check(!closed && bridge === remote && backendUid == 0 && headTrackerRequest == null &&
+                    playbackRequest == null && pairingRequest == null && microphoneProbeRequest == null &&
+                    communicationRequest == null && !settingsRefresh) { "Another audio operation is active" }
+                headTrackerRequest = selectedRequest
+            }
+            fun matching() = selectedRequest.current() && synchronized(lock) {
+                !closed && bridge === remote && headTrackerRequest === selectedRequest
+            }
+            val reportingChanged = onReportingChanged
+            val stopped = onStopped
+            val events = object : IHeadTrackerEvents.Stub() {
+                override fun onReportingChanged(enabled: Boolean, intervalNanos: Long) {
+                    if (!AudioBridgeRules.helperOwnsRequest(0, Binder.getCallingUid())) return
+                    scope.launch { if (matching()) reportingChanged(enabled, intervalNanos) }
+                }
+                override fun onStopped(reason: String) {
+                    if (!AudioBridgeRules.helperOwnsRequest(0, Binder.getCallingUid())) return
+                    scope.launch {
+                        val owned = synchronized(lock) {
+                            if (headTrackerRequest !== selectedRequest) false else {
+                                headTrackerRequest = null; selectedRequest.active.set(false); true
+                            }
+                        }
+                        if (owned) stopped(reason)
+                    }
+                }
+            }
+            val ready = withContext(Dispatchers.IO) { ipc.withLock {
+                check(matching()) { "Head-tracker owner changed" }
+                remote.startHeadTrackerProbe(selected, selectedRequest.owner, poses, events, seconds)
+            } }
+            check(ready.getBoolean("ready") && ready.getBoolean("hal_handshake") && matching()) {
+                "Head-tracker probe could not start: ${ready.getString("reason") ?: "unavailable"}"
+            }
+            selectedRequest.updateCurrent(live)
+            check(startJob?.isActive != false && matching()) { "Head-tracker owner changed" }
+            return HeadTrackerProbeLease(ready,
+                { withContext(Dispatchers.IO) { remote.headTrackerProbeState(selectedRequest.owner) } },
+                { finishHeadTrackerProbe(selectedRequest) })
+        } catch (error: Exception) {
+            request?.let {
+                it.active.set(false)
+                withContext(NonCancellable + Dispatchers.IO) { runCatching { finishHeadTrackerProbe(it) } }
+            }
+            throw error
+        } finally { runCatching { poses.close() } }
+    }
+
+    private suspend fun finishHeadTrackerProbe(request: PlaybackRequest): Bundle = try {
+        withContext(NonCancellable + Dispatchers.IO) { ipc.withLock {
+            request.remote.finishHeadTrackerProbe(request.owner)
+        } }
+    } finally {
+        request.active.set(false)
+        synchronized(lock) { if (headTrackerRequest === request) headTrackerRequest = null }
+    }
+
     internal suspend fun setFixedSpatialEnabled(address: String, enabled: Boolean, stillCurrent: () -> Boolean): Bundle =
         spatialAudioCall(address, stillCurrent) { remote, owner -> remote.setFixedSpatialEnabled(address, owner, enabled) }
 
@@ -752,6 +834,8 @@ class ShizukuAudioClient @JvmOverloads constructor(context: Context,
             communicationRequest = null
             spatialRequest?.active?.set(false)
             spatialRequest = null
+            headTrackerRequest?.active?.set(false)
+            headTrackerRequest = null
             usbHidConnections.toList().forEach { runCatching { it.close() } }
             usbHidConnections.clear()
             bridgeDeath?.let { death -> bridge?.asBinder()?.let { runCatching { it.unlinkToDeath(death, 0) } } }
@@ -783,6 +867,8 @@ class ShizukuAudioClient @JvmOverloads constructor(context: Context,
             communicationRequest = null
             spatialRequest?.also { it.active.set(false); retiring += it }
             spatialRequest = null
+            headTrackerRequest?.also { it.active.set(false); retiring += it }
+            headTrackerRequest = null
             usbHidConnections.toList().forEach { runCatching { it.close() } }
             usbHidConnections.clear()
             bridgeDeath?.let { death -> bridge?.asBinder()?.let { runCatching { it.unlinkToDeath(death, 0) } } }

@@ -85,6 +85,10 @@ jobs:
           mkdir -p "$output"
           g++ -std=c++17 -Wall -Wextra -Werror -UNDEBUG android/tools/head-tracker-probe/protocol_test.cpp -o "$output/head-tracker"
           "$output/head-tracker"
+          g++ -std=c++17 -Wall -Wextra -Werror android/tools/head-tracker-abi-check/abi_check.cpp -o "$output/uhid-abi"
+          "$output/uhid-abi"
+          "$ANDROID_HOME/ndk/30.0.14904198/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android33-clang++" \
+            -std=c++17 -Wall -Wextra -Werror -c android/tools/head-tracker-abi-check/abi_check.cpp -o "$output/uhid-abi-android.o"
           g++ -std=c++17 -Wall -Wextra -Werror -UNDEBUG -DSPATIAL_PROBE_HOST_TEST android/tools/spatial-audio-probe/probe_contract_test.cpp -o "$output/audio-contract"
           "$output/audio-contract"
           g++ -std=c++17 -Wall -Wextra -Werror -UNDEBUG -ffunction-sections -fdata-sections -Wl,--gc-sections \

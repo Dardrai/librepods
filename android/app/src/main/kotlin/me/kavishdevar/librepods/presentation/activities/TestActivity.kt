@@ -37,6 +37,8 @@ import me.kavishdevar.librepods.LibrePodsApplication
 import me.kavishdevar.librepods.audio.MicrophonePhase
 import me.kavishdevar.librepods.audio.SpatialMotionCapture
 import me.kavishdevar.librepods.audio.SpatialMotionCaptureRequest
+import me.kavishdevar.librepods.audio.SpatialHeadTrackingProbe
+import me.kavishdevar.librepods.audio.SpatialHeadTrackingProbeRequest
 import me.kavishdevar.librepods.core.devices.AppleDevice
 import me.kavishdevar.librepods.core.devices.ComponentStatus
 import me.kavishdevar.librepods.core.devices.ConnectionState
@@ -46,18 +48,21 @@ import java.io.File
 
 class TestActivity: ComponentActivity() {
     private var captureRequest: SpatialMotionCaptureRequest? = null
+    private var headTrackerRequest: SpatialHeadTrackingProbeRequest? = null
     private var captureJob: Job? = null
     private var attempted = false
+    private var serviceHandled = false
     private var bound = false
     private var statusView: TextView? = null
     @Volatile private var capturePath = ""
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
-            if (!lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) return
+            if (!lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED) || serviceHandled) return
+            serviceHandled = true
             val service = (binder as? LibrePodsService.LocalBinder)?.getService() ?: return
-            val request = captureRequest ?: return
+            val expectedMac = captureRequest?.expectedMac ?: headTrackerRequest?.expectedMac ?: return
             val device = service.devices.value.values.filterIsInstance<AppleDevice>().singleOrNull {
-                it.macAddress.value.equals(request.expectedMac, ignoreCase = true) && it.connectionState.value == ConnectionState.CONNECTED
+                it.macAddress.value.equals(expectedMac, ignoreCase = true) && it.connectionState.value == ConnectionState.CONNECTED
             }
             val socket = device?.aacp?.captureAudioSocket()
             if (device == null || socket == null) {
@@ -78,6 +83,14 @@ class TestActivity: ComponentActivity() {
                 return connected.size == 1 && connected.single() === device && device.aacp.ownsAudioSocket(socket) && !inCase && audioIdle
             }
             captureJob = lifecycleScope.launch {
+                headTrackerRequest?.let { probe ->
+                    val result = SpatialHeadTrackingProbe(this@TestActivity).run(probe, device, ::current, ::showStatus)
+                    showStatus("Head tracking: ${result.reason}\n${result.poses} poses submitted\n" +
+                        "Head preference restored: ${result.cleanup?.getBoolean("restored")}\n" +
+                        "Sensor closed: ${result.cleanup?.getBoolean("sink_closed")}")
+                    return@launch
+                }
+                val request = captureRequest ?: return@launch
                 showStatus("Capture phase: ${request.phase}\nKeep this screen open for ${request.durationSeconds} seconds.")
                 val result = SpatialMotionCapture(File(filesDir, "spatial-motion-captures")).capture(request, device, ::current) { file ->
                     capturePath = file.absolutePath
@@ -97,7 +110,9 @@ class TestActivity: ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         enableEdgeToEdge()
-        if (!BuildConfig.DEBUG || !runCatching { intent.getBooleanExtra("spatial_motion_capture", false) }.getOrDefault(false)) {
+        val rawCapture = runCatching { intent.getBooleanExtra("spatial_motion_capture", false) }.getOrDefault(false)
+        val headProbe = runCatching { intent.getBooleanExtra("spatial_head_tracking_probe", false) }.getOrDefault(false)
+        if (!BuildConfig.DEBUG || rawCapture == headProbe) {
             setContent { }
             return
         }
@@ -105,6 +120,14 @@ class TestActivity: ComponentActivity() {
         setContentView(statusView)
         if (savedInstanceState != null) {
             showStatus("Capture stopped. Start a new explicit request to record another phase.")
+            return
+        }
+        if (headProbe) {
+            headTrackerRequest = runCatching {
+                SpatialHeadTrackingProbeRequest(
+                    requireNotNull(intent.getStringExtra("expected_mac")) { "An expected MAC is required." },
+                    intent.getIntExtra("duration_seconds", 30))
+            }.getOrElse { showStatus("Invalid head-tracking request: ${it.message}"); null }
             return
         }
         captureRequest = runCatching {
@@ -118,7 +141,7 @@ class TestActivity: ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
-        if (captureRequest == null || attempted) return
+        if (captureRequest == null && headTrackerRequest == null || attempted) return
         attempted = true
         // Bind only the already running service; a diagnostic never starts or reconnects audio.
         bound = runCatching { bindService(Intent(this, LibrePodsService::class.java), connection, 0) }.getOrDefault(false)

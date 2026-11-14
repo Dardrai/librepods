@@ -3,8 +3,11 @@ package me.kavishdevar.librepods.shizuku
 import android.app.Application
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
+import android.os.Binder
+import android.os.Bundle
 import android.os.IBinder
 import android.os.Looper
+import android.os.ParcelFileDescriptor
 import androidx.test.core.app.ApplicationProvider
 import org.junit.Assert.*
 import org.junit.Test
@@ -13,13 +16,19 @@ import org.mockito.Mockito.*
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
+import org.robolectric.shadows.ShadowBinder
 import com.topjohnwu.superuser.Shell
 import rikka.shizuku.Shizuku
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [37], application = Application::class)
@@ -160,6 +169,119 @@ class ShizukuAudioClientLifecycleTest {
             assertTrue(result.isFailure); assertEquals(2, checks)
             verify(hid).close()
         } finally { client.close(); shadowOf(Looper.getMainLooper()).idle() }
+    }
+
+    @Test fun cancelledHeadTrackerStartInvalidatesOwnerBeforeTheBlockedReplyAndFinishesLateSuccess() = runBlocking<Unit> {
+        val previousCaller = Binder.getCallingUid()
+        val client = ShizukuAudioClient(context)
+        val bridge = Bridge()
+        val pipe = ParcelFileDescriptor.createPipe()
+        val descriptor = pipe[0].fileDescriptor
+        val captured = AtomicReference<IPlaybackRecoveryOwner>()
+        val entered = CountDownLatch(1); val reply = CountDownLatch(1)
+        `when`(bridge.remote.startHeadTrackerProbe(eq("AA:BB:CC:DD:EE:FF"), any(), any(), any(), eq(5)))
+            .thenAnswer {
+                captured.set(it.getArgument(1)); entered.countDown()
+                check(reply.await(5, TimeUnit.SECONDS))
+                headTrackerReady()
+            }
+        `when`(bridge.remote.finishHeadTrackerProbe(any())).thenReturn(Bundle().apply { putBoolean("cleanup_complete", true) })
+        accept.invoke(client, bridge.binder, 0, true)
+        val pending = launch(Dispatchers.IO) {
+            runCatching { client.startHeadTrackerProbe("AA:BB:CC:DD:EE:FF", pipe[0], 5, { true }, { _, _ -> }, {}) }
+        }
+        try {
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            ShadowBinder.setCallingUid(0)
+            assertTrue(captured.get().isCurrent)
+            pending.cancel()
+            assertFalse("A cancelled opening coroutine must retire its owner before the reply", captured.get().isCurrent)
+            reply.countDown(); pending.join()
+            verify(bridge.remote).finishHeadTrackerProbe(captured.get())
+            assertFalse(descriptor.valid())
+        } finally {
+            reply.countDown(); pending.cancel(); pending.join()
+            pipe[1].close(); client.close(); ShadowBinder.setCallingUid(previousCaller)
+            shadowOf(Looper.getMainLooper()).idle()
+        }
+    }
+
+    @Test fun headTrackerOwnerOutlivesSuccessfulStartJobAndFinishRemainsRetryable() = runBlocking<Unit> {
+        val previousCaller = Binder.getCallingUid()
+        val client = ShizukuAudioClient(context)
+        val bridge = Bridge(); val pipe = ParcelFileDescriptor.createPipe()
+        val captured = AtomicReference<IPlaybackRecoveryOwner>()
+        `when`(bridge.remote.startHeadTrackerProbe(eq("AA:BB:CC:DD:EE:FF"), any(), any(), any(), eq(5)))
+            .thenAnswer { captured.set(it.getArgument(1)); headTrackerReady() }
+        `when`(bridge.remote.finishHeadTrackerProbe(any())).thenReturn(Bundle().apply { putBoolean("cleanup_complete", true) })
+        accept.invoke(client, bridge.binder, 0, true)
+        try {
+            val opening = async(Dispatchers.IO) {
+                client.startHeadTrackerProbe("AA:BB:CC:DD:EE:FF", pipe[0], 5, { true }, { _, _ -> }, {})
+            }
+            val lease = opening.await()
+            assertTrue(opening.isCompleted)
+            ShadowBinder.setCallingUid(0)
+            assertTrue("The completed start Job must not retire the long-lived lease", captured.get().isCurrent)
+            lease.finish(); lease.finish()
+            assertFalse(captured.get().isCurrent)
+            verify(bridge.remote, times(2)).finishHeadTrackerProbe(captured.get())
+        } finally {
+            pipe[1].close(); client.close(); ShadowBinder.setCallingUid(previousCaller)
+            shadowOf(Looper.getMainLooper()).idle()
+        }
+    }
+
+    @Test fun oldHeadTrackerCallbacksAndForeignUidsCannotRetireAReplacementBridgeLease() = runBlocking<Unit> {
+        val previousCaller = Binder.getCallingUid()
+        val client = ShizukuAudioClient(context)
+        val old = Bridge(); val replacement = Bridge()
+        val oldPipe = ParcelFileDescriptor.createPipe(); val newPipe = ParcelFileDescriptor.createPipe()
+        lateinit var oldEvents: IHeadTrackerEvents
+        lateinit var newEvents: IHeadTrackerEvents
+        lateinit var newOwner: IPlaybackRecoveryOwner
+        val oldReports = CopyOnWriteArrayList<Long>(); val oldStops = CopyOnWriteArrayList<String>()
+        val newReports = CopyOnWriteArrayList<Long>(); val newStops = CopyOnWriteArrayList<String>()
+        `when`(old.remote.startHeadTrackerProbe(anyString(), any(), any(), any(), eq(5)))
+            .thenAnswer { oldEvents = it.getArgument(3); headTrackerReady() }
+        `when`(replacement.remote.startHeadTrackerProbe(anyString(), any(), any(), any(), eq(5)))
+            .thenAnswer { newOwner = it.getArgument(1); newEvents = it.getArgument(3); headTrackerReady() }
+        `when`(old.remote.finishHeadTrackerProbe(any())).thenReturn(Bundle())
+        `when`(replacement.remote.finishHeadTrackerProbe(any())).thenReturn(Bundle())
+        try {
+            accept.invoke(client, old.binder, 0, true)
+            val first = client.startHeadTrackerProbe("AA:BB:CC:DD:EE:FF", oldPipe[0], 5, { true },
+                { _, interval -> oldReports += interval }, { oldStops += it })
+            first.finish()
+            disconnect.invoke(client, "Old bridge retired", old.binder)
+            accept.invoke(client, replacement.binder, 0, true)
+            val next = client.startHeadTrackerProbe("AA:BB:CC:DD:EE:FF", newPipe[0], 5, { true },
+                { _, interval -> newReports += interval }, { newStops += it })
+            ShadowBinder.setCallingUid(0)
+            oldEvents.onReportingChanged(true, 10_000_000); oldEvents.onStopped("late_old_stop")
+            ShadowBinder.setCallingUid(2000)
+            newEvents.onReportingChanged(true, 15_000_000); newEvents.onStopped("foreign_stop")
+            ShadowBinder.setCallingUid(0)
+            newEvents.onReportingChanged(true, 20_000_000)
+            drainClientCallbacks(client)
+            assertTrue(oldReports.isEmpty()); assertTrue(oldStops.isEmpty()); assertTrue(newStops.isEmpty())
+            assertEquals(listOf(20_000_000L), newReports)
+            assertTrue(newOwner.isCurrent)
+            newEvents.onStopped("finished"); drainClientCallbacks(client)
+            assertEquals(listOf("finished"), newStops); assertFalse(newOwner.isCurrent)
+            next.finish()
+        } finally {
+            oldPipe[1].close(); newPipe[1].close(); client.close(); ShadowBinder.setCallingUid(previousCaller)
+            shadowOf(Looper.getMainLooper()).idle()
+        }
+    }
+
+    private fun headTrackerReady() = Bundle().apply { putBoolean("ready", true); putBoolean("hal_handshake", true) }
+
+    private suspend fun drainClientCallbacks(client: ShizukuAudioClient) {
+        val scope = ShizukuAudioClient::class.java.getDeclaredField("scope").apply { isAccessible = true }
+            .get(client) as CoroutineScope
+        scope.coroutineContext[Job]?.children?.toList()?.forEach { it.join() }
     }
 
     private fun assertShizukuFallback(action: (ShizukuAudioClient) -> Unit) {

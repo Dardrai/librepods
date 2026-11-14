@@ -37,6 +37,8 @@ class ShizukuAudioService @JvmOverloads constructor(context: Context,
     private var microphoneProbe: Pair<IPlaybackRecoveryOwner, RootMicrophoneProbe>? = null
     private var communication: Pair<IPlaybackRecoveryOwner, RootCommunicationRoute>? = null
     private var spatialAudio: SpatialAudioAccess? = null
+    @Volatile private var headTrackerProbe: RootHeadTrackerProbe? = null
+    @Volatile private var headTrackerSink: RootHeadTrackerSink? = null
     private val volumeSync by lazy {
         BluetoothVolumeSync(shellContext, audio = ShizukuVolumeSyncAudio(shellContext,
             binder = { checkNotNull(SystemServiceHelper.getSystemService(it)) },
@@ -131,6 +133,7 @@ class ShizukuAudioService @JvmOverloads constructor(context: Context,
 
     override fun retireOwner(owner: IPlaybackRecoveryOwner) {
         enforceCaller()
+        headTrackerProbe?.finish(owner)
         spatialAudio?.retire(owner)
         releaseUsbAbsoluteVolume(owner)
         finishCommunication(owner, false)
@@ -147,6 +150,65 @@ class ShizukuAudioService @JvmOverloads constructor(context: Context,
 
     override fun restoreSpatialAudio(address: String, owner: IPlaybackRecoveryOwner): Bundle =
         spatialAudioCall(true) { it.restore(address, owner) }
+
+    override fun startHeadTrackerProbe(address: String, owner: IPlaybackRecoveryOwner,
+        poses: ParcelFileDescriptor, events: IHeadTrackerEvents, seconds: Int): Bundle {
+        try { enforceCaller() } catch (error: Exception) { poses.close(); throw error }
+        if (!BuildConfig.DEBUG || Process.myUid() != 0 || !headTrackerPermission()) {
+            poses.close()
+            return RootHeadTrackerProbe.failure("probe_unavailable")
+        }
+        val identity = Binder.clearCallingIdentity()
+        return try {
+            val probe = synchronized(lock) {
+                check(!cleanupFailed.get()) { "helper_unavailable" }
+                headTrackerProbe ?: RootHeadTrackerProbe(SpatialAudioAccess.Framework(shellContext),
+                    { selected, selectedOwner, input ->
+                        val sink = synchronized(lock) {
+                            headTrackerSink ?: RootHeadTrackerSink {}.also { headTrackerSink = it }
+                        }
+                        sink.open(selected, selectedOwner, input) {}
+                    },
+                    ::headTrackerMutation, ::headTrackerPermission).also { headTrackerProbe = it }
+            }
+            probe.start(address, owner, poses, events, seconds)
+        } catch (_: Exception) { poses.close(); RootHeadTrackerProbe.failure("unavailable") }
+        finally { Binder.restoreCallingIdentity(identity) }
+    }
+
+    override fun headTrackerProbeState(owner: IPlaybackRecoveryOwner): Bundle {
+        enforceCaller()
+        if (!BuildConfig.DEBUG || Process.myUid() != 0) return RootHeadTrackerProbe.failure("probe_unavailable")
+        val identity = Binder.clearCallingIdentity()
+        return try { headTrackerProbe?.state(owner) ?: RootHeadTrackerProbe.failure("no_owned_probe") }
+        finally { Binder.restoreCallingIdentity(identity) }
+    }
+
+    override fun finishHeadTrackerProbe(owner: IPlaybackRecoveryOwner): Bundle {
+        enforceCaller()
+        if (!BuildConfig.DEBUG || Process.myUid() != 0) return RootHeadTrackerProbe.failure("probe_unavailable")
+        val identity = Binder.clearCallingIdentity()
+        return try { headTrackerProbe?.finish(owner) ?: RootHeadTrackerProbe.failure("no_owned_probe") }
+        finally { Binder.restoreCallingIdentity(identity) }
+    }
+
+    private fun headTrackerPermission() = originalContext.packageManager.checkPermission(
+        Manifest.permission.BLUETOOTH_CONNECT, BuildConfig.APPLICATION_ID) == PackageManager.PERMISSION_GRANTED
+
+    private fun headTrackerMutation(cleanup: Boolean, action: () -> Unit) {
+        val deadline = android.os.SystemClock.elapsedRealtime() + 3_000
+        while (true) {
+            val reserved = synchronized(lock) {
+                if (!cleanup) check(!cleanupFailed.get() && !volumeChecking && playbackRecovery == null &&
+                    playbackRelease == null && callConnection == null && probeIsQuiet()) { "busy" }
+                if (spatialMutating) false else { spatialMutating = true; true }
+            }
+            if (reserved) break
+            check(cleanup && android.os.SystemClock.elapsedRealtime() < deadline) { "busy" }
+            Thread.sleep(10)
+        }
+        try { action() } finally { synchronized(lock) { spatialMutating = false } }
+    }
 
     private fun spatialAudioCall(mutation: Boolean, action: (SpatialAudioAccess) -> Bundle): Bundle {
         enforceCaller()
@@ -491,6 +553,8 @@ class ShizukuAudioService @JvmOverloads constructor(context: Context,
 
     override fun close() {
         if (!cleanupFailed.compareAndSet(false, true)) return
+        synchronized(lock) { headTrackerProbe }?.close()
+        headTrackerSink?.close()
         val routes = synchronized(lock) {
             playbackRecovery?.cancel(); playbackRelease?.cancel(); callConnection?.binderDied()
             mediaPause?.second?.close(); mediaPause = null

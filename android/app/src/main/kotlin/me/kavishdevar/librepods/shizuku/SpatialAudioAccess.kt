@@ -186,7 +186,7 @@ internal class SpatialAudioAccess(private val platform: Platform,
     }
 
     @android.annotation.SuppressLint("MissingPermission", "PrivateApi", "SoonBlockedPrivateApi")
-    private class Framework(private val context: Context) : Platform {
+    internal class Framework(private val context: Context) : Platform {
         private val type = Class.forName("android.media.IAudioService")
         private val attributesType = Class.forName("android.media.AudioDeviceAttributes")
         private val binder = checkNotNull(SystemServiceHelper.getSystemService(Context.AUDIO_SERVICE))

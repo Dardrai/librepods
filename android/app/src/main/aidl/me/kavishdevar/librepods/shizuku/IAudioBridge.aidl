@@ -5,6 +5,7 @@ import me.kavishdevar.librepods.shizuku.IHfpCallControl;
 import me.kavishdevar.librepods.shizuku.IUsbAbsoluteVolumePolicy;
 import me.kavishdevar.librepods.shizuku.IUsbAbsoluteVolumeEvents;
 import me.kavishdevar.librepods.shizuku.IUsbHidConnection;
+import me.kavishdevar.librepods.shizuku.IHeadTrackerEvents;
 import android.os.Bundle;
 import android.os.ParcelFileDescriptor;
 
@@ -47,5 +48,9 @@ interface IAudioBridge {
     Bundle inspectSpatialAudio(String address, IPlaybackRecoveryOwner owner) = 32;
     Bundle setFixedSpatialEnabled(String address, IPlaybackRecoveryOwner owner, boolean enabled) = 33;
     Bundle restoreSpatialAudio(String address, IPlaybackRecoveryOwner owner) = 34;
+    Bundle startHeadTrackerProbe(String address, IPlaybackRecoveryOwner owner,
+        in ParcelFileDescriptor poses, IHeadTrackerEvents events, int seconds) = 35;
+    Bundle headTrackerProbeState(IPlaybackRecoveryOwner owner) = 36;
+    Bundle finishHeadTrackerProbe(IPlaybackRecoveryOwner owner) = 37;
     void destroy() = 16777114;
 }
