@@ -267,11 +267,13 @@ class DongleNativeConnectionServiceTest {
     }
     private fun companionHolds() = field("companionHolds").get(service) as CompanionHolds
     private fun holdsField(name: String) = CompanionHolds::class.java.getDeclaredField(name).apply { isAccessible = true }
+    private fun handoffHost() = field("handoffHost").get(service) as CompanionHandoffHost
+    private fun handoffField(name: String) = CompanionHandoffHost::class.java.getDeclaredField(name).apply { isAccessible = true }
     private fun field(name: String) = LibrePodsService::class.java.getDeclaredField(name).apply { isAccessible = true }
 
     @Suppress("UNCHECKED_CAST")
     private fun holds() = holdsField("released").get(companionHolds()) as MutableSet<MacAddress>
 
     @Suppress("UNCHECKED_CAST")
-    private fun operations() = field("companionOperations").get(service) as ConcurrentHashMap<MacAddress, Any>
+    private fun operations() = handoffField("operations").get(handoffHost()) as ConcurrentHashMap<MacAddress, Any>
 }
