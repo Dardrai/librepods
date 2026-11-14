@@ -63,7 +63,7 @@ class CompanionReleaseServiceTest {
         service = spy(Robolectric.buildService(LibrePodsService::class.java).get())
         app = LibrePodsApplication()
         ReflectionHelpers.setField(service, "mApplication", app)
-        field("companionHoldReady").set(service, true)
+        holdsField("ready").set(companionHolds(), true)
         field("companionBridge\$delegate").set(service, lazyOf(bridge))
         field("companionHoldStore\$delegate").set(service, lazyOf(mock(CompanionHoldStore::class.java)))
         `when`(bridge.hasRootPrivileges).thenReturn(true)
@@ -214,5 +214,7 @@ class CompanionReleaseServiceTest {
     @Suppress("UNCHECKED_CAST")
     private fun devices() = field("_devices").get(service) as MutableStateFlow<Map<MacAddress, Device<*, *, *>>>
     private fun anyCurrent(): () -> Boolean = any<() -> Boolean>() ?: { true }
+    private fun companionHolds() = field("companionHolds").get(service) as CompanionHolds
+    private fun holdsField(name: String) = CompanionHolds::class.java.getDeclaredField(name).apply { isAccessible = true }
     private fun field(name: String) = LibrePodsService::class.java.getDeclaredField(name).apply { isAccessible = true }
 }

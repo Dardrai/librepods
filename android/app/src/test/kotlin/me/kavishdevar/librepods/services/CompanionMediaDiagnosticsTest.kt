@@ -48,7 +48,7 @@ class CompanionMediaDiagnosticsTest {
 
     @Before fun setUp() {
         service = Robolectric.buildService(LibrePodsService::class.java).get()
-        field("companionHoldReady").set(service, true)
+        holdsField("ready").set(companionHolds(), true)
         field("companionBridge\$delegate").set(service, lazyOf(bridge))
         `when`(bridge.hasRootPrivileges).thenReturn(true)
         `when`(bridge.state).thenReturn(MutableStateFlow(me.kavishdevar.librepods.shizuku.BridgeState(connected = true)))
@@ -72,7 +72,7 @@ class CompanionMediaDiagnosticsTest {
     }
 
     @Test fun admissionFailureShowsActualOutputAndTheExactGateWithoutCallingTheHelper() = runBlocking<Unit> {
-        field("companionHoldReady").set(service, false)
+        holdsField("ready").set(companionHolds(), false)
         assertFalse(inspect().known)
         val report = dump()
         assertTrue(report.contains("stage=ADMISSION reason=HOLD_UNAVAILABLE"))
@@ -122,5 +122,7 @@ class CompanionMediaDiagnosticsTest {
             .invoke(service, FileDescriptor(), PrintWriter(it), arrayOf("--companion-media"))
     }.toString()
 
+    private fun companionHolds() = field("companionHolds").get(service) as CompanionHolds
+    private fun holdsField(name: String) = CompanionHolds::class.java.getDeclaredField(name).apply { isAccessible = true }
     private fun field(name: String) = LibrePodsService::class.java.getDeclaredField(name).apply { isAccessible = true }
 }
