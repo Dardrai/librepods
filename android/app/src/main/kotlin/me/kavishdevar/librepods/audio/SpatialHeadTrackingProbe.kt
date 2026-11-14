@@ -89,7 +89,9 @@ internal class SpatialHeadTrackingProbe(
                 val leftIsPrimary = device.state.value.leftIsPrimary
                 check(role == 1 || role == 2) { "Waiting for the current bud role. No probe started." }
                 fun current() = live.get() && isCurrent() && device.state.value.budRoleRaw == roleRaw &&
-                    device.metadata.value.let { it.model == metadata.model && it.modelNumber == metadata.modelNumber && it.version1 == metadata.version1 }
+                    device.metadata.value.let { it.model == metadata.model &&
+                        spatialPoseModelIdentity(it.modelNumber) == spatialPoseModelIdentity(metadata.modelNumber) &&
+                        it.version1 == metadata.version1 }
                 fun requireCurrent() {
                     check(current() && device.state.value.headTrackingState != BuddyState.INACTIVE) { "Connection, bud role or motion stream changed." }
                 }

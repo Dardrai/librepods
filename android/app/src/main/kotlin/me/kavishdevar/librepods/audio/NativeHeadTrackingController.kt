@@ -96,6 +96,8 @@ class NativeHeadTrackingController internal constructor(
     internal fun timingSnapshot(): Bundle = timing.snapshot().apply {
         putString("reason", state.value.reason)
         putBoolean("enabled", state.value.enabled == true); putBoolean("active", state.value.active)
+        putBoolean("calibrated", state.value.calibrated); putBoolean("available", state.value.available)
+        putBoolean("busy", state.value.busy)
         sinkTiming?.let { putBundle("sink", Bundle(it)) }
         putLong("sink_snapshot_age_ms", if (sinkTimingAt == 0L) -1 else SystemClock.elapsedRealtime() - sinkTimingAt)
     }
@@ -161,7 +163,7 @@ class NativeHeadTrackingController internal constructor(
         val role = device.state.value.budRoleRaw.toList()
         if (metadata.model != AirPodsModel.AIRPODS_PRO_3 || role.firstOrNull() !in listOf(1, 2) ||
             metadata.modelNumber.isBlank() || metadata.version1.isBlank()) return null
-        return SpatialPoseProfileKey(device.macAddress.value, role, metadata.modelNumber, metadata.version1)
+        return SpatialPoseProfileKey(device.macAddress.value, role, spatialPoseModelIdentity(metadata.modelNumber), metadata.version1)
     }
 
     private fun sourceCurrent(socket: BluetoothSocket, key: SpatialPoseProfileKey) = current() && access.hasRootPrivileges && hostIdle.get() &&

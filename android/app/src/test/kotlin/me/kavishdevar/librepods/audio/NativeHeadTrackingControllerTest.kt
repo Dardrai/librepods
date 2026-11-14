@@ -123,6 +123,22 @@ class NativeHeadTrackingControllerTest {
         }
     }
 
+    @Test fun knownPro3ModelAliasesUseTheSameFullSourceIdentity() = runBlocking {
+        Target().use { f ->
+            waitUntil { f.controller.state.value.available }
+            fun reads() = mockingDetails(f.profiles).invocations.filter { it.method.name == "load" }
+            val before = reads().size
+            f.metadata.value = f.metadata.value.copy(modelNumber = "A3063")
+            waitUntil { reads().size > before }
+            val keys = reads().map { it.getArgument<SpatialPoseProfileKey>(0) }
+            assertTrue(keys.isNotEmpty())
+            assertTrue(keys.all { it == key().copy(modelNumber = "AIRPODS_PRO_3") })
+            val cached = f.controller.timingSnapshot()
+            assertTrue(cached.getBoolean("calibrated")); assertTrue(cached.getBoolean("available"))
+            assertTrue(f.started.isEmpty())
+        }
+    }
+
     @Test fun unknownRoleNeverStartsAnUncalibratedSourceOrChangesNativeChoice() = runBlocking {
         Target(calibrated = false).use { f ->
             f.states.value = f.states.value.copy(budRoleRaw = emptyList())

@@ -108,7 +108,7 @@ class SpatialHeadTrackingProbeTest {
             { it.states.value = it.states.value.copy(budRoleRaw = listOf(2)) },
             { it.states.value = it.states.value.copy(budRoleRaw = listOf(1, 0)) },
             { it.metadata.value = it.metadata.value.copy(model = AirPodsModel.AIRPODS_3) },
-            { it.metadata.value = it.metadata.value.copy(modelNumber = "A3064") },
+            { it.metadata.value = it.metadata.value.copy(modelNumber = "A3048") },
             { it.metadata.value = it.metadata.value.copy(version1 = "changed-firmware") })
         for (change in changes) {
             val target = Target(); val calibrating = CompletableDeferred<Unit>()
@@ -161,6 +161,29 @@ class SpatialHeadTrackingProbeTest {
         assertTrue(phases.values.all { it.size <= 1000 })
         assertTrue(samples.zipWithNext().all { (a, b) -> a.getLong("arrival_ns") < b.getLong("arrival_ns") })
         assertTrue(trace.last().getBoolean("calibrated")); assertTrue(trace.last().isNull("calibration_failure"))
+        target.assertOwnedCleanup()
+    }
+
+    @Test fun changingPro3ModelAliasDuringCaptureKeepsItsOwnerAndCalibrationValid() = runTest {
+        val current = AtomicBoolean(true)
+        val changed = AtomicBoolean()
+        var returned = false
+        val target = Target(movingReports { testScheduler.currentTime }, StandardTestDispatcher(testScheduler))
+        val result = target.probe.run(SpatialHeadTrackingProbeRequest(MAC), target.device, current::get,
+            onProgress = { event ->
+                if (event.stage == SpatialCalibrationStage.LOOK_UP && changed.compareAndSet(false, true))
+                    target.metadata.value = target.metadata.value.copy(modelNumber = "A3064")
+                if (event.stage == SpatialCalibrationStage.RETURN) returned = true
+                if (event.stage == SpatialCalibrationStage.PREPARING && returned)
+                    current.set(false) // End after valid calibration, before requesting a native sensor.
+            })
+        assertTrue(changed.get()); assertTrue(returned); assertTrue(testScheduler.currentTime >= 13_000)
+        assertTrue(result.calibrated); assertNull(result.calibrationFailure)
+        val store = SpatialPoseProfileStore(target.context)
+        val original = checkNotNull(store.load(SpatialPoseProfileKey(MAC, listOf(1), "A3063", "test-firmware")))
+        val currentAlias = checkNotNull(store.load(SpatialPoseProfileKey(MAC, listOf(1), "A3064", "test-firmware")))
+        assertEquals(original.headFromRaw, currentAlias.headFromRaw)
+        assertTrue(target.onlyTrace().last().getBoolean("calibrated"))
         target.assertOwnedCleanup()
     }
 
