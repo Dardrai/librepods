@@ -12,6 +12,7 @@ import androidx.navigation3.runtime.NavBackStack
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.channels.Channel
 import me.kavishdevar.librepods.R
+import me.kavishdevar.librepods.BuildConfig
 import me.kavishdevar.librepods.LibrePodsApplication
 import me.kavishdevar.librepods.bluetooth.DeviceSettingsRefreshResult
 import me.kavishdevar.librepods.core.bluetooth.MacAddress
@@ -235,6 +236,13 @@ fun RenderScreenContent(
         }
 
         is Screen.SpatialCalibration -> {
+            if (!BuildConfig.DEBUG) {
+                LaunchedEffect(Unit) {
+                    backStack.remove(screen)
+                    if (backStack.isEmpty()) navigate(Screen.DeviceList)
+                }
+                return
+            }
             val device = devices[screen.macAddress] as? AppleDevice ?: return
             SpatialCalibrationRoute(device, navigateBack = { navigateBack?.invoke() },
                 isSelected = { devices.values.filterIsInstance<AppleDevice>().filter {
