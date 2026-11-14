@@ -44,5 +44,8 @@ interface IAudioBridge {
     IUsbHidConnection openDongleHid(String deviceName, String boardSerial, int interfaceId,
         IPlaybackRecoveryOwner owner) = 30;
     Bundle inspectCompanionMedia(String address) = 31;
+    Bundle inspectSpatialAudio(String address, IPlaybackRecoveryOwner owner) = 32;
+    Bundle setFixedSpatialEnabled(String address, IPlaybackRecoveryOwner owner, boolean enabled) = 33;
+    Bundle restoreSpatialAudio(String address, IPlaybackRecoveryOwner owner) = 34;
     void destroy() = 16777114;
 }

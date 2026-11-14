@@ -34,12 +34,15 @@ internal class RTBuddyManager(
     private val onHeartRateState: (BuddyState) -> Unit,
     private val remoteAllowed: () -> Boolean = { false },
     private var motionIntervalUs: Int? = null,
+    private val sharedMotionOwners: MotionOwners? = null,
 ) : AutoCloseable {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val frames = SensorFrames()
     private val reports = SensorReports()
     private var sequence = 0
     private var descriptorsRequested = false
+    private val legacyMotionOwner = Any()
+    private val motionOwners = sharedMotionOwners ?: MotionOwners()
     private var motionWanted = false
     private var heartWanted = false
     private var suspended = false
@@ -62,12 +65,13 @@ internal class RTBuddyManager(
             while (isActive && isCurrent()) {
                 delay(250)
                 synchronized(this@RTBuddyManager) {
-                    if (closed) return@synchronized
+                    if (closed || !isCurrent()) return@synchronized
+                    reconcileHeadTracking()
                     if (stopRetry && isCurrent()) { stopRetry = false; stopMotion(retry = true) }
                     if (motionWanted && !suspended) {
                         if (motionLive == null) startMotion()
                         if (now() - maxOf(motionSince, lastMotion) >= 5_000) {
-                            motionWanted = false
+                            clearMotionRequest()
                             stopMotion()
                             onMotionState(BuddyState.INACTIVE)
                         }
@@ -88,6 +92,7 @@ internal class RTBuddyManager(
     @Synchronized
     fun feed(chunk: ByteArray) {
         if (closed || !isCurrent()) return
+        reconcileHeadTracking()
         for (frame in frames.feed(chunk)) {
             val packet = try { RTBuddyPacket.parse(frame) } catch (_: Exception) { continue }
             val remote = packet.rtBuddyPayload as? RemoteHidBuddyPayload
@@ -155,10 +160,19 @@ internal class RTBuddyManager(
     }
 
     @Synchronized
-    fun setHeadTrackingEnabled(enabled: Boolean): Boolean {
+    fun setHeadTrackingEnabled(enabled: Boolean, owner: Any = legacyMotionOwner): Boolean {
         if (closed || !isCurrent()) return false
-        motionWanted = enabled
-        if (enabled) {
+        motionOwners.set(owner, enabled)
+        return reconcileHeadTracking()
+    }
+
+    @Synchronized
+    fun reconcileHeadTracking(): Boolean {
+        if (closed || !isCurrent()) return false
+        val wanted = motionOwners.wanted()
+        if (motionWanted == wanted) return true
+        motionWanted = wanted
+        if (wanted) {
             if (motionStopping) stopMotion()
             motionSince = now()
             lastMotion = 0
@@ -169,6 +183,13 @@ internal class RTBuddyManager(
             onMotionState(BuddyState.INACTIVE)
         }
         return true
+    }
+
+    @Synchronized
+    fun stopAllHeadTracking() {
+        if (closed || !isCurrent()) return
+        motionOwners.clear()
+        reconcileHeadTracking()
     }
 
     @Synchronized
@@ -215,14 +236,14 @@ internal class RTBuddyManager(
             if (service == null) {
                 if (!remoteRequested) {
                     remoteRequested = sendRaw(RemoteHid.connect(nextSequence()))
-                    if (!remoteRequested) { motionWanted = false; onMotionState(BuddyState.INACTIVE) }
+                    if (!remoteRequested) { clearMotionRequest(); onMotionState(BuddyState.INACTIVE) }
                 }
                 return
             }
             motionLive = service
             motionRemote = true
             if (!sendRaw(RemoteHid.feature(nextSequence(), service, 1, motionIntervalUs ?: 40_000))) {
-                motionWanted = false
+                clearMotionRequest()
                 stopMotion()
                 onMotionState(BuddyState.INACTIVE)
                 return
@@ -236,7 +257,7 @@ internal class RTBuddyManager(
         motionNative = native
         motionRemote = false
         if ((native && !command(service, 1, report = 4)) || !command(service, interval(native))) {
-            motionWanted = false
+            clearMotionRequest()
             stopMotion()
             onMotionState(BuddyState.INACTIVE)
             return
@@ -257,6 +278,11 @@ internal class RTBuddyManager(
         if (sent) { motionLive = null; stopRetry = false }
         else if (!retry) stopRetry = true
         lastMotion = 0
+    }
+
+    private fun clearMotionRequest() {
+        if (isCurrent()) motionOwners.clear()
+        motionWanted = false
     }
 
     private fun interval(native: Boolean): Int = (motionIntervalUs ?: if (native) 20_000 else 40_000)
@@ -352,6 +378,7 @@ internal class RTBuddyManager(
         if (closed) return
         closed = true
         scope.cancel()
+        if (sharedMotionOwners == null) motionOwners.clear()
         motionWanted = false
         heartWanted = false
         onMotionState(BuddyState.INACTIVE)

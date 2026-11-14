@@ -13,6 +13,85 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 class SensorTransportTest {
+    @Test fun motionOwnersShareOneStreamAndReleaseOnlyTheirOwnRequest() {
+        val writes = mutableListOf<AACPPacket>()
+        val states = mutableListOf<BuddyState>()
+        val manager = RTBuddyManager({ writes += it; true }, { true }, { true }, { 9 }, {}, {}, { states += it }, {})
+        // Equal values still represent two independent clients.
+        data class Owner(val name: String)
+        val screen = Owner("motion")
+        val spatial = Owner("motion")
+        try {
+            assertTrue(writes.isEmpty())
+            assertTrue(manager.setHeadTrackingEnabled(true, screen))
+            assertTrue(manager.setHeadTrackingEnabled(true, spatial))
+            assertEquals(1, writes.size)
+            manager.setHeadTrackingEnabled(false) // Legacy Stop has no claim on either owner.
+            manager.setHeadTrackingEnabled(false, screen)
+            assertEquals(1, writes.size)
+            assertEquals(listOf(BuddyState.WAITING), states)
+            manager.setHeadTrackingEnabled(false, spatial)
+            assertEquals(2, writes.size)
+            assertEquals(BuddyState.INACTIVE, states.last())
+            manager.setHeadTrackingEnabled(false, spatial)
+            assertEquals(2, writes.size)
+        } finally { manager.close() }
+    }
+
+    @Test fun controlRefreshResumesOnlyOwnersStillPresentWhenTheReplacementStarts() {
+        val owners = MotionOwners()
+        val released = Any()
+        val live = Any()
+        val original = RTBuddyManager({ true }, { true }, { true }, { 9 }, {}, {}, {}, {}, sharedMotionOwners = owners)
+        original.setHeadTrackingEnabled(true, released)
+        original.setHeadTrackingEnabled(true, live)
+        original.close()
+        owners.set(released, false) // AACP accepts release during the manager-free refresh gap.
+        val writes = mutableListOf<AACPPacket>()
+        val replacement = RTBuddyManager({ writes += it; true }, { true }, { true }, { 9 }, {}, {}, {}, {}, sharedMotionOwners = owners)
+        try {
+            replacement.reconcileHeadTracking()
+            assertEquals(1, writes.size)
+            replacement.setHeadTrackingEnabled(false, released)
+            assertEquals(1, writes.size)
+            replacement.setHeadTrackingEnabled(false, live)
+            assertEquals(2, writes.size)
+            assertFalse(owners.wanted())
+        } finally { replacement.close() }
+    }
+
+    @Test fun releasingTheLastOwnerDuringControlRefreshCannotRestartOnTheReplacement() {
+        val owners = MotionOwners()
+        val owner = Any()
+        val original = RTBuddyManager({ true }, { true }, { true }, { 9 }, {}, {}, {}, {}, sharedMotionOwners = owners)
+        original.setHeadTrackingEnabled(true, owner)
+        original.close()
+        owners.set(owner, false)
+        val writes = mutableListOf<AACPPacket>()
+        val replacement = RTBuddyManager({ writes += it; true }, { true }, { true }, { 9 }, {}, {}, {}, {}, sharedMotionOwners = owners)
+        try {
+            replacement.reconcileHeadTracking()
+            replacement.setSuspended(true)
+            replacement.setSuspended(false)
+            assertTrue(writes.isEmpty())
+        } finally { replacement.close() }
+    }
+
+    @Test fun caseRetirementClearsEveryOwnerAndMicrophoneResumeDoesNotReplayThem() {
+        val writes = mutableListOf<AACPPacket>()
+        val manager = RTBuddyManager({ writes += it; true }, { true }, { true }, { 9 }, {}, {}, {}, {})
+        try {
+            manager.setHeadTrackingEnabled(true, Any())
+            manager.setHeadTrackingEnabled(true, Any())
+            manager.stopAllHeadTracking()
+            assertEquals(2, writes.size)
+            manager.setSuspended(true)
+            manager.setSuspended(false)
+            manager.reconcileHeadTracking()
+            assertEquals(2, writes.size)
+        } finally { manager.close() }
+    }
+
     @Test fun requestedIntervalsUpdateTheLiveStreamWithoutRaisingLegacyRate() {
         val writes = mutableListOf<AACPPacket>()
         val manager = RTBuddyManager({ writes += it; true }, { true }, { true }, { 9 }, {}, {}, {}, {})

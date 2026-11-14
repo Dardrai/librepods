@@ -79,6 +79,20 @@ jobs:
         run: |
           g++ -std=c++23 -Wall -Wextra -pedantic android/app/src/test/cpp/vendor_hook_test.cpp -o "$RUNNER_TEMP/vendor-hook-test"
           "$RUNNER_TEMP/vendor-hook-test"
+      - name: Check spatial audio diagnostics without a device
+        run: |
+          output="$RUNNER_TEMP/spatial-checks"
+          mkdir -p "$output"
+          g++ -std=c++17 -Wall -Wextra -Werror -UNDEBUG android/tools/head-tracker-probe/protocol_test.cpp -o "$output/head-tracker"
+          "$output/head-tracker"
+          g++ -std=c++17 -Wall -Wextra -Werror -UNDEBUG -DSPATIAL_PROBE_HOST_TEST android/tools/spatial-audio-probe/probe_contract_test.cpp -o "$output/audio-contract"
+          "$output/audio-contract"
+          g++ -std=c++17 -Wall -Wextra -Werror -UNDEBUG -ffunction-sections -fdata-sections -Wl,--gc-sections \
+            -idirafter "$ANDROID_HOME/ndk/30.0.14904198/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include" \
+            android/tools/spatial-audio-probe/startup_test.cpp -o "$output/audio-startup"
+          "$output/audio-startup"
+          javac --release 8 -d "$output" android/tools/spatial-audio-inspector/InspectorContract.java android/tools/spatial-audio-inspector/InspectorContractCheck.java
+          java -cp "$output" me.kavishdevar.librepods.spatialinspector.InspectorContractCheck
       - name: Test native audio pipeline with sanitizers
         env:
           CC: clang

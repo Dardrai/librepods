@@ -46,20 +46,22 @@ data class BridgeState(
 )
 
 /** Owned by the foreground service. Nothing is captured or routed just by creating this client. */
-class ShizukuAudioClient(context: Context) : Closeable {
+class ShizukuAudioClient @JvmOverloads constructor(context: Context,
+    private val requireRoot: Boolean = false,
+) : Closeable {
     private class PlaybackRequest(val remote: IAudioBridge, val address: String,
         @Volatile private var stillCurrent: () -> Boolean, private val job: Job?, private val helperUid: Int) {
         val active = AtomicBoolean(true)
         fun updateCurrent(current: () -> Boolean) { stillCurrent = current }
+        fun current() = active.get() && job?.isActive != false && runCatching { stillCurrent() }.getOrDefault(false)
         val owner = object : IPlaybackRecoveryOwner.Stub() {
-            override fun isCurrent() = AudioBridgeRules.helperOwnsRequest(helperUid, Binder.getCallingUid()) && active.get() &&
-                job?.isActive != false && runCatching { stillCurrent() }.getOrDefault(false)
+            override fun isCurrent() = AudioBridgeRules.helperOwnsRequest(helperUid, Binder.getCallingUid()) && current()
         }
     }
 
     private val context = context.applicationContext
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val mutableState = MutableStateFlow(BridgeState())
+    private val mutableState = MutableStateFlow(if (requireRoot) BridgeState(availability = "Root access required") else BridgeState())
     val state: StateFlow<BridgeState> = mutableState.asStateFlow()
     private val lock = Any()
     private val ipc = Mutex()
@@ -69,6 +71,7 @@ class ShizukuAudioClient(context: Context) : Closeable {
     private var volumeRequest: Pair<Any, PlaybackRequest>? = null
     private var microphoneProbeRequest: PlaybackRequest? = null
     private var communicationRequest: PlaybackRequest? = null
+    private var spatialRequest: PlaybackRequest? = null
     private val usbHidConnections = mutableSetOf<IUsbHidConnection>()
     @Volatile private var bridge: IAudioBridge? = null
     @Volatile private var backendUid: Int? = null
@@ -96,7 +99,8 @@ class ShizukuAudioClient(context: Context) : Closeable {
                 connecting = false
                 rootPermissionRequested.also { rootPermissionRequested = false }
             }
-            if (requestFallback) requestShizukuPermission() else connectShizuku()
+            if (requireRoot) mutableState.update { it.copy(availability = "Root access required", detail = "Root access required") }
+            else if (requestFallback) requestShizukuPermission() else connectShizuku()
         })
     private val args = Shizuku.UserServiceArgs(ComponentName(this.context, ShizukuAudioService::class.java))
         .daemon(false)
@@ -144,9 +148,11 @@ class ShizukuAudioClient(context: Context) : Closeable {
     }
 
     init {
-        Shizuku.addBinderReceivedListenerSticky(received)
-        Shizuku.addBinderDeadListener(dead)
-        Shizuku.addRequestPermissionResultListener(permissionResult)
+        if (!requireRoot) {
+            Shizuku.addBinderReceivedListenerSticky(received)
+            Shizuku.addBinderDeadListener(dead)
+            Shizuku.addRequestPermissionResultListener(permissionResult)
+        }
     }
 
     fun requestPermission() {
@@ -163,7 +169,7 @@ class ShizukuAudioClient(context: Context) : Closeable {
     }
 
     private fun requestShizukuPermission() {
-        if (closed) return
+        if (closed || requireRoot) return
         runCatching {
             check(Shizuku.pingBinder()) { "Start Shizuku before connecting" }
             check(!Shizuku.isPreV11()) { "Update Shizuku to version 13 or newer" }
@@ -184,10 +190,15 @@ class ShizukuAudioClient(context: Context) : Closeable {
                 return
             }
         }
+        if (requireRoot) {
+            mutableState.update { it.copy(availability = "Root access required", detail = "Root access required") }
+            return
+        }
         connectShizuku()
     }
 
     private fun connectShizuku() {
+        if (requireRoot) return
         runCatching {
             synchronized(lock) {
                 if (closed || bridge != null || bound) return
@@ -647,6 +658,47 @@ class ShizukuAudioClient(context: Context) : Closeable {
         checkNotNull(bridge).inspectCallMedia(A2dpRecoveryGuard(address).address)
     }
 
+    internal suspend fun inspectSpatialAudio(address: String, stillCurrent: () -> Boolean): Bundle =
+        spatialAudioCall(address, stillCurrent) { remote, owner -> remote.inspectSpatialAudio(address, owner) }
+
+    internal suspend fun setFixedSpatialEnabled(address: String, enabled: Boolean, stillCurrent: () -> Boolean): Bundle =
+        spatialAudioCall(address, stillCurrent) { remote, owner -> remote.setFixedSpatialEnabled(address, owner, enabled) }
+
+    internal suspend fun restoreSpatialAudio(address: String, stillCurrent: () -> Boolean): Bundle =
+        spatialAudioCall(address, stillCurrent) { remote, owner -> remote.restoreSpatialAudio(address, owner) }
+
+    private suspend fun spatialAudioCall(address: String, stillCurrent: () -> Boolean,
+        action: (IAudioBridge, IPlaybackRecoveryOwner) -> Bundle): Bundle = withContext(Dispatchers.IO) {
+        val selected = runCatching { A2dpRecoveryGuard(address).address }.getOrNull()
+            ?: return@withContext SpatialAudioAccess.failure("invalid_address")
+        ipc.withLock {
+            val remote = bridge
+            if (closed || remote == null || backendUid != 0)
+                return@withLock SpatialAudioAccess.failure("root_required")
+            if (!stillCurrent()) return@withLock SpatialAudioAccess.failure("owner_changed")
+            val previous = synchronized(lock) { spatialRequest }
+            val reusable = previous?.takeIf { it.remote === remote && it.address == selected && it.current() }
+            val live = { !closed && bridge === remote && backendUid == 0 && stillCurrent() }
+            val job = currentCoroutineContext()[Job]
+            val request = synchronized(lock) {
+                reusable?.takeIf { spatialRequest === it } ?: run {
+                    spatialRequest?.let { old -> old.active.set(false); runCatching { old.remote.retireOwner(old.owner) } }
+                    PlaybackRequest(remote, selected, live, null, 0).also { spatialRequest = it }
+                }
+            }
+            request.updateCurrent { job?.isActive != false && live() }
+            try {
+                val value = action(remote, request.owner)
+                if (!closed && bridge === remote && request.active.get() && stillCurrent()) value
+                else SpatialAudioAccess.failure("owner_changed")
+            } catch (cancelled: CancellationException) { request.active.set(false); throw cancelled }
+            catch (_: Exception) { SpatialAudioAccess.failure("unavailable") }
+            finally {
+                if (job?.isActive != false) request.updateCurrent(live) else request.active.set(false)
+            }
+        }
+    }
+
     fun canRefreshSettings(): Boolean = synchronized(lock) {
         !closed && !settingsRefresh && playbackRequest == null && microphoneProbeRequest == null &&
             communicationRequest == null && !ipc.isLocked
@@ -672,7 +724,7 @@ class ShizukuAudioClient(context: Context) : Closeable {
     }
 
     private fun refreshAvailability() {
-        if (closed || bridge != null || connecting) return
+        if (closed || requireRoot || bridge != null || connecting) return
         val message = runCatching {
             if (Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED) "Shizuku is available; connect to use audio controls"
             else "Shizuku is available; permission required"
@@ -698,6 +750,8 @@ class ShizukuAudioClient(context: Context) : Closeable {
             microphoneProbeRequest = null
             communicationRequest?.active?.set(false)
             communicationRequest = null
+            spatialRequest?.active?.set(false)
+            spatialRequest = null
             usbHidConnections.toList().forEach { runCatching { it.close() } }
             usbHidConnections.clear()
             bridgeDeath?.let { death -> bridge?.asBinder()?.let { runCatching { it.unlinkToDeath(death, 0) } } }
@@ -727,6 +781,8 @@ class ShizukuAudioClient(context: Context) : Closeable {
             microphoneProbeRequest = null
             communicationRequest?.also { it.active.set(false); retiring += it }
             communicationRequest = null
+            spatialRequest?.also { it.active.set(false); retiring += it }
+            spatialRequest = null
             usbHidConnections.toList().forEach { runCatching { it.close() } }
             usbHidConnections.clear()
             bridgeDeath?.let { death -> bridge?.asBinder()?.let { runCatching { it.unlinkToDeath(death, 0) } } }
@@ -741,9 +797,11 @@ class ShizukuAudioClient(context: Context) : Closeable {
         // A one-way owner-specific release cannot close another client's shared root bridge.
         retiring.forEach { runCatching { it.remote.retireOwner(it.owner) } }
         root.close()
-        Shizuku.removeBinderReceivedListener(received)
-        Shizuku.removeBinderDeadListener(dead)
-        Shizuku.removeRequestPermissionResultListener(permissionResult)
+        if (!requireRoot) {
+            Shizuku.removeBinderReceivedListener(received)
+            Shizuku.removeBinderDeadListener(dead)
+            Shizuku.removeRequestPermissionResultListener(permissionResult)
+        }
         scope.cancel()
     }
 

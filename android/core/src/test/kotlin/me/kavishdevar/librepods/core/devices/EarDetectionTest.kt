@@ -7,6 +7,16 @@ import org.junit.Test
 class EarDetectionTest {
     private val id = ControlCommandIdentifier.EAR_DETECTION_CONFIG
 
+    @Test fun caseRetirementRequiresBothBudsToBeExplicitlyReportedInTheCase() {
+        val left = DeviceComponentState(DeviceComponent.LEFT, ComponentStatus.IN_CASE)
+        val right = DeviceComponentState(DeviceComponent.RIGHT, ComponentStatus.IN_CASE)
+        assertTrue(setOf(left, right).bothBudsInCase())
+        assertFalse(emptySet<DeviceComponentState>().bothBudsInCase())
+        assertFalse(setOf(left).bothBudsInCase())
+        assertFalse(setOf(left, right.copy(status = ComponentStatus.IN_EAR)).bothBudsInCase())
+        assertFalse(setOf(left, right.copy(status = ComponentStatus.DISCONNECTED)).bothBudsInCase())
+    }
+
     @Test fun unknownReportsUseTheSavedChoiceAndValidReportsOverrideIt() {
         for (saved in listOf(false, true)) {
             val settings = AppleSettings(earDetectionEnabled = saved)

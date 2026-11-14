@@ -128,6 +128,10 @@ data class DeviceComponentState(
     val status: ComponentStatus
 )
 
+internal fun Set<DeviceComponentState>.bothBudsInCase(): Boolean =
+    DeviceComponentState(DeviceComponent.LEFT, ComponentStatus.IN_CASE) in this &&
+        DeviceComponentState(DeviceComponent.RIGHT, ComponentStatus.IN_CASE) in this
+
 enum class PacketDestination {
     DEVICE,
     HOST;

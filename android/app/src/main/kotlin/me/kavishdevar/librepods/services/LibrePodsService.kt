@@ -376,9 +376,10 @@ class LibrePodsService: Service() {
     @Synchronized private fun retireHeadGestures(device: AppleDevice? = null) {
         val owner = headGestureOwner ?: return
         if (device != null && owner !== device) return
+        val session = headGestureSession
         headGestureOwner = null
         headGestureSession = null
-        owner.stopHeadTracking()
+        if (session != null) owner.stopHeadTracking(session)
     }
 
     @Synchronized private fun retireIneligibleHeadGestures(device: AppleDevice) {
@@ -400,7 +401,7 @@ class LibrePodsService: Service() {
                     devices.value.values.filterIsInstance<AppleDevice>().firstOrNull(::canControlCall)?.let { device ->
                         headGestureOwner = device
                         val session = Any().also { headGestureSession = it }
-                        device.detectHeadGestures { accept ->
+                        device.detectHeadGestures(session) { accept ->
                             synchronized(this@LibrePodsService) {
                                 if (headGestureOwner !== device || headGestureSession !== session) return@detectHeadGestures
                                 if (!canControlCall(device)) {

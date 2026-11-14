@@ -438,14 +438,16 @@ class AacpSettingsRefreshTest {
         val controls = mapOf(id to byteArrayOf(4))
         val keys = mapOf(MagicKeyType.IRK to ByteArray(16) { 1 }, MagicKeyType.ENC_KEY to ByteArray(16) { 2 })
         val liveBatteries = setOf(Battery(BatteryComponent.CASE, 62, BatteryStatus.CHARGING, System.currentTimeMillis() - 1000))
-        device.loadInitialState(AppleState(controlStates = controls, magicKeys = keys, battery = liveBatteries, headTrackingState = BuddyState.WAITING,
+        device.loadInitialState(AppleState(controlStates = controls, magicKeys = keys, battery = liveBatteries,
             requestedControls = mapOf(id to byteArrayOf(2))), AppleSettings(allowOffChoice = true), fixtureMetadata())
         val confirmedControls = device.state.value.controlStates
-        val original = socket(connected = true)
+        val original = socket()
         val replacement = socket()
-        val manager = AACPManager(device, socketFactory = { replacement })
-        bind(manager, original)
+        val created = AtomicInteger()
+        val manager = AACPManager(device, socketFactory = { if (created.getAndIncrement() == 0) original else replacement })
         try {
+            assertTrue(manager.connect())
+            assertTrue(manager.setHeadTrackingEnabled(true, Any()))
             val request = requireNotNull(manager.prepareControlSessionRefresh())
             assertTrue(manager.refreshControlSession(request) { true })
             assertFalse(original.isConnected)
@@ -461,6 +463,76 @@ class AacpSettingsRefreshTest {
             assertEquals("A settings refresh must not disconnect native audio profiles", 0,
                 deviceShadow(device.bluetoothDevice).disconnects.get())
         } finally { manager.disconnect(); original.close(); replacement.close() }
+    }
+
+    @Test fun releasingMotionDuringTheControlRefreshGapCannotReplayItOnTheReplacement() {
+        for (keepOtherOwner in listOf(false, true)) {
+            val device = createDevice()
+            val original = socket()
+            val replacement = socket()
+            val reconnected = socket()
+            val replacementShadow = socketShadow(replacement)
+            replacementShadow.blockConnect()
+            val created = AtomicInteger()
+            val manager = AACPManager(device) {
+                when (created.getAndIncrement()) { 0 -> original; 1 -> replacement; else -> reconnected }
+            }
+            val released = Any()
+            val live = Any()
+            assertTrue(manager.connect())
+            assertTrue(manager.setHeadTrackingEnabled(true, released))
+            if (keepOtherOwner) assertTrue(manager.setHeadTrackingEnabled(true, live))
+            val request = requireNotNull(manager.prepareControlSessionRefresh())
+            val result = AtomicReference<Boolean?>()
+            val worker = thread { result.set(manager.refreshControlSession(request) { true }) }
+            try {
+                assertTrue(replacementShadow.connectEntered.await(2, TimeUnit.SECONDS))
+                assertNull(manager.captureAudioSocket())
+                assertTrue(manager.setHeadTrackingEnabled(false, released))
+                replacementShadow.unblockConnect()
+                worker.join(2_000)
+                assertFalse(worker.isAlive)
+                assertEquals(true, result.get())
+                assertEquals(if (keepOtherOwner) BuddyState.WAITING else BuddyState.INACTIVE,
+                    device.state.value.headTrackingState)
+                manager.setHeadTrackingEnabled(false, live)
+                assertEquals(BuddyState.INACTIVE, device.state.value.headTrackingState)
+                assertTrue(manager.setHeadTrackingEnabled(true, Any()))
+                manager.disconnect()
+                assertTrue(manager.connect())
+                assertEquals("A normal reconnection must not replay motion owners", BuddyState.INACTIVE,
+                    device.state.value.headTrackingState)
+            } finally {
+                replacementShadow.unblockConnect()
+                manager.disconnect(); original.close(); replacement.close(); reconnected.close(); worker.join(2_000)
+            }
+        }
+    }
+
+    @Test fun bothBudsInCaseRetireMotionUntilAnExplicitRequestAfterTheyLeave() {
+        val device = createDevice()
+        val socket = socket()
+        val manager = AACPManager(device) { socket }
+        fun ears(left: Int, right: Int) = manager.processPacket(
+            byteArrayOf(4, 0, 4, 0, 6, 0, left.toByte(), right.toByte()), socket)
+        try {
+            assertTrue(manager.connect())
+            assertEquals("A control connection alone cannot request motion", BuddyState.INACTIVE, device.state.value.headTrackingState)
+            assertTrue(manager.setHeadTrackingEnabled(true, Any()))
+            assertTrue(manager.setHeadTrackingEnabled(true, Any()))
+            ears(2, 0)
+            assertEquals("One bud in the case does not retire the other owner's stream", BuddyState.WAITING,
+                device.state.value.headTrackingState)
+            ears(2, 2)
+            assertEquals(BuddyState.INACTIVE, device.state.value.headTrackingState)
+            assertFalse(manager.setHeadTrackingEnabled(true, Any()))
+            ears(0, 0)
+            manager.setSensorsSuspended(true)
+            manager.setSensorsSuspended(false)
+            assertEquals(BuddyState.INACTIVE, device.state.value.headTrackingState)
+            assertTrue(manager.setHeadTrackingEnabled(true, Any()))
+            assertEquals(BuddyState.WAITING, device.state.value.headTrackingState)
+        } finally { manager.disconnect(); socket.close() }
     }
 
     @Test fun cancellingBlockedConnectClosesItsReplacementAndCannotPublishSuccess() {

@@ -77,6 +77,7 @@ import me.kavishdevar.librepods.core.devices.cachedControlStates
 import me.kavishdevar.librepods.core.devices.withControlReport
 import me.kavishdevar.librepods.core.devices.withControlRequest
 import me.kavishdevar.librepods.core.devices.mergeBatteryReports
+import me.kavishdevar.librepods.core.devices.bothBudsInCase
 import me.kavishdevar.librepods.core.devices.normalizedControl
 import me.kavishdevar.librepods.core.utils.HeadTracking
 import java.nio.ByteBuffer
@@ -167,6 +168,8 @@ class AACPManager(private val device: AppleDevice,
     }
 
     @Volatile private var rtBuddyManager: RTBuddyManager? = null
+    @Volatile private var motionOwners = MotionOwners()
+    private val legacyMotionOwner = Any()
 
     private fun createSensorSession(expected: BluetoothSocket) = RTBuddyManager(
         sendPacket = { sendPacket(it, expected) },
@@ -197,6 +200,7 @@ class AACPManager(private val device: AppleDevice,
         remoteAllowed = { device.metadata.value.model == AirPodsModel.AIRPODS_3 },
         motionIntervalUs = device.settings.value.takeIf { it.headTrackingIntervalConfigured }
             ?.headTrackingInterval?.inWholeMicroseconds?.takeIf { it in 20_000..1_000_000 && it % 1000 == 0L }?.toInt(),
+        sharedMotionOwners = motionOwners,
     )
 
     private suspend fun sendDelayedInitPackets(expected: BluetoothSocket, settings: me.kavishdevar.librepods.core.devices.AppleSettings): Boolean {
@@ -331,7 +335,6 @@ class AACPManager(private val device: AppleDevice,
         if (!connectLock.tryLock(10, java.util.concurrent.TimeUnit.SECONDS)) return false
         try {
             val sensorState = device.state.value
-            val motionWanted = sensorState.headTrackingState != BuddyState.INACTIVE
             val heartWanted = sensorState.hrmState != BuddyState.INACTIVE
             synchronized(this) {
                 if (request.cancelled || !stillCurrent() || !ownsAudioSocket(request.original) ||
@@ -359,7 +362,7 @@ class AACPManager(private val device: AppleDevice,
                 return false
             }
             // The captured manager only writes to its captured replacement socket.
-            if (motionWanted) sensors.setHeadTrackingEnabled(true)
+            sensors.reconcileHeadTracking()
             if (heartWanted) sensors.setHeartRateEnabled(true)
             val current = !request.cancelled && request.epoch == connectionEpoch.get() && stillCurrent() && captureAudioSocket() != null
             if (!current) cancelControlSessionRefresh(request)
@@ -397,6 +400,10 @@ class AACPManager(private val device: AppleDevice,
         val previous = synchronized(this) {
             if (requestEpoch != connectionEpoch.get() || !stillCurrent()) null else {
                 val retired = socket to rtBuddyManager
+                if (hearingRefresh == null) {
+                    motionOwners.clear()
+                    motionOwners = MotionOwners()
+                }
                 socket = connectingSocket
                 pendingConnect = pending
                 rtBuddyManager = null
@@ -654,6 +661,7 @@ class AACPManager(private val device: AppleDevice,
 
             MessageOpcode.EAR_DETECTION -> {
                 if (packet.size < 8) return
+                var sensorsInCase: RTBuddyManager? = null
                 publishForTransport(this, sourceSocket, ::captureAudioSocket) {
                     val earDetectionResponsePacket = EarDetectionResponsePacket.parse(packet, device.state.value.leftIsPrimary)
                     device.updateState {
@@ -662,7 +670,12 @@ class AACPManager(private val device: AppleDevice,
                             aacpPackets = it.aacpPackets + earDetectionResponsePacket
                         )
                     }
+                    if (earDetectionResponsePacket.componentStates.bothBudsInCase()) {
+                        motionOwners.clear()
+                        sensorsInCase = rtBuddyManager
+                    }
                 }
+                sensorsInCase?.reconcileHeadTracking()
             }
 
             MessageOpcode.CONVERSATION_AWARENESS -> {
@@ -998,7 +1011,22 @@ class AACPManager(private val device: AppleDevice,
         return sendPacket(packet, expected)
     }
 
-    fun setHeadTrackingEnabled(enabled: Boolean): Boolean = rtBuddyManager?.setHeadTrackingEnabled(enabled) ?: false
+    fun setHeadTrackingEnabled(enabled: Boolean, owner: Any = legacyMotionOwner): Boolean {
+        if (enabled) {
+            if (device.state.value.componentState.bothBudsInCase()) return false
+            val sensors = rtBuddyManager ?: return false
+            val accepted = sensors.setHeadTrackingEnabled(true, owner)
+            if (device.state.value.componentState.bothBudsInCase()) {
+                motionOwners.clear()
+                sensors.reconcileHeadTracking()
+                return false
+            }
+            return accepted
+        }
+        // Release remains authoritative while a control refresh has no sensor manager.
+        motionOwners.set(owner, false)
+        return rtBuddyManager?.reconcileHeadTracking() ?: true
+    }
     fun setHeadTrackingInterval(interval: Duration): Boolean = rtBuddyManager?.setMotionInterval(interval) ?: false
     fun setHeartRateEnabled(enabled: Boolean): Boolean = rtBuddyManager?.setHeartRateEnabled(enabled) ?: false
     fun setSensorsSuspended(suspended: Boolean) { rtBuddyManager?.setSuspended(suspended) }
@@ -1272,6 +1300,11 @@ class AACPManager(private val device: AppleDevice,
         val retired = retireForTransport(this, expected, { socket }) {
             val preserveNearbyBattery = pendingConnect?.takeIf { it.socket === expected }?.preserveNearbyBattery == true
             retiredSensors = rtBuddyManager
+            if (hearingRefresh == null || hearingRefresh.cancelled) {
+                motionOwners.clear()
+                motionOwners = MotionOwners()
+            }
+            HeadTracking.reset()
             socket = null
             pendingConnect = null
             rtBuddyManager = null

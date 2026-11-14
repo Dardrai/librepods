@@ -70,6 +70,7 @@ import me.kavishdevar.librepods.presentation.components.apple.NoiseControlSettin
 import me.kavishdevar.librepods.presentation.components.apple.PressAndHoldSettings
 import me.kavishdevar.librepods.presentation.components.primitives.StyledButton
 import me.kavishdevar.librepods.presentation.components.primitives.StyledListItem
+import me.kavishdevar.librepods.presentation.components.primitives.StyledListScope
 import me.kavishdevar.librepods.presentation.components.primitives.StyledListItemOrientation
 import me.kavishdevar.librepods.presentation.components.primitives.StyledScaffold
 import me.kavishdevar.librepods.presentation.components.primitives.StyledToggle
@@ -105,6 +106,7 @@ fun AppleSettingsRoute(
     val uiState by viewModel.uiState.collectAsState()
     val gameMode by (viewModel.gameModeController?.state ?:
         remember { MutableStateFlow(NativeGameModeController.State()) }).collectAsState()
+    val spatialSupported = supportsNativeSpatialAudio()
 
     AppleSettingsScreen(
         uiState = uiState,
@@ -139,6 +141,7 @@ fun AppleSettingsRoute(
         navigateToHeartRateScreen = navigateToHeartRateScreen,
         navigateToDebugScreen = navigateToDebugScreen,
         gameMode = gameMode,
+        spatialAudioContent = if (spatialSupported) ({ NativeSpatialAudioSetting(viewModel) }) else null,
     )
 }
 
@@ -180,6 +183,7 @@ fun AppleSettingsScreen(
     dongle: Boolean = false,
     canWriteControl: (ControlCommandIdentifier) -> Boolean = { true },
     navigateToDongleSettings: (() -> Unit)? = null,
+    spatialAudioContent: (@Composable StyledListScope.() -> Unit)? = null,
 ) {
     val state = uiState.state
     val settings = uiState.settings
@@ -413,6 +417,7 @@ fun AppleSettingsScreen(
                     onGameModeChanged = { enabled -> updateSettings { it.copy(nativeGameModeEnabled = enabled) } },
                     adaptiveVolumeEnabled = canWriteControl(ControlCommandIdentifier.ADAPTIVE_VOLUME_CONFIG),
                     conversationAwarenessEnabled = canWriteControl(ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG),
+                    spatialAudioContent = spatialAudioContent.takeUnless { dongle },
                 )
             }
 

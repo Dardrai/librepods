@@ -124,6 +124,10 @@ class AppleViewModel(
 
     val events = device.events
     val connectionState = device.connectionState
+    internal val spatialAudioAddress: String get() = device.macAddress.value
+    internal fun captureSpatialAudioOwner(): Any? = device.aacp.captureAudioSocket()
+        ?.takeIf { device.connectionState.value == ConnectionState.CONNECTED }
+    internal fun ownsSpatialAudio(owner: Any): Boolean = captureSpatialAudioOwner() === owner
     private val _refreshingSettings = MutableStateFlow(false)
     val refreshingSettings = _refreshingSettings.asStateFlow()
     private var hearingModeJob: Job? = null
@@ -472,6 +476,8 @@ class AppleViewModel(
 
     fun startHeadTracking() = device.startHeadTracking()
     fun stopHeadTracking() = device.stopHeadTracking()
+    fun startHeadTracking(owner: Any) = device.startHeadTracking(owner)
+    fun stopHeadTracking(owner: Any) = device.stopHeadTracking(owner)
 
     fun setHeadGesturesEnabled(enabled: Boolean) = device.setHeadGesturesEnabled(enabled)
 
@@ -501,6 +507,7 @@ class AppleViewModel(
     }
 
     fun detectHeadGestures(callback: (Boolean) -> Unit) = device.detectHeadGestures(callback)
+    fun detectHeadGestures(owner: Any, callback: (Boolean) -> Unit) = device.detectHeadGestures(owner, callback)
 
     fun setHeadGesturesVerticalOffset(offset: Int) = device.setHeadGesturesVerticalOffset(offset)
     fun setHeadGesturesHorizontalOffset(offset: Int) = device.setHeadGesturesHorizontalOffset(offset)

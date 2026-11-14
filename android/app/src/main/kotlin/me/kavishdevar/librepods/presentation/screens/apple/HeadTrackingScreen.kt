@@ -104,10 +104,22 @@ fun HeadTrackingScreen(
     val state = uiState.state
     val settings = uiState.settings
 
-    DisposableEffect(Unit) {
-        viewModel.startHeadTracking()
+    val motionOwner = remember(viewModel) { Any() }
+    val gestureOwner = remember(viewModel) { Any() }
+    var motionRequested by remember(viewModel) { mutableStateOf(true) }
+    val motionPlaying = motionRequested && state.headTrackingState == BuddyState.ACTIVE
+    val toggleMotion: () -> Unit = {
+        if (motionPlaying) {
+            viewModel.stopHeadTracking(motionOwner)
+            motionRequested = false
+        } else motionRequested = viewModel.startHeadTracking(motionOwner)
+    }
+
+    DisposableEffect(viewModel, motionOwner, gestureOwner) {
+        motionRequested = viewModel.startHeadTracking(motionOwner)
         onDispose {
-            viewModel.stopHeadTracking()
+            viewModel.stopHeadTracking(motionOwner)
+            viewModel.stopHeadTracking(gestureOwner)
         }
     }
 
@@ -127,28 +139,28 @@ fun HeadTrackingScreen(
             { scaffoldBackdrop ->
                 if (LocalDesignSystem.current == DesignSystem.Material) {
                     FilledTonalIconToggleButton(
-                        checked = state.headTrackingState == BuddyState.ACTIVE,
-                        onCheckedChange = { if (it) viewModel.startHeadTracking() else viewModel.stopHeadTracking() },
+                        checked = motionPlaying,
+                        onCheckedChange = { toggleMotion() },
                         modifier = Modifier
                             .minimumInteractiveComponentSize()
                             .size(IconButtonDefaults.mediumContainerSize(IconButtonDefaults.IconButtonWidthOption.Uniform)),
                         shape = IconButtonDefaults.mediumRoundShape,
-                        enabled = state.headTrackingState != BuddyState.WAITING
+                        enabled = !motionRequested || state.headTrackingState != BuddyState.WAITING
                     ) {
                         Icon(
-                            imageVector = if (state.headTrackingState == BuddyState.ACTIVE) MaterialIcons.Pause else Icons.Default.PlayArrow,
+                            imageVector = if (motionPlaying) MaterialIcons.Pause else Icons.Default.PlayArrow,
                             contentDescription = "Play/Pause",
                             modifier = Modifier.size(IconButtonDefaults.mediumIconSize),
                         )
                     }
                 } else {
                     StyledIconButton(
-                        onClick = if (state.headTrackingState != BuddyState.ACTIVE) viewModel::startHeadTracking else viewModel::stopHeadTracking,
+                        onClick = toggleMotion,
                         backdrop = scaffoldBackdrop,
-                        enabled = state.headTrackingState != BuddyState.WAITING
+                        enabled = !motionRequested || state.headTrackingState != BuddyState.WAITING
                     ) {
                         Icon(
-                            imageVector = if (state.headTrackingState == BuddyState.ACTIVE) LocalIcons.current.Pause else LocalIcons.current.Play,
+                            imageVector = if (motionPlaying) LocalIcons.current.Pause else LocalIcons.current.Play,
                             contentDescription = "Play/Pause",
                             modifier = Modifier.size(16.dp),
                             tint = MaterialTheme.colorScheme.onBackground
@@ -209,7 +221,7 @@ fun HeadTrackingScreen(
                 onClick = {
                     gestureText = gestureTextValue
                     coroutineScope.launch {
-                        viewModel.detectHeadGestures { gestureText = if (it) "\"Yes\" gesture detected." else "\"No\" gesture detected." }
+                        viewModel.detectHeadGestures(gestureOwner) { gestureText = if (it) "\"Yes\" gesture detected." else "\"No\" gesture detected." }
                     }
                 },
                 backdrop = backdrop,

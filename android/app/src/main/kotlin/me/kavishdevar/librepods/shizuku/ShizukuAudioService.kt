@@ -31,10 +31,12 @@ class ShizukuAudioService @JvmOverloads constructor(context: Context,
     private var callConnection: NativeCallConnection? = null
     private var mediaPause: Pair<IPlaybackRecoveryOwner, OwnedMediaPause>? = null
     private var volumeChecking = false
+    private var spatialMutating = false
     private val usbVolume = RootUsbAbsoluteVolume(originalContext)
     private val dongleHid by lazy { RootDongleHid(originalContext, expectedUid, ::enforceCaller) }
     private var microphoneProbe: Pair<IPlaybackRecoveryOwner, RootMicrophoneProbe>? = null
     private var communication: Pair<IPlaybackRecoveryOwner, RootCommunicationRoute>? = null
+    private var spatialAudio: SpatialAudioAccess? = null
     private val volumeSync by lazy {
         BluetoothVolumeSync(shellContext, audio = ShizukuVolumeSyncAudio(shellContext,
             binder = { checkNotNull(SystemServiceHelper.getSystemService(it)) },
@@ -65,7 +67,7 @@ class ShizukuAudioService @JvmOverloads constructor(context: Context,
             BuildConfig.APPLICATION_ID) == PackageManager.PERMISSION_GRANTED)
         val selected = A2dpRecoveryGuard(address).address
         synchronized(lock) {
-            check(!cleanupFailed.get() && !volumeChecking && playbackRecovery == null &&
+            check(!cleanupFailed.get() && !volumeChecking && !spatialMutating && playbackRecovery == null &&
                 playbackRelease == null && callConnection == null && probeIsQuiet())
             volumeChecking = true
         }
@@ -129,11 +131,48 @@ class ShizukuAudioService @JvmOverloads constructor(context: Context,
 
     override fun retireOwner(owner: IPlaybackRecoveryOwner) {
         enforceCaller()
+        spatialAudio?.retire(owner)
         releaseUsbAbsoluteVolume(owner)
         finishCommunication(owner, false)
         finishMicrophoneProbe(owner)
         finishOwnedMedia(owner, false)
         volumeSync.forget(owner.asBinder())
+    }
+
+    override fun inspectSpatialAudio(address: String, owner: IPlaybackRecoveryOwner): Bundle =
+        spatialAudioCall(false) { it.inspect(address, owner) }
+
+    override fun setFixedSpatialEnabled(address: String, owner: IPlaybackRecoveryOwner, enabled: Boolean): Bundle =
+        spatialAudioCall(true) { it.setFixedEnabled(address, owner, enabled) }
+
+    override fun restoreSpatialAudio(address: String, owner: IPlaybackRecoveryOwner): Bundle =
+        spatialAudioCall(true) { it.restore(address, owner) }
+
+    private fun spatialAudioCall(mutation: Boolean, action: (SpatialAudioAccess) -> Bundle): Bundle {
+        enforceCaller()
+        if (Process.myUid() != 0) return SpatialAudioAccess.failure("root_required")
+        if (originalContext.packageManager.checkPermission(Manifest.permission.BLUETOOTH_CONNECT,
+                BuildConfig.APPLICATION_ID) != PackageManager.PERMISSION_GRANTED)
+            return SpatialAudioAccess.failure("permission_denied")
+        val identity = Binder.clearCallingIdentity()
+        var reserved = false
+        return try {
+            val access = synchronized(lock) {
+                if (cleanupFailed.get()) return SpatialAudioAccess.failure("helper_unavailable")
+                if (mutation && (spatialMutating || volumeChecking || playbackRecovery != null || playbackRelease != null ||
+                        callConnection != null || !probeIsQuiet())) return SpatialAudioAccess.failure("busy")
+                val access = spatialAudio ?: SpatialAudioAccess(shellContext).also { spatialAudio = it }
+                if (mutation) { spatialMutating = true; reserved = true }
+                access
+            }
+            action(access)
+        } catch (_: ReflectiveOperationException) { SpatialAudioAccess.failure("method_unavailable") }
+        catch (_: SecurityException) { SpatialAudioAccess.failure("permission_denied") }
+        catch (_: Exception) { SpatialAudioAccess.failure("unavailable") }
+        finally {
+            if (reserved) synchronized(lock) { spatialMutating = false }
+            Binder.restoreCallingIdentity(identity)
+        }
     }
 
     override fun startUsbAbsoluteVolume(owner: IPlaybackRecoveryOwner, policy: IUsbAbsoluteVolumePolicy,
@@ -162,7 +201,7 @@ class ShizukuAudioService @JvmOverloads constructor(context: Context,
             check(originalContext.packageManager.checkPermission(permission, BuildConfig.APPLICATION_ID) ==
                 PackageManager.PERMISSION_GRANTED) { "LibrePods call access is unavailable" }
         val operation = synchronized(lock) {
-            check(!cleanupFailed.get() && !volumeChecking && playbackRecovery == null &&
+            check(!cleanupFailed.get() && !volumeChecking && !spatialMutating && playbackRecovery == null &&
                 playbackRelease == null && callConnection == null && probeIsQuiet()) { "Another audio operation is active" }
             NativeCallConnection(shellContext, address, owner).also { callConnection = it }
         }
@@ -177,7 +216,7 @@ class ShizukuAudioService @JvmOverloads constructor(context: Context,
         enforceCaller()
         val identity = Binder.clearCallingIdentity()
         return try { synchronized(lock) {
-            check(!cleanupFailed.get() && !volumeChecking && playbackRecovery == null &&
+            check(!cleanupFailed.get() && !volumeChecking && !spatialMutating && playbackRecovery == null &&
                 playbackRelease == null && callConnection == null && probeIsQuiet()) { "Another audio operation is active" }
             mediaPause?.second?.close(); mediaPause = null
             OwnedMediaPause.acquire(shellContext, address, owner)?.let { mediaPause = owner to it; true } ?: false
@@ -232,7 +271,7 @@ class ShizukuAudioService @JvmOverloads constructor(context: Context,
             check(!microphonePrivacyBlocked()) { "Microphone privacy is enabled" }
             val selected = A2dpRecoveryGuard(address).address
             operation = synchronized(lock) {
-                check(!cleanupFailed.get() && !volumeChecking && playbackRecovery == null && playbackRelease == null &&
+                check(!cleanupFailed.get() && !volumeChecking && !spatialMutating && playbackRecovery == null && playbackRelease == null &&
                     callConnection == null && mediaPause == null && microphoneProbe == null && communication == null) {
                     "Another audio operation is active"
                 }
@@ -334,7 +373,7 @@ class ShizukuAudioService @JvmOverloads constructor(context: Context,
                 BuildConfig.APPLICATION_ID) == PackageManager.PERMISSION_GRANTED)
             check(!microphonePrivacyBlocked()) { "Microphone privacy is enabled" }
             operation = synchronized(lock) {
-                check(!cleanupFailed.get() && !volumeChecking && playbackRecovery == null &&
+                check(!cleanupFailed.get() && !volumeChecking && !spatialMutating && playbackRecovery == null &&
                     playbackRelease == null && callConnection == null && microphoneProbe == null && communication == null) {
                     "Another audio operation is active"
                 }
@@ -400,7 +439,7 @@ class ShizukuAudioService @JvmOverloads constructor(context: Context,
         check(originalContext.packageManager.checkPermission("android.permission.BLUETOOTH_CONNECT", BuildConfig.APPLICATION_ID) ==
             PackageManager.PERMISSION_GRANTED) { "LibrePods Bluetooth permission was revoked" }
         val release = synchronized(lock) {
-            check(!cleanupFailed.get() && !volumeChecking && playbackRecovery == null && playbackRelease == null && callConnection == null && probeIsQuiet()) {
+            check(!cleanupFailed.get() && !volumeChecking && !spatialMutating && playbackRecovery == null && playbackRelease == null && callConnection == null && probeIsQuiet()) {
                 "Another audio operation is active"
             }
             NativePlaybackRelease(shellContext, address, owner).also { playbackRelease = it }
@@ -417,7 +456,7 @@ class ShizukuAudioService @JvmOverloads constructor(context: Context,
         check(originalContext.packageManager.checkPermission("android.permission.BLUETOOTH_CONNECT", BuildConfig.APPLICATION_ID) ==
             PackageManager.PERMISSION_GRANTED) { "LibrePods Bluetooth permission was revoked" }
         val recovery = synchronized(lock) {
-            check(!cleanupFailed.get() && !volumeChecking && playbackRecovery == null && playbackRelease == null && callConnection == null && probeIsQuiet()) { "Another audio operation is active" }
+            check(!cleanupFailed.get() && !volumeChecking && !spatialMutating && playbackRecovery == null && playbackRelease == null && callConnection == null && probeIsQuiet()) { "Another audio operation is active" }
             A2dpPlaybackRecovery(shellContext, address, owner, connectOnly).also { playbackRecovery = it }
         }
         val identity = Binder.clearCallingIdentity()

@@ -37,6 +37,7 @@ class HeadGestureCallTest {
     private val telecom = mock(TelecomManager::class.java)
     private val settings = MutableStateFlow(AppleSettings(headGesturesEnabled = false))
     private var gesture: ((Boolean) -> Unit)? = null
+    private val gestureOwners = mutableListOf<Any>()
     private val address = MacAddress("00:11:22:33:44:55")
     private val connections = MutableStateFlow(ConnectionState.CONNECTED)
     private val states = MutableStateFlow(AppleState(componentState = setOf(
@@ -47,8 +48,8 @@ class HeadGestureCallTest {
         `when`(device.settings).thenReturn(settings)
         `when`(device.connectionState).thenReturn(connections)
         `when`(device.state).thenReturn(states)
-        doAnswer { invocation -> gesture = invocation.getArgument(0); null }
-            .`when`(device).detectHeadGestures(anyGesture())
+        doAnswer { invocation -> gestureOwners += invocation.getArgument<Any>(0); gesture = invocation.getArgument(1); true }
+            .`when`(device).detectHeadGestures(anyOwner(), anyGesture())
         @Suppress("UNCHECKED_CAST")
         val devices = field("_devices").get(service) as MutableStateFlow<Map<MacAddress, Device<*, *, *>>>
         devices.value = mapOf(address to device)
@@ -59,16 +60,18 @@ class HeadGestureCallTest {
 
     @Test fun disabledGesturesNeverStartCallDetectionAndTurningThemOffRetiresItsCallback() {
         ringing()
-        verify(device, never()).detectHeadGestures(anyGesture())
+        verify(device, never()).detectHeadGestures(anyOwner(), anyGesture())
         settings.value = settings.value.copy(headGesturesEnabled = true)
         ringing()
-        verify(device).detectHeadGestures(anyGesture())
+        verify(device).detectHeadGestures(anyOwner(), anyGesture())
         val callback = checkNotNull(gesture)
         settings.value = settings.value.copy(headGesturesEnabled = false)
         callback(true)
         callback(false)
         verifyNoInteractions(telecom)
-        verify(device).stopHeadTracking()
+        val gestureOwner = gestureOwners.single()
+        verify(device).stopHeadTracking(same(gestureOwner) ?: gestureOwner)
+        verify(device, never()).stopHeadTracking()
     }
 
     @Suppress("DEPRECATION")
@@ -80,7 +83,7 @@ class HeadGestureCallTest {
         ringing()
         checkNotNull(gesture)(false)
         verify(telecom).endCall()
-        verify(device, times(2)).stopHeadTracking()
+        verify(device, times(2)).stopHeadTracking(anyOwner())
     }
 
     @Test fun endedOrAnsweredCallsRetireQueuedGestureCallbacks() {
@@ -93,7 +96,7 @@ class HeadGestureCallTest {
             callback(false)
         }
         verifyNoInteractions(telecom)
-        verify(device, times(2)).stopHeadTracking()
+        verify(device, times(2)).stopHeadTracking(anyOwner())
     }
 
     @Test fun disconnectedRemovedOrReplacedDevicesCannotUseQueuedGestures() {
@@ -117,7 +120,7 @@ class HeadGestureCallTest {
             callback(false)
         }
         verifyNoInteractions(telecom)
-        verify(device, times(3)).stopHeadTracking()
+        verify(device, times(3)).stopHeadTracking(anyOwner())
     }
 
     @Suppress("DEPRECATION")
@@ -141,7 +144,7 @@ class HeadGestureCallTest {
         states.value = states.value.copy(componentState = emptySet())
         (field("telephonyCallback").get(service) as TelephonyCallback.CallStateListener)
             .onCallStateChanged(TelephonyManager.CALL_STATE_IDLE)
-        verify(device).stopHeadTracking()
+        verify(device).stopHeadTracking(anyOwner())
         checkNotNull(gesture)(false)
         verifyNoInteractions(telecom)
     }
@@ -150,6 +153,7 @@ class HeadGestureCallTest {
         .onCallStateChanged(TelephonyManager.CALL_STATE_RINGING)
 
     private fun anyGesture(): (Boolean) -> Unit = any<(Boolean) -> Unit>() ?: {}
+    private fun anyOwner(): Any = any<Any>() ?: Any()
 
     private fun field(name: String) = LibrePodsService::class.java.getDeclaredField(name).apply { isAccessible = true }
 }

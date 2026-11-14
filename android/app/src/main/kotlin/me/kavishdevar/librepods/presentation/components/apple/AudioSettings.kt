@@ -24,6 +24,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.res.stringResource
 import me.kavishdevar.librepods.R
 import me.kavishdevar.librepods.presentation.components.primitives.StyledList
+import me.kavishdevar.librepods.presentation.components.primitives.StyledListScope
 import me.kavishdevar.librepods.presentation.components.primitives.styledListItem
 import me.kavishdevar.librepods.presentation.components.primitives.styledToggle
 import kotlin.io.encoding.ExperimentalEncodingApi
@@ -54,9 +55,11 @@ fun AudioSettings(
     adaptiveVolumeEnabled: Boolean = true,
     conversationAwarenessEnabled: Boolean = true,
     loudSoundReductionEnabled: Boolean = false,
+    spatialAudioContent: (@Composable StyledListScope.() -> Unit)? = null,
 ) {
-    if (adaptiveVolumeCapability || conversationAwarenessCapability || loudSoundReductionCapability || gameModeVisible) {
+    if (adaptiveVolumeCapability || conversationAwarenessCapability || loudSoundReductionCapability || gameModeVisible || spatialAudioContent != null) {
         StyledList(title = stringResource(R.string.audio)) {
+            spatialAudioContent?.invoke(this)
             if (gameModeVisible) {
                 styledToggle(
                     label = stringResource(R.string.native_game_mode),

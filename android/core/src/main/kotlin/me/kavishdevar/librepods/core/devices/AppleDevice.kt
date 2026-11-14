@@ -268,6 +268,14 @@ class AppleDevice(
     private val gestureDetector by lazy {
         GestureDetector()
     }
+    private val legacyHeadTrackingOwner = Any()
+    private val legacyHeadGestureOwner = Any()
+    private var headGestureOwner: Any? = null
+
+    private fun clearHeadGestureDetection() = synchronized(gestureDetector) {
+        headGestureOwner = null
+        gestureDetector.stopDetection()
+    }
 
     init {
         updateMetadata {
@@ -318,7 +326,7 @@ class AppleDevice(
     var onExplicitDisconnect: (() -> Unit)? = null
 
     fun disconnectControl() {
-        gestureDetector.stopDetection()
+        clearHeadGestureDetection()
         _connectionState.update {
             ConnectionState.DISCONNECTING
         }
@@ -343,7 +351,7 @@ class AppleDevice(
     }
 
     internal fun onAacpDisconnected() {
-        gestureDetector.stopDetection()
+        clearHeadGestureDetection()
         recordingHandler?.invoke(null)
         _connectionState.value = ConnectionState.DISCONNECTED
     }
@@ -1021,13 +1029,21 @@ class AppleDevice(
         aacp.sendRename(newName, expected)
 
     fun startHeadTracking() {
-        aacp.setHeadTrackingEnabled(true)
+        startHeadTracking(legacyHeadTrackingOwner)
     }
 
     fun stopHeadTracking() {
-        aacp.setHeadTrackingEnabled(false)
-        HeadTracking.reset()
-        gestureDetector.stopDetection()
+        stopHeadTracking(legacyHeadTrackingOwner)
+        stopHeadTracking(legacyHeadGestureOwner)
+    }
+
+    fun startHeadTracking(owner: Any): Boolean = aacp.setHeadTrackingEnabled(true, owner)
+
+    fun stopHeadTracking(owner: Any): Boolean {
+        synchronized(gestureDetector) {
+            if (headGestureOwner === owner) clearHeadGestureDetection()
+        }
+        return aacp.setHeadTrackingEnabled(false, owner)
     }
 
     /** Pause sensor transport while the HQ microphone owns it; preserve user sensor intent. */
@@ -1035,13 +1051,34 @@ class AppleDevice(
         aacp.setSensorsSuspended(suspended)
     }
 
-    // TODO: multiple callbacks
     fun detectHeadGestures(callback: (Boolean) -> Unit) {
-        if (state.value.headTrackingState != BuddyState.ACTIVE) startHeadTracking()
-        val started = gestureDetector.startDetection(HeadTracking.angularVelocity, callback)
+        detectHeadGestures(legacyHeadGestureOwner, callback)
+    }
+
+    // Gesture detection still accepts one callback; each requester owns only its own motion stream.
+    fun detectHeadGestures(owner: Any, callback: (Boolean) -> Unit): Boolean {
+        synchronized(gestureDetector) {
+            if (headGestureOwner != null) return false
+            headGestureOwner = owner
+        }
+        if (!startHeadTracking(owner)) {
+            stopHeadTracking(owner)
+            return false
+        }
+        val started = synchronized(gestureDetector) {
+            headGestureOwner === owner && gestureDetector.startDetection(HeadTracking.angularVelocity) { gesture ->
+                try {
+                    if (synchronized(gestureDetector) { headGestureOwner === owner }) callback(gesture)
+                } finally {
+                    stopHeadTracking(owner)
+                }
+            }
+        }
         if (!started) {
+            stopHeadTracking(owner)
             Log.w(TAG, "Failed to start gesture detection, probably because already running.")
         }
+        return started
     }
 
     fun setHeadGesturesEnabled(enabled: Boolean) {
