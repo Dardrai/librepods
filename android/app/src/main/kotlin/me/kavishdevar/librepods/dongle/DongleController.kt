@@ -106,6 +106,7 @@ internal data class DongleState(
 internal class DongleController(context: Context) : Closeable {
     private val context = context.applicationContext
     private val preferences = this.context.getSharedPreferences("dongle-control", Context.MODE_PRIVATE)
+    private val savedChoiceStore = DongleSavedChoiceStore(preferences)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val bridge by lazy { ShizukuAudioClient(this.context) }
     private val io = Mutex()
@@ -438,31 +439,19 @@ internal class DongleController(context: Context) : Closeable {
         check(before.canWriteSetting(id, value))
         val owner = checkNotNull(editorOwner())
         val baseline = before.settings[id]
-        val peer = choicePeer(before.status)
+        val peer = savedChoiceStore.peer(before.status)
         client.setting(id, value) {
-            check(writable(owner) && mutableState.value.canWriteSetting(id, value) && choicePeer(mutableState.value.status) == peer)
+            check(writable(owner) && mutableState.value.canWriteSetting(id, value) && savedChoiceStore.peer(mutableState.value.status) == peer)
         }
         publish(client) {
-            check(peer != null && choicePeer(mutableState.value.status) == peer)
-            val persist = id in dongleSavedChoiceIds && (id != 0x34 ||
-                before.metadata?.model == me.kavishdevar.librepods.core.devices.AirPodsModel.AIRPODS_PRO_3)
-            val stored = !persist || runCatching { preferences.edit().putLong("choice:$peer:$id", value).commit() }.getOrDefault(false)
+            check(peer != null && savedChoiceStore.peer(mutableState.value.status) == peer)
+            val persist = savedChoiceStore.persists(id, before.metadata?.model)
+            val stored = !persist || savedChoiceStore.save(peer, id, value)
             val saved = if (persist && stored) mutableState.value.savedChoices + (id to value) else mutableState.value.savedChoices
             pendingWrites.recordSent(id, value, baseline, stored)
             mutableState.update { it.copy(savedChoices = saved, requested = pendingWrites.requestedValues(),
                 error = if (!stored) "The setting was sent, but the choice could not be saved." else it.error) }
         }
-    }
-    private fun choicePeer(status: DongleProtocol.Status?): String? = status?.address
-        ?.takeIf { it.size == 6 && it.all { value -> value in 0..255 } && it.any { value -> value != 0 } && it.any { value -> value != 255 } }
-        ?.joinToString("") { it.toString(16).padStart(2, '0') }
-    private fun savedChoices(status: DongleProtocol.Status?): Map<Int, Long> {
-        val peer = choicePeer(status) ?: return emptyMap()
-        return dongleSavedChoiceIds.mapNotNull { id ->
-            val key = "choice:$peer:$id"
-            if (!preferences.contains(key)) null else runCatching { preferences.getLong(key, -1) }.getOrNull()
-                ?.takeIf { validLiveSetting(id, it) }?.let { id to it }
-        }.toMap()
     }
     private fun recordEditor(kind: RecordKind): LiveRecordEditor {
         fun source(): LiveRecordSource {
@@ -719,7 +708,7 @@ internal class DongleController(context: Context) : Closeable {
                 finderWanted = false; finderEpoch++
                 mutableState.update { it.copy(finderOpen = false, nearby = null) }
             }
-            mutableState.update { it.copy(status = status, usbVolumeRequested = volumeRequested(), savedChoices = savedChoices(status),
+            mutableState.update { it.copy(status = status, usbVolumeRequested = volumeRequested(), savedChoices = savedChoiceStore.load(status),
                 unconfirmed = pendingWrites.unconfirmed()) }
             if (status.microphoneActive) cancelEar()
             mutableState.update { if (it.error == CONTROL_BUSY) it.copy(error = null) else it }
