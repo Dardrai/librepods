@@ -176,4 +176,78 @@ class HeadTrackerUhidProtocolTest {
         active.checkFresh(expired + 60_000_000_000L)
         assertNull(active.input(expired + 60_000_000_000L))
     }
+
+    @Test fun reusableInputBufferKeepsTheProvenWireEncoding() {
+        val buffer = HeadTrackerUhidProtocol.event(HeadTrackerUhidProtocol.INPUT2)
+        for (value in listOf(-0.3f, 0.4f, 0f)) {
+            val pose = pose(start, value)
+            assertSame(buffer, HeadTrackerUhidProtocol.input(pose, buffer))
+            assertArrayEquals(HeadTrackerUhidProtocol.input(pose), buffer)
+        }
+        rejected { HeadTrackerUhidProtocol.input(pose(start), ByteArray(20)) }
+    }
+
+    @Test fun firstFreshReportIsImmediateAndNormalPollRoundingDoesNotAccumulate() {
+        val pacer = HeadTrackerReportPacer()
+        val period = 10_000_000L
+        pacer.reporting(true, period, start)
+        assertEquals(start, pacer.deadline)
+        repeat(100) { index ->
+            val due = start + index * period
+            assertEquals(due, pacer.deadline)
+            pacer.sent(due + 500_000) // A millisecond poll can return slightly after its deadline.
+        }
+        assertEquals(start + 100 * period, pacer.deadline)
+        val late = pacer.deadline + 35_000_000
+        pacer.sent(late)
+        assertEquals(late + period, pacer.deadline) // Skip missed periods; never replay a burst.
+    }
+
+    @Test fun hostRateChangesRespectTheLastSubmissionAndOffResetsFirstInput() {
+        val pacer = HeadTrackerReportPacer()
+        pacer.reporting(true, 10_000_000, start)
+        pacer.sent(start)
+        pacer.reporting(true, 20_000_000, start + 1)
+        assertEquals(start + 20_000_000, pacer.deadline)
+        pacer.reporting(true, 10_000_000, start + 2)
+        assertEquals(start + 10_000_000, pacer.deadline)
+        pacer.reporting(false, 10_000_000, start + 3)
+        assertEquals(Long.MAX_VALUE, pacer.deadline)
+        pacer.reporting(true, 10_000_000, start + 4)
+        assertEquals(start + 4, pacer.deadline)
+        val firstFresh = start + 3_000_000_000
+        pacer.sent(firstFresh)
+        assertEquals(firstFresh + 10_000_000, pacer.deadline)
+    }
+
+    @Test fun aggregateStatsSeparateAcceptedPosesHeldReportsAndHostAgeWithoutAnIdleGap() {
+        val stats = HeadTrackerSinkMetrics()
+        assertEquals(HeadTrackerSinkStats(), stats.snapshot())
+        stats.accepted(); stats.input(start, start)
+        stats.input(start, start + 10_000_000)
+        stats.accepted(); stats.input(start + 21_000_000, start + 22_000_000)
+        val first = stats.snapshot()
+        assertEquals(2L, first.acceptedPoses); assertEquals(3L, first.hidInputs); assertEquals(1L, first.heldRepeats)
+        assertEquals(2L, first.intervalCount); assertEquals(10_000_000L, first.intervalMinNanos)
+        assertEquals(11_000_000.0, first.intervalMeanNanos, 0.001); assertEquals(12_000_000L, first.intervalMaxNanos)
+        assertEquals(3L, first.sourceAgeCount); assertEquals(0L, first.sourceAgeMinNanos)
+        assertEquals(11_000_000.0 / 3, first.sourceAgeMeanNanos, 0.001)
+        assertEquals(10_000_000L, first.sourceAgeMaxNanos)
+        stats.idle(); stats.accepted(); stats.input(start + 10_000_000_000, start + 10_000_000_000)
+        assertEquals(2L, stats.snapshot().intervalCount)
+        assertEquals(3L, stats.snapshot().acceptedPoses); assertEquals(4L, stats.snapshot().sourceAgeCount)
+        assertEquals(3L, first.hidInputs) // Snapshots do not change under the observer.
+    }
+
+    @Test fun routeConfirmationIsExactBoundedAndCannotSurviveClockReversalOrClear() {
+        var clock = 10_000L
+        val route = HeadTrackerRouteCache(address) { clock }
+        assertFalse(route.current(address))
+        route.confirm()
+        assertTrue(route.current(address)); assertFalse(route.current("AA:BB:CC:DD:EE:FF"))
+        clock += 500; assertTrue(route.current(address))
+        ++clock; assertFalse(route.current(address))
+        route.confirm(); --clock; assertFalse(route.current(address))
+        route.confirm(); route.clear(); assertFalse(route.current(address))
+    }
 }

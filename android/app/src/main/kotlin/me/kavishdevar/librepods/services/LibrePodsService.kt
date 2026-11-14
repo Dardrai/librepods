@@ -180,6 +180,12 @@ class LibrePodsService: Service() {
     private lateinit var dongleControlsLazy: Lazy<me.kavishdevar.librepods.dongle.DongleController>
     internal val dongleControls by lazy { me.kavishdevar.librepods.dongle.DongleController(this) }.also { dongleControlsLazy = it }
     override fun dump(fd: FileDescriptor, writer: PrintWriter, args: Array<out String>?) {
+        if (args?.contains("--head-tracking") == true) {
+            headTrackingControllers.values.forEachIndexed { index, controller ->
+                writer.println("head_tracking device_index=$index ${headTrackingTimingJson(controller.timingSnapshot())}")
+            }
+            return
+        }
         if (args?.contains("--settings") == true) {
             val activeDevices = devices.value.values.filterIsInstance<AppleDevice>()
             writer.println("settings devices=${activeDevices.size}")

@@ -15,6 +15,11 @@ import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 
+/** Only a local manager-owned Binder can supply this witness; remote AIDL owners cannot. */
+internal sealed interface HeadTrackerRouteWitness {
+    fun selectedRouteCurrent(address: String): Boolean
+}
+
 /** Shared owner-bound provider. DEBUG choices roll back; normal confirmed choices are durable. */
 internal class RootHeadTrackerProbe(
     private val platform: SpatialAudioAccess.Platform,
@@ -127,16 +132,20 @@ internal class RootHeadTrackerProbe(
         @Volatile private var observed: SpatialAudioAccess.State? = null
         private var before: SpatialAudioAccess.DeviceState? = null
         private var attempted = false
+        private val route = HeadTrackerRouteCache(address, now)
         // App Binder callbacks never run on the UHID or preference-mutation worker.
-        private val sinkOwner = object : IPlaybackRecoveryOwner.Stub() {
+        private inner class SinkOwner : IPlaybackRecoveryOwner.Stub(), HeadTrackerRouteWitness {
             override fun isCurrent() = ownerFresh()
+            override fun selectedRouteCurrent(address: String) = ownerFresh() && route.current(address)
         }
+        private val sinkOwner = SinkOwner()
 
         private fun ownerFresh() = ownerCurrent && ownerCheckedAt != Long.MIN_VALUE &&
             now() - ownerCheckedAt in 0..500 && !stopping.get() && owner.asBinder().isBinderAlive
 
         fun stop(value: String) {
             if (stopping.compareAndSet(false, true)) reason = value
+            route.clear()
             ownerCurrent = false
             ownerPoller?.interrupt()
             sink?.close()
@@ -156,7 +165,7 @@ internal class RootHeadTrackerProbe(
             check(!stopping.get()) { "cancelled" }
         }
 
-        private fun readEligible(starting: Boolean): SpatialAudioAccess.State {
+        private fun readEligible(starting: Boolean): SpatialAudioAccess.State = try {
             requireLive(starting)
             val state = platform.read(address)
             observed = state
@@ -166,7 +175,11 @@ internal class RootHeadTrackerProbe(
             check(state.nativePair && state.routeSelected) { "route_changed" }
             check(state.supported && state.compatible == true && state.mutationApi &&
                 state.deviceEnabled == true && state.enabled && state.headTrackerEnabled != null) { "spatial_disabled" }
-            return state
+            route.confirm()
+            state
+        } catch (error: Exception) {
+            route.clear()
+            throw error
         }
 
         private fun run() {
@@ -194,8 +207,13 @@ internal class RootHeadTrackerProbe(
                     check(readEligible(true).device() == before) { "state_changed" }
                     sink = openSink(address, sinkOwner, poses)
                 }
+                var nextStartupRead = now() + 250
                 while (true) {
                     requireLive(true)
+                    if (now() >= nextStartupRead) {
+                        check(readEligible(true).device() == before) { "state_changed" }
+                        nextStartupRead = now() + 250
+                    }
                     val current = checkNotNull(sink)
                     check(!current.isClosed) { "sink_stopped" }
                     handshake = current.halHandshake
@@ -299,6 +317,20 @@ internal class RootHeadTrackerProbe(
                 putBoolean("hal_handshake", handshake)
                 putBoolean("reporting_enabled", sink?.reporting?.enabled == true && !stopping.get())
                 putLong("report_interval_nanos", sink?.reporting?.intervalNanos ?: 0)
+                sink?.stats?.let { stats -> putBundle("sink_stats", Bundle().apply {
+                    putInt("version", 1)
+                    putLong("accepted_poses", stats.acceptedPoses); putLong("hid_inputs", stats.hidInputs)
+                    putLong("held_repeats", stats.heldRepeats); putLong("hid_interval_count", stats.intervalCount)
+                    putLong("hid_interval_min_nanos", stats.intervalMinNanos)
+                    putDouble("hid_interval_mean_nanos", stats.intervalMeanNanos)
+                    putLong("hid_interval_max_nanos", stats.intervalMaxNanos)
+                    putLong("host_source_age_count", stats.sourceAgeCount)
+                    putLong("host_source_age_min_nanos", stats.sourceAgeMinNanos)
+                    putDouble("host_source_age_mean_nanos", stats.sourceAgeMeanNanos)
+                    putLong("host_source_age_max_nanos", stats.sourceAgeMaxNanos)
+                    putString("age_scope", "host_frame_timestamp_to_uhid_submission")
+                    putBoolean("excludes_acoustic_latency", true)
+                }) }
                 if (!normal) putLong("remaining_ms", (deadline - now()).coerceAtLeast(0))
                 observed?.headTrackerEnabled?.let { putBoolean("head_tracker_enabled", it) }
                 observed?.deviceEnabled?.let { putBoolean("device_enabled", it) }

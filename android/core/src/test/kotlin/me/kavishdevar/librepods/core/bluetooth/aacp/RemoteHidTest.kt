@@ -128,6 +128,10 @@ class RemoteHidTest {
             manager.setHeadTrackingEnabled(true)
             assertEquals(1, raw.size)
             assertArrayEquals(RemoteHid.feature(1, 6, 1, 40_000), raw.last())
+            val nativeRateOwner = Any()
+            assertTrue(manager.setHeadTrackingEnabled(true, nativeRateOwner, kotlin.time.Duration.parse("10ms")))
+            assertTrue(manager.setHeadTrackingEnabled(false, nativeRateOwner))
+            assertEquals(1, raw.size) // Native owner rates never change the RemoteHID policy.
             manager.feed(announcement)
             assertEquals(3, raw.size)
             // Shared synthetic input uses ID 7; move it to the announced ID 6.

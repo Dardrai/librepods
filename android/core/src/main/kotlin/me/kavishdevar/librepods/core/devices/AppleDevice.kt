@@ -1039,6 +1039,9 @@ class AppleDevice(
 
     fun startHeadTracking(owner: Any): Boolean = aacp.setHeadTrackingEnabled(true, owner)
 
+    /** Temporary sampling request owned by this client; never changes the saved interval. */
+    fun startHeadTracking(owner: Any, interval: Duration): Boolean = aacp.setHeadTrackingEnabled(true, owner, interval)
+
     fun stopHeadTracking(owner: Any): Boolean {
         synchronized(gestureDetector) {
             if (headGestureOwner === owner) clearHeadGestureDetection()

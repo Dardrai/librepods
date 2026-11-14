@@ -9,6 +9,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -26,6 +27,7 @@ import kotlinx.coroutines.withTimeout
 import me.kavishdevar.librepods.core.bluetooth.MacAddress
 import me.kavishdevar.librepods.core.bluetooth.aacp.AACPManager
 import me.kavishdevar.librepods.core.data.apple.MotionReport
+import me.kavishdevar.librepods.core.utils.MotionSample
 import me.kavishdevar.librepods.core.devices.AirPodsModel
 import me.kavishdevar.librepods.core.devices.AppleDevice
 import me.kavishdevar.librepods.core.devices.AppleMetadata
@@ -49,12 +51,23 @@ class NativeHeadTrackingControllerTest {
     private val identity = checkNotNull(SpatialPoseProfile.fromBasis(listOf(
         listOf(1.0, 0.0, 0.0), listOf(0.0, 1.0, 0.0), listOf(0.0, 0.0, 1.0))))
 
-    private inner class Target(calibrated: Boolean = true) : AutoCloseable {
+    private inner class Target(calibrated: Boolean = true, rejectFirstStart: Boolean = false) : AutoCloseable {
         val parent = CoroutineScope(SupervisorJob())
-        val device = mock(AppleDevice::class.java)
+        val started = CopyOnWriteArrayList<Any>()
+        val released = CopyOnWriteArrayList<Any>()
+        val device = mock(AppleDevice::class.java, withSettings().defaultAnswer { invocation ->
+            if (invocation.method.name.startsWith("startHeadTracking") && invocation.arguments.isNotEmpty()) {
+                started += invocation.getArgument<Any>(0)
+                !rejectFirstStart || started.size != 1
+            } else RETURNS_DEFAULTS.answer(invocation)
+        })
         val aacp = mock(AACPManager::class.java)
         val socket = mock(BluetoothSocket::class.java)
-        val bridge = mock(ShizukuAudioClient::class.java)
+        var disable: (() -> Boolean) -> Bundle = { Bundle().apply { putBoolean("applied", true) } }
+        val bridge = mock(ShizukuAudioClient::class.java, withSettings().defaultAnswer { invocation ->
+            if (invocation.method.name.substringBefore('$') == "disableHeadTracking")
+                disable(invocation.getArgument(1)) else RETURNS_DEFAULTS.answer(invocation)
+        })
         val profiles = mock(SpatialPoseProfileStore::class.java)
         val current = AtomicBoolean(true)
         val blocked = AtomicBoolean(false)
@@ -66,8 +79,6 @@ class NativeHeadTrackingControllerTest {
             putBoolean("known", true); putBoolean("head_tracker_enabled", false)
             putBoolean("device_enabled", true); putBoolean("enabled", true); putBoolean("route_selected", true)
         }
-        val started = CopyOnWriteArrayList<Any>()
-        val released = CopyOnWriteArrayList<Any>()
         val controller: NativeHeadTrackingController
         init {
             `when`(device.macAddress).thenReturn(MacAddress(MAC))
@@ -79,11 +90,9 @@ class NativeHeadTrackingControllerTest {
             `when`(aacp.ownsAudioSocket(socket)).thenReturn(true)
             `when`(bridge.hasRootPrivileges).thenReturn(true)
             `when`(profiles.load(any<SpatialPoseProfileKey>() ?: key())).thenReturn(if (calibrated) identity else null)
-            doAnswer { started += it.getArgument<Any>(0); true }.`when`(device).startHeadTracking(any<Any>() ?: Any())
             doAnswer { released += it.getArgument<Any>(0); true }.`when`(device).stopHeadTracking(any<Any>() ?: Any())
             runBlocking {
                 `when`(bridge.inspectSpatialAudio(eq(MAC) ?: MAC, anyCurrent())).thenReturn(snapshot)
-                `when`(bridge.disableHeadTracking(eq(MAC) ?: MAC, anyCurrent())).thenReturn(Bundle().apply { putBoolean("applied", true) })
             }
             controller = NativeHeadTrackingController(device, parent, blocked::get, current::get,
                 bridge, profiles, MutableStateFlow(null), Dispatchers.Default)
@@ -152,11 +161,11 @@ class NativeHeadTrackingControllerTest {
             val entered = CountDownLatch(1); val release = CountDownLatch(1)
             val owner = AtomicReference<() -> Boolean>()
             val returned = AtomicBoolean()
-            doAnswer {
-                owner.set(it.getArgument(1)); entered.countDown()
+            f.disable = { current ->
+                owner.set(current); entered.countDown()
                 release.await(2, TimeUnit.SECONDS); returned.set(true)
                 Bundle().apply { putBoolean("applied", true) }
-            }.`when`(f.bridge).disableHeadTracking(eq(MAC) ?: MAC, anyCurrent())
+            }
             try {
                 f.controller.setEnabled(false)
                 assertTrue(entered.await(2, TimeUnit.SECONDS))
@@ -188,17 +197,25 @@ class NativeHeadTrackingControllerTest {
     @Test fun reportingSourcePrimesFreshRatesAndReleasesOnlyItsOwnMotionOwner() = runBlocking {
         Target().use { f ->
             val poses = mutableListOf<SpatialPose>()
-            val source = flow<MotionReport?> {
-                emit(report(1)) // Cached StateFlow value is not a new source sample.
-                emit(report(2)); emit(report(3)); emit(report(3)); emit(report(4))
+            val arrivals = mutableListOf<Long>()
+            var clock = HOST_START
+            val timing = HeadTrackingTiming()
+            val source = flow<MotionSample?> {
+                emit(MotionSample(report(1), HOST_START - 1)) // Cached before this reporting epoch.
+                for (tick in listOf(2, 3, 3, 4)) {
+                    clock += 20_000_000; emit(MotionSample(report(tick), clock))
+                }
                 awaitCancellation()
             }
-            val job = async { streamNativeHeadTracking(f.device, source, identity, 7, { true }, poses::add) }
+            val job = async { streamNativeHeadTracking(f.device, source, identity, 7, { true }, timing,
+                now = { clock }) { pose, arrival -> poses += pose; arrivals += arrival } }
             try {
                 waitUntil { poses.size == 2 }
                 assertEquals(listOf(7, 7), poses.map { it.discontinuity })
                 assertEquals(listOf(60_000_000L, 80_000_000L), poses.map { it.timestampNs })
                 assertTrue(poses.all { it.angularVelocity.all { n -> n == 0f } })
+                assertEquals(listOf(HOST_START + 40_000_000, HOST_START + 80_000_000), arrivals)
+                assertEquals(5_000, timing.snapshot().getLong("requested_interval_us"))
             } finally { job.cancelAndJoin() }
             assertEquals(1, f.started.size); assertEquals(f.started.toList(), f.released.toList())
             verify(f.device, never()).stopHeadTracking()
@@ -208,15 +225,123 @@ class NativeHeadTrackingControllerTest {
     @Test fun sourceOwnerLossAndBadReferenceStopWithoutEmittingAnotherPose() = runBlocking {
         for (loseOwner in listOf(false, true)) Target().use { f ->
             val current = AtomicBoolean(true); val poses = mutableListOf<SpatialPose>()
-            val source = flow<MotionReport?> {
-                emit(null); emit(report(1)); emit(report(2))
+            var clock = HOST_START
+            val source = flow<MotionSample?> {
+                emit(null)
+                for (tick in listOf(1, 2)) { clock += 20_000_000; emit(MotionSample(report(tick), clock)) }
                 if (loseOwner) current.set(false)
-                emit(report(if (loseOwner) 3 else 1))
+                clock += 20_000_000; emit(MotionSample(report(if (loseOwner) 3 else 1), clock))
             }
-            val failure = runCatching { streamNativeHeadTracking(f.device, source, identity, 0, current::get, poses::add) }.exceptionOrNull()
+            val failure = runCatching { streamNativeHeadTracking(f.device, source, identity, 0, current::get,
+                now = { clock }) { pose, _ -> poses += pose } }.exceptionOrNull()
             assertNotNull(failure); assertEquals(1, poses.size)
             assertEquals(if (loseOwner) "owner_changed" else "sensor_time_changed", failure?.message)
             assertEquals(1, f.started.size); assertEquals(f.started.toList(), f.released.toList())
+        }
+    }
+
+    @Test fun staleSamplesAreNotRestampedAndTheFirstFreshSamplePrimesWithoutAnExtraDrop() = runBlocking {
+        Target().use { f ->
+            var clock = HOST_START
+            val timing = HeadTrackingTiming(); val poses = mutableListOf<Pair<SpatialPose, Long>>()
+            val source = flow<MotionSample?> {
+                clock += 300_000_000
+                emit(MotionSample(report(1), HOST_START + 1))
+                clock += 20_000_000; emit(MotionSample(report(2), clock - 30_000_000))
+                clock += 20_000_000; emit(MotionSample(report(3), clock - 25_000_000))
+                awaitCancellation()
+            }
+            val job = async { streamNativeHeadTracking(f.device, source, identity, 0, { true }, timing,
+                now = { clock }) { pose, arrival -> poses += pose to arrival } }
+            try {
+                waitUntil { poses.size == 1 }
+                assertEquals(HOST_START + 315_000_000, poses.single().second)
+                val stats = timing.snapshot()
+                assertEquals(1, stats.getLong("stale_samples_dropped"))
+                assertEquals(2, stats.getLong("source_samples"))
+                assertEquals(27_500_000.0, stats.getDouble("app_collection_age_mean_nanos"), 0.0)
+            } finally { job.cancelAndJoin() }
+        }
+    }
+
+    @Test fun refusedFastRateFallsBackToTheWorkingRateUsingTheSameOwner() = runBlocking {
+        Target(rejectFirstStart = true).use { f ->
+            var clock = HOST_START
+            val timing = HeadTrackingTiming(); val poses = mutableListOf<SpatialPose>()
+            val source = flow<MotionSample?> {
+                for (tick in 1..2) { clock += 20_000_000; emit(MotionSample(report(tick), clock)) }
+                awaitCancellation()
+            }
+            val job = async { streamNativeHeadTracking(f.device, source, identity, 0, { true }, timing,
+                now = { clock }) { pose, _ -> poses += pose } }
+            try {
+                waitUntil { poses.size == 1 }
+                assertEquals(20_000, timing.snapshot().getLong("requested_interval_us"))
+                assertTrue(timing.snapshot().getBoolean("fallback_rate"))
+            } finally { job.cancelAndJoin() }
+            assertEquals(2, f.started.size); assertSame(f.started[0], f.started[1])
+            assertEquals(listOf(f.started[0]), f.released.toList())
+        }
+    }
+
+    @Test fun anAcceptedFastRequestWithNoValidAttitudeFallsBackWithoutRestartingTheSource() = runBlocking {
+        Target().use { f ->
+            val timing = HeadTrackingTiming()
+            val source = flow<MotionSample?> { emit(null); awaitCancellation() }
+            val job = async { streamNativeHeadTracking(f.device, source, identity, 0, { true }, timing,
+                now = { HOST_START }) { _, _ -> fail("No measurements exist") } }
+            try {
+                waitUntil { timing.snapshot().getBoolean("fallback_rate") }
+                assertEquals(20_000, timing.snapshot().getLong("requested_interval_us"))
+                assertEquals(2, f.started.size); assertSame(f.started[0], f.started[1])
+                assertTrue(f.released.isEmpty())
+            } finally { job.cancelAndJoin() }
+            assertEquals(listOf(f.started[0]), f.released.toList())
+        }
+    }
+
+    @Test fun oneFreshAttitudeThenAStallFallsBackBeforeTheRootFreshnessWindow() = runBlocking {
+        Target().use { f ->
+            val clock = AtomicLong(HOST_START)
+            val timing = HeadTrackingTiming(); val fallbackAt = AtomicLong()
+            val firstArrival = HOST_START + 20_000_000
+            val source = flow<MotionSample?> {
+                clock.set(firstArrival); emit(MotionSample(report(1), firstArrival))
+                clock.set(firstArrival + 180_000_000)
+                awaitCancellation()
+            }
+            val job = async { streamNativeHeadTracking(f.device, source, identity, 0, { true }, timing,
+                now = clock::get, onFallback = { fallbackAt.set(clock.get()) }) { _, _ ->
+                fail("One attitude only primes the converter; fallback cannot fabricate a pose")
+            } }
+            try {
+                waitUntil { timing.snapshot().getBoolean("fallback_rate") }
+                assertTrue(fallbackAt.get() - firstArrival in 150_000_000L until 250_000_000L)
+                assertEquals(20_000L, timing.snapshot().getLong("requested_interval_us"))
+                assertEquals(2, f.started.size); assertSame(f.started[0], f.started[1])
+                assertTrue(f.released.isEmpty())
+            } finally { job.cancelAndJoin() }
+            assertEquals(listOf(f.started[0]), f.released.toList())
+        }
+    }
+
+    @Test fun aSocketAlreadyMarkedForFallbackStartsAtTheWorkingRateWithoutTryingFastAgain() = runBlocking {
+        Target().use { f ->
+            var clock = HOST_START
+            val timing = HeadTrackingTiming(); val poses = mutableListOf<SpatialPose>()
+            val source = flow<MotionSample?> {
+                for (tick in 1..2) { clock += 20_000_000; emit(MotionSample(report(tick), clock)) }
+                awaitCancellation()
+            }
+            val job = async { streamNativeHeadTracking(f.device, source, identity, 0, { true }, timing,
+                now = { clock }, tryFast = false) { pose, _ -> poses += pose } }
+            try {
+                waitUntil { poses.size == 1 }
+                assertEquals(1, f.started.size)
+                assertEquals(20_000L, timing.snapshot().getLong("requested_interval_us"))
+                assertTrue(timing.snapshot().getBoolean("fallback_rate"))
+            } finally { job.cancelAndJoin() }
+            assertEquals(f.started.toList(), f.released.toList())
         }
     }
 
@@ -228,6 +353,7 @@ class NativeHeadTrackingControllerTest {
         listOf(0, 0, 0), listOf(0, 0, 0), listOf(0, 0, -1000), tick * 4L)
     companion object {
         private const val MAC = "00:AA:22:33:44:55"
+        private const val HOST_START = 1_000_000_000L
         private fun anyCurrent(): () -> Boolean = any<() -> Boolean>() ?: { true }
     }
 }

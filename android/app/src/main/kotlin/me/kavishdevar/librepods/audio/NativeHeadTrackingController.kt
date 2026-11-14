@@ -27,22 +27,23 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.collectLatest
-import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import me.kavishdevar.librepods.BuildConfig
-import me.kavishdevar.librepods.core.data.apple.MotionReport
 import me.kavishdevar.librepods.core.devices.AirPodsModel
 import me.kavishdevar.librepods.core.devices.AppleDevice
 import me.kavishdevar.librepods.core.devices.ComponentStatus
 import me.kavishdevar.librepods.core.devices.ConnectionState
 import me.kavishdevar.librepods.core.devices.DeviceComponent
 import me.kavishdevar.librepods.core.utils.HeadTracking
+import me.kavishdevar.librepods.core.utils.MotionSample
 import me.kavishdevar.librepods.shizuku.HeadTrackerUhidProtocol
 import me.kavishdevar.librepods.shizuku.ShizukuAudioClient
+import kotlin.time.Duration.Companion.milliseconds
 
 data class NativeHeadTrackingState(val enabled: Boolean? = null, val calibrated: Boolean = false,
     val available: Boolean = false, val active: Boolean = false, val busy: Boolean = false,
@@ -56,13 +57,13 @@ class NativeHeadTrackingController internal constructor(
     private val deviceCurrent: () -> Boolean,
     private val access: ShizukuAudioClient,
     private val profiles: SpatialPoseProfileStore,
-    private val motion: Flow<MotionReport?>,
+    private val motion: Flow<MotionSample?>,
     dispatcher: CoroutineDispatcher,
 ) : AutoCloseable {
     constructor(device: AppleDevice, parentScope: CoroutineScope, hostBlocked: () -> Boolean,
         deviceCurrent: () -> Boolean) : this(device, parentScope, hostBlocked, deviceCurrent,
         ShizukuAudioClient(device.context, requireRoot = true), SpatialPoseProfileStore(device.context),
-        HeadTracking.motion, Dispatchers.Default)
+        HeadTracking.motionSample, Dispatchers.Default)
 
     private data class Choice(val epoch: Long, val enabled: Boolean, val started: Long)
     private val mutableState = MutableStateFlow(NativeHeadTrackingState())
@@ -86,6 +87,18 @@ class NativeHeadTrackingController internal constructor(
     private val discontinuity = AtomicInteger()
     private val forceInspect = AtomicBoolean(true)
     private val retryAfter = AtomicLong()
+    @Volatile private var fallbackSocket: BluetoothSocket? = null
+    @Volatile private var timing = HeadTrackingTiming()
+    @Volatile private var activeLease: ShizukuAudioClient.HeadTrackerLease? = null
+    @Volatile private var sinkTiming: Bundle? = null
+    @Volatile private var sinkTimingAt = 0L
+
+    internal fun timingSnapshot(): Bundle = timing.snapshot().apply {
+        putString("reason", state.value.reason)
+        putBoolean("enabled", state.value.enabled == true); putBoolean("active", state.value.active)
+        sinkTiming?.let { putBundle("sink", Bundle(it)) }
+        putLong("sink_snapshot_age_ms", if (sinkTimingAt == 0L) -1 else SystemClock.elapsedRealtime() - sinkTimingAt)
+    }
     // Bluetooth source cleanup can block in a socket write; it must not delay the user's native Off.
     private val offWriter = scope.launch {
         for (choice in offRequests) {
@@ -183,9 +196,7 @@ class NativeHeadTrackingController internal constructor(
                     val profile = key?.let(profiles::load)
                     val socket = device.aacp.captureAudioSocket()
                     val eligible = BuildConfig.DEBUG && profile != null && socket != null &&
-                        sourceCurrent(socket, checkNotNull(key)) &&
-                        (!device.settings.value.headTrackingIntervalConfigured ||
-                            device.settings.value.headTrackingInterval.inWholeMilliseconds <= 40)
+                        sourceCurrent(socket, checkNotNull(key))
                     mutableState.update { it.copy(calibrated = profile != null) }
                     if (session != null && (!eligible || sessionSocket !== socket || sessionKey != key ||
                             sessionLive?.get() != true || session?.isActive != true)) stopSession()
@@ -209,6 +220,11 @@ class NativeHeadTrackingController internal constructor(
                             val now = SystemClock.elapsedRealtime()
                             if (forceInspect.getAndSet(false) || inspectedAt == Long.MIN_VALUE || now - inspectedAt >= 1_000) {
                                 val snapshot = access.inspectSpatialAudio(device.macAddress.value, ::current)
+                                activeLease?.let { lease ->
+                                    lease.state().getBundle("sink_stats")?.let { stats ->
+                                        if (activeLease === lease) { sinkTiming = stats; sinkTimingAt = SystemClock.elapsedRealtime() }
+                                    }
+                                }
                                 if (choiceEpoch.get() != epoch) { forceInspect.set(true); delay(100); continue }
                                 inspectedAt = now
                                 spatialEligible = false
@@ -267,6 +283,7 @@ class NativeHeadTrackingController internal constructor(
         var lease: ShizukuAudioClient.HeadTrackerLease? = null
         val reporting = MutableStateFlow(false)
         val stopped = kotlinx.coroutines.CompletableDeferred<String>()
+        val sessionTiming = HeadTrackingTiming().also { timing = it; sinkTiming = null; sinkTimingAt = 0 }
         fun owns() = live.get() && choiceEpoch.get() == epoch &&
             (choice != null || pending.get() == null) && sourceCurrent(socket, key)
         try {
@@ -277,6 +294,7 @@ class NativeHeadTrackingController internal constructor(
             }
             lease = access.openHeadTracking(device.macAddress.value, descriptors[0], choice != null, ::owns,
                 { enabled, _ -> reporting.value = enabled }, { stopped.complete(it) })
+            activeLease = lease
             withChoice(epoch) {
                 nativeOn = true
                 if (choice == null || pending.compareAndSet(choice, null))
@@ -288,12 +306,14 @@ class NativeHeadTrackingController internal constructor(
                         withChoice(epoch) { mutableState.update { it.copy(active = false) } }
                         if (enabled) {
                             streamNativeHeadTracking(device, motion, profile,
-                                discontinuity.getAndIncrement() and 255, ::owns) { pose ->
+                                discontinuity.getAndIncrement() and 255, ::owns, sessionTiming,
+                                tryFast = fallbackSocket !== socket, onFallback = { fallbackSocket = socket }) { pose, arrivalNs ->
                                 val frame = HeadTrackerUhidProtocol.little(ByteArray(HeadTrackerUhidProtocol.FRAME_BYTES))
                                     .putInt(HeadTrackerUhidProtocol.FRAME_MAGIC).putInt(pose.discontinuity)
-                                    .putLong(SystemClock.elapsedRealtimeNanos())
+                                    .putLong(arrivalNs)
                                 (pose.rotationVector + pose.angularVelocity).forEach { frame.putFloat(it) }
                                 check(Os.write(output, frame.array(), 0, frame.capacity()) == frame.capacity()) { "pose_pipe_stalled" }
+                                sessionTiming.submitted()
                                 withChoice(epoch) { mutableState.update { it.copy(active = true) } }
                             }
                         }
@@ -325,7 +345,10 @@ class NativeHeadTrackingController internal constructor(
             live.set(false)
             forceInspect.set(true)
             withContext(NonCancellable + Dispatchers.IO) {
-                runCatching { lease?.finish() }
+                runCatching { lease?.finish()?.getBundle("sink_stats") }.getOrNull()?.let {
+                    if (activeLease === lease) { sinkTiming = it; sinkTimingAt = SystemClock.elapsedRealtime() }
+                }
+                if (activeLease === lease) activeLease = null
                 pipe?.forEach { runCatching { it.close() } }
             }
             withChoice(epoch) { mutableState.update { it.copy(active = false) } }
@@ -347,20 +370,63 @@ private fun Bundle.flag(name: String) = get(name) as? Boolean
 private class NativeHeadTrackingPoseFault(reason: String) : IllegalStateException(reason)
 
 /** Each reporting interval owns its source and a new clock/rate history, never another reader's. */
-internal suspend fun streamNativeHeadTracking(device: AppleDevice, motion: Flow<MotionReport?>,
-    profile: SpatialPoseProfile, discontinuity: Int, current: () -> Boolean, submit: (SpatialPose) -> Unit) {
+internal suspend fun streamNativeHeadTracking(device: AppleDevice, motion: Flow<MotionSample?>,
+    profile: SpatialPoseProfile, discontinuity: Int, current: () -> Boolean,
+    timing: HeadTrackingTiming = HeadTrackingTiming(), now: () -> Long = { SystemClock.elapsedRealtimeNanos() },
+    tryFast: Boolean = true, onFallback: () -> Unit = {},
+    submit: (SpatialPose, Long) -> Unit) {
     val owner = Any()
     try {
-        check(current() && device.startHeadTracking(owner)) { "motion_unavailable" }
+        check(current()) { "owner_changed" }
+        val startedAt = now()
+        val fast = tryFast && device.startHeadTracking(owner, 5.milliseconds)
+        if (!fast) {
+            onFallback()
+            check(current() && device.startHeadTracking(owner, 20.milliseconds)) { "motion_unavailable" }
+        }
+        timing.begin(); timing.requested(if (fast) 5_000 else 20_000, fallback = !fast)
         val converter = SpatialPoseConverter(profile, discontinuity)
         var previousCounter: Long? = null
-        motion.drop(1).filterNotNull().collect { report ->
-            check(current()) { "owner_changed" }
-            if (report.counter != null && report.counter == previousCounter) return@collect
-            previousCounter = report.counter
-            converter.accept(report)?.let(submit)
-            if (converter.invalidated) throw NativeHeadTrackingPoseFault(converter.invalidReason ?: "motion_changed")
+        val firstAttitude = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val lastAttitudeAt = AtomicLong()
+        kotlinx.coroutines.coroutineScope {
+            val fallback = if (fast) launch(Dispatchers.IO) {
+                val received = withTimeoutOrNull(1_500) { firstAttitude.await(); true } == true
+                if (received) {
+                    while (current()) {
+                        delay(25)
+                        if (now() - lastAttitudeAt.get() >= 150_000_000L) break
+                    }
+                }
+                if (current()) {
+                    // Keep this socket at its working rate even if root freshness closes during this write.
+                    onFallback()
+                    check(device.startHeadTracking(owner, 20.milliseconds)) { "motion_unavailable" }
+                    timing.requested(20_000, fallback = true)
+                }
+            } else null
+            try {
+                motion.filterNotNull().collect { sample ->
+                    check(current()) { "owner_changed" }
+                    val collectedAt = now()
+                    if (sample.arrivalNs > collectedAt) throw NativeHeadTrackingPoseFault("host_clock_changed")
+                    if (sample.arrivalNs < startedAt) return@collect
+                    if (collectedAt - sample.arrivalNs > HeadTrackerUhidProtocol.FRESH_NANOS) {
+                        timing.stale(); return@collect
+                    }
+                    val report = sample.report
+                    if (report.counter != null && report.counter == previousCounter) return@collect
+                    previousCounter = report.counter
+                    timing.sample(sample, collectedAt)
+                    converter.accept(report)?.let { submit(it, sample.arrivalNs) }
+                    if (converter.invalidated) throw NativeHeadTrackingPoseFault(converter.invalidReason ?: "motion_changed")
+                    if (report.attitudeQ15.any { it != 0 }) {
+                        lastAttitudeAt.set(sample.arrivalNs)
+                        firstAttitude.complete(Unit)
+                    }
+                }
+                error("motion_ended")
+            } finally { fallback?.cancelAndJoin() }
         }
-        error("motion_ended")
     } finally { device.stopHeadTracking(owner) }
 }

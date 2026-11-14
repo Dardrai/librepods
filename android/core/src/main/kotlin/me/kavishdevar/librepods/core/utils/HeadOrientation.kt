@@ -24,6 +24,11 @@ import me.kavishdevar.librepods.core.data.apple.MotionReport
 
 data class Acceleration(val vertical: Float = 0f, val horizontal: Float = 0f)
 
+/** Parsed-source arrival uses Android elapsedRealtimeNanos, independently of the sensor clock. */
+data class MotionSample(val report: MotionReport, val arrivalNs: Long) {
+    init { require(arrivalNs > 0) }
+}
+
 object HeadTracking {
     private val _acceleration = MutableStateFlow(Acceleration())
     val acceleration = _acceleration.asStateFlow()
@@ -31,9 +36,13 @@ object HeadTracking {
     val angularVelocity = acceleration
     private val _motion = MutableStateFlow<MotionReport?>(null)
     val motion = _motion.asStateFlow()
+    private val _motionSample = MutableStateFlow<MotionSample?>(null)
+    val motionSample = _motionSample.asStateFlow()
 
-    fun addMotion(report: MotionReport?, vert: Float, horiz: Float) {
+    fun addMotion(report: MotionReport?, vert: Float, horiz: Float, arrivalNs: Long = 0) {
         _motion.value = report
+        // Legacy publishers have no source timestamp and cannot claim a fresh timed sample.
+        _motionSample.value = report?.takeIf { arrivalNs > 0 }?.let { MotionSample(it, arrivalNs) }
         addAccel(vert, horiz)
     }
 
@@ -42,6 +51,7 @@ object HeadTracking {
     }
 
     fun reset() {
+        _motionSample.value = null
         _acceleration.value = Acceleration()
         _motion.value = null
     }

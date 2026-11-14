@@ -23,7 +23,12 @@ internal interface HeadTrackerSinkSession : Closeable {
     val halHandshake: Boolean
     val isClosed: Boolean
     val stopReason: String?
+    val stats: HeadTrackerSinkStats get() = HeadTrackerSinkStats()
 }
+
+internal fun selectedHeadTrackerRouteCurrent(address: String, owner: IPlaybackRecoveryOwner,
+    nativeRoute: (String) -> Boolean): Boolean =
+    if (owner is HeadTrackerRouteWitness) owner.selectedRouteCurrent(address) else nativeRoute(address)
 
 /** Root-only sink. The caller transfers a readable pose pipe; this sink enables no audio/settings. */
 internal class RootHeadTrackerSink(
@@ -65,7 +70,7 @@ internal class RootHeadTrackerSink(
     }
 
     private fun requireCurrent(address: String, owner: IPlaybackRecoveryOwner) {
-        check(owner.asBinder().isBinderAlive && owner.isCurrent && selectedRoute(address) &&
+        check(owner.asBinder().isBinderAlive && owner.isCurrent && selectedHeadTrackerRouteCurrent(address, owner, selectedRoute) &&
             owner.asBinder().isBinderAlive && owner.isCurrent) { "head_tracker_owner_or_route_changed" }
     }
 
@@ -81,6 +86,8 @@ internal class RootHeadTrackerSink(
             private set
         @Volatile override var stopReason: String? = null
             private set
+        private val metrics = HeadTrackerSinkMetrics()
+        override val stats get() = metrics.snapshot()
 
         private fun stop(reason: String) { if (stopReason == null) stopReason = reason; stopped.set(true) }
         override fun close() = stop("closed")
@@ -108,11 +115,12 @@ internal class RootHeadTrackerSink(
                 check(OsConstants.S_ISCHR(Os.fstat(descriptor).st_mode)) { "uhid_not_character_device" }
                 val protocol = HeadTrackerUhidProtocol(address)
                 val gate = HeadTrackerPoseGate()
+                val pacer = HeadTrackerReportPacer()
                 send(descriptor, protocol.create())
                 val events = ByteArray(HeadTrackerUhidProtocol.EVENT_BYTES)
                 val frame = ByteArray(HeadTrackerUhidProtocol.FRAME_BYTES)
+                val inputEvent = HeadTrackerUhidProtocol.event(HeadTrackerUhidProtocol.INPUT2)
                 var partial = 0
-                var nextInput = 0L
                 var nextOwnerCheck = 0L
                 val polls = arrayOf(
                     StructPollfd().apply { fd = descriptor; this.events = OsConstants.POLLIN.toShort() },
@@ -127,7 +135,7 @@ internal class RootHeadTrackerSink(
                         nextOwnerCheck = now + 250_000_000L
                     }
                     var wake = minOf(nextOwnerCheck, gate.deadline)
-                    if (protocol.reporting && gate.hasPose) wake = minOf(wake, nextInput)
+                    if (protocol.reporting && gate.hasPose) wake = minOf(wake, pacer.deadline)
                     val timeout = ((wake - now).coerceAtLeast(0) + 999_999) / 1_000_000
                     polls.forEach { it.revents = 0 }
                     try { Os.poll(polls, timeout.coerceAtMost(250).toInt()) }
@@ -144,8 +152,9 @@ internal class RootHeadTrackerSink(
                         val changed = Reporting(protocol.reporting, protocol.intervalNanos)
                         if (changed != reporting) {
                             gate.reporting(changed.enabled, now)
+                            pacer.reporting(changed.enabled, changed.intervalNanos, now)
+                            if (!changed.enabled) metrics.idle()
                             reporting = changed
-                            nextInput = now + changed.intervalNanos
                             onReportingChanged(changed)
                         }
                     }
@@ -161,7 +170,7 @@ internal class RootHeadTrackerSink(
                         partial += count
                         if (partial == frame.size) {
                             now = SystemClock.elapsedRealtimeNanos()
-                            gate.accept(HeadTrackerUhidProtocol.decodePose(frame, now), now)
+                            if (gate.accept(HeadTrackerUhidProtocol.decodePose(frame, now), now)) metrics.accepted()
                             partial = 0; ++received
                         }
                     }
@@ -173,9 +182,14 @@ internal class RootHeadTrackerSink(
                     }
                     now = SystemClock.elapsedRealtimeNanos()
                     gate.checkFresh(now)
-                    if (protocol.reporting && now >= nextInput) {
-                        gate.input(now)?.let { send(descriptor, it) }
-                        nextInput = now + protocol.intervalNanos
+                    if (protocol.reporting && now >= pacer.deadline) {
+                        gate.pose(now)?.let { pose ->
+                            HeadTrackerUhidProtocol.input(pose, inputEvent)
+                            val submittedAt = SystemClock.elapsedRealtimeNanos()
+                            send(descriptor, inputEvent)
+                            metrics.input(pose.timestampNanos, submittedAt)
+                            pacer.sent(SystemClock.elapsedRealtimeNanos())
+                        }
                     }
                 }
             } catch (error: Exception) {

@@ -99,7 +99,9 @@ internal class HeadTrackerUhidProtocol(address: String) {
             return Pose(timestamp, discontinuity, values)
         }
 
-        fun input(pose: Pose): ByteArray = event(INPUT2).apply {
+        fun input(pose: Pose, destination: ByteArray = event(INPUT2)): ByteArray = destination.apply {
+            require(size == EVENT_BYTES)
+            little(this).putInt(0, INPUT2)
             val output = little(this).putShort(4, 14)
             this[6] = 1
             pose.values.forEachIndexed { index, value ->
@@ -144,15 +146,90 @@ internal class HeadTrackerPoseGate {
         enabled = value
     }
 
-    fun accept(pose: HeadTrackerUhidProtocol.Companion.Pose, now: Long) {
+    fun accept(pose: HeadTrackerUhidProtocol.Companion.Pose, now: Long): Boolean {
         require(pose.timestampNanos > lastTimestamp) { "nonincreasing_pose_timestamp" }
         lastTimestamp = pose.timestampNanos
-        if (!enabled || pose.timestampNanos < enabledAt) return
+        if (!enabled || pose.timestampNanos < enabledAt) return false
         require(now - pose.timestampNanos <= HeadTrackerUhidProtocol.FRESH_NANOS) { "stale_pose" }
         checkFresh(now)
         latest = pose
+        return true
     }
 
     fun checkFresh(now: Long) { check(now <= deadline) { if (latest == null) "pose_startup_timeout" else "pose_stale" } }
-    fun input(now: Long): ByteArray? { checkFresh(now); return latest?.let { HeadTrackerUhidProtocol.input(it) } }
+    fun pose(now: Long): HeadTrackerUhidProtocol.Companion.Pose? { checkFresh(now); return latest }
+    fun input(now: Long): ByteArray? = pose(now)?.let { HeadTrackerUhidProtocol.input(it) }
+}
+
+/** Keep the host's periodic cadence without accumulating each poll's rounding delay or catch-up bursts. */
+internal class HeadTrackerReportPacer {
+    private var enabled = false
+    private var interval = 10_000_000L
+    private var lastInput: Long? = null
+    var deadline = Long.MAX_VALUE
+        private set
+
+    fun reporting(value: Boolean, intervalNanos: Long, now: Long) {
+        require(intervalNanos in 10_000_000L..100_000_000L)
+        if (!value) { lastInput = null; deadline = Long.MAX_VALUE }
+        else if (!enabled) deadline = now
+        else if (interval != intervalNanos) deadline = lastInput?.let { it + intervalNanos } ?: now
+        enabled = value; interval = intervalNanos
+    }
+
+    fun sent(now: Long) {
+        check(enabled && now >= deadline)
+        val next = deadline + interval
+        deadline = if (next <= now) now + interval else next
+        lastInput = now
+    }
+}
+
+internal data class HeadTrackerSinkStats(
+    val acceptedPoses: Long = 0, val hidInputs: Long = 0, val heldRepeats: Long = 0,
+    val intervalCount: Long = 0, val intervalMinNanos: Long = 0, val intervalMeanNanos: Double = 0.0,
+    val intervalMaxNanos: Long = 0, val sourceAgeCount: Long = 0, val sourceAgeMinNanos: Long = 0,
+    val sourceAgeMeanNanos: Double = 0.0, val sourceAgeMaxNanos: Long = 0,
+)
+
+/** Constant-space host timing only; intervals exclude host-disabled windows. */
+internal class HeadTrackerSinkMetrics {
+    private var accepted = 0L
+    private var inputs = 0L
+    private var repeats = 0L
+    private var lastPoseTimestamp: Long? = null
+    private var lastInput: Long? = null
+    private class Range {
+        var count = 0L; var min = 0L; var mean = 0.0; var max = 0L
+        fun add(value: Long) {
+            require(value >= 0)
+            if (count++ == 0L) { min = value; max = value } else { min = minOf(min, value); max = maxOf(max, value) }
+            mean += (value.toDouble() - mean) / count
+        }
+    }
+    private val intervals = Range()
+    private val ages = Range()
+    @Synchronized fun accepted() { ++accepted }
+    @Synchronized fun idle() { lastInput = null }
+    @Synchronized fun input(poseTimestamp: Long, now: Long) {
+        require(poseTimestamp <= now)
+        lastInput?.let { intervals.add(now - it) }
+        ages.add(now - poseTimestamp)
+        if (lastPoseTimestamp == poseTimestamp) ++repeats
+        ++inputs; lastInput = now; lastPoseTimestamp = poseTimestamp
+    }
+    @Synchronized fun snapshot() = HeadTrackerSinkStats(accepted, inputs, repeats,
+        intervals.count, intervals.min, intervals.mean, intervals.max,
+        ages.count, ages.min, ages.mean, ages.max)
+}
+
+/** Confirmation belongs to one exact selected address; a stuck native read cannot renew it. */
+internal class HeadTrackerRouteCache(private val address: String, private val now: () -> Long) {
+    @Volatile private var checkedAt = Long.MIN_VALUE
+    fun confirm() { checkedAt = now() }
+    fun clear() { checkedAt = Long.MIN_VALUE }
+    fun current(selected: String): Boolean {
+        val checked = checkedAt
+        return selected == address && checked != Long.MIN_VALUE && now() - checked in 0..500
+    }
 }

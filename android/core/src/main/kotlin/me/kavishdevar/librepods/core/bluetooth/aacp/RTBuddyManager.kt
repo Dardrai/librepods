@@ -21,6 +21,7 @@ import me.kavishdevar.librepods.core.data.apple.BuddyState
 import me.kavishdevar.librepods.core.data.apple.MotionReport
 import me.kavishdevar.librepods.core.devices.PacketDestination
 import kotlin.time.Duration
+import kotlin.time.Duration.Companion.microseconds
 
 /** One typed sensor session; every write belongs to the socket captured by its callbacks. */
 internal class RTBuddyManager(
@@ -48,6 +49,7 @@ internal class RTBuddyManager(
     private var suspended = false
     private var closed = false
     private var motionLive: Int? = null
+    private var motionAppliedIntervalUs: Int? = null
     private var motionNative = false
     private var motionRemote = false
     private var motionStopping = false
@@ -92,7 +94,7 @@ internal class RTBuddyManager(
     @Synchronized
     fun feed(chunk: ByteArray) {
         if (closed || !isCurrent()) return
-        reconcileHeadTracking()
+        reconcileHeadTracking(updateInterval = false)
         for (frame in frames.feed(chunk)) {
             val packet = try { RTBuddyPacket.parse(frame) } catch (_: Exception) { continue }
             val remote = packet.rtBuddyPayload as? RemoteHidBuddyPayload
@@ -106,6 +108,7 @@ internal class RTBuddyManager(
             if (batch.mappingChanged) {
                 // The previous address can now name another sensor; never send it a delayed Stop.
                 motionLive = null
+                motionAppliedIntervalUs = null
                 motionStopping = false
                 stopRetry = false
                 motionSince = now()
@@ -141,6 +144,7 @@ internal class RTBuddyManager(
                 remoteService = packet.device.takeIf { connects }
                 if (!same) {
                     motionLive = null
+                    motionAppliedIntervalUs = null
                     motionStopping = false
                     stopRetry = false
                 }
@@ -160,17 +164,27 @@ internal class RTBuddyManager(
     }
 
     @Synchronized
-    fun setHeadTrackingEnabled(enabled: Boolean, owner: Any = legacyMotionOwner): Boolean {
+    fun setHeadTrackingEnabled(enabled: Boolean, owner: Any = legacyMotionOwner, interval: Duration? = null): Boolean {
         if (closed || !isCurrent()) return false
-        motionOwners.set(owner, enabled)
-        return reconcileHeadTracking()
+        val us = interval?.inWholeMicroseconds
+        // This is a bounded request, not a claim about the firmware's minimum interval.
+        if (enabled && us != null && (us !in 5_000..1_000_000 || interval != us.microseconds)) return false
+        val previous = motionOwners.request(owner)
+        val request = motionOwners.set(owner, enabled, us?.toInt())
+        val accepted = reconcileHeadTracking() && (!enabled || motionOwners.request(owner) === request)
+        if (!accepted && enabled) {
+            // A failed rate change must not replace another client's live stream or claim.
+            motionOwners.restore(owner, requireNotNull(request), previous)
+        }
+        return accepted
     }
 
     @Synchronized
-    fun reconcileHeadTracking(): Boolean {
+    fun reconcileHeadTracking(updateInterval: Boolean = true): Boolean {
         if (closed || !isCurrent()) return false
         val wanted = motionOwners.wanted()
-        if (motionWanted == wanted) return true
+        // Incoming samples must not turn a failed rate restoration into packet-rate retries.
+        if (motionWanted == wanted) return !updateInterval || applyMotionInterval()
         motionWanted = wanted
         if (wanted) {
             if (motionStopping) stopMotion()
@@ -242,12 +256,14 @@ internal class RTBuddyManager(
             }
             motionLive = service
             motionRemote = true
-            if (!sendRaw(RemoteHid.feature(nextSequence(), service, 1, motionIntervalUs ?: 40_000))) {
+            val period = motionIntervalUs ?: 40_000
+            if (!sendRaw(RemoteHid.feature(nextSequence(), service, 1, period))) {
                 clearMotionRequest()
                 stopMotion()
                 onMotionState(BuddyState.INACTIVE)
                 return
             }
+            motionAppliedIntervalUs = period
             motionSince = now()
             return
         }
@@ -256,12 +272,14 @@ internal class RTBuddyManager(
         motionLive = service
         motionNative = native
         motionRemote = false
-        if ((native && !command(service, 1, report = 4)) || !command(service, interval(native))) {
+        val period = interval(native)
+        if ((native && !command(service, 1, report = 4)) || !command(service, period)) {
             clearMotionRequest()
             stopMotion()
             onMotionState(BuddyState.INACTIVE)
             return
         }
+        motionAppliedIntervalUs = period
         motionSince = now()
     }
 
@@ -275,7 +293,7 @@ internal class RTBuddyManager(
             command(service, 0) && fifo
         } else true
         motionStopping = !sent
-        if (sent) { motionLive = null; stopRetry = false }
+        if (sent) { motionLive = null; motionAppliedIntervalUs = null; stopRetry = false }
         else if (!retry) stopRetry = true
         lastMotion = 0
     }
@@ -285,20 +303,34 @@ internal class RTBuddyManager(
         motionWanted = false
     }
 
-    private fun interval(native: Boolean): Int = (motionIntervalUs ?: if (native) 20_000 else 40_000)
-        .coerceAtLeast(if (native) 20_000 else 40_000)
+    private fun interval(native: Boolean): Int {
+        val baseline = (motionIntervalUs ?: if (native) 20_000 else 40_000)
+            .coerceAtLeast(if (native) 20_000 else 40_000)
+        // Only an identified native WX stream gets temporary owner rates. Legacy and
+        // RemoteHID retain their existing rate policy.
+        return if (native) minOf(baseline, motionOwners.fastestIntervalUs() ?: baseline) else baseline
+    }
+
+    private fun applyMotionInterval(): Boolean {
+        val service = motionLive ?: return true
+        if (suspended) return true
+        if (motionStopping) return false
+        val period = if (motionRemote) motionIntervalUs ?: 40_000 else interval(motionNative)
+        if (period == motionAppliedIntervalUs) return true
+        val sent = if (motionRemote) sendRaw(RemoteHid.feature(nextSequence(), service, 1, period))
+            else command(service, period)
+        if (sent) motionAppliedIntervalUs = period
+        // Releases remain authoritative on failure; reconciliation retries restoration.
+        return sent
+    }
 
     @Synchronized
     fun setMotionInterval(interval: Duration): Boolean {
         val us = interval.inWholeMicroseconds
         if (closed || !isCurrent() || motionStopping || us !in 20_000..1_000_000 || us % 1000 != 0L) return false
-        val service = motionLive
-        if (service != null) {
-            val sent = if (motionRemote) sendRaw(RemoteHid.feature(nextSequence(), service, 1, us.toInt()))
-                else command(service, us.toInt().coerceAtLeast(if (motionNative) 20_000 else 40_000))
-            if (!sent) return false
-        }
+        val previous = motionIntervalUs
         motionIntervalUs = us.toInt()
+        if (!applyMotionInterval()) { motionIntervalUs = previous; return false }
         return true
     }
 

@@ -13,6 +13,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [37], application = Application::class)
@@ -36,13 +37,15 @@ class RootHeadTrackerProbeTest {
         @Volatile override var isClosed = false
         override val stopReason: String? get() = if (isClosed) "closed" else null
         @Volatile var delayClose = false
+        @Volatile override var stats = HeadTrackerSinkStats()
         override fun close() { if (!delayClose) isClosed = true }
     }
     private inner class Platform : SpatialAudioAccess.Platform {
         @Volatile var state = initial
         val writes = CopyOnWriteArrayList<Boolean>()
         @Volatile var throwAfterEnable = false
-        override fun read(address: String): SpatialAudioAccess.State = state
+        @Volatile var beforeRead: () -> Unit = {}
+        override fun read(address: String): SpatialAudioAccess.State { beforeRead(); return state }
         override fun setDeviceEnabled(address: String, enabled: Boolean) = error("device writes forbidden")
         override fun setHeadTrackerEnabled(address: String, enabled: Boolean) {
             assertEquals(this@RootHeadTrackerProbeTest.address, address)
@@ -338,5 +341,72 @@ class RootHeadTrackerProbeTest {
             assertEquals(1, calls.get()); assertTrue(platform.writes.isEmpty())
             release.countDown(); Thread.sleep(30); assertTrue(platform.writes.isEmpty())
         } finally { release.countDown(); probe.close() }
+    }
+
+    @Test fun privateOwnerWitnessAvoidsNativeRouteCallsAndExpiresDuringABlockedNativeRead() {
+        val platform = Platform().apply { state = initial.copy(headTrackerEnabled = true) }
+        val sink = Sink(); val selectedOwner = AtomicReference<IPlaybackRecoveryOwner>()
+        val probe = RootHeadTrackerProbe(platform, { _, owner, _ -> selectedOwner.set(owner); sink },
+            { _, action -> action() }, { true }) { System.nanoTime() / 1_000_000 }
+        val owner = Owner(); val pipe = ParcelFileDescriptor.createPipe()
+        val blocked = CountDownLatch(1); val release = CountDownLatch(1)
+        try {
+            assertTrue(probe.openNormal(address, owner, pipe[0], Events(), false).getBoolean("ready"))
+            val witness = selectedOwner.get()
+            assertTrue(selectedHeadTrackerRouteCurrent(address, witness) { error("No native query on the pose worker") })
+            assertFalse(selectedHeadTrackerRouteCurrent("11:22:33:44:55:66", witness) { error("No route bypass") })
+            platform.beforeRead = {
+                blocked.countDown()
+                while (release.count > 0) try { release.await() } catch (_: InterruptedException) { }
+            }
+            assertTrue(blocked.await(1, TimeUnit.SECONDS))
+            waitUntil { !selectedHeadTrackerRouteCurrent(address, witness) { error("No fallback on expiry") } }
+            assertTrue(witness.isCurrent) // App ownership is still fresh; the native route witness expired separately.
+            sink.isClosed = true; release.countDown()
+            waitUntil { probe.state(owner).getBoolean("cleanup_complete") }
+            assertTrue(platform.writes.isEmpty())
+        } finally { release.countDown(); pipe[1].close(); probe.close() }
+    }
+
+    @Test fun startupRefreshesTheRouteWitnessWhileWaitingForHalDiscovery() {
+        val platform = Platform().apply { state = initial.copy(headTrackerEnabled = true) }
+        val sink = Sink().apply { halHandshake = false }
+        val selectedOwner = AtomicReference<IPlaybackRecoveryOwner>()
+        val reads = AtomicInteger(); platform.beforeRead = { reads.incrementAndGet() }
+        val probe = RootHeadTrackerProbe(platform, { _, owner, _ -> selectedOwner.set(owner); sink },
+            { _, action -> action() }, { true }) { System.nanoTime() / 1_000_000 }
+        val owner = Owner(); val pipe = ParcelFileDescriptor.createPipe()
+        val opening = Thread { probe.openNormal(address, owner, pipe[0], Events(), false) }.apply { start() }
+        try {
+            waitUntil { selectedOwner.get() != null }
+            Thread.sleep(700)
+            assertTrue(selectedHeadTrackerRouteCurrent(address, selectedOwner.get()) { error("No native query") })
+            assertTrue("Startup must renew its route witness", reads.get() >= 4)
+            sink.halHandshake = true; opening.join(2_000)
+            assertFalse(opening.isAlive); assertTrue(probe.state(owner).getBoolean("ready"))
+            probe.finish(owner)
+            assertFalse(selectedHeadTrackerRouteCurrent(address, selectedOwner.get()) { error("No stale fallback") })
+        } finally { sink.halHandshake = true; opening.join(2_000); pipe[1].close(); probe.close() }
+    }
+
+    @Test fun ordinaryOwnersStillRequireTheNativeRouteAndStatsKeepTheirHostOnlyScope() {
+        var nativeCalls = 0
+        assertTrue(selectedHeadTrackerRouteCurrent(address, Owner()) { nativeCalls++; it == address })
+        assertFalse(selectedHeadTrackerRouteCurrent(address, Owner()) { nativeCalls++; false })
+        assertEquals(2, nativeCalls)
+        val platform = Platform(); val sink = Sink().apply {
+            stats = HeadTrackerSinkStats(2, 3, 1, 2, 10, 11.5, 13, 3, 0, 5.0, 10)
+        }
+        val probe = probe(platform, sink); val pipe = ParcelFileDescriptor.createPipe(); val owner = Owner()
+        try {
+            val ready = probe.start(address, owner, pipe[0], Events(), 5)
+            val stats = checkNotNull(ready.getBundle("sink_stats"))
+            assertEquals(1, stats.getInt("version")); assertEquals(2L, stats.getLong("accepted_poses"))
+            assertEquals(3L, stats.getLong("hid_inputs")); assertEquals(1L, stats.getLong("held_repeats"))
+            assertEquals(11.5, stats.getDouble("hid_interval_mean_nanos"), 0.0)
+            assertEquals(5.0, stats.getDouble("host_source_age_mean_nanos"), 0.0)
+            assertEquals("host_frame_timestamp_to_uhid_submission", stats.getString("age_scope"))
+            assertTrue(stats.getBoolean("excludes_acoustic_latency"))
+        } finally { pipe[1].close(); probe.close() }
     }
 }

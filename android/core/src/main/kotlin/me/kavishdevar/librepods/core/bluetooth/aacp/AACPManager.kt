@@ -177,8 +177,9 @@ class AACPManager(private val device: AppleDevice,
         isCurrent = { ownsAudioSocket(expected) },
         firmwareMajor = { device.metadata.value.firmwareMajor },
         onMotion = { report ->
+            val arrivalNs = SystemClock.elapsedRealtimeNanos()
             publishForTransport(this, expected, ::captureAudioSocket) {
-                HeadTracking.addMotion(report.report, report.vertical.toFloat(), report.horizontal.toFloat())
+                HeadTracking.addMotion(report.report, report.vertical.toFloat(), report.horizontal.toFloat(), arrivalNs)
             }
         },
         onHeartRate = { report ->
@@ -1011,11 +1012,12 @@ class AACPManager(private val device: AppleDevice,
         return sendPacket(packet, expected)
     }
 
-    fun setHeadTrackingEnabled(enabled: Boolean, owner: Any = legacyMotionOwner): Boolean {
+    fun setHeadTrackingEnabled(enabled: Boolean, owner: Any = legacyMotionOwner, interval: Duration? = null): Boolean {
         if (enabled) {
+            if (interval != null && device.metadata.value.model != AirPodsModel.AIRPODS_PRO_3) return false
             if (device.state.value.componentState.bothBudsInCase()) return false
             val sensors = rtBuddyManager ?: return false
-            val accepted = sensors.setHeadTrackingEnabled(true, owner)
+            val accepted = sensors.setHeadTrackingEnabled(true, owner, interval)
             if (device.state.value.componentState.bothBudsInCase()) {
                 motionOwners.clear()
                 sensors.reconcileHeadTracking()

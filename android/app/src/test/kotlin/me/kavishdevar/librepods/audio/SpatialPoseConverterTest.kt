@@ -62,6 +62,26 @@ class SpatialPoseConverterTest {
         assertNull(SpatialPoseProfile.calibrate(phases.first, mixed, phases.third))
     }
 
+    @Test fun fasterReportsKeepTheSamePhysicalAngularRateAndSavedCalibration() {
+        val profile = checkNotNull(calibrate())
+        for (interval in listOf(5_000_000L, 10_000_000L, 20_000_000L)) {
+            val converter = SpatialPoseConverter(profile, 7)
+            var head = neutral
+            var time = 1_000_000_000L
+            assertNull(converter.accept(report(head * mount.inverse(), time)))
+            repeat(40) {
+                head *= axis(1.0, 0.0, 0.0, Math.toDegrees(interval / 1e9))
+                time += interval
+                val pose = checkNotNull(converter.accept(report(head * mount.inverse(), time)
+                    .copy(counter = time / 5_000_000L)))
+                vector(listOf(1.0, 0.0, 0.0), pose.angularVelocity.map(Float::toDouble), 0.05)
+                assertEquals(interval, pose.intervalNs)
+                assertEquals(7, pose.discontinuity)
+            }
+            assertFalse(converter.invalidated)
+        }
+    }
+
     @Test fun calibrationRejectsInvalidAttitudeAndReferenceClocks() {
         val phases = phases()
         for (bad in listOf(
