@@ -120,8 +120,6 @@ import me.kavishdevar.librepods.core.devices.hasSameDisplayValues
 import me.kavishdevar.librepods.core.devices.ComponentStatus
 import me.kavishdevar.librepods.core.devices.ConnectionState
 import me.kavishdevar.librepods.core.devices.Device
-import me.kavishdevar.librepods.core.devices.DeviceComponentState
-import me.kavishdevar.librepods.core.devices.DeviceComponent
 import me.kavishdevar.librepods.database.app.AppSettingsEntity
 import me.kavishdevar.librepods.presentation.activities.MainActivity
 import me.kavishdevar.librepods.presentation.overlays.IslandType
@@ -254,11 +252,6 @@ class LibrePodsService: Service() {
         companionPreferenceAdapter::supports, { device, key -> me.kavishdevar.librepods.core.devices.LocalPreferenceEdits.token(this, device, key) }) }
     private val companionCalls by lazy { CompanionCallMonitor(this, serviceScope) { state, fresh -> companion?.onCallState(state, fresh) } }
     private var companionCallMonitorJob: Job? = null
-    private class WearMedia(val transport: BluetoothSocket) {
-        @Volatile var paused = false
-        val pauseCompleted = CompletableDeferred<Unit>()
-    }
-    private val wearMediaEpochs = ConcurrentHashMap<MacAddress, WearMedia>()
     private val companionSettingsWriters = ConcurrentHashMap<MacAddress, Mutex>()
     private data class NearbyMedia(val device: AppleDevice, val state: Int, val deferUntil: Long,
         val localCloseUntil: Long = 0)
@@ -275,6 +268,10 @@ class LibrePodsService: Service() {
     private val settingsRefresher = SettingsRefresher(serviceScope, { destroying }, { audioControllers[it] },
         ::refreshDeviceIsCurrent, ::callBlocksSettingsRefresh, { microphoneOwners.isNotEmpty() || bleCaptureBlocked },
         { companionOperations.isNotEmpty() })
+    private val wearMedia = WearMediaController(serviceScope, { destroying }, devices, { companionBridge },
+        ::callBlocksSettingsRefresh, { companionReleased.contains(it) || companionOperations.containsKey(it) },
+        ::isNearbyDeviceAudioConnected, { appDataRepository.settings.value.islandSettings.keepCompactVisible },
+        { showIsland(device = it, type = IslandType.CONNECTED) }, { islandWindow.close() })
     private val backgroundAudioAccess by lazy { BackgroundAudioAccess(this) }
     private val bluetoothVolumeSync by lazy { BluetoothVolumeSync(this) }
     private var bluetoothVolumeSyncJob: Job? = null
@@ -324,10 +321,7 @@ class LibrePodsService: Service() {
 
     private fun retireWearMediaForOtherRoute() {
         dongleControls.mediaRouteChanged()
-        if (wearMediaEpochs.keys.any { !MediaController.isMediaRoute(it.value) }) {
-            wearMediaEpochs.clear()
-            companionBridge.cancelOwnedMedia()
-        }
+        wearMedia.retireForOtherRoute()
     }
 
     private val appleRepository by lazy {
@@ -388,7 +382,7 @@ class LibrePodsService: Service() {
         override fun onCallStateChanged(state: Int) {
             telephonyCallState = state
             dongleControls.callStateChanged(state != TelephonyManager.CALL_STATE_IDLE)
-            if (state != TelephonyManager.CALL_STATE_IDLE) { wearMediaEpochs.clear(); companionBridge.cancelOwnedMedia() }
+            if (state != TelephonyManager.CALL_STATE_IDLE) wearMedia.retireAll()
             if (state != TelephonyManager.CALL_STATE_IDLE && companion?.hasCallReservation != true) companion?.invalidate()
             if (state == TelephonyManager.CALL_STATE_RINGING) {
                 isCallRinging = true
@@ -910,8 +904,7 @@ class LibrePodsService: Service() {
         val device = companionDevice(address) ?: return "unavailable"
         if (!requested()) return "superseded"
         if (companionBusy(device)) return "busy"
-        wearMediaEpochs.clear()
-        companionBridge.cancelOwnedMedia()
+        wearMedia.retireAll()
         val operation = Any()
         if (companionOperations.putIfAbsent(device.macAddress, operation) != null) return "busy"
         val game = gameControllers[device.macAddress]
@@ -2245,7 +2238,7 @@ class LibrePodsService: Service() {
 
                 val earDetectionEnabled = deviceSettings.hostAutoPause && state.effectiveEarDetection(deviceSettings)
                 if (earDetectionEnabled) {
-                    processComponentStateChange(
+                    wearMedia.onComponentStateChange(
                         device = device,
                         previousComponentState = previousState.componentState,
                         newComponentState = state.componentState,
@@ -2643,66 +2636,6 @@ class LibrePodsService: Service() {
         appWidgetManager.updateAppWidget(widgetIds, remoteViews)
     }
 
-    private fun processComponentStateChange(
-        device: Device<*, *, *>,
-        previousComponentState: Set<DeviceComponentState>,
-        newComponentState: Set<DeviceComponentState>,
-        transport: BluetoothSocket?
-    ) {
-        val pod = device as? AppleDevice ?: return
-        if (transport == null || !pod.aacp.ownsAudioSocket(transport) ||
-            pod.state.value.componentState != newComponentState) return
-        val old = earPresenceOf(previousComponentState)
-        val new = earPresenceOf(newComponentState)
-        if (old == new || !MediaController.isMediaRoute(device.macAddress.value)) return
-
-        if (Log.isLoggable(TAG, Log.DEBUG)) Log.d(TAG, "earPresence: $old -> $new")
-
-        // new != NONE because old!=new
-        if (old == EarPresence.NONE) {
-            showIsland(
-                device = device,
-                type = IslandType.CONNECTED
-            )
-        }
-
-        if (new == EarPresence.NONE && appDataRepository.settings.value.islandSettings.keepCompactVisible) {
-            islandWindow.close()
-        }
-
-        if (!pod.settings.value.hostAutoPause || !pod.state.value.effectiveEarDetection(pod.settings.value) || callBlocksSettingsRefresh()) return
-        val shouldPause = new == EarPresence.NONE || old == EarPresence.FULL && new == EarPresence.PARTIAL
-        if (shouldPause) {
-            val owner = WearMedia(transport)
-            wearMediaEpochs[pod.macAddress] = owner
-            serviceScope.launch {
-                try {
-                    fun current() = !destroying && devices.value[pod.macAddress] === pod && wearMediaEpochs[pod.macAddress] === owner &&
-                        pod.aacp.ownsAudioSocket(transport) &&
-                        pod.settings.value.hostAutoPause && pod.state.value.effectiveEarDetection(pod.settings.value) &&
-                        !callBlocksSettingsRefresh() && !companionReleased.contains(pod.macAddress) &&
-                        !companionOperations.containsKey(pod.macAddress) && isNearbyDeviceAudioConnected(pod) &&
-                        (owner.paused || earPresenceOf(pod.state.value.componentState) != EarPresence.FULL)
-                    companionBridge.connect()
-                    if (withTimeoutOrNull(2000) { companionBridge.state.first { it.connected } } == null || !current()) return@launch
-                    owner.paused = companionBridge.pauseOwnedMedia(pod.macAddress.value, ::current)
-                } finally {
-                    owner.pauseCompleted.complete(Unit)
-                }
-            }
-        } else if (new == EarPresence.FULL || old == EarPresence.NONE) {
-            val owner = wearMediaEpochs[pod.macAddress] ?: return
-            serviceScope.launch {
-                owner.pauseCompleted.await()
-                if (!owner.paused || owner.transport !== transport || wearMediaEpochs[pod.macAddress] !== owner ||
-                    !pod.aacp.ownsAudioSocket(transport) ||
-                    pod.state.value.componentState != newComponentState) return@launch
-                companionBridge.finishOwnedMedia(resume = true)
-                wearMediaEpochs.remove(pod.macAddress, owner)
-            }
-        }
-    }
-
     @Synchronized private fun clearHeartRateAlert(device: AppleDevice? = null) {
         val owner = heartRateAlertOwner ?: return
         if (device != null && owner !== device) return
@@ -2836,23 +2769,6 @@ class LibrePodsService: Service() {
             "20".toByteArray()
         )
      */
-    }
-}
-
-// TODO: move out of this file
-private enum class EarPresence { NONE, PARTIAL, FULL }
-
-private fun earPresenceOf(components: Set<DeviceComponentState>): EarPresence {
-    if (components.isEmpty()) return EarPresence.NONE
-    val inEarCount = components.count { it.status == ComponentStatus.IN_EAR }
-    val outOfCaseCount = components.count { it.status != ComponentStatus.IN_CASE }
-    val completeReport = components.any { it.component == DeviceComponent.HEADSET } ||
-        components.any { it.component == DeviceComponent.LEFT } && components.any { it.component == DeviceComponent.RIGHT }
-    return when (inEarCount) {
-        0 -> EarPresence.NONE
-        // Only an explicit in-case report makes the other bud unnecessary for playback.
-        outOfCaseCount -> if (completeReport) EarPresence.FULL else EarPresence.PARTIAL
-        else -> EarPresence.PARTIAL
     }
 }
 
