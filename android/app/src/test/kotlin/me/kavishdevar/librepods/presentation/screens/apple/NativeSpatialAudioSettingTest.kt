@@ -66,6 +66,20 @@ class NativeSpatialAudioSettingTest {
         assertEquals(false, FixedSpatialState.read(report().apply { putBoolean("head_tracker_enabled", true) }).checked)
     }
 
+    @Test fun anOffDeviceCanBeEnabledEvenWhenAndroidsCurrentEngineIsOff() {
+        val state = FixedSpatialState.read(report(false).apply { putBoolean("enabled", false) })
+        assertEquals(false, state.checked)
+        assertTrue(state.writable)
+        assertEquals("ok", state.reason)
+        val disabled = FixedSpatialState.read(report(true).apply {
+            putBoolean("enabled", false)
+            putBoolean("fixed_supported", false)
+            putString("reason", "global_disabled")
+        })
+        assertFalse(disabled.writable)
+        assertEquals("global_disabled", disabled.reason)
+    }
+
     @Test fun renderingDoesNotChangeAnythingAndTheLiveToggleCallsOnlyItsWriter() {
         val writes = mutableListOf<Boolean>()
         compose.setContent {

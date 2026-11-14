@@ -19,6 +19,7 @@ internal class SpatialAudioAccess(private val platform: Platform,
     constructor(context: Context) : this(Framework(context))
 
     internal data class DeviceState(val enabled: Boolean, val headTracking: Boolean)
+    // enabled is the routed engine state, which also depends on this device's preference.
     internal data class State(val supported: Boolean, val enabled: Boolean, val available: Boolean,
         val routeSelected: Boolean, val nativePair: Boolean, val canSpatialize51: Boolean,
         val compatible: Boolean?, val deviceEnabled: Boolean?, val headTrackerEnabled: Boolean?,
@@ -33,8 +34,8 @@ internal class SpatialAudioAccess(private val platform: Platform,
             compatible == null || device() == null -> "device_state_unavailable"
             !compatible -> "device_incompatible"
             !mutationApi -> "method_unavailable"
-            !enabled -> "global_disabled"
             !canSpatialize51 -> "format_unavailable"
+            deviceEnabled == true && !enabled -> "global_disabled"
             else -> "ok"
         }
         fun bundle(reason: String = reason()) = Bundle().apply {
@@ -83,8 +84,9 @@ internal class SpatialAudioAccess(private val platform: Platform,
                 before.compatible == null || before.device() == null -> "device_state_unavailable"
                 !before.compatible -> "device_incompatible"
                 !before.mutationApi -> "method_unavailable"
-                enabled && !before.enabled -> "global_disabled"
                 enabled && !before.canSpatialize51 -> "format_unavailable"
+                // An off device hides the global choice; enabling its preference must remain possible.
+                enabled && before.deviceEnabled == true && !before.enabled -> "global_disabled"
                 else -> null
             }
             if (blocked != null) return@guarded before.bundle(blocked)
@@ -96,7 +98,7 @@ internal class SpatialAudioAccess(private val platform: Platform,
                 val state = platform.read(selected)
                 requireCurrent(owner, deadline)
                 check(state.nativePair && state.routeSelected && state.compatible == true &&
-                    state.enabled == before.enabled && state.device() == expected) { "state_changed" }
+                    state.device() == expected) { "state_changed" }
                 verified = expected
                 return state
             }
@@ -113,7 +115,7 @@ internal class SpatialAudioAccess(private val platform: Platform,
                 }
                 val after = revalidate()
                 change = Change(owner.asBinder(), selected, initial, expected)
-                after.bundle("ok").apply { putBoolean("applied", true) }
+                after.bundle().apply { putBoolean("applied", true) }
             } catch (error: Exception) {
                 val restored = runCatching {
                     val current = platform.read(selected)

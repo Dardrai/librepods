@@ -13,15 +13,18 @@ import org.robolectric.annotation.Config
 class SpatialAudioAccessTest {
     private val address = "AA:BB:CC:DD:EE:FF"
     private val other = "11:22:33:44:55:66"
-    private val initial = SpatialAudioAccess.State(true, true, true, true, true, true,
+    private val initial = SpatialAudioAccess.State(true, false, true, true, true, true,
         true, false, true, true, false, -1, true)
     private class Owner(var current: Boolean = true) : IPlaybackRecoveryOwner.Stub() {
         override fun isCurrent() = current
     }
-    private inner class Platform(state: SpatialAudioAccess.State = initial) : SpatialAudioAccess.Platform {
-        val devices = mutableMapOf(address to state, other to initial.copy(deviceEnabled = true))
+    private inner class Platform(state: SpatialAudioAccess.State = initial,
+        var masterEnabled: Boolean = state.enabled || state.deviceEnabled != true) : SpatialAudioAccess.Platform {
+        val devices = mutableMapOf(address to state, other to initial.copy(enabled = true, deviceEnabled = true))
+        private fun nativeState(value: SpatialAudioAccess.State) =
+            value.copy(enabled = masterEnabled && value.deviceEnabled == true)
         var state: SpatialAudioAccess.State
-            get() = checkNotNull(devices[address])
+            get() = nativeState(checkNotNull(devices[address]))
             set(value) { devices[address] = value }
         val writes = mutableListOf<String>()
         val reads = mutableListOf<String>()
@@ -31,14 +34,15 @@ class SpatialAudioAccessTest {
         var denyDevice = false
         override fun read(address: String): SpatialAudioAccess.State {
             reads += address
-            val value = checkNotNull(devices[address])
+            val value = nativeState(checkNotNull(devices[address]))
             afterRead()
             return value
         }
         override fun setDeviceEnabled(address: String, enabled: Boolean) {
             if (denyDevice) throw SecurityException("private platform details")
             writes += "device=$enabled"
-            devices[address] = checkNotNull(devices[address]).copy(deviceEnabled = enabled)
+            devices[address] = checkNotNull(devices[address]).copy(deviceEnabled = enabled,
+                enabled = masterEnabled && enabled)
             afterDevice()
         }
         override fun setHeadTrackerEnabled(address: String, enabled: Boolean) {
@@ -62,6 +66,8 @@ class SpatialAudioAccessTest {
         assertEquals(listOf(address), platform.reads); assertTrue(platform.writes.isEmpty())
         assertTrue(value.getBoolean("known")); assertTrue(value.getBoolean("can_spatialize_51"))
         assertFalse(value.getBoolean("device_enabled")); assertFalse(value.getBoolean("applied"))
+        assertFalse(value.getBoolean("enabled")); assertTrue(value.getBoolean("fixed_supported"))
+        assertEquals("ok", value.getString("reason"))
         assertFalse(value.containsKey("rendering")); assertFalse(value.getBoolean("head_tracker_available"))
     }
 
@@ -75,7 +81,7 @@ class SpatialAudioAccessTest {
             initial.copy(headTrackerEnabled = null) to "device_state_unavailable",
             initial.copy(compatible = false) to "device_incompatible",
             initial.copy(mutationApi = false) to "method_unavailable",
-            initial.copy(enabled = false) to "global_disabled",
+            initial.copy(deviceEnabled = true) to "global_disabled",
             initial.copy(canSpatialize51 = false) to "format_unavailable")
         for ((state, reason) in cases) {
             val platform = Platform(state)
@@ -90,6 +96,7 @@ class SpatialAudioAccessTest {
         val otherBefore = platform.devices[other]
         val applied = access.setFixedEnabled(address, owner, true)
         assertTrue(applied.getBoolean("applied")); assertTrue(applied.getBoolean("device_enabled"))
+        assertTrue(applied.getBoolean("enabled"))
         assertFalse(applied.getBoolean("head_tracker_enabled"))
         assertEquals(listOf("head=false", "device=true"), platform.writes)
         assertTrue(access.restore(address, owner).getBoolean("restored"))
@@ -127,10 +134,11 @@ class SpatialAudioAccessTest {
     @Test fun lateMutationReceiptRollsBackWithoutChangingTheGlobalChoice() {
         var time = 0L
         val platform = Platform(initial.copy(headTrackerEnabled = false))
-        platform.afterDevice = { time = 3_000; platform.state = platform.state.copy(enabled = false) }
+        platform.afterDevice = { time = 3_000; platform.masterEnabled = false }
         val value = SpatialAudioAccess(platform) { time }.setFixedEnabled(address, Owner(), true)
         assertEquals("owner_changed", value.getString("reason"))
         assertFalse(platform.state.deviceEnabled!!); assertFalse(platform.state.enabled)
+        assertFalse(platform.masterEnabled)
         assertEquals(listOf("device=true", "device=false"), platform.writes)
     }
 
@@ -160,5 +168,59 @@ class SpatialAudioAccessTest {
         val value = SpatialAudioAccess(platform) { 0 }.setFixedEnabled(address, Owner(), false)
         assertTrue(value.getBoolean("applied")); assertFalse(platform.state.enabled)
         assertTrue(platform.state.headTrackerEnabled!!); assertEquals(listOf("device=false"), platform.writes)
+    }
+
+    @Test fun fixedOnOffOnAcceptsNativeEngineTransitionsWithoutUnexpectedRollback() {
+        val platform = Platform(initial.copy(headTrackerEnabled = false))
+        val access = SpatialAudioAccess(platform) { 0 }; val owner = Owner()
+        val nativeTransitions = mutableListOf<Boolean>()
+        platform.afterDevice = { nativeTransitions += platform.state.enabled }
+        for (enabled in listOf(true, false, true)) {
+            val value = access.setFixedEnabled(address, owner, enabled)
+            assertTrue(value.getBoolean("applied"))
+            assertEquals(enabled, value.getBoolean("device_enabled"))
+            assertEquals(enabled, value.getBoolean("enabled"))
+            assertTrue(value.getBoolean("fixed_supported"))
+            assertEquals("ok", value.getString("reason"))
+            val inspected = access.inspect(address, owner)
+            assertEquals(enabled, inspected.getBoolean("device_enabled"))
+            assertTrue(inspected.getBoolean("fixed_supported"))
+        }
+        assertEquals(listOf(true, false, true), nativeTransitions)
+        assertEquals(listOf("device=true", "device=false", "device=true"), platform.writes)
+        assertTrue(platform.masterEnabled)
+    }
+
+    @Test fun knownGlobalOffBlocksEnablingWithoutChangingEitherDeviceFlag() {
+        val platform = Platform(initial.copy(deviceEnabled = true), masterEnabled = false)
+        val access = SpatialAudioAccess(platform) { 0 }
+        val value = access.setFixedEnabled(address, Owner(), true)
+        assertEquals("global_disabled", value.getString("reason"))
+        assertFalse(value.getBoolean("applied")); assertFalse(value.getBoolean("fixed_supported"))
+        assertTrue(value.getBoolean("device_enabled")); assertFalse(value.getBoolean("enabled"))
+        assertTrue(platform.state.headTrackerEnabled!!)
+        assertFalse(platform.masterEnabled); assertTrue(platform.writes.isEmpty())
+    }
+
+    @Test fun offDeviceCanEnableItsPreferenceWhileAnUnknownGlobalOffIsReportedHonestly() {
+        val platform = Platform(masterEnabled = false)
+        val access = SpatialAudioAccess(platform) { 0 }; val owner = Owner()
+        assertTrue(access.inspect(address, owner).getBoolean("fixed_supported"))
+        val value = access.setFixedEnabled(address, owner, true)
+        assertTrue(value.getBoolean("applied")); assertTrue(value.getBoolean("device_enabled"))
+        assertFalse(value.getBoolean("enabled")); assertFalse(value.getBoolean("fixed_supported"))
+        assertEquals("global_disabled", value.getString("reason"))
+        assertFalse(platform.masterEnabled)
+        assertEquals(listOf("head=false", "device=true"), platform.writes)
+    }
+
+    @Test fun externalGlobalOffDuringEnableDoesNotRollBackTheCorrectDevicePreference() {
+        val platform = Platform(initial.copy(headTrackerEnabled = false))
+        platform.afterDevice = { platform.masterEnabled = false }
+        val value = SpatialAudioAccess(platform) { 0 }.setFixedEnabled(address, Owner(), true)
+        assertTrue(value.getBoolean("applied")); assertTrue(value.getBoolean("device_enabled"))
+        assertFalse(value.getBoolean("enabled")); assertEquals("global_disabled", value.getString("reason"))
+        assertFalse(platform.masterEnabled); assertTrue(platform.state.deviceEnabled!!)
+        assertEquals(listOf("device=true"), platform.writes)
     }
 }

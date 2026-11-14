@@ -40,14 +40,14 @@ internal data class FixedSpatialState(val checked: Boolean?, val writable: Boole
         fun read(value: Bundle): FixedSpatialState {
             @Suppress("DEPRECATION") fun flag(name: String) = value.get(name) as? Boolean
             val known = value.getInt("version", 0) == 1 && flag("known") == true
-            val global = flag("enabled")
+            val nativeEnabled = flag("enabled")
             val device = flag("device_enabled")
             val tracking = flag("head_tracker_enabled")
-            val checked = if (known && global != null && device != null && tracking != null)
-                global && device && !tracking else null
+            val checked = if (known && nativeEnabled != null && device != null && tracking != null)
+                nativeEnabled && device && !tracking else null
             return FixedSpatialState(checked,
                 known && checked != null && flag("fixed_supported") == true && flag("route_selected") == true,
-                if (known && global == false) "global_disabled" else value.getString("reason") ?: "unavailable")
+                value.getString("reason") ?: "unavailable")
         }
     }
 }
