@@ -4,6 +4,8 @@ import com.google.protobuf.ByteString
 import me.kavishdevar.librepods.core.bluetooth.aacp.packet.RTBuddyPacket
 import me.kavishdevar.librepods.core.bluetooth.aacp.rtbuddy.proto.SensorCommand
 import me.kavishdevar.librepods.core.bluetooth.aacp.rtbuddy.proto.SensorDataWX
+import me.kavishdevar.librepods.core.bluetooth.aacp.rtbuddy.proto.SensorServiceSetting
+import me.kavishdevar.librepods.core.bluetooth.aacp.rtbuddy.proto.SensorTypeAck
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.SensorDataWxBuddyPayload
 import me.kavishdevar.librepods.core.data.apple.BuddyState
 import me.kavishdevar.librepods.core.data.apple.MotionReport
@@ -15,8 +17,70 @@ import java.util.concurrent.atomic.AtomicLong
 import kotlin.concurrent.thread
 
 class MotionSourceTimingTest {
+    @Test fun onlyClockCorroboratedSixteenBitCrossingsIncrementTheWrapDiagnostic() {
+        val timing = MotionSourceTiming()
+        timing.motionPublished(report(1_000_000_000, 65534), 100, 110)
+        timing.motionPublished(report(1_010_000_000, 0), 120, 130)
+        assertEquals(1L, timing.snapshot()["counter_wrap16_count"])
+        assertEquals(2L, timing.snapshot()["counter_step_max"])
+        timing.motionPublished(report(1_020_000_000, 30000), 140, 150)
+        timing.motionPublished(report(1_030_000_000, 0), 160, 170)
+        assertEquals(1L, timing.snapshot()["counter_wrap16_count"])
+        assertEquals((0L - 30000) and 0xffffffffL, timing.snapshot()["counter_step_max"])
+        timing.motionPublished(report(null, 65534), 180, 190)
+        timing.motionPublished(report(1_040_000_000, 0), 200, 210)
+        assertEquals(1L, timing.snapshot()["counter_wrap16_count"])
+    }
+
     private fun report(time: Long?, counter: Long?) = MotionReport(time,
         listOf(1, 2, 3), listOf(0, 0, 0), listOf(0, 0, 0), listOf(0, 0, -16384), counter)
+
+    @Test fun controlMetadataIsSelectedServiceOnlyAndDoesNotConfirmOrChangeRequestedRate() {
+        val timing = MotionSourceTiming()
+        timing.motionStarted(10_000, 10)
+        val ack = SensorTypeAck.newBuilder().setServiceValue(27)
+        val data = SensorDataWX.newBuilder().setSeq(127).setStartAck(ack).setCommandAck(ack).build()
+        for (service in listOf(null, 0, 16, 128)) timing.motionControlReceived(data, service, 20)
+        timing.motionControlReceived(data, 27, 0)
+        assertEquals(0L, timing.snapshot()["motion_start_ack_count"])
+        timing.motionControlReceived(data, 27, 30)
+        val before = timing.snapshot()
+        timing.motionStopped()
+        timing.motionControlReceived(data.toBuilder().setSeq(0).build(), 27, 40)
+        val after = timing.snapshot()
+        assertEquals(1L, before["motion_start_ack_count"])
+        assertEquals(127L, before["motion_start_ack_last_sequence"])
+        for (prefix in listOf("motion_start_ack", "motion_command_ack")) {
+            assertEquals(2L, after["${prefix}_count"])
+            assertEquals(0L, after["${prefix}_last_sequence"])
+            assertEquals(40L, after["${prefix}_last_at_nanos"])
+        }
+        assertEquals(10_000L, after["motion_interval_us"])
+        assertEquals(0L, after["motion_interval_change_count"])
+        assertEquals(0L, after["motion_reports"])
+    }
+
+    @Test fun intervalEchoRetainsOnlyExactSelectedReportOneLiteralIncludingUnexpectedUnsignedValues() {
+        val timing = MotionSourceTiming()
+        fun echo(bytes: ByteArray, service: Int = 27, setting: Int = 2, seq: Int = 9) =
+            SensorDataWX.newBuilder().setSeq(seq).setServiceSettings(SensorServiceSetting.newBuilder()
+                .setServiceValue(service).setSetting(setting).setConfiguration(ByteString.copyFrom(bytes))).build()
+        val literal = byteArrayOf(1, -1, -1, -1, -1)
+        val invalid = listOf(echo(literal, service = 20), echo(literal, setting = 1),
+            echo(literal.copyOf(4)), echo(literal.copyOf(6)), echo(byteArrayOf(4, 1, 0, 0, 0)))
+        for (data in invalid) timing.motionControlReceived(data, 27, 20)
+        assertEquals(0L, timing.snapshot()["motion_interval_echo_count"])
+        timing.motionControlReceived(echo(literal), 27, 30)
+        assertEquals(0xffffffffL, timing.snapshot()["motion_interval_echo_last_us"])
+        timing.motionControlReceived(echo(byteArrayOf(1, 0, 0, 0, 0), seq = 10), 27, 40)
+        val stats = timing.snapshot()
+        assertEquals(2L, stats["motion_interval_echo_count"])
+        assertEquals(0L, stats["motion_interval_echo_last_us"])
+        assertEquals(10L, stats["motion_interval_echo_last_sequence"])
+        assertEquals(40L, stats["motion_interval_echo_last_at_nanos"])
+        assertEquals(0L, stats["motion_interval_us"])
+        assertEquals(0L, stats["motion_interval_change_count"])
+    }
 
     @Test fun readAndStageGapsKeepTheirBootTimeAndDoNotRetainMutableSnapshots() {
         val timing = MotionSourceTiming()

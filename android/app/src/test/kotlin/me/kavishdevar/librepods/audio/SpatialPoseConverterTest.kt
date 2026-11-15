@@ -351,6 +351,52 @@ class SpatialPoseConverterTest {
         assertEquals("sensor_gap", withoutCounters.invalidReason)
     }
 
+    @Test fun clockCorroboratedSixteenBitWrapWorksInLiveCalibrationAndReferenceHandoff() {
+        val profile = checkNotNull(SpatialPoseProfile.fromBasis(checkNotNull(calibrate()).headFromRaw))
+        for ((before, after, dt) in listOf(Triple(65534L, 0L, 10_000_000L), Triple(65535L, 1L, 10_000_000L),
+            Triple(65532L, 0L, tick), Triple(65524L, 12L, 120_000_000L))) {
+            val converter = SpatialPoseConverter(profile, 7)
+            val first = report(neutral * mount.inverse(), 1_000_000_000).copy(counter = before)
+            assertNull(converter.accept(first))
+            val crossing = first.copy(timestampNs = first.timestampNs!! + dt, counter = after)
+            if (dt <= 100_000_000) assertNotNull(converter.accept(crossing))
+            else assertNull(converter.accept(crossing)) // Existing short-gap reprime remains intact.
+            assertFalse(converter.invalidated)
+            assertNotNull(converter.accept(crossing.copy(timestampNs = crossing.timestampNs!! + tick, counter = after + 4)))
+        }
+        val phases = phases()
+        val crossing = (phases.first + phases.second + phases.third).mapIndexed { i, value ->
+            value.copy(counter = (65516L + i * 4) and 0xffff)
+        }
+        assertNotNull(SpatialPoseProfile.calibrate(crossing.take(5), crossing.drop(5).take(5), crossing.takeLast(5)))
+        val endingAtBoundary = crossing.mapIndexed { i, value -> value.copy(counter = 65478L + i * 4) }
+        val referenceProfile = checkNotNull(SpatialPoseProfile.calibrate(endingAtBoundary.take(5),
+            endingAtBoundary.drop(5).take(5), endingAtBoundary.takeLast(5)))
+        val last = endingAtBoundary.last()
+        assertEquals(65534L, last.counter)
+        val handoff = SpatialPoseConverter(referenceProfile, 9)
+        val first = last.copy(timestampNs = last.timestampNs!! + 10_000_000, counter = 0)
+        assertNull(handoff.accept(first)); assertFalse(handoff.invalidated)
+        assertNotNull(handoff.accept(first.copy(timestampNs = first.timestampNs!! + 10_000_000, counter = 2)))
+        val bad = crossing.toMutableList().also { it[5] = it[5].copy(timestampNs = it[4].timestampNs!! + 250_000_000) }
+        assertEquals(SpatialCalibrationFailure.SENSOR_COUNTER_CHANGED,
+            SpatialPoseProfile.calibrateResult(bad.take(5), bad.drop(5).take(5), bad.takeLast(5)).failure)
+    }
+
+    @Test fun aSixteenBitLookingResetStillRequiresPlausibleTimeAndPreservesFailureLatching() {
+        val profile = checkNotNull(SpatialPoseProfile.fromBasis(checkNotNull(calibrate()).headFromRaw))
+        for ((before, after, dt) in listOf(Triple(30000L, 0L, tick), Triple(65534L, 0L, 50_000_000L),
+            Triple(65534L, 0L, 250_000_000L), Triple(0x1fffeL, 0L, 10_000_000L),
+            Triple(65534L, 0L, -10_000_000L))) {
+            val converter = SpatialPoseConverter(profile, 0)
+            val first = report(neutral * mount.inverse(), 1_000_000_000).copy(counter = before)
+            assertNull(converter.accept(first))
+            assertNull(converter.accept(first.copy(timestampNs = first.timestampNs!! + dt, counter = after)))
+            assertTrue(converter.invalidated)
+            assertNull(converter.accept(first.copy(timestampNs = first.timestampNs!! + tick, counter = before + 1)))
+        }
+    }
+
     @Test fun naturalCounterWrapIsValidButExplicitRoleOrReferenceRetirementCannotRestart() {
         val phases = phases()
         val shifted = (phases.first + phases.second + phases.third).mapIndexed { i, report ->

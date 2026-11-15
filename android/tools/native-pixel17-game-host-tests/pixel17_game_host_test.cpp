@@ -8,7 +8,9 @@
 #include <iostream>
 #include <iterator>
 #include <stdexcept>
+#include <sys/mman.h>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 using namespace eld;
 namespace {
@@ -22,6 +24,8 @@ uint64_t now=1000000000,encoder_generation=9;
 bool encoder_active=true,encoder_failed=false,peer_sco=false,readable=true;
 uint8_t sco_count=0;
 size_t reads=0,forwards[7]{};
+std::vector<size_t> batches;
+size_t reject_batch=0;
 std::vector<Pixel17GameInvalidation> invalidations;
 void (*during_original)()=nullptr;
 bool throw_original=false;
@@ -36,6 +40,21 @@ bool copy(const void* p,size_t n,void* out) noexcept {
     if(!readable || !(contains(p,n,scb.data(),scb.size()) || contains(p,n,other_scb.data(),other_scb.size()) ||
         contains(p,n,avdt.data(),avdt.size()) || contains(p,n,peer,6) || contains(p,n,other_peer,6))) return false;
     std::memcpy(out,p,n); return true;
+}
+bool copy_batch(const void* p,const Pixel17GameRead* ranges,size_t count) noexcept {
+    ++reads;
+    batches.push_back(count);
+    if(!readable || batches.size()==reject_batch) return false;
+    const auto base=reinterpret_cast<uintptr_t>(p);
+    for(size_t i=0;i<count;++i) {
+        const auto& range=ranges[i];
+        if(range.offset>UINTPTR_MAX-base) return false;
+        const auto* at=reinterpret_cast<const void*>(base+range.offset);
+        if(!(contains(at,range.size,scb.data(),scb.size()) ||
+            contains(at,range.size,other_scb.data(),other_scb.size()) ||
+            contains(at,range.size,avdt.data(),avdt.size()))) return false;
+    }
+    return pixel17_game_copy_batch(p,ranges,count);
 }
 void* find_scb(uint16_t handle) noexcept { return handle==0x41?scb.data():handle==0x42?other_scb.data():nullptr; }
 void* find_avdt(uint8_t handle) noexcept { return handle==6?avdt.data():nullptr; }
@@ -55,7 +74,7 @@ void invalidated(Pixel17GameInvalidation reason,const Pixel17GameHostState&) noe
     (void)pixel17_game_host_snapshot(); // Callback is outside the state mutex.
 }
 Pixel17GameBindings bindings() {
-    return {copy,find_scb,find_avdt,media_cid,cid_acl,peer_acl,active_peer,sco_links,peer_has_sco,encoder,clock_ns,invalidated};
+    return {copy,copy_batch,find_scb,find_avdt,media_cid,cid_acl,peer_acl,active_peer,sco_links,peer_has_sco,encoder,clock_ns,invalidated};
 }
 void forwarded(size_t index) {
     ++forwards[index];
@@ -94,6 +113,7 @@ void setup() {
     uint16_t mask=0x100;std::memcpy(avdt.data()+layout.avdt_reporting_mask,&mask,2);avdt[layout.avdt_self_handle]=6;
     cid=0;acl=cid_handle=11;now=1000000000;encoder_generation=9;
     encoder_active=true;encoder_failed=false;peer_sco=false;readable=true;sco_count=0;reads=0;
+    batches.clear();reject_batch=0;
     invalidations.clear();std::memset(forwards,0,sizeof(forwards));during_original=nullptr;throw_original=false;
     assert(pixel17_game_host_prepare(bindings(),layout));
     void* originals[]={reinterpret_cast<void*>(open_original),reinterpret_cast<void*>(start_original),reinterpret_cast<void*>(stop_original),
@@ -103,6 +123,7 @@ void setup() {
 void playing() { set_cid(0x43);event(0);event(1);assert(pixel17_game_host_snapshot().streaming); }
 void preparation() {
     pixel17_game_host_reset_for_test();auto b=bindings();b.cid_acl=nullptr;assert(!pixel17_game_host_prepare(b,layout));
+    b=bindings();b.copy_batch=nullptr;assert(!pixel17_game_host_prepare(b,layout));
     auto bad=layout;bad.peer=0;assert(!pixel17_game_host_prepare(bindings(),bad));
     assert(pixel17_game_host_prepare(bindings(),layout));assert(!pixel17_game_host_prepare(bindings(),layout));
     assert(!pixel17_game_host_is_event_thread());
@@ -179,6 +200,61 @@ void thread_and_snapshot() {
     event(1);assert(pixel17_game_host_snapshot().streaming);
     readable=false;assert(!pixel17_game_host_refresh_on_event_thread());assert(!pixel17_game_host_snapshot().route_valid);
 }
+void batching_and_invalidation() {
+    setup();playing();const auto before=pixel17_game_host_snapshot();
+    readable=false;delay(900);close();readable=true;
+    assert(pixel17_game_host_snapshot().route_valid && !pixel17_game_host_snapshot().delay_valid);
+    assert(pixel17_game_host_snapshot().media_generation==before.media_generation);
+    assert(forwards[3]==1 && forwards[5]==1); // Unreadable callback peers still forward, without retirement/publication.
+    batches.clear();const auto initial_reads=reads;
+    assert(pixel17_game_host_refresh_on_event_thread());
+    assert((batches==std::vector<size_t>{6,2}) && reads==initial_reads+2);
+    assert(pixel17_game_host_snapshot().media_generation==before.media_generation);
+    set_cid(0x44);batches.clear();reject_batch=2;
+    assert(!pixel17_game_host_refresh_on_event_thread());
+    const auto rejected=pixel17_game_host_snapshot();
+    assert((batches==std::vector<size_t>{6,2}) && !rejected.route_valid && !rejected.streaming);
+    assert(rejected.media_generation==before.media_generation && rejected.media_cid==before.media_cid);
+    assert(invalidations.back()==Pixel17GameInvalidation::InvalidRoute);
+    batches.clear();reject_batch=0;
+    std::thread wrong([] {assert(!pixel17_game_host_refresh_on_event_thread());});wrong.join();
+    assert(batches.empty());
+    assert(pixel17_game_host_refresh_on_event_thread());
+    assert(pixel17_game_host_snapshot().media_generation>before.media_generation);
+    assert(!pixel17_game_host_snapshot().streaming);
+}
+void checked_memory_batches() {
+    const long page_size=sysconf(_SC_PAGESIZE);assert(page_size>0);
+    const auto page=static_cast<size_t>(page_size);
+    auto* source=static_cast<uint8_t*>(mmap(nullptr,page*2,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0));
+    assert(source!=MAP_FAILED);std::memset(source,0x5a,page*2);
+    std::array<uint8_t,6> output{};
+    Pixel17GameRead ranges[6];
+    for(size_t i=0;i<6;++i) ranges[i]={i,1,&output[i]};
+    assert(pixel17_game_copy_batch(source,ranges,6));
+    for(auto value:output) assert(value==0x5a);
+    auto rejected=[&](const void* base,const Pixel17GameRead* batch,size_t count) {
+        output.fill(0xa5);assert(!pixel17_game_copy_batch(base,batch,count));
+        for(auto value:output) assert(value==0xa5);
+    };
+    rejected(nullptr,ranges,6);rejected(source,nullptr,6);
+    rejected(source,ranges,0);rejected(source,ranges,7);
+    ranges[5].out=nullptr;rejected(source,ranges,6);ranges[5].out=&output[5];
+    ranges[5].size=0;rejected(source,ranges,6);ranges[5].size=1;
+    ranges[5].offset=UINTPTR_MAX;rejected(source,ranges,6);ranges[5].offset=5;
+    ranges[5].size=UINTPTR_MAX;rejected(source,ranges,6);ranges[5].size=1;
+    rejected(reinterpret_cast<const void*>(UINTPTR_MAX-2),ranges,6);
+    ranges[5].offset=page;
+    assert(pixel17_game_copy_batch(source,ranges,6));
+    assert(mprotect(source+page,page,PROT_NONE)==0);
+    rejected(source,ranges,6); // A successful earlier call must not cache permission.
+    assert(mprotect(source+page,page,PROT_READ)==0);
+    assert(pixel17_game_copy_batch(source,ranges,6));
+    // Both pages are readable, but a single read may not cross their mapping boundary.
+    ranges[5]={page-1,2,&output[4]};rejected(source,ranges,6);
+    assert(munmap(source,page*2)==0);
+    ranges[5]={5,1,&output[5]};rejected(source,ranges,6);
+}
 void real_contract(const char* path) {
     std::ifstream input(path,std::ios::binary);assert(input);
     std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(input)),{});SymbolImage image;
@@ -211,7 +287,7 @@ void real_contract(const char* path) {
 }
 int main(int argc,char** argv) {
     preparation();initial_delay();fresh_delay();stop_restart();close_reset();late_and_reentry();
-    failures_and_forwarding();sco_and_encoder();thread_and_snapshot();
+    failures_and_forwarding();sco_and_encoder();thread_and_snapshot();batching_and_invalidation();checked_memory_batches();
     if(argc==2) real_contract(argv[1]);
-    pixel17_game_host_reset_for_test();std::cout<<"nine game-host groups passed\n";
+    pixel17_game_host_reset_for_test();std::cout<<"eleven game-host groups passed\n";
 }

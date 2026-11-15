@@ -14,6 +14,46 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [37], application = Application::class)
 class HeadTrackingTimingTest {
+    @Test fun collectorWorkIncludesFailuresAndKeepsTheFirstMaximumCompletionTime() {
+        val stats = HeadTrackingTiming()
+        stats.collectorFinished(100, 110)
+        stats.collectorFinished(120, 150)
+        stats.collectorFinished(160, 190)
+        stats.collectorFinished(200, 199)
+        stats.collectorFinished(0, 10)
+        val value = stats.snapshot()
+        assertEquals(3L, value.getLong("collector_work_count"))
+        assertEquals(70.0 / 3, value.getDouble("collector_work_mean_nanos"), 0.0)
+        assertEquals(30L, value.getLong("collector_work_max_nanos"))
+        assertEquals(150L, value.getLong("collector_work_max_at_nanos"))
+    }
+
+    @Test fun latestEpochMilestonesResetWithoutResettingCumulativeWorkOrSamples() {
+        val stats = HeadTrackingTiming()
+        stats.begin(100)
+        stats.validAttitude(105); stats.poseSubmitted(106) // No accepted collection yet.
+        assertEquals(0L, stats.snapshot().getLong("latest_epoch_first_attitude_at_nanos"))
+        stats.sample(sample(1, 110), 112)
+        stats.validAttitude(111); stats.poseSubmitted(113)
+        assertEquals(0L, stats.snapshot().getLong("latest_epoch_first_submit_at_nanos"))
+        stats.validAttitude(112); stats.poseSubmitted(114)
+        stats.validAttitude(120); stats.poseSubmitted(121)
+        stats.collectorFinished(110, 114)
+        var value = stats.snapshot()
+        assertEquals(100L, value.getLong("latest_epoch_request_at_nanos"))
+        assertEquals(112L, value.getLong("latest_epoch_first_collection_at_nanos"))
+        assertEquals(112L, value.getLong("latest_epoch_first_attitude_at_nanos"))
+        assertEquals(114L, value.getLong("latest_epoch_first_submit_at_nanos"))
+        stats.begin(200)
+        value = stats.snapshot()
+        assertEquals(200L, value.getLong("latest_epoch_request_at_nanos"))
+        assertEquals(0L, value.getLong("latest_epoch_first_collection_at_nanos"))
+        assertEquals(0L, value.getLong("latest_epoch_first_attitude_at_nanos"))
+        assertEquals(0L, value.getLong("latest_epoch_first_submit_at_nanos"))
+        assertEquals(1L, value.getLong("source_samples"))
+        assertEquals(1L, value.getLong("collector_work_count"))
+    }
+
     @Test fun sourceRateAndHostForwardingAgeStaySeparate() {
         val stats = HeadTrackingTiming()
         stats.begin(); stats.requested(5_000)

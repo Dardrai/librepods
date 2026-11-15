@@ -44,14 +44,15 @@ internal suspend fun streamCalibratedHeadMotion(device: AppleDevice, motion: Flo
             onFallback()
             check(current() && device.startHeadTracking(owner, 20.milliseconds)) { "motion_unavailable" }
         }
-        timing.begin(); timing.requested(if (fast) 10_000 else 20_000, fallback = !fast)
+        timing.begin(startedAt); timing.requested(if (fast) 10_000 else 20_000, fallback = !fast)
         val converter = SpatialPoseConverter(profile, discontinuity)
         var previousCounter: Long? = null
         val firstAttitude = kotlinx.coroutines.CompletableDeferred<Unit>()
         val lastAttitudeAt = AtomicLong()
         kotlinx.coroutines.coroutineScope {
             val fallback = if (fast) launch(Dispatchers.IO) {
-                val received = withTimeoutOrNull(1_500) { firstAttitude.await(); true } == true
+                // Cold audio startup can take ~1.8 s; leave 2 s for fallback within the sink's 5 s startup budget.
+                val received = withTimeoutOrNull(3_000) { firstAttitude.await(); true } == true
                 var fallbackAt = now()
                 var fallbackLastAttitudeAt = lastAttitudeAt.get()
                 if (received) {
@@ -73,24 +74,34 @@ internal suspend fun streamCalibratedHeadMotion(device: AppleDevice, motion: Flo
             } else null
             try {
                 motion.filterNotNull().collect { sample ->
-                    check(current()) { "owner_changed" }
-                    val collectedAt = now()
-                    if (sample.arrivalNs > collectedAt) throw CalibratedHeadMotionFault("host_clock_changed")
-                    if (sample.arrivalNs < startedAt) return@collect
-                    if (collectedAt - sample.arrivalNs > HeadTrackerUhidProtocol.FRESH_NANOS) {
-                        timing.stale(); return@collect
-                    }
-                    val report = sample.report
-                    if (report.counter != null && report.counter == previousCounter) return@collect
-                    previousCounter = report.counter
-                    timing.sample(sample, collectedAt)
-                    val pose = converter.accept(report)
-                    pose?.let { submit(it, sample.arrivalNs) }
-                    if (converter.invalidated) throw CalibratedHeadMotionFault(converter.invalidReason ?: "motion_changed")
-                    if (pose != null || report.attitudeQ15.any { it != 0 }) {
-                        lastAttitudeAt.set(sample.arrivalNs)
-                        firstAttitude.complete(Unit)
-                    }
+                    val callbackStartedAt = now()
+                    try {
+                        check(current()) { "owner_changed" }
+                        val collectedAt = now()
+                        if (sample.arrivalNs > collectedAt) throw CalibratedHeadMotionFault("host_clock_changed")
+                        if (sample.arrivalNs < startedAt) return@collect
+                        if (collectedAt - sample.arrivalNs > HeadTrackerUhidProtocol.FRESH_NANOS) {
+                            timing.stale(); return@collect
+                        }
+                        val report = sample.report
+                        if (report.counter != null && report.counter == previousCounter) return@collect
+                        previousCounter = report.counter
+                        timing.sample(sample, collectedAt)
+                        val pose = converter.accept(report)
+                        val savedReference = profile.referenceTimestampNs != null &&
+                            report.timestampNs == profile.referenceTimestampNs && report.counter == profile.referenceCounter
+                        if (!converter.invalidated && !savedReference && report.attitudeQ15.any { it != 0 })
+                            timing.validAttitude(collectedAt)
+                        pose?.let {
+                            submit(it, sample.arrivalNs)
+                            timing.poseSubmitted(now())
+                        }
+                        if (converter.invalidated) throw CalibratedHeadMotionFault(converter.invalidReason ?: "motion_changed")
+                        if (pose != null || report.attitudeQ15.any { it != 0 }) {
+                            lastAttitudeAt.set(sample.arrivalNs)
+                            firstAttitude.complete(Unit)
+                        }
+                    } finally { timing.collectorFinished(callbackStartedAt, now()) }
                 }
                 error("motion_ended")
             } finally { fallback?.cancelAndJoin() }

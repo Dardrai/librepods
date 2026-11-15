@@ -14,6 +14,7 @@ struct Pixel17PacketStatus {
     bool known = false, pending = false, dirty = false, ready = false;
     Pixel17HciStatus error = Pixel17HciStatus::Ok;
 };
+enum class Pixel17PacketRestoreResult { Accepted, Deferred, Refused };
 // Only scalar event data crosses from GD to BT main. A missing event retains the
 // physical command fence; a timer cannot make a late event belong to another ACL.
 class Pixel17PacketPolicy {
@@ -22,8 +23,8 @@ public:
     void event(const uint8_t*, size_t);
     bool begin(const Pixel17HciOwner&, uint64_t deadline_us, uint64_t now_us,
                void (*send)(uint16_t, uint16_t));
-    bool restore(const Pixel17HciOwner&, uint64_t deadline_us, uint64_t now_us,
-                 void (*send)(uint16_t, uint16_t));
+    Pixel17PacketRestoreResult restore(const Pixel17HciOwner&, uint64_t deadline_us, uint64_t now_us,
+                                      void (*send)(uint16_t, uint16_t));
     Pixel17PacketStatus status(uint64_t now_us);
 private:
     struct Link {
@@ -39,6 +40,7 @@ private:
     Pixel17PacketStatus status_{};
     uint16_t pending_handle_ = 0xffff, requested_ = 0;
     bool physical_ = false, owned_ = false, accepted_ = false, armed_ = false, poisoned_ = false;
+    bool disconnected_ = false;
     Link* link(uint16_t);
     bool issue(uint16_t mask, uint64_t deadline, void (*send)(uint16_t, uint16_t),
                std::unique_lock<std::mutex>&);

@@ -8,6 +8,7 @@ if(LIBREPODS_PRIVATE_WIDE_PCM AND NOT LIBREPODS_PRIVATE_OWNED_FDK)
     message(FATAL_ERROR "Wide Pixel PCM requires the matching private owned FDK backend")
 endif()
 option(ELD_KEEP_GAME_FLUSH_BASELINE "Preserve the captured controller flush timeout in Game Mode" ON)
+option(ELD_KEEP_GAME_PACKET_BASELINE "Preserve captured controller packet permissions in Game Mode" ON)
 option(LIBREPODS_NATIVE_TRACE "Verbose native hook diagnostics" OFF)
 
 add_library(dongle_hid SHARED dongle_hid.cpp)
@@ -57,6 +58,7 @@ add_library(fluoride_hooks SHARED
         eld/pixel17_hci.cpp
         eld/pixel17_hci_contract.cpp
         eld/pixel17_game_host.cpp
+        eld/pixel17_game_memory.cpp
         eld/pixel17_game_host_contract.cpp
         eld/pixel17_game_runtime.cpp
         eld/pixel17_packet_policy.cpp
@@ -79,6 +81,7 @@ target_compile_definitions(fluoride_hooks PRIVATE
         LIBREPODS_NATIVE_TRACE=$<BOOL:${LIBREPODS_NATIVE_TRACE}>
         ELD_PRIVATE_WIDE_PCM=$<BOOL:${LIBREPODS_PRIVATE_WIDE_PCM}>
         ELD_KEEP_GAME_FLUSH_BASELINE=$<BOOL:${ELD_KEEP_GAME_FLUSH_BASELINE}>
+        ELD_KEEP_GAME_PACKET_BASELINE=$<BOOL:${ELD_KEEP_GAME_PACKET_BASELINE}>
         XZ_DEC_X86
         XZ_DEC_ARM
         XZ_DEC_ARMTHUMB

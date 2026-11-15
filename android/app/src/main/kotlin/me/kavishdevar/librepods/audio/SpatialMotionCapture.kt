@@ -18,6 +18,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import me.kavishdevar.librepods.core.bluetooth.MacAddress
 import me.kavishdevar.librepods.core.data.apple.BuddyState
 import me.kavishdevar.librepods.core.data.apple.MotionReport
+import me.kavishdevar.librepods.core.data.apple.motionCounterStep
 import me.kavishdevar.librepods.core.devices.AppleDevice
 import me.kavishdevar.librepods.core.utils.HeadTracking
 import java.io.File
@@ -81,6 +82,7 @@ internal class SpatialMotionCapture(
                         throw CaptureStopped("Stopped: connection or motion request ended.")
                 }
                 var previousCounter: Long? = null
+                var previousDeviceTime: Long? = null
                 var previousArrival = startedArrival
                 val finished = withTimeoutOrNull(request.durationSeconds * 1_000L) {
                     coroutineScope {
@@ -93,11 +95,12 @@ internal class SpatialMotionCapture(
                                 val counter = report.counter
                                 val previous = previousCounter
                                 if (counter != null && previous != null) {
-                                    val delta = (counter - previous) and 0xffffffffL
+                                    val delta = motionCounterStep(previous, counter, previousDeviceTime, report.timestampNs)
                                     if (delta == 0L) return@filter false
                                     if (delta > 0x7fffffffL) throw CaptureStopped("Stopped: sensor counter moved backward.")
                                 }
                                 previousCounter = counter
+                                previousDeviceTime = report.timestampNs
                                 true
                             }.take(MAX_SAMPLES).collect { report ->
                                 requireCurrent()

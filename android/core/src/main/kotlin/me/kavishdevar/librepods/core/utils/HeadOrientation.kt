@@ -18,7 +18,10 @@
 
 package me.kavishdevar.librepods.core.utils
 
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import me.kavishdevar.librepods.core.data.apple.MotionReport
 
@@ -38,11 +41,17 @@ object HeadTracking {
     val motion = _motion.asStateFlow()
     private val _motionSample = MutableStateFlow<MotionSample?>(null)
     val motionSample = _motionSample.asStateFlow()
+    // Absorb a two-report burst; a slow renderer must lose old reports, never block the source.
+    private val _motionSamples = MutableSharedFlow<MotionSample?>(replay = 1,
+        extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+    val motionSamples = _motionSamples.asSharedFlow()
 
     fun addMotion(report: MotionReport?, vert: Float, horiz: Float, arrivalNs: Long = 0) {
         _motion.value = report
         // Legacy publishers have no source timestamp and cannot claim a fresh timed sample.
-        _motionSample.value = report?.takeIf { arrivalNs > 0 }?.let { MotionSample(it, arrivalNs) }
+        val sample = report?.takeIf { arrivalNs > 0 }?.let { MotionSample(it, arrivalNs) }
+        _motionSample.value = sample
+        _motionSamples.tryEmit(sample)
         addAccel(vert, horiz)
     }
 
@@ -52,6 +61,7 @@ object HeadTracking {
 
     fun reset() {
         _motionSample.value = null
+        _motionSamples.tryEmit(null)
         _acceleration.value = Acceleration()
         _motion.value = null
     }

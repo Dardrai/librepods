@@ -2,6 +2,7 @@
 package me.kavishdevar.librepods.audio
 
 import me.kavishdevar.librepods.core.data.apple.MotionReport
+import me.kavishdevar.librepods.core.data.apple.motionCounterStep
 import kotlin.math.abs
 import kotlin.math.acos
 import kotlin.math.atan2
@@ -45,7 +46,7 @@ internal class SpatialPoseProfile private constructor(val headFromRaw: List<List
                 val before = a.timestampNs; val after = b.timestampNs
                 if (before == null || after == null || before <= 0 || after <= before)
                     return failed(SpatialCalibrationFailure.SENSOR_TIME_CHANGED)
-                if (!counterFollows(a.counter, b.counter)) return failed(SpatialCalibrationFailure.SENSOR_COUNTER_CHANGED)
+                if (!counterFollows(a.counter, b.counter, before, after)) return failed(SpatialCalibrationFailure.SENSOR_COUNTER_CHANGED)
             }
             val quaternions = all.map { attitude(it) ?: return failed(SpatialCalibrationFailure.UNSUPPORTED_ATTITUDE) }
             val neutralTail = settledTail(ready); val returnTail = settledTail(returned)
@@ -139,7 +140,7 @@ internal class SpatialPoseConverter(private val profile: SpatialPoseProfile, pri
             profile.referenceTimestampNs?.let { reference ->
                 if (time == reference && report.counter == profile.referenceCounter) return null
                 if (time <= reference) return retire("sensor_time_changed")
-                if (!counterFollows(profile.referenceCounter, report.counter)) return retire("sensor_counter_changed")
+                if (!counterFollows(profile.referenceCounter, report.counter, reference, time)) return retire("sensor_counter_changed")
             }
             initialHeadInverse = head.inverse()
             previous = head; previousTime = time; previousCounter = report.counter
@@ -147,7 +148,7 @@ internal class SpatialPoseConverter(private val profile: SpatialPoseProfile, pri
         }
         val dt = time - previousTime
         if (dt <= 0) return retire("sensor_time_changed")
-        if (!counterFollows(previousCounter, report.counter)) return retire("sensor_counter_changed")
+        if (!counterFollows(previousCounter, report.counter, previousTime, time)) return retire("sensor_counter_changed")
         if (dt >= 250_000_000L) return retire("sensor_gap")
         val omega = (old.inverse() * head).rotationVector() * (1e9 / dt)
         if (!omega.norm().isFinite() || omega.norm() > 32.0) return retire("reference_discontinuity")
@@ -171,8 +172,8 @@ private fun attitude(report: MotionReport): Q? {
     return report.quaternionQ15PositiveW()?.let { Q(it[0], it[1], it[2], it[3]) }
 }
 
-private fun counterFollows(before: Long?, after: Long?): Boolean = before == null || after != null &&
-    ((after - before) and 0xffffffffL) in 1..0x7fffffffL
+private fun counterFollows(before: Long?, after: Long?, beforeTimeNs: Long?, afterTimeNs: Long?): Boolean =
+    before == null || after != null && motionCounterStep(before, after, beforeTimeNs, afterTimeNs) in 1..0x7fffffffL
 private fun radians(degrees: Double) = degrees * Math.PI / 180
 private fun angleBetween(a: V, b: V) = acos(a.dot(b).coerceIn(-1.0, 1.0))
 

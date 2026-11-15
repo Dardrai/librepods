@@ -18,9 +18,8 @@ internal object NativeGameModePolicy {
         host.clockReady && !host.scoOrMicrophone
     fun canApply(expected: Owner, session: Long, host: Host, nowMs: Long) = owns(expected, session, host) &&
         ready(host) && host.streaming && nowMs >= host.startedMs && nowMs - host.startedMs >= 500 &&
-        // The owned target request must get fresh timing before activation; startup may have no report yet.
-        (host.delayTenths in 600..65534 || host.delayTenths == 0 && host.delaySerial == 0L &&
-            host.delayReceivedMs == 0L && host.delayReceivedNs == 0L)
+        // Zero timing can survive a prior stream/app. The owned target still needs a fresh valid report before activation.
+        (host.delayTenths in 600..65534 || host.delayTenths == 0)
     // Cleanup keeps its original owner even after Stop/SCO makes application inadmissible.
     fun canRestore(expected: Owner, session: Long, host: Host) = owns(expected, session, host)
     fun freshRestoreReport(expected: Owner, session: Long, host: Host, beforeSerial: Long, sentMs: Long, nowMs: Long,

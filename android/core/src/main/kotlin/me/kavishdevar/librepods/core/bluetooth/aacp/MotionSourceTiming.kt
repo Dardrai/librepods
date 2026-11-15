@@ -1,10 +1,24 @@
 package me.kavishdevar.librepods.core.bluetooth.aacp
 
+import me.kavishdevar.librepods.core.bluetooth.aacp.rtbuddy.proto.SensorDataWX
 import me.kavishdevar.librepods.core.data.apple.BuddyState
 import me.kavishdevar.librepods.core.data.apple.MotionReport
+import me.kavishdevar.librepods.core.data.apple.motionCounterStep
 
 /** Constant-space timing before StateFlow conflation; no packet, identity, or pose history. */
 internal class MotionSourceTiming {
+    private class ControlMetadata {
+        var count = 0L
+        var sequence = 0L
+        var at = 0L
+        fun received(seq: Int, atNanos: Long) { count++; sequence = seq.toLong(); at = atNanos }
+        fun append(out: MutableMap<String, Long>, prefix: String) {
+            out["${prefix}_count"] = count
+            out["${prefix}_last_sequence"] = sequence
+            out["${prefix}_last_at_nanos"] = at
+        }
+    }
+
     private class Metric {
         var count = 0L
         var min = Long.MAX_VALUE
@@ -35,6 +49,7 @@ internal class MotionSourceTiming {
     private var motionReports = 0L
     private var deviceClockNonIncreasing = 0L
     private var counterNonUnitSteps = 0L
+    private var counterWrap16Count = 0L
     private var motionStarts = 0L
     private var lastMotionStart = 0L
     private var lastMotionStartIntervalUs = 0L
@@ -66,6 +81,28 @@ internal class MotionSourceTiming {
     private val activeReadInterval = Metric()
     private val activePublishInterval = Metric()
     private val activeDeviceInterval = Metric()
+    private val motionStartAck = ControlMetadata()
+    private val motionCommandAck = ControlMetadata()
+    private val motionIntervalEcho = ControlMetadata()
+    private var lastMotionIntervalEchoUs = 0L
+
+    /** Socket-lifetime observations, including stop ACKs; neither ACKs nor echoes confirm an applied rate. */
+    @Synchronized fun motionControlReceived(data: SensorDataWX, selectedService: Int?, readAtNanos: Long) {
+        if (selectedService == null || selectedService !in 1..127 || readAtNanos <= 0) return
+        if (data.hasStartAck() && data.startAck.serviceValue == selectedService)
+            motionStartAck.received(data.seq, readAtNanos)
+        if (data.hasCommandAck() && data.commandAck.serviceValue == selectedService)
+            motionCommandAck.received(data.seq, readAtNanos)
+        if (!data.hasServiceSettings()) return
+        val setting = data.serviceSettings
+        val bytes = setting.configuration
+        if (setting.serviceValue != selectedService || setting.setting != 2 ||
+            bytes.size() != 5 || bytes.byteAt(0) != 1.toByte()) return
+        lastMotionIntervalEchoUs = (1..4).fold(0L) { value, index ->
+            value or ((bytes.byteAt(index).toLong() and 255) shl ((index - 1) * 8))
+        }
+        motionIntervalEcho.received(data.seq, readAtNanos)
+    }
 
     @Synchronized fun readReturned(atNanos: Long, bytes: Int, startedAtNanos: Long = 0) {
         if (atNanos <= 0 || bytes <= 0) return
@@ -151,14 +188,15 @@ internal class MotionSourceTiming {
             if (it > before) deviceInterval.add(it - before, publishedAtNanos)
             else deviceClockNonIncreasing++
         } }
-        previousDevice = device
         val counter = report.counter
         previousCounter?.let { before -> counter?.let {
-            val step = (it - before) and 0xffffffffL
+            val step = motionCounterStep(before, it, previousDevice, device)
+            if (step != ((it - before) and 0xffffffffL)) counterWrap16Count++
             counterStep.add(step, publishedAtNanos)
             if (step != 1L) counterNonUnitSteps++
         } }
         previousCounter = counter
+        previousDevice = device
     }
 
     /** All *_max_at_nanos values use the same elapsed-realtime clock as the source arrival. */
@@ -168,6 +206,7 @@ internal class MotionSourceTiming {
         put("motion_reports", motionReports)
         put("device_clock_non_increasing", deviceClockNonIncreasing)
         put("counter_non_unit_steps", counterNonUnitSteps)
+        put("counter_wrap16_count", counterWrap16Count)
         put("motion_start_count", motionStarts)
         put("last_motion_start_at_nanos", lastMotionStart)
         put("last_motion_start_interval_us", lastMotionStartIntervalUs)
@@ -179,6 +218,10 @@ internal class MotionSourceTiming {
         put("heart_mapping_changes", heartMappingChanges)
         put("last_motion_mapping_change_at_nanos", lastMotionMappingChange)
         put("last_heart_mapping_change_at_nanos", lastHeartMappingChange)
+        motionStartAck.append(this, "motion_start_ack")
+        motionCommandAck.append(this, "motion_command_ack")
+        motionIntervalEcho.append(this, "motion_interval_echo")
+        put("motion_interval_echo_last_us", lastMotionIntervalEchoUs)
         readInterval.append(this, "read_interval")
         readWait.append(this, "read_wait")
         readWork.append(this, "read_work")

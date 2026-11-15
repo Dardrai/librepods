@@ -64,9 +64,17 @@ struct Pixel17GameHostState {
 enum class Pixel17GameInvalidation : uint8_t {
     Stop, Close, Reconfigure, RouteChanged, EncoderChanged, Sco, InvalidRoute, WrongThread, Disabled
 };
+struct Pixel17GameRead {
+    size_t offset;
+    size_t size;
+    void* out;
+};
+// One fresh maps pass; validate every range before copying any output. At most six reads.
+bool pixel17_game_copy_batch(const void* source, const Pixel17GameRead* reads, size_t count) noexcept;
 struct Pixel17GameBindings {
     // Platform readers execute only on the thread delivering the validated BTA callbacks.
     bool (*copy)(const void* source, size_t size, void* out) noexcept = nullptr;
+    bool (*copy_batch)(const void* source, const Pixel17GameRead* reads, size_t count) noexcept = nullptr;
     void* (*scb)(uint16_t bta_handle) noexcept = nullptr;
     void* (*avdt_scb)(uint8_t avdt_handle) noexcept = nullptr;
     uint16_t (*media_cid)(uint8_t avdt_handle) noexcept = nullptr;

@@ -21,6 +21,12 @@ internal class HeadTrackingTiming {
     private val deviceIntervals = Range()
     private val arrivalIntervals = Range()
     private val collectionAge = Range()
+    private val collectorWork = Range()
+    private var collectorWorkMaxAt = 0L
+    private var epochRequestAt = 0L
+    private var firstCollectionAt = 0L
+    private var firstAttitudeAt = 0L
+    private var firstSubmitAt = 0L
     private var previousDevice: Long? = null
     private var previousArrival = 0L
     private var epochs = 0L
@@ -33,7 +39,11 @@ internal class HeadTrackingTiming {
     private var firstFallbackReason: String? = null
     private var lastAttitudeAtFallback = 0L
 
-    @Synchronized fun begin() { epochs++; previousDevice = null; previousArrival = 0 }
+    @Synchronized fun begin(requestAtNanos: Long = 0) {
+        epochs++; previousDevice = null; previousArrival = 0
+        epochRequestAt = requestAtNanos
+        firstCollectionAt = 0; firstAttitudeAt = 0; firstSubmitAt = 0
+    }
     @Synchronized fun requested(intervalUs: Long, fallback: Boolean = false) {
         requestedUs = intervalUs; this.fallback = fallback
     }
@@ -46,6 +56,8 @@ internal class HeadTrackingTiming {
     @Synchronized fun sample(value: MotionSample, collectedAt: Long) {
         require(collectedAt >= value.arrivalNs)
         samples++
+        if (firstCollectionAt == 0L && epochRequestAt > 0 && collectedAt >= epochRequestAt)
+            firstCollectionAt = collectedAt
         value.report.timestampNs?.let { time ->
             previousDevice?.let { before -> if (time > before) deviceIntervals.add(time - before) }
             previousDevice = time
@@ -56,6 +68,19 @@ internal class HeadTrackingTiming {
         collectionAge.add(collectedAt - value.arrivalNs)
     }
     @Synchronized fun submitted() { submitted++ }
+    @Synchronized fun validAttitude(atNanos: Long) {
+        if (firstAttitudeAt == 0L && firstCollectionAt > 0 && atNanos >= firstCollectionAt) firstAttitudeAt = atNanos
+    }
+    // The caller's submitted counter remains separate; record only a successful callback's milestone here.
+    @Synchronized fun poseSubmitted(atNanos: Long) {
+        if (firstSubmitAt == 0L && firstAttitudeAt > 0 && atNanos >= firstAttitudeAt) firstSubmitAt = atNanos
+    }
+    @Synchronized fun collectorFinished(startedAt: Long, finishedAt: Long) {
+        if (startedAt <= 0 || finishedAt < startedAt) return
+        val elapsed = finishedAt - startedAt
+        if (collectorWork.count == 0L || elapsed > collectorWork.max) collectorWorkMaxAt = finishedAt
+        collectorWork.add(elapsed)
+    }
     @Synchronized fun stale() { stale++ }
     @Synchronized fun snapshot(): Bundle = Bundle().apply {
         putInt("version", 1); putLong("source_epochs", epochs); putLong("source_samples", samples)
@@ -66,6 +91,13 @@ internal class HeadTrackingTiming {
         putLong("first_fallback_last_attitude_at_nanos", lastAttitudeAtFallback)
         putString("age_scope", "parsed_source_callback_to_app_collection")
         putBoolean("excludes_acoustic_latency", true)
+        putLong("latest_epoch_request_at_nanos", epochRequestAt)
+        putLong("latest_epoch_first_collection_at_nanos", firstCollectionAt)
+        putLong("latest_epoch_first_attitude_at_nanos", firstAttitudeAt)
+        putLong("latest_epoch_first_submit_at_nanos", firstSubmitAt)
+        putString("collector_work_scope", "non_null_callback_entry_through_owner_check_conversion_submit")
+        collectorWork.write(this, "collector_work")
+        putLong("collector_work_max_at_nanos", collectorWorkMaxAt)
         deviceIntervals.write(this, "device_interval")
         arrivalIntervals.write(this, "source_arrival_interval")
         collectionAge.write(this, "app_collection_age")

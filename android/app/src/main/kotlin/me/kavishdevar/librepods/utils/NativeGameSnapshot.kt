@@ -15,7 +15,7 @@ internal class NativeGameSnapshot private constructor(private val values: LongAr
     val currentKnown get() = values[11] == 1L
     val currentSlots get() = values[12].toInt()
     val restorePending get() = values[13] == 1L || packetPending || packetRestorePending ||
-        (packetBaselineKnown && packetBaseline != packetCurrent)
+        (packetBaselineKnown && packetBaseline != packetCurrent && !packetOwnerRetired)
     val cancelled get() = values[14] == 1L
     val requestMediaGeneration get() = values[15]
     val requestEncoderGeneration get() = values[16]
@@ -63,9 +63,13 @@ internal class NativeGameSnapshot private constructor(private val values: LongAr
     val packetCurrent get() = if (values.size == 86) values[81].toInt() else 0
     val packetPending get() = values.size == 86 && values[82] == 1L
     val packetRestorePending get() = values.size == 86 && values[83] == 1L
+    // Native ACL retirement clears debt but retains mask history; it does not verify a baseline write.
+    private val packetOwnerRetired get() = values.size == 86 && values[85] == 3L && values[84] == 0L &&
+        !packetPending && !packetRestorePending
+    /** Flush readback is confirmed and packet cleanup is resolved, including a retired packet ACL. */
     val restored get() = !holding && !busy && !restorePending && !clockPending && clockInterval == 10 && baselineKnown && currentKnown &&
         baselineSlots == currentSlots && !packetPending && !packetRestorePending &&
-        (!packetBaselineKnown || packetBaseline == packetCurrent)
+        (!packetBaselineKnown || packetBaseline == packetCurrent || packetOwnerRetired)
     // Runtime resets each accepted Prepare, checks its owner before the first HCI read,
     // and records a captured baseline plus restore debt before any controller write.
     val noControllerMutation get() = supported && operation == 3 && phase == 9 && error == 3 &&
@@ -87,7 +91,13 @@ internal class NativeGameSnapshot private constructor(private val values: LongAr
         "packetBaseline=$packetBaseline packetCurrent=$packetCurrent packetPending=$packetPending packetRestorePending=$packetRestorePending " +
         "clockRequest=$clockRequestSerial clockPending=$clockPending clockPhase=$clockPhase " +
         "clockSerial=$clockSerial clockInterval=$clockInterval clockDrift=$clockDriftMs " +
-        "clockActualFrames=${values[74]} clockNominalFrames=${values[75]} clockProgressFrames=${values[76]}"
+        "clockActualFrames=${values[74]} clockNominalFrames=${values[75]} clockProgressFrames=${values[76]} " +
+        "snapshotVersion=${values[0]} operation=$operation nativeRestorePending=${values[13]} cancelled=$cancelled " +
+        "requestMediaGeneration=$requestMediaGeneration requestEncoderGeneration=$requestEncoderGeneration " +
+        "requestAclHandle=$requestAclHandle aclHandle=$aclHandle " +
+        "packetBaselineKnown=$packetBaselineKnown packetReady=${values.getOrNull(84)} packetError=${values.getOrNull(85)} " +
+        "packetOwnerRetired=$packetOwnerRetired " +
+        "globalClockPhase=${values[43]} globalClockSerial=${values[44]} globalClockInterval=${values[45]}"
 
     companion object {
         fun parse(input: LongArray): NativeGameSnapshot? {

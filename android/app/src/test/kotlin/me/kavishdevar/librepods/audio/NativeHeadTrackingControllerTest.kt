@@ -28,6 +28,7 @@ import me.kavishdevar.librepods.core.bluetooth.MacAddress
 import me.kavishdevar.librepods.core.bluetooth.aacp.AACPManager
 import me.kavishdevar.librepods.core.data.apple.MotionReport
 import me.kavishdevar.librepods.core.utils.MotionSample
+import me.kavishdevar.librepods.core.utils.HeadTracking
 import me.kavishdevar.librepods.core.devices.AirPodsModel
 import me.kavishdevar.librepods.core.devices.AppleDevice
 import me.kavishdevar.librepods.core.devices.AppleMetadata
@@ -107,6 +108,34 @@ class NativeHeadTrackingControllerTest {
             assertEquals(12L, source.getLong("reads"))
             assertEquals(30L, source.getLong("feed_wait_max_nanos"))
             assertTrue(f.started.isEmpty())
+        }
+    }
+
+    @Test fun sessionReplacementRetainsOnlyThePreviousSourceSummaryAndResetsCurrentCounters() {
+        Target().use { f ->
+            val old = HeadTrackingTiming().apply {
+                begin(100); collectorFinished(110, 150); fallingBack(200, "attitude_stall", 120)
+            }
+            ReflectionHelpers.setField(f.controller, "timing", old)
+            val fresh = ReflectionHelpers.callInstanceMethod<HeadTrackingTiming>(f.controller, "replaceSessionTiming")
+            var value = f.controller.timingSnapshot()
+            assertEquals(0L, value.getLong("source_epochs"))
+            assertEquals(0L, value.getLong("collector_work_count"))
+            var previous = requireNotNull(value.getBundle("previous_session"))
+            assertEquals(40L, previous.getLong("collector_work_max_nanos"))
+            assertEquals(150L, previous.getLong("collector_work_max_at_nanos"))
+            assertEquals("attitude_stall", previous.getString("first_fallback_reason"))
+            assertFalse(previous.containsKey("previous_session"))
+            previous.putLong("collector_work_max_nanos", 999) // Dump callers cannot mutate the retained snapshot.
+            assertEquals(40L, f.controller.timingSnapshot().getBundle("previous_session")!!.getLong("collector_work_max_nanos"))
+            fresh.begin(300); fresh.collectorFinished(310, 315)
+            ReflectionHelpers.callInstanceMethod<HeadTrackingTiming>(f.controller, "replaceSessionTiming")
+            value = f.controller.timingSnapshot()
+            previous = requireNotNull(value.getBundle("previous_session"))
+            assertEquals(300L, previous.getLong("latest_epoch_request_at_nanos"))
+            assertEquals(5L, previous.getLong("collector_work_max_nanos"))
+            assertNull(previous.getString("first_fallback_reason"))
+            assertFalse(previous.containsKey("previous_session"))
         }
     }
 
@@ -220,6 +249,92 @@ class NativeHeadTrackingControllerTest {
         }
     }
 
+    @Test fun collectorDiagnosticsIncludeOwnerAndSubmitWorkWithoutCreditingInvalidStartupSamples() = runBlocking {
+        Target().use { f ->
+            var clock = HOST_START
+            val timing = HeadTrackingTiming()
+            val source = flow<MotionSample?> {
+                emit(null)
+                clock = HOST_START + 10_000_000
+                emit(MotionSample(report(1), HOST_START)) // Before the request.
+                clock = HOST_START + 300_000_000
+                emit(MotionSample(report(1), HOST_START + 2_000_000)) // Stale.
+                clock = HOST_START + 320_000_000
+                emit(MotionSample(report(1).copy(attitudeQ15 = listOf(0, 0, 0)), clock))
+                clock = HOST_START + 330_000_000
+                emit(MotionSample(report(1), clock)) // Duplicate counter cannot establish the valid-attitude milestone.
+                clock = HOST_START + 340_000_000
+                emit(MotionSample(report(2), clock)) // Valid attitude primes only.
+                clock = HOST_START + 360_000_000
+                emit(MotionSample(report(3), clock))
+            }
+            val collectorThread = Thread.currentThread()
+            val failure = runCatching {
+                streamCalibratedHeadMotion(f.device, source, identity, 0,
+                    { if (Thread.currentThread() === collectorThread) clock += 1_000_000; true },
+                    timing, now = { clock }) { _, _ -> clock += 3_000_000 }
+            }.exceptionOrNull()
+            assertEquals("motion_ended", failure?.message)
+            val value = timing.snapshot()
+            assertEquals(6L, value.getLong("collector_work_count"))
+            assertEquals(1_000_000L, value.getLong("collector_work_min_nanos"))
+            assertEquals(4_000_000L, value.getLong("collector_work_max_nanos"))
+            assertEquals(HOST_START + 364_000_000, value.getLong("collector_work_max_at_nanos"))
+            assertEquals(HOST_START + 1_000_000, value.getLong("latest_epoch_request_at_nanos"))
+            assertEquals(HOST_START + 321_000_000, value.getLong("latest_epoch_first_collection_at_nanos"))
+            assertEquals(HOST_START + 341_000_000, value.getLong("latest_epoch_first_attitude_at_nanos"))
+            assertEquals(HOST_START + 364_000_000, value.getLong("latest_epoch_first_submit_at_nanos"))
+            assertEquals(3L, value.getLong("source_samples"))
+            assertEquals(1L, value.getLong("stale_samples_dropped"))
+        }
+    }
+
+    @Test fun savedCalibrationReferenceAndInvalidAttitudeCannotClaimFirstUsableAttitude() = runBlocking {
+        for (savedReference in listOf(true, false)) Target().use { f ->
+            var clock = HOST_START
+            val timing = HeadTrackingTiming()
+            val profile = checkNotNull(SpatialPoseProfile.fromBasis(identity.headFromRaw))
+            val first = if (savedReference) report(1) else report(1).copy(attitudeQ15 = listOf(32767, 32767, 32767))
+            if (savedReference) {
+                ReflectionHelpers.setField(profile, "referenceTimestampNs", first.timestampNs)
+                ReflectionHelpers.setField(profile, "referenceCounter", first.counter)
+            }
+            val source = flow<MotionSample?> { clock += 10_000_000; emit(MotionSample(first, clock)) }
+            val failure = runCatching {
+                streamCalibratedHeadMotion(f.device, source, profile, 0, { true }, timing, now = { clock }) { _, _ ->
+                    fail("Neither input can emit a pose")
+                }
+            }.exceptionOrNull()
+            assertEquals(if (savedReference) "motion_ended" else "unsupported_attitude", failure?.message)
+            val value = timing.snapshot()
+            assertEquals(1L, value.getLong("collector_work_count"))
+            assertEquals(HOST_START + 10_000_000, value.getLong("latest_epoch_first_collection_at_nanos"))
+            assertEquals(0L, value.getLong("latest_epoch_first_attitude_at_nanos"))
+            assertEquals(0L, value.getLong("latest_epoch_first_submit_at_nanos"))
+        }
+    }
+
+    @Test fun failedSubmissionIsTimedWithoutPublishingASuccessMilestone() = runBlocking {
+        Target().use { f ->
+            var clock = HOST_START
+            val timing = HeadTrackingTiming()
+            val source = flow<MotionSample?> {
+                for (tick in 1..2) { clock += 10_000_000; emit(MotionSample(report(tick), clock)) }
+            }
+            val failure = runCatching {
+                streamCalibratedHeadMotion(f.device, source, identity, 0, { true }, timing, now = { clock }) { _, _ ->
+                    clock += 5_000_000
+                    error("submit_failed")
+                }
+            }.exceptionOrNull()
+            assertEquals("submit_failed", failure?.message)
+            val value = timing.snapshot()
+            assertEquals(2L, value.getLong("collector_work_count"))
+            assertEquals(5_000_000L, value.getLong("collector_work_max_nanos"))
+            assertEquals(0L, value.getLong("latest_epoch_first_submit_at_nanos"))
+        }
+    }
+
     @Test fun reportingSourcePrimesFreshRatesAndReleasesOnlyItsOwnMotionOwner() = runBlocking {
         Target().use { f ->
             val poses = mutableListOf<SpatialPose>()
@@ -245,6 +360,32 @@ class NativeHeadTrackingControllerTest {
             } finally { job.cancelAndJoin() }
             assertEquals(1, f.started.size); assertEquals(f.started.toList(), f.released.toList())
             verify(f.device, never()).stopHeadTracking()
+        }
+    }
+
+    @Test fun hundredHertzSourceContinuesAcrossTheCorroboratedSixteenBitBoundary() = runBlocking {
+        Target().use { f ->
+            var clock = HOST_START
+            val timing = HeadTrackingTiming()
+            val poses = mutableListOf<SpatialPose>()
+            val source = flow<MotionSample?> {
+                for ((index, counter) in listOf(65530L, 65532L, 65534L, 0L, 2L, 4L).withIndex()) {
+                    clock += 10_000_000
+                    emit(MotionSample(report(index + 1).copy(timestampNs = (index + 1) * 10_000_000L,
+                        counter = counter), clock))
+                }
+                awaitCancellation()
+            }
+            val job = async { streamCalibratedHeadMotion(f.device, source, identity, 3, { true }, timing,
+                now = { clock }) { pose, _ -> poses += pose } }
+            try {
+                waitUntil { poses.size == 5 }
+                assertEquals((2..6).map { it * 10_000_000L }, poses.map { it.timestampNs })
+                assertEquals(6L, timing.snapshot().getLong("source_samples"))
+                assertFalse(timing.snapshot().getBoolean("fallback_rate"))
+                assertEquals(1, f.started.size)
+            } finally { job.cancelAndJoin() }
+            assertEquals(f.started.toList(), f.released.toList())
         }
     }
 
@@ -344,16 +485,67 @@ class NativeHeadTrackingControllerTest {
         Target().use { f ->
             val timing = HeadTrackingTiming()
             val source = flow<MotionSample?> { emit(null); awaitCancellation() }
+            val startedAt = System.nanoTime()
             val job = async { streamCalibratedHeadMotion(f.device, source, identity, 0, { true }, timing,
                 now = { HOST_START }) { _, _ -> fail("No measurements exist") } }
             try {
-                waitUntil { timing.snapshot().getBoolean("fallback_rate") }
+                withTimeout(4_500) { while (!timing.snapshot().getBoolean("fallback_rate")) delay(10) }
+                assertTrue(System.nanoTime() - startedAt >= 3_000_000_000L)
                 assertEquals("attitude_startup_timeout", timing.snapshot().getString("first_fallback_reason"))
                 assertEquals(20_000, timing.snapshot().getLong("requested_interval_us"))
                 assertEquals(2, f.started.size); assertSame(f.started[0], f.started[1])
                 assertTrue(f.released.isEmpty())
             } finally { job.cancelAndJoin() }
             assertEquals(listOf(f.started[0]), f.released.toList())
+        }
+    }
+
+    @Test fun aFirstAttitudeAfterColdStartupKeeps100HzAndOnlyEmitsMeasuredTimestamps() = runBlocking {
+        Target().use { f ->
+            val timing = HeadTrackingTiming(); val clock = AtomicLong(HOST_START)
+            val poses = mutableListOf<Pair<SpatialPose, Long>>()
+            val firstArrival = HOST_START + 1_800_000_000L
+            val source = flow<MotionSample?> {
+                delay(1_800)
+                assertTrue(poses.isEmpty())
+                clock.set(firstArrival)
+                emit(MotionSample(report(1).copy(timestampNs = 10_000_000), firstArrival))
+                assertTrue("The first attitude only primes the converter", poses.isEmpty())
+                delay(10)
+                clock.addAndGet(10_000_000)
+                emit(MotionSample(report(2).copy(timestampNs = 20_000_000), clock.get()))
+                awaitCancellation()
+            }
+            val job = async { streamCalibratedHeadMotion(f.device, source, identity, 0, { true }, timing,
+                now = clock::get) { pose, arrival -> poses += pose to arrival } }
+            try {
+                waitUntil { poses.size == 1 }
+                assertEquals(20_000_000L, poses.single().first.timestampNs)
+                assertEquals(firstArrival + 10_000_000, poses.single().second)
+                assertEquals(10_000L, timing.snapshot().getLong("requested_interval_us"))
+                assertFalse(timing.snapshot().getBoolean("fallback_rate"))
+                assertNull(timing.snapshot().getString("first_fallback_reason"))
+                assertEquals(1, f.started.size)
+            } finally { job.cancelAndJoin() }
+            assertEquals(f.started.toList(), f.released.toList())
+        }
+    }
+
+    @Test fun cancellationDuringColdStartupReleasesTheOwnerWithoutAFallbackWrite() = runBlocking {
+        Target().use { f ->
+            val timing = HeadTrackingTiming()
+            val source = flow<MotionSample?> { emit(null); awaitCancellation() }
+            val job = async { streamCalibratedHeadMotion(f.device, source, identity, 0, { true }, timing,
+                now = { HOST_START }) { _, _ -> fail("No measurements exist") } }
+            try {
+                waitUntil { f.started.isNotEmpty() }
+                delay(1_800)
+                assertFalse(timing.snapshot().getBoolean("fallback_rate"))
+            } finally { job.cancelAndJoin() }
+            assertTrue(job.isCancelled)
+            assertEquals(1, f.started.size)
+            assertEquals(f.started.toList(), f.released.toList())
+            assertNull(timing.snapshot().getString("first_fallback_reason"))
         }
     }
 
@@ -427,6 +619,68 @@ class NativeHeadTrackingControllerTest {
                 assertFalse(timing.snapshot().getBoolean("fallback_rate"))
             } finally { job.cancelAndJoin() }
             assertEquals(f.started.toList(), f.released.toList())
+        }
+    }
+
+    @Test fun liveBurstHandoffPreservesOrderAndStillRejectsPreStartAndExpiredSamples() = runBlocking {
+        HeadTracking.reset()
+        Target().use { f ->
+            val clock = AtomicLong(HOST_START)
+            val timing = HeadTrackingTiming()
+            val poses = mutableListOf<Pair<SpatialPose, Long>>()
+            HeadTracking.addMotion(report(99), 0f, 0f, HOST_START - 1)
+            val job = async(start = CoroutineStart.UNDISPATCHED) {
+                streamCalibratedHeadMotion(f.device, HeadTracking.motionSamples, identity, 0,
+                    { true }, timing, now = clock::get, tryFast = false) { pose, arrival ->
+                    poses += pose to arrival
+                }
+            }
+            try {
+                assertEquals(0L, timing.snapshot().getLong("source_samples"))
+                // Publish both before yielding to the live collector, just like a parsed socket burst.
+                for (tick in 1..2) {
+                    HeadTracking.addMotion(report(tick), 0f, 0f, clock.addAndGet(20_000_000))
+                }
+                waitUntil { poses.size == 1 }
+                assertEquals(40_000_000L, poses.single().first.timestampNs)
+                assertEquals(HOST_START + 40_000_000L, poses.single().second)
+                assertEquals(2L, timing.snapshot().getLong("source_samples"))
+                HeadTracking.addMotion(report(3), 0f, 0f, clock.addAndGet(20_000_000))
+                clock.addAndGet(300_000_000)
+                HeadTracking.addMotion(report(4), 0f, 0f, clock.get())
+                waitUntil { poses.size == 2 }
+                assertEquals(80_000_000L, poses.last().first.timestampNs)
+                assertEquals(clock.get(), poses.last().second)
+                assertEquals(1L, timing.snapshot().getLong("stale_samples_dropped"))
+                assertEquals(3L, timing.snapshot().getLong("source_samples"))
+            } finally { job.cancelAndJoin(); HeadTracking.reset() }
+        }
+    }
+
+    @Test fun queuedReportsCannotOutliveTheirOwnerEvenWhenResetIsBehindThem() = runBlocking {
+        HeadTracking.reset()
+        Target().use { f ->
+            val current = AtomicBoolean(true)
+            val clock = AtomicLong(HOST_START)
+            val timing = HeadTrackingTiming()
+            val job = async(start = CoroutineStart.UNDISPATCHED) {
+                runCatching {
+                    streamCalibratedHeadMotion(f.device, HeadTracking.motionSamples, identity, 0,
+                        current::get, timing, now = clock::get, tryFast = false) { _, _ ->
+                        fail("An old owner cannot submit queued reports")
+                    }
+                }.exceptionOrNull()
+            }
+            try {
+                for (tick in 1..2) {
+                    HeadTracking.addMotion(report(tick), 0f, 0f, clock.addAndGet(20_000_000))
+                }
+                current.set(false)
+                HeadTracking.reset()
+                assertEquals("owner_changed", withTimeout(2_000) { job.await() }?.message)
+                assertEquals(0L, timing.snapshot().getLong("source_samples"))
+                assertEquals(f.started.toList(), f.released.toList())
+            } finally { job.cancelAndJoin(); HeadTracking.reset() }
         }
     }
 

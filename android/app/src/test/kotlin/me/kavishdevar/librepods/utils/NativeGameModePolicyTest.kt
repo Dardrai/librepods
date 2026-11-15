@@ -34,10 +34,10 @@ class NativeGameModePolicyTest {
         assertFalse(NativeGameModePolicy.freshReport(owner,4,host,1,1400,3401))
         assertFalse(NativeGameModePolicy.freshReport(owner,4,host.copy(delayTenths=0),1,1400,1600))
     }
-    @Test fun exactGameTargetIsAdmittedButLowerAndMissingReportsAreNot() {
+    @Test fun exactGameTargetIsAdmittedButLowerAndInvalidReportsAreNot() {
         val target = host.copy(delayTenths = 600)
         assertTrue(NativeGameModePolicy.canApply(owner,4,target,1500))
-        for (delay in listOf(0, 1, 599, 65535))
+        for (delay in listOf(1, 599, 65535))
             assertFalse(NativeGameModePolicy.canApply(owner,4,target.copy(delayTenths = delay),1500))
         assertFalse(NativeGameModePolicy.canApply(owner,5,target,1500))
         assertFalse(NativeGameModePolicy.canApply(owner,4,target.copy(mediaGeneration = 99),1500))
@@ -60,12 +60,23 @@ class NativeGameModePolicyTest {
         val missing = host.copy(delaySerial = 0, delayReceivedMs = 0, delayReceivedNs = 0, delayTenths = 0)
         assertTrue(NativeGameModePolicy.canApply(owner, 4, missing, 1500))
         assertFalse(NativeGameModePolicy.freshReport(owner, 4, missing, 0, 1400, 1600))
-        for (invalid in listOf(missing.copy(reporting = false), missing.copy(delaySerial = 1),
-            missing.copy(delayReceivedNs = 1), missing.copy(delayTenths = 65535),
+        for (invalid in listOf(missing.copy(reporting = false), missing.copy(delayTenths = 65535),
             missing.copy(streaming = false), missing.copy(scoOrMicrophone = true),
             missing.copy(encoderReady = false), missing.copy(clockReady = false)))
             assertFalse(NativeGameModePolicy.canApply(owner, 4, invalid, 1500))
         assertFalse(NativeGameModePolicy.canApply(owner, 5, missing, 1500))
+    }
+    @Test fun historicalZeroTimingCanPrepareButStillNeedsFreshValidOwnedTiming() {
+        val zero = host.copy(delayTenths = 0)
+        assertTrue(NativeGameModePolicy.canApply(owner, 4, zero, 1500))
+        assertFalse(NativeGameModePolicy.freshReport(owner, 4, zero, 1, 1400, 1600))
+        assertNull(NativeGameModePolicy.clock(0, 60))
+        for (invalid in listOf(zero.copy(reporting = false), zero.copy(encoderReady = false),
+            zero.copy(flushReady = false), zero.copy(clockReady = false), zero.copy(streaming = false),
+            zero.copy(scoOrMicrophone = true), zero.copy(peer = peer.reversed()), zero.copy(mediaGeneration = 99)))
+            assertFalse(NativeGameModePolicy.canApply(owner, 4, invalid, 1500))
+        assertFalse(NativeGameModePolicy.canApply(owner, 5, zero, 1500))
+        assertFalse(NativeGameModePolicy.canApply(owner, 4, zero, 1499))
     }
     @Test fun sameMillisecondPrewriteReportCannotConfirmEitherTarget() {
         val boundary = 1_500_000_500L

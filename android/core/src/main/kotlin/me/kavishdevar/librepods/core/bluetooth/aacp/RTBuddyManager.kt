@@ -118,6 +118,8 @@ internal class RTBuddyManager(
             if (remoteAllowed()) continue
             val data = (packet.rtBuddyPayload as? SensorDataWxBuddyPayload)?.data ?: continue
             val batch = reports.receive(data, legacyMotion())
+            if (data.hasStartAck() || data.hasCommandAck() || data.hasServiceSettings())
+                sourceTiming?.motionControlReceived(data, reports.motionService, readAtNanos)
             if (batch.mappingChanged) sourceTiming?.mappingChanged(
                 batch.motionMappingChanged, batch.heartRateMappingChanged, sourceClockNanos())
             if (batch.motionMappingChanged) {

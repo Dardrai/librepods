@@ -37,6 +37,7 @@ struct Runtime {
     Pixel17PacketPolicy* packets = nullptr;
     void (*send_packets)(uint16_t,uint16_t) = nullptr;
     bool packet_started = false, packet_entering = false, packet_restoring = false, packet_restore_attempted = false;
+    uint64_t packet_restore_wait_deadline_us = 0;
     uint64_t next = 0, hci_serial = 0, command_epoch = 0, monitor_deadline_ns = 0;
     uint64_t next_clock_request = 0, clock_epoch = 0, owned_clock = 0;
     bool tick_queued = false, restore_attempted = false, finishing = false;
@@ -150,7 +151,8 @@ struct Runtime {
             status.clock=actual; status.clock_observed_ns=now;
         }
     }
-    bool end_for(uint64_t lease,uint64_t serial,Pixel17HciStatus error,bool graceful=false,bool held_only=false) {
+    bool end_for(uint64_t lease,uint64_t serial,Pixel17HciStatus error,bool graceful=false,bool held_only=false,
+                 bool snapshot_host=false) {
         uint64_t clock_serial;
         {
             std::lock_guard<std::mutex> lock(mutex);
@@ -160,6 +162,17 @@ struct Runtime {
             // only if that same hold is still live under this lock; never relabel
             // successful graceful cleanup as an ownership/lease failure.
             if(held_only && (!status.holding || status.cancelled)) return false;
+            // Host invalidations notify after releasing their mutex. Publish the current
+            // snapshot with hold loss; no refresh/platform reads run under this lock.
+            if(snapshot_host) status.host=pixel17_game_host_snapshot();
+            // An explicit same-owner Restore can renew an expired foreign wait,
+            // never a submitted write. Reset before publishing busy to the
+            // watchdog; controller events cannot renew either deadline.
+            if(graceful && !packet_restore_attempted && packet_restore_wait_deadline_us &&
+               clock.now(clock.clock_context)>=packet_restore_wait_deadline_us) {
+                packet_restore_wait_deadline_us=0;
+                monitor_deadline_ns=0;
+            }
             status.cancelled=true; status.holding=false;
             graceful_restore=graceful && status.error==Pixel17HciStatus::Ok;
             if(status.error==Pixel17HciStatus::Ok && !graceful) status.error=error;
@@ -239,14 +252,35 @@ struct Runtime {
                 status.phase=Pixel17GamePhase::Restoring; status.restore_pending=true;
                 if(status.packets.pending) { status.phase=Pixel17GamePhase::Quarantined; return; }
                 if(packet_restore_attempted) { status.phase=Pixel17GamePhase::Quarantined; status.busy=false; return; }
-                packet_restore_attempted=true; packet_restoring=true; packet_cleanup=true;
+                packet_restoring=true; packet_cleanup=true;
             }
         }
         if(packet_cleanup) {
+            const bool current=owner_current(this,owner);
             const auto now=clock.now(clock.clock_context);
-            if(!owner_current(this,owner) || !packets->restore(owner,now+1000000,now,send_packets)) {
+            {
                 std::lock_guard<std::mutex> lock(mutex);
-                packet_restoring=false; status.phase=Pixel17GamePhase::Quarantined; status.busy=false;
+                if(packet_restore_wait_deadline_us && now>=packet_restore_wait_deadline_us) {
+                    // Stop waiting without erasing debt or permitting a later
+                    // unrelated event to restart this bounded recovery window.
+                    // Recheck after native route refresh, which may take time.
+                    packet_restoring=false;
+                    if(status.error==Pixel17HciStatus::Ok) status.error=Pixel17HciStatus::Timeout;
+                    status.phase=Pixel17GamePhase::Quarantined; status.busy=false; return;
+                }
+            }
+            const auto result=current
+                ? packets->restore(owner,now+1000000,now,send_packets) : Pixel17PacketRestoreResult::Refused;
+            std::lock_guard<std::mutex> lock(mutex);
+            if(result==Pixel17PacketRestoreResult::Deferred) {
+                // A foreign ACL owns the physical slot, not our restore attempt.
+                if(!packet_restore_wait_deadline_us) packet_restore_wait_deadline_us=now+1000000;
+                packet_restoring=false;
+            } else {
+                packet_restore_attempted=true;
+                if(result==Pixel17PacketRestoreResult::Refused) {
+                    packet_restoring=false; status.phase=Pixel17GamePhase::Quarantined; status.busy=false;
+                }
             }
             return;
         }
@@ -651,6 +685,7 @@ uint64_t pixel17_game_submit(Pixel17GameOperation operation,uint64_t lease,
         r->monitor_deadline_ns=0; r->late_reclaimed=false; r->late_verification_attempted=false;
         r->graceful_restore=false;
         r->packet_started=false; r->packet_entering=false; r->packet_restoring=false; r->packet_restore_attempted=false;
+        r->packet_restore_wait_deadline_us=0;
     }
     auto* start=new(std::nothrow) Runtime::Start{r,serial};
     if(!start || !r->main->post(Runtime::start_task,start,Runtime::delete_start,deadline/1000)) {
@@ -736,7 +771,7 @@ void pixel17_game_invalidated(Pixel17GameInvalidation,const Pixel17GameHostState
           r->status.owner.media_generation!=previous.media_generation ||
           r->status.owner.acl_handle!=previous.acl_handle || std::memcmp(r->status.owner.peer,previous.peer,6)) return;
       lease=r->status.lease_owner; serial=r->status.serial; }
-    r->end_for(lease,serial,Pixel17HciStatus::StaleOwner);
+    r->end_for(lease,serial,Pixel17HciStatus::StaleOwner,false,false,true);
 }
 void pixel17_game_runtime_disable() {
     auto* r=get(); if(!r) return;

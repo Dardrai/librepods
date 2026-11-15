@@ -1,5 +1,16 @@
 package me.kavishdevar.librepods.core.utils
 
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.take
+import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import me.kavishdevar.librepods.core.data.apple.MotionReport
 import org.junit.After
 import org.junit.Assert.*
@@ -53,5 +64,64 @@ class HeadTrackingMotionSampleTest {
         for (arrival in listOf(0L, -1L)) assertThrows(IllegalArgumentException::class.java) {
             MotionSample(report, arrival)
         }
+    }
+
+    @Test fun aTwoReportBurstReachesEachLiveSubscriberInOrderWhileStateRemainsLatest() = runBlocking {
+        val first = async(start = CoroutineStart.UNDISPATCHED) {
+            HeadTracking.motionSamples.filterNotNull().take(2).toList()
+        }
+        val second = async(start = CoroutineStart.UNDISPATCHED) {
+            HeadTracking.motionSamples.filterNotNull().take(2).toList()
+        }
+        val state = async(start = CoroutineStart.UNDISPATCHED) {
+            HeadTracking.motionSample.filterNotNull().first()
+        }
+        HeadTracking.addMotion(report, 0f, 0f, 100)
+        val one = HeadTracking.motionSample.value!!
+        HeadTracking.addMotion(report.copy(counter = 6), 0f, 0f, 200)
+        val two = HeadTracking.motionSample.value!!
+        withTimeout(2_000) {
+            assertEquals(listOf(one, two), first.await())
+            assertEquals(listOf(one, two), second.await())
+            assertSame(two, state.await())
+        }
+        // Both handoffs share the same immutable sample, not separately allocated wrappers.
+        assertSame(two, HeadTracking.motionSamples.replayCache.single())
+    }
+
+    @Test fun aBlockedSubscriberCannotBlockTheProducerOrRetainMoreThanTheNewestTwoReports() = runBlocking {
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val received = mutableListOf<Long>()
+        val reader = launch(start = CoroutineStart.UNDISPATCHED) {
+            HeadTracking.motionSamples.filterNotNull().take(3).collect {
+                received += it.arrivalNs
+                if (received.size == 1) { entered.complete(Unit); release.await() }
+            }
+        }
+        try {
+            HeadTracking.addMotion(report, 0f, 0f, 1)
+            withTimeout(2_000) { entered.await() }
+            // No receiver progress is possible until publication of the whole burst completes.
+            for (arrival in 2L..100L) HeadTracking.addMotion(report, 0f, 0f, arrival)
+            assertEquals(listOf(1L), received)
+            release.complete(Unit)
+            withTimeout(2_000) { reader.join() }
+            assertEquals(listOf(1L, 99L, 100L), received)
+        } finally { release.complete(Unit); reader.cancel() }
+    }
+
+    @Test fun aNewSubscriberGetsOnlyTheLatestReportAndResetOrLegacyPublicationClearsReplay() = runBlocking {
+        HeadTracking.addMotion(report, 0f, 0f, 100)
+        HeadTracking.addMotion(report.copy(counter = 6), 0f, 0f, 200)
+        assertSame(HeadTracking.motionSample.value, HeadTracking.motionSamples.first())
+        HeadTracking.reset()
+        assertNull(HeadTracking.motionSamples.first())
+        HeadTracking.addMotion(report, 0f, 0f, 300)
+        HeadTracking.addMotion(report, 0f, 0f)
+        assertNull(HeadTracking.motionSamples.first())
+        HeadTracking.addMotion(report, 0f, 0f, 400)
+        HeadTracking.addMotion(null, 0f, 0f, 500)
+        assertNull(HeadTracking.motionSamples.first())
     }
 }

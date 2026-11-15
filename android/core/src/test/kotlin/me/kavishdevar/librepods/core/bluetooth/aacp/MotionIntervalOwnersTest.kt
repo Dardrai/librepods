@@ -6,6 +6,8 @@ import me.kavishdevar.librepods.core.bluetooth.aacp.packet.RTBuddyPacket
 import me.kavishdevar.librepods.core.bluetooth.aacp.rtbuddy.proto.SensorDataWX
 import me.kavishdevar.librepods.core.bluetooth.aacp.rtbuddy.proto.SensorCommand
 import me.kavishdevar.librepods.core.bluetooth.aacp.rtbuddy.proto.SensorDescriptor
+import me.kavishdevar.librepods.core.bluetooth.aacp.rtbuddy.proto.SensorServiceSetting
+import me.kavishdevar.librepods.core.bluetooth.aacp.rtbuddy.proto.SensorTypeAck
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.SensorDataWxBuddyPayload
 import me.kavishdevar.librepods.core.data.apple.BuddyState
 import org.junit.Assert.*
@@ -19,6 +21,36 @@ import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.nanoseconds
 
 class MotionIntervalOwnersTest {
+    @Test fun inboundControlMetadataIsObservedWithoutSensorReportsOrNewCommands() {
+        val fixture = Fixture()
+        try {
+            assertTrue(fixture.manager.setHeadTrackingEnabled(true, Any(), 10.milliseconds))
+            val writes = fixture.writes.size
+            val data = SensorDataWX.newBuilder().setSeq(17).setLogType(1)
+                .setStartAck(SensorTypeAck.newBuilder().setServiceValue(27))
+                .setCommandAck(SensorTypeAck.newBuilder().setServiceValue(20))
+                .setServiceSettings(SensorServiceSetting.newBuilder().setServiceValue(27).setSetting(2)
+                    .setConfiguration(ByteString.copyFrom(byteArrayOf(1, 0x30, 0x75, 0, 0)))).build()
+            val frame = RTBuddyPacket.create(SensorDataWxBuddyPayload(data)).rawPacket
+            fixture.clock = 2_000
+            fixture.manager.feed(frame, 1_900)
+            val stats = fixture.sourceTiming.snapshot()
+            assertEquals(1L, stats["motion_start_ack_count"])
+            assertEquals(17L, stats["motion_start_ack_last_sequence"])
+            assertEquals(1_900L, stats["motion_start_ack_last_at_nanos"])
+            assertEquals(0L, stats["motion_command_ack_count"])
+            assertEquals(1L, stats["motion_interval_echo_count"])
+            assertEquals(30_000L, stats["motion_interval_echo_last_us"])
+            assertEquals(10_000L, stats["motion_interval_us"])
+            assertEquals(0L, stats["motion_interval_change_count"])
+            assertEquals(writes, fixture.writes.size)
+            assertTrue(fixture.motionReports.isEmpty())
+            fixture.manager.close()
+            fixture.manager.feed(frame, 2_000)
+            assertEquals(1L, fixture.sourceTiming.snapshot()["motion_start_ack_count"])
+        } finally { fixture.close() }
+    }
+
     @Test fun lateHeartDiscoveryAndItsDuplicateDoNotRestartOrResetLiveMotion() {
         Fixture().use { fixture ->
             assertTrue(fixture.manager.setHeadTrackingEnabled(true, Any(), 10.milliseconds))

@@ -177,6 +177,27 @@ class SpatialMotionCaptureTest {
         } finally { first.cancelAndJoin() }
     }
 
+    @Test fun corroboratedSixteenBitWrapPreservesRawCountersAndSkippedDuplicatesDoNotChangeTheClockPair() = runBlocking {
+        val target = Target()
+        val arrivals = AtomicLong(100)
+        val source = flow<MotionReport?> {
+            emit(null)
+            emit(report(65534).copy(timestampNs = 1_000_000_000))
+            emit(report(65534).copy(timestampNs = 1_999_000_000)) // Duplicate must not replace the retained time.
+            emit(report(0).copy(timestampNs = 1_010_000_000))
+            emit(report(2).copy(timestampNs = 1_020_000_000))
+            emit(report(1).copy(timestampNs = 1_030_000_000)) // A real backward step still stops capture.
+        }
+        val result = SpatialMotionCapture(temporary.newFolder(), source, arrivals::getAndIncrement)
+            .capture(SpatialMotionCaptureRequest(MAC, "roll"), target.device, { true })
+        assertEquals(3, result.samples)
+        assertTrue(result.reason.contains("counter moved backward"))
+        val captured = requireNotNull(result.file).readLines().drop(1).map { JSONObject(it).getJSONObject("report") }
+        assertEquals(listOf(65534L, 0L, 2L), captured.map { it.getLong("counter") })
+        assertEquals(listOf(1_000_000_000L, 1_010_000_000L, 1_020_000_000L), captured.map { it.getLong("timestamp_ns") })
+        assertSame(target.started.single(), target.stopped.single())
+    }
+
     @Test fun duplicateCountersAreSkippedAndUint32WrapIsAcceptedBeforeBackwardCountersStopCapture() = runBlocking {
         val target = Target()
         val arrivals = AtomicLong(100)

@@ -25,7 +25,8 @@ MARKER = MARKER_PREFIX + b"backend=owned-fdk;pcm_bits=32;fdk=" + FDK_REVISION.en
 NATIVE_ENTRY = "lib/arm64-v8a/libfluoride_hooks.so"
 NATIVE_OPTIONS = {"CMAKE_BUILD_TYPE": "Release", "ANDROID_ABI": "arm64-v8a",
                   "LIBREPODS_PRIVATE_OWNED_FDK": "ON", "LIBREPODS_PRIVATE_WIDE_PCM": "ON",
-                  "LIBREPODS_NATIVE_TRACE": "OFF", "ELD_KEEP_GAME_FLUSH_BASELINE": "ON"}
+                  "LIBREPODS_NATIVE_TRACE": "OFF", "ELD_KEEP_GAME_FLUSH_BASELINE": "ON",
+                  "ELD_KEEP_GAME_PACKET_BASELINE": "ON"}
 
 
 def require(condition, message):
@@ -210,7 +211,7 @@ def compile_contract(cache_path, source):
             require(re.fullmatch(r'\\*"' + FDK_REVISION + r'\\*"', definitions.get("ELD_OWNED_FDK_REVISION") or ""),
                     "Encoder revision does not match its source pin")
         if name == "fluoride_hooks.cpp":
-            for define in ("ELD_KEEP_GAME_FLUSH_BASELINE=1", "ELD_PRIVATE_OWNED_FDK=1",
+            for define in ("ELD_KEEP_GAME_FLUSH_BASELINE=1", "ELD_KEEP_GAME_PACKET_BASELINE=1", "ELD_PRIVATE_OWNED_FDK=1",
                            "ELD_PRIVATE_WIDE_PCM=1", "LIBREPODS_NATIVE_TRACE=0"):
                 key, value = define.split("=", 1)
                 require(definitions.get(key) == value, "Native compilation contract mismatch: " + define)

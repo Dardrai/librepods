@@ -26,6 +26,33 @@ class NativeGameSnapshotTest {
         this[61] = 1; this[71] = 10; this[72] = 10
     }
 
+    @Test fun retiredPacketAclResolvesOnlyItsOwnDebtWithoutInventingReadback() {
+        val source = snapshot().copyOf(86).apply {
+            this[0] = 2; this[9] = 1; this[11] = 1
+            this[79] = 1; this[80] = 0xcc18; this[81] = 0xee1c; this[85] = 3
+        }
+        val retired = NativeGameSnapshot.parse(source)!!
+        assertFalse(retired.restorePending)
+        assertTrue(retired.restored)
+        assertEquals(0xcc18, retired.packetBaseline)
+        assertEquals(0xee1c, retired.packetCurrent)
+        assertTrue(retired.summary().contains("packetOwnerRetired=true"))
+        // A stale owner alone, without the native retirement flags, cannot erase debt.
+        for ((index, value) in listOf(13 to 1L, 82 to 1L, 83 to 1L, 84 to 1L, 85 to 0L, 85 to 7L)) {
+            val unresolved = NativeGameSnapshot.parse(source.copyOf().apply { this[index] = value })!!
+            assertTrue("debt index $index value $value", unresolved.restorePending)
+            assertFalse("restored index $index value $value", unresolved.restored)
+        }
+        // Retirement cannot substitute for flush readback or clear an active lease/clock.
+        for ((index, value) in listOf(2 to 1L, 9 to 0L, 11 to 0L, 12 to 96L, 56 to 1L, 57 to 1L, 72 to 9L)) {
+            assertFalse("index $index", NativeGameSnapshot.parse(source.copyOf().apply { this[index] = value })!!.restored)
+        }
+        val legacy = source.copyOf(79).apply { this[0] = 1 }
+        assertTrue(NativeGameSnapshot.parse(legacy)!!.restored)
+        legacy[13] = 1
+        assertFalse(NativeGameSnapshot.parse(legacy)!!.restored)
+    }
+
     @Test fun fixedVersionAndBoundsAreRequired() {
         assertNotNull(NativeGameSnapshot.parse(snapshot()))
         assertNull(NativeGameSnapshot.parse(snapshot().copyOf(52)))
@@ -147,5 +174,28 @@ class NativeGameSnapshotTest {
         assertFalse(summary.contains("peer", ignoreCase = true))
         assertFalse(summary.contains("160"))
         assertFalse(summary.contains("a0", ignoreCase = true))
+    }
+
+    @Test fun summaryDistinguishesRawDebtAndHistoricalOwnerWithoutIdentifiers() {
+        val source = snapshot().copyOf(86).apply {
+            this[0] = 2; this[4] = 3; this[6] = 987654321
+            this[15] = 4; this[16] = 5; this[17] = 11
+            this[24] = 6; this[25] = 7; this[31] = 12
+            this[43] = 4; this[44] = 900; this[45] = 10
+            this[79] = 1; this[80] = 0xcc18; this[81] = 0xee1c; this[85] = 7
+            for (i in 0..5) { this[18 + i] = 160 + i.toLong(); this[36 + i] = 170 + i.toLong() }
+        }
+        val summary = NativeGameSnapshot.parse(source)!!.summary()
+        assertTrue(summary.contains("restorePending=true"))
+        assertTrue(summary.contains("snapshotVersion=2 operation=3 nativeRestorePending=0 cancelled=false"))
+        assertTrue(summary.contains("requestMediaGeneration=4 requestEncoderGeneration=5 requestAclHandle=11 aclHandle=12"))
+        assertTrue(summary.contains("packetBaselineKnown=true packetReady=0 packetError=7"))
+        assertTrue(summary.contains("globalClockPhase=4 globalClockSerial=900 globalClockInterval=10"))
+        assertFalse(summary.contains("987654321"))
+        assertFalse(summary.contains("peer", ignoreCase = true))
+        assertFalse(summary.contains("160"))
+        assertFalse(summary.contains("170"))
+        val legacy = NativeGameSnapshot.parse(snapshot())!!.summary()
+        assertTrue(legacy.contains("packetReady=null packetError=null"))
     }
 }

@@ -28,14 +28,6 @@ bool valid_peer(const uint8_t* peer) {
     return any && all!=0xff;
 }
 bool valid_acl(uint16_t handle) { return handle<=0x0eff; }
-bool read(const void* source,size_t offset,void* out,size_t size) {
-    const auto address=reinterpret_cast<uintptr_t>(source);
-    return source && offset<=UINTPTR_MAX-address && size<=UINTPTR_MAX-address-offset &&
-        host.copy(reinterpret_cast<const void*>(address+offset),size,out);
-}
-template<class T> bool read(const void* source,size_t offset,T* out) {
-    return read(source,offset,out,sizeof(*out));
-}
 bool valid_layout(const Pixel17GameLayout& value) {
     const size_t offsets[]={value.media_cid,value.bta_handle,value.avdt_handle,value.co_started,
         value.peer,value.codec,value.avdt_reporting_mask,value.avdt_self_handle};
@@ -80,16 +72,24 @@ bool collect(const void* scb,Candidate* out) {
     uint8_t started=0, avdt_handle=0;
     uint16_t reporting=0;
     std::array<uint8_t,45> codec{};
-    if(!scb || !read(scb,layout.bta_handle,&result.value.bta_handle) ||
+    const Pixel17GameRead scb_reads[]={
+        {layout.bta_handle,sizeof(result.value.bta_handle),&result.value.bta_handle},
+        {layout.avdt_handle,sizeof(result.value.avdt_handle),&result.value.avdt_handle},
+        {layout.media_cid,sizeof(result.value.media_cid),&result.value.media_cid},
+        {layout.peer,sizeof(result.value.peer),result.value.peer},
+        {layout.co_started,sizeof(started),&started},
+        {layout.codec,codec.size(),codec.data()}
+    };
+    if(!scb || !host.copy_batch(scb,scb_reads,6) ||
         !result.value.bta_handle || host.scb(result.value.bta_handle)!=scb ||
-        !read(scb,layout.avdt_handle,&result.value.avdt_handle) || !result.value.avdt_handle ||
-        !read(scb,layout.media_cid,&result.value.media_cid) ||
-        !read(scb,layout.peer,result.value.peer,6) || !valid_peer(result.value.peer) ||
-        !read(scb,layout.co_started,&started) || started>1 ||
-        !read(scb,layout.codec,codec.data(),codec.size()) || !valid_configuration(codec.data(),codec.size())) return false;
+        !result.value.avdt_handle || !valid_peer(result.value.peer) || started>1 ||
+        !valid_configuration(codec.data(),codec.size())) return false;
     const void* avdt=host.avdt_scb(result.value.avdt_handle);
-    if(!avdt || !read(avdt,layout.avdt_self_handle,&avdt_handle) || avdt_handle!=result.value.avdt_handle ||
-        !read(avdt,layout.avdt_reporting_mask,&reporting)) return false;
+    const Pixel17GameRead avdt_reads[]={
+        {layout.avdt_self_handle,sizeof(avdt_handle),&avdt_handle},
+        {layout.avdt_reporting_mask,sizeof(reporting),&reporting}
+    };
+    if(!avdt || !host.copy_batch(avdt,avdt_reads,2) || avdt_handle!=result.value.avdt_handle) return false;
     result.value.reporting=(reporting&0x100)!=0;
     result.value.acl_handle=host.peer_acl(result.value.peer,1); // BR/EDR only.
     if(!valid_acl(result.value.acl_handle)) return false;
@@ -249,7 +249,7 @@ const Pixel17WireHookSpec hooks[]={
 }
 bool pixel17_game_host_prepare(const Pixel17GameBindings& bindings,const Pixel17GameLayout& validated_layout) {
     std::lock_guard<std::mutex> lock(mutex);
-    if(prepared.load() || !valid_layout(validated_layout) || !bindings.copy || !bindings.scb ||
+    if(prepared.load() || !valid_layout(validated_layout) || !bindings.copy || !bindings.copy_batch || !bindings.scb ||
         !bindings.avdt_scb || !bindings.media_cid || !bindings.cid_acl || !bindings.peer_acl ||
         !bindings.active_peer || !bindings.sco_count || !bindings.peer_sco || !bindings.encoder ||
         !bindings.now_ns || !bindings.invalidated) return false;

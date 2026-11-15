@@ -7,6 +7,7 @@ find_package(Threads REQUIRED)
 get_filename_component(NATIVE "${CMAKE_CURRENT_SOURCE_DIR}/../../app/src/main/cpp" ABSOLUTE)
 add_executable(pixel17_game_host_test pixel17_game_host_test.cpp
     "${NATIVE}/eld/pixel17_game_host.cpp" "${NATIVE}/eld/pixel17_game_host_contract.cpp"
+    "${NATIVE}/eld/pixel17_game_memory.cpp"
     "${NATIVE}/eld/wire.cpp" "${NATIVE}/eld/symbol_image.cpp"
     "${NATIVE}/xz/xz_crc32.c" "${NATIVE}/xz/xz_crc64.c" "${NATIVE}/xz/xz_sha256.c"
     "${NATIVE}/xz/xz_dec_stream.c" "${NATIVE}/xz/xz_dec_lzma2.c" "${NATIVE}/xz/xz_dec_bcj.c")

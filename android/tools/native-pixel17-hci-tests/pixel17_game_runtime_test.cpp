@@ -133,7 +133,7 @@ int main(int argc,char** argv) {
             assert(packet_commands.empty() && !pixel17_game_status().holding);
             restored(); return 0;
         }
-        if(scenario!="packets-no-change") {
+        if(scenario!="packets-no-change" && scenario!="packets-stock-policy") {
             assert(packet_commands==std::vector<uint16_t>{0xee1c});
             assert(!pixel17_game_status().holding && pixel17_game_status().packets.pending);
             if(scenario=="packets-status-error") {
@@ -156,6 +156,70 @@ int main(int argc,char** argv) {
         } else {
             assert(packet_commands.empty() && pixel17_game_status().holding);
         }
+        if(scenario=="packets-stock-policy") {
+            const auto held=pixel17_game_status();
+            assert(held.packets.known && held.packets.ready && held.packets.baseline==0xcc18 && held.packets.current==0xcc18);
+            assert(!held.packets.pending && !held.packets.dirty && !held.restore_pending);
+            assert(pixel17_game_clock_begin(42,serial,expected(),11,81)); loop.run();
+            assert(clock_begins==1 && mock_clock.phase==EncoderClockPhase::Armed);
+        }
+        if(scenario.rfind("packets-foreign-",0)==0) {
+            packet_event({3,11,0,0x35,2,7,5,4,3,2,1,1,0});
+            packet_policy.command(0x235,0xcc18,false); tick();
+            assert(pixel17_game_status().holding && pixel17_game_status().error==Pixel17HciStatus::Ok);
+            const auto foreign_done=[&] { packet_event({0x1d,5,0,0x35,2,0x18,0xcc}); tick(); };
+            if(scenario=="packets-foreign-settled") {
+                accepted(); foreign_done();
+                assert(pixel17_game_status().holding && pixel17_game_status().error==Pixel17HciStatus::Ok);
+            } else {
+                assert(pixel17_game_restore(42,serial)); loop.run();
+                auto waiting=pixel17_game_status();
+                assert(waiting.busy && !waiting.holding && waiting.restore_pending);
+                assert(waiting.packets.dirty && !waiting.packets.pending && packet_commands.size()==1);
+                if(scenario=="packets-foreign-timeout" || scenario=="packets-foreign-refresh-expiry") {
+                    if(scenario=="packets-foreign-refresh-expiry") {
+                        accepted();
+                        during_refresh=[&] {
+                            clock_us+=1000001;
+                            packet_event({0x1d,5,0,0x35,2,0x18,0xcc});
+                        };
+                        tick(); during_refresh={};
+                    } else { clock_us+=1000001; tick(); }
+                    waiting=pixel17_game_status();
+                    assert(!waiting.busy && waiting.restore_pending && waiting.error==Pixel17HciStatus::Timeout);
+                    assert(packet_commands.size()==1);
+                    accepted(); foreign_done(); // No automatic renewal after expiry.
+                    assert(!pixel17_game_status().busy && pixel17_game_status().restore_pending);
+                    assert(packet_commands.size()==1);
+                    clock_us+=3000001; // The previous watchdog recovery window has also expired.
+                    assert(!pixel17_game_restore(43,serial));
+                    assert(pixel17_game_restore(42,serial));
+                    tick(); // Watchdog may run before the queued explicit retry.
+                } else if(scenario=="packets-foreign-rejected") {
+                    packet_event({0x0f,4,0x0c,1,0x0f,4}); tick();
+                } else if(scenario=="packets-foreign-disconnect") {
+                    accepted(); packet_event({5,4,0,0x35,2,0x13}); tick();
+                } else if(scenario=="packets-foreign-disconnect-before-status") {
+                    packet_event({5,4,0,0x35,2,0x13}); tick();
+                    assert(packet_commands.size()==1 && pixel17_game_status().busy);
+                    accepted();
+                } else {
+                    if(scenario=="packets-foreign-owner") ++route.media_generation;
+                    accepted(); foreign_done();
+                    if(scenario=="packets-foreign-owner") {
+                        assert(packet_commands.size()==1 && pixel17_game_status().restore_pending);
+                        assert(!pixel17_game_status().busy && !pixel17_game_status().holding);
+                        return 0;
+                    }
+                }
+                assert(packet_commands.size()==2 && packet_commands.back()==0xcc18);
+                foreign_done(); // Foreign readback cannot discharge our debt.
+                assert(pixel17_game_status().packets.pending && pixel17_game_status().restore_pending);
+                accepted(); packet_changed(0xcc18); tick(); restored();
+                assert(packet_commands.size()==2);
+                return 0;
+            }
+        }
         if(scenario=="packets-owner") {
             ++route.media_generation; tick();
             assert(!pixel17_game_status().holding && pixel17_game_status().restore_pending);
@@ -170,13 +234,15 @@ int main(int argc,char** argv) {
         }
         if(scenario=="packets-expiry") { clock_us+=3000001; tick(); }
         else if(scenario!="packets-timeout" && scenario!="packets-cancel-send") { assert(pixel17_game_restore(42,serial)); loop.run(); }
-        if(scenario!="packets-no-change") {
+        if(scenario!="packets-no-change" && scenario!="packets-stock-policy") {
             assert(packet_commands.size()==2 && packet_commands.back()==0xcc18);
             accepted(); assert(pixel17_game_status().restore_pending);
             if(scenario=="packets-late-restore") { clock_us+=1000001; tick(); }
             packet_changed(0xcc18); tick();
         }
-        restored(); return 0;
+        restored();
+        if(scenario=="packets-stock-policy") assert(packet_commands.empty() && clock_cancels==1);
+        return 0;
     }
     if(scenario.rfind("flush",0)==0) {
         const uint16_t original=scenario=="flush320" ? 320 : 0;
@@ -439,9 +505,21 @@ int main(int argc,char** argv) {
         }
         if(scenario=="clock-stop" || scenario=="clock-sco" || scenario=="clock-wrong-channel") {
             const auto previous=route; ++route.encoder_generation; route.encoder_ready=false; route.route_valid=false;
+            if(scenario=="clock-stop") route.streaming=false;
             if(scenario=="clock-wrong-channel") ++route.media_cid;
             if(scenario=="clock-sco") route.native_sco=true;
+            const auto before_refreshes=refreshes;
+            auto unrelated=previous; ++unrelated.media_generation;
+            pixel17_game_invalidated(Pixel17GameInvalidation::Stop,unrelated);
+            assert(pixel17_game_status().holding); // A different old owner cannot cancel this hold.
             pixel17_game_invalidated(scenario=="clock-sco" ? Pixel17GameInvalidation::Sco : Pixel17GameInvalidation::Stop,previous);
+            const auto invalidated=pixel17_game_status(); // The app can read here before any queued refresh.
+            assert(!invalidated.holding && invalidated.serial==held && invalidated.error==Pixel17HciStatus::StaleOwner);
+            assert(invalidated.host.streaming==route.streaming && invalidated.host.native_sco==route.native_sco);
+            assert(invalidated.host.encoder_generation==route.encoder_generation &&
+                invalidated.host.media_cid==route.media_cid && !invalidated.host.route_valid);
+            assert(invalidated.owner.encoder_generation==previous.encoder_generation);
+            assert(refreshes==before_refreshes); // Publishing the already-owned snapshot must not scan memory again.
             assert(mock_clock.effective_interval_tenths==10 && clock_cancels==1); // Before dispatching main.
             finish_restore(Pixel17HciStatus::StaleOwner,scenario=="clock-wrong-channel"); return 0;
         }
@@ -517,6 +595,9 @@ int main(int argc,char** argv) {
         if(scenario=="wrong-cid") ++route.media_cid;
         if(scenario=="new-media") ++route.media_generation;
         pixel17_game_invalidated(Pixel17GameInvalidation::Stop,previous);
+        const auto invalidated=pixel17_game_status();
+        assert(invalidated.host.media_generation==route.media_generation && invalidated.host.media_cid==route.media_cid);
+        assert(invalidated.owner.media_generation==previous.media_generation); // Cleanup never adopts the replacement route.
         pixel17_game_runtime_tick_for_test(); loop.run();
         // Targetwrite still belongs to native. Cancel doesn't free its context.
         assert(radio.transmissions==2);

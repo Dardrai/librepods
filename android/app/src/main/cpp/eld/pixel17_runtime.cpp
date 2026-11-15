@@ -232,6 +232,7 @@ bool prepare_game(const Image& image,RuntimeHook install,RuntimeUnhook remove) {
     if(!main_thread) return false;
     Pixel17GameBindings host;
     host.copy=game_copy;
+    host.copy_batch=pixel17_game_copy_batch;
     host.scb=reinterpret_cast<decltype(host.scb)>(image.function(kPixel17GameScb));
     host.avdt_scb=reinterpret_cast<decltype(host.avdt_scb)>(image.function(kPixel17GameAvdtScb));
     host.media_cid=reinterpret_cast<decltype(host.media_cid)>(image.function(kPixel17GameCid));

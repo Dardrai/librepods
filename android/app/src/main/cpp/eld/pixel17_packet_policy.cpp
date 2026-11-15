@@ -3,6 +3,10 @@
 #include <algorithm>
 #include <atomic>
 #include <cstring>
+#ifndef ELD_KEEP_GAME_PACKET_BASELINE
+#define ELD_KEEP_GAME_PACKET_BASELINE 1
+#endif
+static_assert(ELD_KEEP_GAME_PACKET_BASELINE==0 || ELD_KEEP_GAME_PACKET_BASELINE==1);
 
 namespace eld {
 namespace {
@@ -45,11 +49,13 @@ Pixel17PacketPolicy::Link* Pixel17PacketPolicy::link(uint16_t handle) {
 }
 void Pixel17PacketPolicy::command(uint16_t handle,uint16_t mask,bool owned) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if(physical_ || (status_.dirty && !owned)) {
+    // Command Status has no handle: overlapping submissions remain ambiguous.
+    // A settled policy on our ACL does not conflict with another device's command.
+    if(physical_ || (status_.dirty && !owned && owner_.acl_handle==handle)) {
         poisoned_=true; status_.error=Pixel17HciStatus::UnexpectedStatus; status_.ready=false;
         return;
     }
-    physical_=true; pending_handle_=handle; accepted_=false;
+    physical_=true; pending_handle_=handle; accepted_=false; disconnected_=false;
     owned_=owned && armed_ && owner_.acl_handle==handle && requested_==mask;
     if(owned && !owned_) { poisoned_=true; status_.error=Pixel17HciStatus::UnexpectedStatus; }
     if(owned_) armed_=false;
@@ -75,7 +81,12 @@ void Pixel17PacketPolicy::event(const uint8_t* p,size_t size) {
     if(p[0]==5 && size==6 && p[2]==0) {
         const auto handle=le16(p+3);
         if(auto* l=link(handle)) *l={};
-        if(physical_ && pending_handle_==handle) physical_=false;
+        if(physical_ && pending_handle_==handle) {
+            // Until its handle-less status arrives, even a disconnected ACL
+            // retains the command fence. That status cannot confirm a new send.
+            disconnected_=true;
+            if(accepted_) physical_=false;
+        }
         if(epoch_ && owner_.acl_handle==handle) {
             status_.dirty=false; status_.pending=false; status_.ready=false;
             status_.error=Pixel17HciStatus::StaleOwner;
@@ -93,6 +104,7 @@ void Pixel17PacketPolicy::event(const uint8_t* p,size_t size) {
                 status_.error=Pixel17HciStatus::ControllerError;
             }
         }
+        if(disconnected_) physical_=false;
         return;
     }
     if(p[0]!=0x1d || size!=7 || poisoned_) return;
@@ -144,18 +156,24 @@ bool Pixel17PacketPolicy::begin(const Pixel17HciOwner& owner,uint64_t deadline,u
     status_.known=true; status_.baseline=l->mask; status_.current=l->mask;
     // EDR exclusions have negative polarity: prohibit only 3-DH1/3/5, retaining
     // the controller-confirmed BR/2-Mbit permissions instead of assuming CC18.
-    const auto target=uint16_t(l->mask|0x2204);
+    // The default preserves this exact observed mask; it does not skip
+    // owner/baseline admission or change receiver timing and encoder settings.
+    const auto target=ELD_KEEP_GAME_PACKET_BASELINE ? l->mask : uint16_t(l->mask|0x2204);
     if(target==l->mask) { status_.ready=true; return true; }
     return issue(target,deadline,send,lock);
 }
-bool Pixel17PacketPolicy::restore(const Pixel17HciOwner& owner,uint64_t deadline,uint64_t now,
-                                 void (*send)(uint16_t,uint16_t)) {
+Pixel17PacketRestoreResult Pixel17PacketPolicy::restore(const Pixel17HciOwner& owner,uint64_t deadline,uint64_t now,
+                                                       void (*send)(uint16_t,uint16_t)) {
     std::unique_lock<std::mutex> lock(mutex_);
     auto* l=link(owner.acl_handle);
-    if(!status_.dirty) return true;
+    if(!status_.dirty) return Pixel17PacketRestoreResult::Accepted;
     if(!l || l->epoch!=epoch_ || !pixel17_same_hci_owner(owner_,owner) ||
-       physical_ || status_.pending || deadline<=now || deadline-now>1000000) return false;
-    return issue(status_.baseline,deadline,send,lock);
+       poisoned_ || status_.pending || !send || deadline<=now || deadline-now>1000000)
+        return Pixel17PacketRestoreResult::Refused;
+    if(physical_) return !owned_ && pending_handle_!=owner_.acl_handle
+        ? Pixel17PacketRestoreResult::Deferred : Pixel17PacketRestoreResult::Refused;
+    return issue(status_.baseline,deadline,send,lock)
+        ? Pixel17PacketRestoreResult::Accepted : Pixel17PacketRestoreResult::Refused;
 }
 Pixel17PacketStatus Pixel17PacketPolicy::status(uint64_t now) {
     std::lock_guard<std::mutex> lock(mutex_);

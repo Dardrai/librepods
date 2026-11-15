@@ -60,7 +60,7 @@ class NativeHeadTrackingController internal constructor(
     constructor(device: AppleDevice, parentScope: CoroutineScope, hostBlocked: () -> Boolean,
         deviceCurrent: () -> Boolean) : this(device, parentScope, hostBlocked, deviceCurrent,
         ShizukuAudioClient(device.context, requireRoot = true), SpatialPoseProfileStore(device.context),
-        HeadTracking.motionSample, Dispatchers.Default)
+        HeadTracking.motionSamples, Dispatchers.Default)
 
     private data class Choice(val epoch: Long, val enabled: Boolean, val started: Long)
     private val mutableState = MutableStateFlow(NativeHeadTrackingState())
@@ -87,6 +87,7 @@ class NativeHeadTrackingController internal constructor(
     private val retryAfter = AtomicLong()
     @Volatile private var fallbackSocket: BluetoothSocket? = null
     @Volatile private var timing = HeadTrackingTiming()
+    @Volatile private var previousSessionTiming: Bundle? = null
     @Volatile private var activeLease: ShizukuAudioClient.HeadTrackerLease? = null
     @Volatile private var sinkTiming: Bundle? = null
     @Volatile private var sinkTimingAt = 0L
@@ -102,6 +103,16 @@ class NativeHeadTrackingController internal constructor(
         })
         sinkTiming?.let { putBundle("sink", Bundle(it)) }
         putLong("sink_snapshot_age_ms", if (sinkTimingAt == 0L) -1 else SystemClock.elapsedRealtime() - sinkTimingAt)
+        previousSessionTiming?.let { putBundle("previous_session", Bundle(it)) }
+    }
+
+    private fun replaceSessionTiming(): HeadTrackingTiming {
+        // The runner joins the old session before replacement; retain one scalar summary, never nested history.
+        timing.snapshot().takeIf { it.getLong("source_epochs") > 0 }?.let {
+            it.putLong("retained_at_nanos", SystemClock.elapsedRealtimeNanos())
+            previousSessionTiming = it
+        }
+        return HeadTrackingTiming().also { timing = it; sinkTiming = null; sinkTimingAt = 0 }
     }
     // Bluetooth source cleanup can block in a socket write; it must not delay the user's native Off.
     private val offWriter = scope.launch {
@@ -281,7 +292,7 @@ class NativeHeadTrackingController internal constructor(
         var lease: ShizukuAudioClient.HeadTrackerLease? = null
         val reporting = MutableStateFlow(false)
         val stopped = kotlinx.coroutines.CompletableDeferred<String>()
-        val sessionTiming = HeadTrackingTiming().also { timing = it; sinkTiming = null; sinkTimingAt = 0 }
+        val sessionTiming = replaceSessionTiming()
         fun owns() = live.get() && choiceEpoch.get() == epoch &&
             (choice != null || pending.get() == null) && sourceCurrent(socket, key)
         try {

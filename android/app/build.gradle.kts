@@ -2,8 +2,8 @@ import java.util.Properties
 import org.gradle.api.file.DirectoryProperty
 import org.gradle.api.tasks.OutputDirectory
 
-val appVersionName = (rootProject.extra["appVersionName"] as String) + "-pixel144"
-val appVersionCode = 200000229
+val appVersionName = (rootProject.extra["appVersionName"] as String) + "-pixel145"
+val appVersionCode = 200000230
 
 plugins {
     alias(libs.plugins.android.application)
@@ -95,6 +95,7 @@ android {
                     "-DLIBREPODS_PRIVATE_OWNED_FDK=ON",
                     "-DLIBREPODS_PRIVATE_WIDE_PCM=ON",
                     "-DELD_KEEP_GAME_FLUSH_BASELINE=ON",
+                    "-DELD_KEEP_GAME_PACKET_BASELINE=ON",
                     "-DLIBREPODS_NATIVE_TRACE=OFF",
                     "-DLIBREPODS_ELD_ASSETS_DIR=${layout.projectDirectory.dir(".cxx/eld-assets").asFile.invariantSeparatorsPath}"
                 )

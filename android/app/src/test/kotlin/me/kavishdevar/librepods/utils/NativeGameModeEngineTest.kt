@@ -289,7 +289,7 @@ class NativeGameModeEngineTest {
 
     @Test fun invalidTimingWaitsForAReportWhileBelowTargetNeverRaisesTheDelay() = runBlocking {
         val f = Fixture()
-        f.value = f.value.copy(host = f.value.host.copy(delayTenths = 0, delaySerial = 0))
+        f.value = f.value.copy(host = f.value.host.copy(delayTenths = 65535, delaySerial = 0))
         assertEquals(NativeGameModeController.Issue.WAITING_FOR_TIMING, f.step().issue)
         assertTrue(f.effects.isEmpty())
         f.report(599)
@@ -302,6 +302,56 @@ class NativeGameModeEngineTest {
         f.report(600)
         assertFalse(f.step().active)
         assertEquals(listOf("prepare"), f.effects)
+    }
+
+    @Test fun historicalZeroTimingRequiresANewValidPostWriteReportBeforeActivation() = runBlocking {
+        val f = Fixture()
+        f.value = f.value.copy(host = f.value.host.copy(delayTenths = 0, delaySerial = 20))
+        f.step(); f.step()
+        assertEquals(listOf("prepare", "heartbeat:12", "target:60"), f.effects)
+        f.value = f.value.copy(host = f.value.host.copy(delayTenths = 600)) // Same historical serial/time.
+        assertFalse(f.step().active)
+        f.report(600)
+        f.value = f.value.copy(host = f.value.host.copy(delayReceivedMs = 900, delayReceivedNs = 900_000_000))
+        assertFalse(f.step().active) // Changed serial alone cannot confirm a pre-write report.
+        f.report(0); assertFalse(f.step().active)
+        f.report(65535); assertFalse(f.step().active)
+        assertTrue(f.clocks.isEmpty())
+        f.report(600)
+        assertTrue(f.step().active)
+        assertTrue(f.clocks.isEmpty())
+    }
+
+    @Test fun historicalZeroWithoutAResponseTimesOutAndDoesNotRepeatTheSameAttempt() = runBlocking {
+        val f = Fixture()
+        f.value = f.value.copy(host = f.value.host.copy(delayTenths = 0, delaySerial = 20))
+        f.step(); f.step(); f.now += 2100
+        assertEquals(NativeGameModeController.Issue.REPORT_UNCONFIRMED, f.step().issue)
+        assertTrue(f.engine.remoteRestorePending)
+        assertTrue(f.value.restored)
+        assertTrue(f.clocks.isEmpty())
+        f.report(1500); f.step(); f.step()
+        assertFalse(f.engine.remoteRestorePending)
+        repeat(8) {
+            val failed = f.step()
+            assertFalse(failed.active)
+            assertEquals(NativeGameModeController.Issue.REPORT_UNCONFIRMED, failed.issue)
+        }
+        assertEquals(1, f.effects.count { it == "prepare" })
+        assertEquals(listOf("target:60", "target:150"), f.effects.filter { it.startsWith("target:") })
+    }
+
+    @Test fun aHistoricalZeroTargetFailureRetainsPossibleRemoteDebt() = runBlocking {
+        val f = Fixture().apply { failTarget = true }
+        f.value = f.value.copy(host = f.value.host.copy(delayTenths = 0, delaySerial = 20))
+        f.step()
+        val failed = f.step()
+        assertFalse(failed.active)
+        assertEquals(NativeGameModeController.Issue.REQUEST_FAILED, failed.issue)
+        assertTrue(failed.remoteRestorePending)
+        assertTrue(f.value.restored)
+        assertEquals(listOf("target:60", "target:150"), f.effects.filter { it.startsWith("target:") })
+        assertTrue(f.clocks.isEmpty())
     }
 
     @Test fun pauseOrMicrophoneAfterLongPlaybackRestoresLocallyWithoutWaitingForAReport() = runBlocking {
@@ -324,6 +374,108 @@ class NativeGameModeEngineTest {
         assertFalse(finished.restoring)
         assertEquals(NativeGameModeController.Issue.RESTORE_UNCONFIRMED, finished.issue)
         assertEquals(320, f.value.current)
+    }
+
+    @Test fun aStoppedActiveStreamWaitsWithoutHidingRemoteDebtAndResumesWithOnSelected() = runBlocking {
+        val f = Fixture(keepFlushBaseline = true).apply { originalBaseline = 0 }
+        assertTrue(f.start().active)
+        f.value = f.value.copy(holding = false, phase = 9, encoderGeneration = 10,
+            host = f.value.host.copy(streaming = false, startedMs = 0))
+        f.step()
+        f.now += 2501
+        val paused = f.step()
+        assertTrue(paused.desiredOn)
+        assertFalse(paused.active)
+        assertFalse(paused.restoring)
+        assertTrue(paused.remoteRestorePending)
+        assertFalse(f.engine.nativeObligation)
+        assertEquals(NativeGameModeController.Issue.WAITING_FOR_AUDIO, paused.issue)
+        val writes = f.effects.count { it == "target:150" }
+        repeat(3) { assertEquals(NativeGameModeController.Issue.WAITING_FOR_AUDIO, f.step().issue) }
+        assertEquals(writes, f.effects.count { it == "target:150" })
+        f.value = f.value.copy(host = f.value.host.copy(streaming = true, startedMs = f.now))
+        f.step()
+        assertEquals(writes + 1, f.effects.count { it == "target:150" })
+        f.report(1500); f.step(); f.step()
+        assertFalse(f.engine.remoteRestorePending)
+        f.now += 501
+        f.step(); f.step(); f.report(600)
+        val resumed = f.step()
+        assertTrue(resumed.desiredOn)
+        assertTrue(resumed.active)
+        assertEquals(NativeGameModeController.Issue.NONE, resumed.issue)
+        assertEquals(10L, f.value.requestEncoder)
+    }
+
+    @Test fun aPauseDoesNotHideUnsettledNativeCleanup() = runBlocking {
+        val f = Fixture()
+        assertTrue(f.start().active)
+        f.value = f.value.copy(holding = false, phase = 9,
+            host = f.value.host.copy(streaming = false, startedMs = 0))
+        f.step()
+        f.value = f.value.copy(current = 96, restorePending = true)
+        f.now += 2501
+        val paused = f.step()
+        assertFalse(paused.active)
+        assertTrue(paused.remoteRestorePending)
+        assertTrue(f.engine.nativeObligation)
+        assertEquals(NativeGameModeController.Issue.RESTORE_UNCONFIRMED, paused.issue)
+    }
+
+    @Test fun aPausedWaitDoesNotMaskNewBlockingOrLostEligibility() = runBlocking {
+        for (blocked in listOf(true, false)) {
+            val f = Fixture()
+            assertTrue(f.start().active)
+            f.value = f.value.copy(holding = false, phase = 9,
+                host = f.value.host.copy(streaming = false, startedMs = 0))
+            f.step(); f.now += 2501
+            assertEquals(NativeGameModeController.Issue.WAITING_FOR_AUDIO, f.step().issue)
+            val unavailable = f.step(blocked = blocked, eligible = blocked)
+            assertFalse(unavailable.active)
+            assertTrue(unavailable.remoteRestorePending)
+            assertEquals(NativeGameModeController.Issue.RESTORE_UNCONFIRMED, unavailable.issue)
+        }
+    }
+
+    @Test fun aPausedWaitDoesNotHideAnArmedClockAtNormalInterval() = runBlocking {
+        val f = Fixture()
+        assertTrue(f.start().active)
+        f.value = f.value.copy(holding = false, phase = 9,
+            host = f.value.host.copy(streaming = false, startedMs = 0))
+        f.step(); f.now += 2501
+        assertEquals(NativeGameModeController.Issue.WAITING_FOR_AUDIO, f.step().issue)
+        f.value = f.value.copy(clockPhase = 2, clockPending = false, clockInterval = 10)
+        assertTrue(f.value.restored) // This coarse receipt alone cannot establish that the clock is settled.
+        val armed = f.step()
+        assertFalse(armed.active)
+        assertTrue(armed.remoteRestorePending)
+        assertTrue(f.engine.nativeObligation)
+        assertEquals(NativeGameModeController.Issue.RESTORE_UNCONFIRMED, armed.issue)
+    }
+
+    @Test fun aPausedFailedStartRemainsAFailure() = runBlocking {
+        val f = Fixture().apply { failTarget = true }
+        f.step(); f.step()
+        f.value = f.value.copy(host = f.value.host.copy(streaming = false, startedMs = 0))
+        f.now += 2501
+        val paused = f.step()
+        assertFalse(paused.active)
+        assertTrue(paused.remoteRestorePending)
+        assertEquals(NativeGameModeController.Issue.REQUEST_FAILED, paused.issue)
+    }
+
+    @Test fun aPausedOwnerReplacementCannotMasqueradeAsWaitingForPlayback() = runBlocking {
+        val f = Fixture()
+        assertTrue(f.start().active)
+        f.value = f.value.copy(holding = false, phase = 9,
+            host = f.value.host.copy(streaming = false, startedMs = 0))
+        f.step(); f.now += 2501
+        assertEquals(NativeGameModeController.Issue.WAITING_FOR_AUDIO, f.step().issue)
+        f.control = f.control.copy(session = f.control.session + 1, socket = Any())
+        val replaced = f.step()
+        assertFalse(replaced.active)
+        assertTrue(replaced.remoteRestorePending)
+        assertEquals(NativeGameModeController.Issue.RESTORE_UNCONFIRMED, replaced.issue)
     }
 
     @Test fun aFreshOffReportAfterNativeRestorationSettlesTheOriginalPausedOwner() = runBlocking {
