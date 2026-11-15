@@ -100,6 +100,16 @@ class NativeHeadTrackingControllerTest {
         override fun close() { controller.close(); parent.cancel() }
     }
 
+    @Test fun cachedSourceTimingIsIncludedWithoutStartingMotion() {
+        Target().use { f ->
+            `when`(f.aacp.motionSourceTimingSnapshot()).thenReturn(mapOf("reads" to 12L, "feed_wait_max_nanos" to 30L))
+            val source = requireNotNull(f.controller.timingSnapshot().getBundle("source"))
+            assertEquals(12L, source.getLong("reads"))
+            assertEquals(30L, source.getLong("feed_wait_max_nanos"))
+            assertTrue(f.started.isEmpty())
+        }
+    }
+
     @Test fun calibratedNativeOffIsReadWithoutStartingASensorOrRequestingPermission() = runBlocking {
         Target().use { f ->
             waitUntil { f.controller.state.value.available }

@@ -168,10 +168,14 @@ class AACPManager(private val device: AppleDevice,
     }
 
     @Volatile private var rtBuddyManager: RTBuddyManager? = null
+    @Volatile private var motionSourceTiming = MotionSourceTiming()
     @Volatile private var motionOwners = MotionOwners()
     private val legacyMotionOwner = Any()
 
-    private fun createSensorSession(expected: BluetoothSocket) = RTBuddyManager(
+    /** Per-connection, constant-space counters before the latest-value motion flow. */
+    fun motionSourceTimingSnapshot(): Map<String, Long> = motionSourceTiming.snapshot()
+
+    private fun createSensorSession(expected: BluetoothSocket, timing: MotionSourceTiming) = RTBuddyManager(
         sendPacket = { sendPacket(it, expected) },
         sendRaw = { sendAudioPacket(expected, it) },
         isCurrent = { ownsAudioSocket(expected) },
@@ -190,7 +194,8 @@ class AACPManager(private val device: AppleDevice,
         onMotionState = { state ->
             publishForTransport(this, expected, ::captureAudioSocket) {
                 if (state != BuddyState.ACTIVE) HeadTracking.reset()
-                device.updateState { it.copy(headTrackingState = state) }
+                if (needsMotionStateUpdate(device.state.value.headTrackingState, state))
+                    device.updateState { it.copy(headTrackingState = state) }
             }
         },
         onHeartRateState = { state ->
@@ -202,6 +207,8 @@ class AACPManager(private val device: AppleDevice,
         motionIntervalUs = device.settings.value.takeIf { it.headTrackingIntervalConfigured }
             ?.headTrackingInterval?.inWholeMicroseconds?.takeIf { it in 20_000..1_000_000 && it % 1000 == 0L }?.toInt(),
         sharedMotionOwners = motionOwners,
+        sourceTiming = timing,
+        sourceClockNanos = SystemClock::elapsedRealtimeNanos,
     )
 
     private suspend fun sendDelayedInitPackets(expected: BluetoothSocket, settings: me.kavishdevar.librepods.core.devices.AppleSettings): Boolean {
@@ -447,6 +454,7 @@ class AACPManager(private val device: AppleDevice,
             }
 
             val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+            val sourceTiming = MotionSourceTiming()
             val published = synchronized(this) {
                 if (this.socket !== socket || pendingConnect !== pending || pending.cancelled ||
                     requestEpoch != connectionEpoch.get() || !stillCurrent()) false else {
@@ -459,7 +467,8 @@ class AACPManager(private val device: AppleDevice,
                         hearingAidData = byteArrayOf(), transparencyData = byteArrayOf(),
                         hearingAidReadStatus = SettingsReadStatus.WAITING, transparencyReadStatus = SettingsReadStatus.WAITING,
                         loudSoundReductionReadStatus = SettingsReadStatus.WAITING) }
-                    rtBuddyManager = createSensorSession(socket)
+                    motionSourceTiming = sourceTiming
+                    rtBuddyManager = createSensorSession(socket, sourceTiming)
                     true
                 }
             }
@@ -478,14 +487,19 @@ class AACPManager(private val device: AppleDevice,
                 try {
                 while (this@AACPManager.socket === socket && socket.isConnected) {
                     try {
+                        val readStartedAtNanos = SystemClock.elapsedRealtimeNanos()
                         val bytesRead = socket.inputStream.read(buffer)
+                        val readAtNanos = SystemClock.elapsedRealtimeNanos()
                         var data: ByteArray
                         if (bytesRead > 0) {
+                            if (ownsAudioSocket(socket)) sourceTiming.readReturned(readAtNanos, bytesRead, readStartedAtNanos)
                             data = buffer.copyOfRange(0, bytesRead)
                             try {
-                                processPacket(data, socket)
+                                processPacket(data, socket, readAtNanos)
                             } catch (e: Exception) {
                                 Log.e(TAG, "Error processing received packet: ${e.javaClass.simpleName}")
+                            } finally {
+                                sourceTiming.readProcessed(readAtNanos, SystemClock.elapsedRealtimeNanos())
                             }
 
                         } else if (bytesRead == -1) {
@@ -544,13 +558,13 @@ class AACPManager(private val device: AppleDevice,
     }
 
     @OptIn(ExperimentalStdlibApi::class)
-    fun processPacket(packet: ByteArray, sourceSocket: BluetoothSocket? = captureAudioSocket()) {
+    fun processPacket(packet: ByteArray, sourceSocket: BluetoothSocket? = captureAudioSocket(), readAtNanos: Long = 0) {
         if (sourceSocket == null || !ownsAudioSocket(sourceSocket)) return
         // A protobuf record can span reads; feed continuation bytes before the AACP header guard.
         val sensors = synchronized(this) {
             if (ownsAudioSocket(sourceSocket)) rtBuddyManager else null
         }
-        sensors?.feed(packet)
+        sensors?.feed(packet, readAtNanos)
         if (successfulSettingsConnectResponse(packet)) {
             settingsReady(sourceSocket)
             return

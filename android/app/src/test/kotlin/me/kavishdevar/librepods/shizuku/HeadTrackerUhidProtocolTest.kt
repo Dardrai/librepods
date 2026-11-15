@@ -332,6 +332,32 @@ class HeadTrackerUhidProtocolTest {
         assertEquals(4L, snapshot.sourceAgeCount); assertEquals(10_000_000L, snapshot.sourceAgeMaxNanos)
     }
 
+    @Test fun maximumHidGapRetainsItsOriginalSourceEvidenceAcrossSkippedSlotsAndIdle() {
+        val stats = HeadTrackerSinkMetrics()
+        stats.input(start, start + 2_000_000)
+        assertEquals(0L, stats.snapshot().maxHidGapAtNanos)
+        stats.input(start + 8_000_000, start + 12_000_000)
+        stats.skipped(); stats.skipped()
+        stats.input(start + 145_000_000, start + 150_000_000, extrapolated = true)
+        val maximum = stats.snapshot()
+        assertEquals(138_000_000L, maximum.intervalMaxNanos)
+        assertEquals(start + 150_000_000, maximum.maxHidGapAtNanos)
+        assertEquals(5_000_000L, maximum.sourceAgeAtMaxHidGapNanos)
+        assertEquals(start + 8_000_000, maximum.previousSourceTimestampAtMaxHidGapNanos)
+        assertEquals(start + 145_000_000, maximum.sourceTimestampAtMaxHidGapNanos)
+        // An equal maximum retains the first event; smaller intervals and host Off do too.
+        stats.input(start + 285_000_000, start + 288_000_000)
+        stats.input(start + 295_000_000, start + 300_000_000)
+        stats.idle(); stats.input(start + 10_000_000_000, start + 10_000_000_001)
+        val later = stats.snapshot()
+        assertEquals(4L, later.intervalCount)
+        assertEquals(maximum.maxHidGapAtNanos, later.maxHidGapAtNanos)
+        assertEquals(maximum.sourceAgeAtMaxHidGapNanos, later.sourceAgeAtMaxHidGapNanos)
+        assertEquals(maximum.previousSourceTimestampAtMaxHidGapNanos, later.previousSourceTimestampAtMaxHidGapNanos)
+        assertEquals(maximum.sourceTimestampAtMaxHidGapNanos, later.sourceTimestampAtMaxHidGapNanos)
+        assertEquals(2L, later.skippedInputs)
+    }
+
     private fun rotate(rotation: FloatArray, vector: DoubleArray): DoubleArray {
         val angle = sqrt((0..2).sumOf { rotation[it].toDouble() * rotation[it] })
         if (angle == 0.0) return vector.copyOf()

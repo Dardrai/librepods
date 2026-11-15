@@ -228,6 +228,8 @@ internal data class HeadTrackerSinkStats(
     val intervalMaxNanos: Long = 0, val sourceAgeCount: Long = 0, val sourceAgeMinNanos: Long = 0,
     val sourceAgeMeanNanos: Double = 0.0, val sourceAgeMaxNanos: Long = 0,
     val sourceReuses: Long = 0, val extrapolatedInputs: Long = 0, val skippedInputs: Long = 0,
+    val maxHidGapAtNanos: Long = 0, val sourceAgeAtMaxHidGapNanos: Long = 0,
+    val previousSourceTimestampAtMaxHidGapNanos: Long = 0, val sourceTimestampAtMaxHidGapNanos: Long = 0,
 )
 
 /** Constant-space host timing only; intervals exclude host-disabled windows. */
@@ -240,6 +242,10 @@ internal class HeadTrackerSinkMetrics {
     private var skipped = 0L
     private var lastPoseTimestamp: Long? = null
     private var lastInput: Long? = null
+    private var maxGapAt = 0L
+    private var sourceAgeAtMaxGap = 0L
+    private var previousSourceAtMaxGap = 0L
+    private var sourceAtMaxGap = 0L
     private class Range {
         var count = 0L; var min = 0L; var mean = 0.0; var max = 0L
         fun add(value: Long) {
@@ -255,7 +261,17 @@ internal class HeadTrackerSinkMetrics {
     @Synchronized fun idle() { lastInput = null }
     @Synchronized fun input(poseTimestamp: Long, now: Long, extrapolated: Boolean = false) {
         require(poseTimestamp <= now)
-        lastInput?.let { intervals.add(now - it) }
+        lastInput?.let {
+            val gap = now - it
+            val maximum = intervals.count == 0L || gap > intervals.max
+            intervals.add(gap)
+            if (maximum) {
+                maxGapAt = now
+                sourceAgeAtMaxGap = now - poseTimestamp
+                previousSourceAtMaxGap = checkNotNull(lastPoseTimestamp)
+                sourceAtMaxGap = poseTimestamp
+            }
+        }
         ages.add(now - poseTimestamp)
         if (lastPoseTimestamp == poseTimestamp) {
             ++reuses
@@ -266,7 +282,8 @@ internal class HeadTrackerSinkMetrics {
     }
     @Synchronized fun snapshot() = HeadTrackerSinkStats(accepted, inputs, repeats,
         intervals.count, intervals.min, intervals.mean, intervals.max,
-        ages.count, ages.min, ages.mean, ages.max, reuses, extrapolated, skipped)
+        ages.count, ages.min, ages.mean, ages.max, reuses, extrapolated, skipped,
+        maxGapAt, sourceAgeAtMaxGap, previousSourceAtMaxGap, sourceAtMaxGap)
 }
 
 /** Confirmation belongs to one exact selected address; a stuck native read cannot renew it. */

@@ -100,6 +100,9 @@ class NativeHeadTrackingController internal constructor(
         putBoolean("calibrated", state.value.calibrated); putBoolean("available", state.value.available)
         putBoolean("busy", state.value.busy)
         putString("pose_fault_reason", poseFaultReason)
+        putBundle("source", Bundle().apply {
+            device.aacp.motionSourceTimingSnapshot().forEach { (key, value) -> putLong(key, value) }
+        })
         sinkTiming?.let { putBundle("sink", Bundle(it)) }
         putLong("sink_snapshot_age_ms", if (sinkTimingAt == 0L) -1 else SystemClock.elapsedRealtime() - sinkTimingAt)
     }

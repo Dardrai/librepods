@@ -36,6 +36,8 @@ internal class RTBuddyManager(
     private val remoteAllowed: () -> Boolean = { false },
     private var motionIntervalUs: Int? = null,
     private val sharedMotionOwners: MotionOwners? = null,
+    private val sourceTiming: MotionSourceTiming? = null,
+    private val sourceClockNanos: () -> Long = System::nanoTime,
 ) : AutoCloseable {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val frames = SensorFrames()
@@ -91,15 +93,26 @@ internal class RTBuddyManager(
             SensorDataWX.newBuilder().setRequestAllDescriptors(RequestAllDescriptors.getDefaultInstance()).build())
     }
 
-    @Synchronized
-    fun feed(chunk: ByteArray) {
+    fun feed(chunk: ByteArray, readAtNanos: Long = 0) {
+        val timing = sourceTiming?.takeIf { readAtNanos > 0 }
+        val attemptedAt = if (timing != null) sourceClockNanos() else 0
+        timing?.dispatch(readAtNanos, attemptedAt)
+        synchronized(this) {
+            val enteredAt = if (timing != null) sourceClockNanos() else 0
+            timing?.feedEntered(attemptedAt, enteredAt)
+            try { feedLocked(chunk, readAtNanos) }
+            finally { timing?.feedFinished(enteredAt, sourceClockNanos()) }
+        }
+    }
+
+    private fun feedLocked(chunk: ByteArray, readAtNanos: Long) {
         if (closed || !isCurrent()) return
         reconcileHeadTracking(updateInterval = false)
         for (frame in frames.feed(chunk)) {
             val packet = try { RTBuddyPacket.parse(frame) } catch (_: Exception) { continue }
             val remote = packet.rtBuddyPayload as? RemoteHidBuddyPayload
             if (remote != null) {
-                if (remoteAllowed()) receiveRemote(remote.data)
+                if (remoteAllowed()) receiveRemote(remote.data, readAtNanos)
                 continue
             }
             if (remoteAllowed()) continue
@@ -123,6 +136,7 @@ internal class RTBuddyManager(
                 lastMotion = now()
                 onMotionState(BuddyState.ACTIVE)
                 onMotion(batch.motion)
+                sourceTiming?.motionPublished(batch.motion.report, readAtNanos, sourceClockNanos())
             }
             if (heartWanted && batch.heartRate != null) {
                 lastHeart = now()
@@ -132,7 +146,7 @@ internal class RTBuddyManager(
         }
     }
 
-    private fun receiveRemote(body: ByteArray) {
+    private fun receiveRemote(body: ByteArray, readAtNanos: Long) {
         val packets = RemoteHid.packets(body) ?: return
         for (packet in packets) {
             if (packet.device == 0 || packet.response || packet.status) continue
@@ -159,6 +173,7 @@ internal class RTBuddyManager(
                 lastMotion = now()
                 onMotionState(BuddyState.ACTIVE)
                 onMotion(SensorReports.Motion(report.gyroRaw[1], report.gyroRaw[2]).also { it.report = report })
+                sourceTiming?.motionPublished(report, readAtNanos, sourceClockNanos())
             }
         }
     }
