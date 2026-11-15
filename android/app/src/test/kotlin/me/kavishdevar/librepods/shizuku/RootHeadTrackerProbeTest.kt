@@ -408,7 +408,7 @@ class RootHeadTrackerProbeTest {
             assertEquals(3L, stats.getLong("hid_inputs")); assertEquals(1L, stats.getLong("held_repeats"))
             assertEquals(2L, stats.getLong("source_reuses")); assertEquals(1L, stats.getLong("extrapolated_inputs"))
             assertEquals(4L, stats.getLong("skipped_inputs"))
-            assertEquals(20_000_000L, stats.getLong("extrapolation_limit_nanos"))
+            assertEquals(40_000_000L, stats.getLong("extrapolation_limit_nanos"))
             assertEquals(150_000_000L, stats.getLong("max_hid_gap_at_nanos"))
             assertEquals(5_000_000L, stats.getLong("source_age_at_max_hid_gap_nanos"))
             assertEquals(8_000_000L, stats.getLong("previous_source_timestamp_at_max_hid_gap_nanos"))

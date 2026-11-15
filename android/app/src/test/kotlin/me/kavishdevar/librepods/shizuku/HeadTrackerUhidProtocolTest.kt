@@ -247,7 +247,7 @@ class HeadTrackerUhidProtocolTest {
             val values = FloatArray(6).apply { this[axis] = sign * 0.3f; this[axis + 3] = sign * 2f }
             val measured = HeadTrackerUhidProtocol.decodePose(frame(start, 37, *values), start)
             val before = measured.values.copyOf()
-            for (age in listOf(5_000_000L, 20_000_000L)) {
+            for (age in listOf(5_000_000L, 20_000_000L, 40_000_000L)) {
                 val advanced = checkNotNull(HeadTrackerUhidProtocol.poseAtHostTime(measured, start + age))
                 assertNotSame(measured, advanced)
                 assertEquals(sign * (0.3 + 2 * age / 1e9), advanced.values[axis].toDouble(), 1e-7)
@@ -265,7 +265,7 @@ class HeadTrackerUhidProtocolTest {
             floatArrayOf(0.2f, -0.4f, 0.3f, 1.2f, -0.7f, 2.1f),
         )) {
             val measured = HeadTrackerUhidProtocol.decodePose(frame(start, 0, *values), start)
-            for (age in listOf(5_000_000L, 20_000_000L)) {
+            for (age in listOf(5_000_000L, 20_000_000L, 40_000_000L)) {
                 val advanced = checkNotNull(HeadTrackerUhidProtocol.poseAtHostTime(measured, start + age))
                 val delta = FloatArray(3) { (values[it + 3] * age / 1e9).toFloat() }
                 for (axis in 0..2) {
@@ -280,26 +280,29 @@ class HeadTrackerUhidProtocolTest {
 
     @Test fun crossingPiReturnsTheEquivalentPrincipalRotationVector() {
         val measured = HeadTrackerUhidProtocol.decodePose(frame(start, 0, 0f, 0f, (Math.PI - 0.01).toFloat(), 0f, 0f, 2f), start)
-        val advanced = checkNotNull(HeadTrackerUhidProtocol.poseAtHostTime(measured, start + 20_000_000))
-        assertEquals(-Math.PI + 0.03, advanced.values[2].toDouble(), 2e-7)
+        val advanced = checkNotNull(HeadTrackerUhidProtocol.poseAtHostTime(measured, start + 40_000_000))
+        assertEquals(-Math.PI + 0.07, advanced.values[2].toDouble(), 2e-7)
         assertEquals(0f, advanced.values[0], 0f); assertEquals(0f, advanced.values[1], 0f)
-        HeadTrackerUhidProtocol.decodePose(frame(advanced.timestampNanos, advanced.discontinuity, *advanced.values), start + 20_000_000)
+        HeadTrackerUhidProtocol.decodePose(frame(advanced.timestampNanos, advanced.discontinuity, *advanced.values), start + 40_000_000)
     }
 
     @Test fun hostAgeIntegrationIsBoundedAndCannotExtendSourceFreshness() {
         val measured = HeadTrackerUhidProtocol.decodePose(frame(start, 0, 0f, 0f, 0f, 0f, 1f), start)
         assertSame(measured, HeadTrackerUhidProtocol.poseAtHostTime(measured, start))
         val still = pose(start, 0.3f)
-        assertSame(still, HeadTrackerUhidProtocol.poseAtHostTime(still, start + 20_000_000))
+        assertSame(still, HeadTrackerUhidProtocol.poseAtHostTime(still, start + 40_000_000))
         assertNull(HeadTrackerUhidProtocol.poseAtHostTime(measured, start - 1))
-        assertNull(HeadTrackerUhidProtocol.poseAtHostTime(measured, start + 20_000_001))
+        assertNull(HeadTrackerUhidProtocol.poseAtHostTime(measured, start + 40_000_001))
+        assertNull(HeadTrackerUhidProtocol.poseAtHostTime(still, start + 40_000_001))
         assertNull(HeadTrackerUhidProtocol.poseAtHostTime(measured, Long.MAX_VALUE))
-        val advanced = checkNotNull(HeadTrackerUhidProtocol.poseAtHostTime(measured, start + 20_000_000))
+        val advanced = checkNotNull(HeadTrackerUhidProtocol.poseAtHostTime(measured, start + 40_000_000))
         assertEquals(start, advanced.timestampNanos)
         val gate = HeadTrackerPoseGate()
         gate.reporting(true, start); gate.accept(measured, start)
-        assertEquals(start + HeadTrackerUhidProtocol.FRESH_NANOS, gate.deadline)
-        expired { gate.checkFresh(advanced.timestampNanos + HeadTrackerUhidProtocol.FRESH_NANOS + 1) }
+        assertEquals(start + 250_000_000, gate.deadline)
+        rejected { gate.accept(advanced, start + 40_000_000) }
+        gate.checkFresh(start + 250_000_000)
+        expired { gate.checkFresh(advanced.timestampNanos + 250_000_001) }
     }
 
     @Test fun skippedSlotsAdvanceTheCadenceWithoutAnImmediatePollLoop() {
@@ -349,7 +352,7 @@ class HeadTrackerUhidProtocolTest {
         }
     }
 
-    @Test fun fiftyHertzSourceDeliveredInPairsCanSkipHalfTheSlotsWithoutPacingDrift() {
+    @Test fun fiftyHertzSourceDeliveredInPairsCanCoverOneHundredHostSlotsWithoutRefreshingTimestamps() {
         val source = (0..30).flatMap { pair ->
             (0..1).map { within ->
                 val arrival = start + (pair + 1)*40_000_000L + within*100_000L
@@ -377,9 +380,52 @@ class HeadTrackerUhidProtocolTest {
             pacer.advance(now)
         }
         assertEquals(50, next) // Fifty distinct reports were delivered during the one-second window.
-        assertEquals(50L, stats.snapshot().hidInputs)
-        assertEquals(50L, stats.snapshot().skippedInputs)
+        assertEquals(100L, stats.snapshot().hidInputs)
+        assertEquals(0L, stats.snapshot().skippedInputs)
+        assertEquals(31_900_000L, stats.snapshot().sourceAgeMaxNanos)
         assertEquals(start + 1_042_000_000, pacer.deadline)
+    }
+
+    @Test fun tenMillisecondSourceInThreeReportBurstsCoversOneHundredSlotsWithOriginalArrivalTimes() {
+        val period = 10_000_000L
+        val transit = 1_200_000L
+        val source = (0..40).flatMap { burst ->
+            (0..2).map { within ->
+                val arrival = start + (burst + 1)*30_000_000L + within*100_000L
+                val measured = movingPose(arrival, (burst*3 + within)*0.005f)
+                Triple(arrival + transit, arrival, measured)
+            }
+        }
+        for (phase in listOf(2_000_000L, 5_000_000L, 9_000_000L)) {
+            val first = start + 100_000_000 + phase
+            val gate = HeadTrackerPoseGate().apply { reporting(true, start) }
+            val pacer = HeadTrackerReportPacer().apply { reporting(true, period, first) }
+            val stats = HeadTrackerSinkMetrics()
+            var next = 0
+            repeat(100) { index ->
+                val now = first + index*period
+                assertEquals(now, pacer.deadline)
+                while (next < source.size && source[next].first <= now) {
+                    val (availableAt, originalArrival, measured) = source[next++]
+                    assertEquals(originalArrival, measured.timestampNanos)
+                    assertTrue(gate.accept(measured, availableAt))
+                    stats.accepted()
+                }
+                val measured = checkNotNull(gate.pose(now))
+                val emitted = checkNotNull(HeadTrackerUhidProtocol.poseAtHostTime(measured, now))
+                assertEquals(measured.timestampNanos, emitted.timestampNanos)
+                assertEquals(measured.discontinuity, emitted.discontinuity)
+                assertEquals(measured.values[2] + 0.5*(now - measured.timestampNanos)/1e9,
+                    emitted.values[2].toDouble(), 1e-7)
+                assertEquals(measured.timestampNanos + 250_000_000, gate.deadline)
+                stats.input(measured.timestampNanos, now, emitted !== measured)
+                pacer.advance(now)
+            }
+            assertEquals(100L, stats.snapshot().hidInputs)
+            assertEquals(0L, stats.snapshot().skippedInputs)
+            assertTrue(stats.snapshot().sourceAgeMaxNanos > 20_000_000)
+            assertEquals(first + 100*period, pacer.deadline)
+        }
     }
 
     @Test fun a144MillisecondSourceGapSkipsSlotsWithoutRefreshingTheOldMeasurement() {
@@ -400,7 +446,7 @@ class HeadTrackerUhidProtocolTest {
             }
             val measured = checkNotNull(gate.pose(now))
             val emitted = HeadTrackerUhidProtocol.poseAtHostTime(measured, now)
-            if (index in 5..16) {
+            if (index in 7..16) {
                 assertNull(emitted)
                 assertEquals(start + 20_000_000 + HeadTrackerUhidProtocol.FRESH_NANOS, gate.deadline)
             }
@@ -411,9 +457,9 @@ class HeadTrackerUhidProtocolTest {
             }
             pacer.advance(now)
         }
-        assertEquals(12L, stats.snapshot().skippedInputs)
-        assertEquals(7L, stats.snapshot().hidInputs)
-        assertEquals(130_000_000L, stats.snapshot().intervalMaxNanos)
+        assertEquals(10L, stats.snapshot().skippedInputs)
+        assertEquals(9L, stats.snapshot().hidInputs)
+        assertEquals(110_000_000L, stats.snapshot().intervalMaxNanos)
         assertEquals(start + 20_000_000, stats.snapshot().previousSourceTimestampAtMaxHidGapNanos)
         assertEquals(start + 164_000_000, stats.snapshot().sourceTimestampAtMaxHidGapNanos)
         assertEquals(6_000_000L, stats.snapshot().sourceAgeAtMaxHidGapNanos)

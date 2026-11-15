@@ -75,7 +75,8 @@ internal class HeadTrackerUhidProtocol(address: String) {
         const val FRAME_BYTES = 40
         const val FRAME_MAGIC = 0x31505448 // ASCII HTP1, little endian.
         const val FRESH_NANOS = 250_000_000L
-        const val MAX_EXTRAPOLATION_NANOS = 20_000_000L
+        // shortcut: bridge short bursts with constant velocity; revisit when transport delivers steadily.
+        const val MAX_EXTRAPOLATION_NANOS = 40_000_000L
         const val STARTUP_NANOS = 5_000_000_000L
         const val START = 2; const val STOP = 3; const val OPEN = 4; const val CLOSE = 5
         const val GET_REPORT = 9; const val GET_REPORT_REPLY = 10; const val CREATE2 = 11
