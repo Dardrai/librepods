@@ -83,6 +83,7 @@ class NativeHeadTrackingController internal constructor(
     private var sessionKey: SpatialPoseProfileKey? = null
     @Volatile private var failedSocket: BluetoothSocket? = null
     @Volatile private var failedKey: SpatialPoseProfileKey? = null
+    @Volatile private var poseFaultReason: String? = null
     @Volatile private var nativeOn: Boolean? = null
     private val discontinuity = AtomicInteger()
     private val forceInspect = AtomicBoolean(true)
@@ -98,6 +99,7 @@ class NativeHeadTrackingController internal constructor(
         putBoolean("enabled", state.value.enabled == true); putBoolean("active", state.value.active)
         putBoolean("calibrated", state.value.calibrated); putBoolean("available", state.value.available)
         putBoolean("busy", state.value.busy)
+        putString("pose_fault_reason", poseFaultReason)
         sinkTiming?.let { putBundle("sink", Bundle(it)) }
         putLong("sink_snapshot_age_ms", if (sinkTimingAt == 0L) -1 else SystemClock.elapsedRealtime() - sinkTimingAt)
     }
@@ -115,7 +117,7 @@ class NativeHeadTrackingController internal constructor(
                 withChoice(choice.epoch) {
                     if (pending.compareAndSet(choice, null)) {
                         nativeOn = if (result.getBoolean("applied")) false else null
-                        if (nativeOn == false) { failedSocket = null; failedKey = null }
+                        if (nativeOn == false) { failedSocket = null; failedKey = null; poseFaultReason = null }
                         mutableState.update { it.copy(enabled = nativeOn, busy = false, active = false,
                             reason = if (nativeOn == false) "off" else "request_failed") }
                     }
@@ -140,7 +142,7 @@ class NativeHeadTrackingController internal constructor(
     fun setCalibrationActive(owner: Any, active: Boolean) {
         synchronized(calibrationOwners) { if (active) calibrationOwners += owner else calibrationOwners -= owner }
         if (active) sessionLive?.set(false)
-        else { failedSocket = null; failedKey = null }
+        else { failedSocket = null; failedKey = null; poseFaultReason = null }
     }
 
     fun setEnabled(enabled: Boolean) {
@@ -202,7 +204,7 @@ class NativeHeadTrackingController internal constructor(
                     mutableState.update { it.copy(calibrated = profile != null) }
                     if (session != null && (!eligible || sessionSocket !== socket || sessionKey != key ||
                             sessionLive?.get() != true || session?.isActive != true)) stopSession()
-                    if (failedSocket !== socket || failedKey != key) { failedSocket = null; failedKey = null }
+                    if (failedSocket !== socket || failedKey != key) { failedSocket = null; failedKey = null; poseFaultReason = null }
                     val epoch = choiceEpoch.get()
                     val choice = pending.get()
                     if (choice != null && choice.epoch != epoch) { delay(100); continue }
@@ -234,7 +236,7 @@ class NativeHeadTrackingController internal constructor(
                                     @Suppress("DEPRECATION")
                                     val headPreference = snapshot.flag("head_tracker_enabled")
                                     withChoice(epoch) {
-                                        if (nativeOn == false && headPreference == true) { failedSocket = null; failedKey = null }
+                                        if (nativeOn == false && headPreference == true) { failedSocket = null; failedKey = null; poseFaultReason = null }
                                         nativeOn = headPreference
                                         spatialEligible = headPreference != null && snapshot.flag("device_enabled") == true &&
                                             snapshot.flag("enabled") == true && snapshot.flag("route_selected") == true
@@ -252,7 +254,7 @@ class NativeHeadTrackingController internal constructor(
                             if (session == null && eligible && mutableState.value.available &&
                                 (explicitOn || nativeOn == true && SystemClock.elapsedRealtime() >= retryAfter.get() &&
                                     !(failedSocket === socket && failedKey == key))) {
-                                if (explicitOn) { failedSocket = null; failedKey = null }
+                                if (explicitOn) { failedSocket = null; failedKey = null; poseFaultReason = null }
                                 val live = AtomicBoolean(true)
                                 sessionLive = live; sessionSocket = socket; sessionKey = key
                                 session = launch { runSensor(checkNotNull(socket), checkNotNull(key),
@@ -336,7 +338,9 @@ class NativeHeadTrackingController internal constructor(
         } catch (cancelled: CancellationException) { throw cancelled }
         catch (error: Exception) {
             withChoice(epoch) {
-                if (error is NativeHeadTrackingPoseFault && owns()) { failedSocket = socket; failedKey = key }
+                if (error is NativeHeadTrackingPoseFault && owns()) {
+                    failedSocket = socket; failedKey = key; poseFaultReason = error.message
+                }
                 else retryAfter.set(SystemClock.elapsedRealtime() + 2_000)
                 if (choice != null) pending.compareAndSet(choice, null)
                 mutableState.update { it.copy(enabled = pending.get()?.enabled ?: nativeOn,
@@ -420,9 +424,10 @@ internal suspend fun streamNativeHeadTracking(device: AppleDevice, motion: Flow<
                     if (report.counter != null && report.counter == previousCounter) return@collect
                     previousCounter = report.counter
                     timing.sample(sample, collectedAt)
-                    converter.accept(report)?.let { submit(it, sample.arrivalNs) }
+                    val pose = converter.accept(report)
+                    pose?.let { submit(it, sample.arrivalNs) }
                     if (converter.invalidated) throw NativeHeadTrackingPoseFault(converter.invalidReason ?: "motion_changed")
-                    if (report.attitudeQ15.any { it != 0 }) {
+                    if (pose != null || report.attitudeQ15.any { it != 0 }) {
                         lastAttitudeAt.set(sample.arrivalNs)
                         firstAttitude.complete(Unit)
                     }

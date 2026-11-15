@@ -395,14 +395,18 @@ class RootHeadTrackerProbeTest {
         assertFalse(selectedHeadTrackerRouteCurrent(address, Owner()) { nativeCalls++; false })
         assertEquals(2, nativeCalls)
         val platform = Platform(); val sink = Sink().apply {
-            stats = HeadTrackerSinkStats(2, 3, 1, 2, 10, 11.5, 13, 3, 0, 5.0, 10)
+            stats = HeadTrackerSinkStats(2, 3, 1, 2, 10, 11.5, 13, 3, 0, 5.0, 10,
+                sourceReuses = 2, extrapolatedInputs = 1, skippedInputs = 4)
         }
         val probe = probe(platform, sink); val pipe = ParcelFileDescriptor.createPipe(); val owner = Owner()
         try {
             val ready = probe.start(address, owner, pipe[0], Events(), 5)
             val stats = checkNotNull(ready.getBundle("sink_stats"))
-            assertEquals(1, stats.getInt("version")); assertEquals(2L, stats.getLong("accepted_poses"))
+            assertEquals(2, stats.getInt("version")); assertEquals(2L, stats.getLong("accepted_poses"))
             assertEquals(3L, stats.getLong("hid_inputs")); assertEquals(1L, stats.getLong("held_repeats"))
+            assertEquals(2L, stats.getLong("source_reuses")); assertEquals(1L, stats.getLong("extrapolated_inputs"))
+            assertEquals(4L, stats.getLong("skipped_inputs"))
+            assertEquals(20_000_000L, stats.getLong("extrapolation_limit_nanos"))
             assertEquals(11.5, stats.getDouble("hid_interval_mean_nanos"), 0.0)
             assertEquals(5.0, stats.getDouble("host_source_age_mean_nanos"), 0.0)
             assertEquals("host_frame_timestamp_to_uhid_submission", stats.getString("age_scope"))

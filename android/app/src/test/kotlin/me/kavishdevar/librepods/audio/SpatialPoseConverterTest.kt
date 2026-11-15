@@ -22,11 +22,11 @@ class SpatialPoseConverterTest {
         assertNull(converter.accept(report(neutral * mount.inverse(), 1_000_000_000)))
         val still = checkNotNull(converter.accept(report(neutral * mount.inverse(), 1_000_000_000 + tick)))
         vector(listOf(0.0, 0.0, 0.0), still.angularVelocity.map(Float::toDouble), 0.0001)
-        vector(listOf(0.0, 0.0, Math.toRadians(23.0)), still.rotationVector.map(Float::toDouble), 0.0003)
+        vector(listOf(0.0, 0.0, 0.0), still.rotationVector.map(Float::toDouble), 0.0003)
         assertEquals(7, still.discontinuity); assertEquals(tick, still.intervalNs)
     }
 
-    @Test fun composedWorldFromHeadAndIntrinsicRatesRemainCorrectWithNontrivialMounts() {
+    @Test fun sessionRelativeHeadAndIntrinsicRatesRemainCorrectWithNontrivialMounts() {
         for (rawFromHead in listOf(mount, axis(1.0, 2.0, -1.0, 57.0), axis(0.0, 0.0, 1.0, 180.0))) {
             val converter = SpatialPoseConverter(checkNotNull(calibrate(rawFromHead)), 19)
             var head = neutral
@@ -38,13 +38,120 @@ class SpatialPoseConverterTest {
                 axis(0.0, 0.0, 1.0, Math.toDegrees(0.010)) to listOf(0.0, 0.0, 0.5))) {
                 head *= delta; time += tick
                 val pose = checkNotNull(converter.accept(report(head * rawFromHead.inverse(), time)))
-                vector(head.rotvec(), pose.rotationVector.map(Float::toDouble), 0.0004)
+                vector((neutral.inverse() * head).rotvec(), pose.rotationVector.map(Float::toDouble), 0.0004)
                 // The half-turn mount leaves raw w≈0.2: Q15 reconstruction's two-frame
                 // angular-rate error is bounded by ~0.03 rad/s at a 20 ms interval.
                 vector(wantedRate, pose.angularVelocity.map(Float::toDouble), 0.03)
                 assertEquals(time, pose.timestampNs); assertEquals(19, pose.discontinuity)
             }
         }
+    }
+
+    @Test fun canonicalWholeQuaternionSignFlipsAcrossRawPiKeepTheSessionPoseContinuous() {
+        val identity = checkNotNull(SpatialPoseProfile.fromBasis(listOf(
+            listOf(1.0, 0.0, 0.0), listOf(0.0, 1.0, 0.0), listOf(0.0, 0.0, 1.0))))
+        val converter = SpatialPoseConverter(identity, 23)
+        val direction = listOf(1.0, 2.0, 3.0).map { it / sqrt(14.0) }
+        val angles = (160..178 step 2).map(Int::toDouble) + listOf(179.0, 181.0) + (182..200 step 2).map(Int::toDouble)
+        var time = 1_000_000_000L
+        assertNull(converter.accept(report(axis(1.0, 2.0, 3.0, angles.first()), time)))
+        for ((before, angle) in angles.zipWithNext()) {
+            time += tick
+            val pose = checkNotNull(converter.accept(report(axis(1.0, 2.0, 3.0, angle), time)))
+            vector(direction.map { it * Math.toRadians(angle - angles.first()) }, pose.rotationVector.map(Float::toDouble), 0.003)
+            // Q15 xyz reconstructs w near zero with ~0.12 degree error here; the two-frame
+            // rate error is ~0.21 rad/s across179/181 degrees at20ms, without a branch jump.
+            vector(direction.map { it * Math.toRadians(angle - before) / (tick / 1e9) },
+                pose.angularVelocity.map(Float::toDouble), 0.25)
+            assertEquals(23, pose.discontinuity); assertFalse(converter.invalidated)
+        }
+    }
+
+    @Test fun anArbitraryInitialWorldPoseIsCenteredWithoutChangingMountedBodyRates() {
+        val rawFromHead = axis(1.0, 2.0, -1.0, 57.0)
+        val converter = SpatialPoseConverter(checkNotNull(calibrate(rawFromHead)), 8)
+        val origin = axis(1.0, -2.0, 3.0, 147.0)
+        var head = origin
+        var time = 1_000_000_000L
+        assertNull(converter.accept(report(head * rawFromHead.inverse(), time)))
+        time += tick
+        val centered = checkNotNull(converter.accept(report(head * rawFromHead.inverse(), time)))
+        vector(listOf(0.0, 0.0, 0.0), centered.rotationVector.map(Float::toDouble), 0.0001)
+        for ((delta, wantedRate) in listOf(
+            axis(1.0, 0.0, 0.0, Math.toDegrees(0.01)) to listOf(0.5, 0.0, 0.0),
+            axis(0.0, 1.0, 0.0, Math.toDegrees(-0.012)) to listOf(0.0, -0.6, 0.0),
+            axis(0.0, 0.0, 1.0, Math.toDegrees(0.008)) to listOf(0.0, 0.0, 0.4))) {
+            head *= delta; time += tick
+            val pose = checkNotNull(converter.accept(report(head * rawFromHead.inverse(), time)))
+            // This world/mount combination has raw |w|≈0.05: the two-frame Q15
+            // orientation-error bound is≈0.00212 rad near the raw half-turn.
+            vector((origin.inverse() * head).rotvec(), pose.rotationVector.map(Float::toDouble), 0.0022)
+            vector(wantedRate, pose.angularVelocity.map(Float::toDouble), 0.03)
+        }
+    }
+
+    @Test fun calibrationHoldMeansAlignCanonicalHemispheresAcrossTheRawHalfTurn() {
+        var time = 100_000_000L
+        fun hold() = List(10) { i -> report(axis(0.0, 0.0, 1.0, if (i % 2 == 0) 179.0 else 181.0), time).also { time += tick } }
+        val neutral = hold()
+        val up = List(10) {
+            report(axis(0.0, 0.0, 1.0, 180.0) * axis(1.0, 0.0, 0.0, 25.0), time).also { time += tick }
+        }
+        val result = SpatialPoseProfile.calibrateResult(neutral, up, hold())
+        assertNotNull(result.profile); assertNull(result.failure)
+        assertNotNull(SpatialPoseProfile.fromBasis(checkNotNull(result.profile).headFromRaw))
+    }
+
+    @Test fun fullSpherePosesRemainFiniteAndPrincipalWhileNativePiContinuityIsNotClaimed() {
+        val profile = checkNotNull(SpatialPoseProfile.fromBasis(listOf(
+            listOf(1.0, 0.0, 0.0), listOf(0.0, 1.0, 0.0), listOf(0.0, 0.0, 1.0))))
+        val converter = SpatialPoseConverter(profile, 0)
+        var time = 1_000_000_000L
+        assertNull(converter.accept(report(axis(0.0, 0.0, 1.0, 37.0), time)))
+        for (relative in 15..345 step 15) {
+            time += tick
+            val pose = checkNotNull(converter.accept(report(axis(0.0, 0.0, 1.0, 37.0 + relative), time)))
+            val rv = pose.rotationVector.map(Float::toDouble)
+            val norm = sqrt(rv.sumOf { it * it })
+            assertTrue(norm.isFinite() && norm <= Math.PI + Math.ulp(Math.PI.toFloat()))
+            val reconstructed = axis(rv[0], rv[1], rv[2], Math.toDegrees(norm))
+            assertEquals(1.0, kotlin.math.abs(reconstructed.dot(axis(0.0, 0.0, 1.0, relative.toDouble()))), 0.00001)
+            assertFalse(converter.invalidated)
+        }
+        val boundary = SpatialPoseConverter(profile, 1)
+        val halfTurn = report(axis(1.0, 0.0, 0.0, 180.0), time).copy(attitudeQ15 = listOf(-32768, 0, 0))
+        assertNull(boundary.accept(halfTurn))
+        val still = checkNotNull(boundary.accept(halfTurn.copy(timestampNs = time + tick, counter = halfTurn.counter!! + 4)))
+        vector(listOf(0.0, 0.0, 0.0), still.rotationVector.map(Float::toDouble), 0.00001)
+    }
+
+    @Test fun anEstablishedReferenceCanPassThroughExactZeroXyzAsARealIdentityPose() {
+        val profile = checkNotNull(SpatialPoseProfile.fromBasis(listOf(
+            listOf(1.0, 0.0, 0.0), listOf(0.0, 1.0, 0.0), listOf(0.0, 0.0, 1.0))))
+        val converter = SpatialPoseConverter(profile, 11)
+        var time = 1_000_000_000L
+        assertNull(converter.accept(report(axis(0.0, 0.0, 1.0, -2.0), time)))
+        var before = -2.0
+        for (angle in listOf(-1.0, -0.2, 0.0, 0.2, 1.0, 2.0)) {
+            time += tick
+            val raw = report(axis(0.0, 0.0, 1.0, angle), time)
+            if (angle == 0.0) assertEquals(listOf(0, 0, 0), raw.attitudeQ15)
+            val pose = checkNotNull(converter.accept(raw))
+            vector(listOf(0.0, 0.0, Math.toRadians(angle + 2.0)), pose.rotationVector.map(Float::toDouble), 0.0001)
+            vector(listOf(0.0, 0.0, Math.toRadians(angle - before) / (tick / 1e9)),
+                pose.angularVelocity.map(Float::toDouble), 0.004)
+            assertFalse(converter.invalidated); before = angle
+        }
+    }
+
+    @Test fun calibrationAllowsIdentitySamplesInEstablishedNeutralAndReturnHolds() {
+        var time = 100_000_000L
+        fun capture(head: TQ) = report(head, time).also { time += tick }
+        val start = List(10) { i -> capture(axis(0.0, 0.0, 1.0, if (i == 0) 1.0 else 0.0)) }
+        val up = List(10) { capture(axis(1.0, 0.0, 0.0, 25.0)) }
+        val finish = List(10) { capture(axis(0.0, 0.0, 1.0, 0.0)) }
+        val result = SpatialPoseProfile.calibrateResult(start, up, finish)
+        assertNotNull(result.profile); assertNull(result.failure)
     }
 
     @Test fun calibrationRejectsWeakMixedOrUnreturnedExcursionsAndUnstableHolds() {
@@ -86,7 +193,7 @@ class SpatialPoseConverterTest {
         val phases = phases()
         for (bad in listOf(
             phases.second[0].copy(attitudeQ15 = listOf(0, 0, 0)),
-            phases.second[0].copy(attitudeQ15 = listOf(32767, 0, 0)),
+            phases.second[0].copy(attitudeQ15 = listOf(32767, 32767, 0)),
             phases.second[0].copy(timestampNs = null),
             phases.second[0].copy(timestampNs = phases.first.last().timestampNs),
             phases.second[0].copy(counter = 0))) {
@@ -105,7 +212,7 @@ class SpatialPoseConverterTest {
         rejected(SpatialCalibrationFailure.SENSOR_COUNTER_CHANGED,
             p.copy(second = listOf(p.second.first().copy(counter = 0)) + p.second.drop(1)))
         rejected(SpatialCalibrationFailure.UNSUPPORTED_ATTITUDE,
-            p.copy(second = listOf(p.second.first().copy(attitudeQ15 = listOf(32767, 0, 0))) + p.second.drop(1)))
+            p.copy(second = listOf(p.second.first().copy(attitudeQ15 = listOf(32767, 32767, 0))) + p.second.drop(1)))
     }
 
     @Test fun calibrationResultDistinguishesHoldReturnGravityAndUpFailures() {
@@ -184,7 +291,7 @@ class SpatialPoseConverterTest {
             phases.second, phases.third))
     }
 
-    @Test fun badTimesCounterResetsAndUnsupportedBranchLatchUntilANewConverter() {
+    @Test fun badTimesCounterResetsAndInvalidAttitudesLatchUntilANewConverter() {
         val first = report(neutral * mount.inverse(), 1_000_000_000)
         val next = report(neutral * mount.inverse(), 1_000_000_000 + tick)
         for (bad in listOf(
@@ -193,7 +300,7 @@ class SpatialPoseConverterTest {
             next.copy(timestampNs = first.timestampNs!! + 250_000_000),
             next.copy(counter = first.counter), next.copy(counter = 0), next.copy(counter = null),
             next.copy(attitudeQ15 = listOf(0, 0, 0)),
-            next.copy(attitudeQ15 = listOf(32767, 0, 0)), next.copy(attitudeQ15 = listOf(32767, 32767, 0)),
+            next.copy(attitudeQ15 = listOf(32767, 32767, 0)),
             report((neutral * axis(1.0, 0.0, 0.0, 80.0)) * mount.inverse(), next.timestampNs!!))) {
             val converter = SpatialPoseConverter(checkNotNull(calibrate()), 0)
             assertNull(converter.accept(first)); assertNull(converter.accept(bad))
@@ -205,7 +312,7 @@ class SpatialPoseConverterTest {
         assertNull(fresh.accept(first)); assertNotNull(fresh.accept(next))
     }
 
-    @Test fun forwardShortGapsReprimeRateWithoutChangingAbsoluteReferenceOrDiscontinuity() {
+    @Test fun forwardShortGapsReprimeRateWithoutChangingSessionReferenceOrDiscontinuity() {
         val first = report(neutral * mount.inverse(), 1_000_000_000)
         val raised = neutral * axis(1.0, 0.0, 0.0, 20.0)
         val after = raised * axis(1.0, 0.0, 0.0, Math.toDegrees(0.01))
@@ -217,7 +324,7 @@ class SpatialPoseConverterTest {
             val next = report(after * mount.inverse(), gapReport.timestampNs!! + tick).copy(counter = gapReport.counter!! + 4)
             val pose = checkNotNull(converter.accept(next))
             assertEquals(17, pose.discontinuity); assertEquals(tick, pose.intervalNs)
-            vector(after.rotvec(), pose.rotationVector.map(Float::toDouble), 0.0004)
+            vector((neutral.inverse() * after).rotvec(), pose.rotationVector.map(Float::toDouble), 0.0004)
             vector(listOf(0.5, 0.0, 0.0), pose.angularVelocity.map(Float::toDouble), 0.02)
         }
     }
@@ -230,7 +337,7 @@ class SpatialPoseConverterTest {
             gap.copy(counter = first.counter) to "sensor_counter_changed",
             gap.copy(counter = 0) to "sensor_counter_changed",
             gap.copy(counter = null) to "sensor_counter_changed",
-            gap.copy(attitudeQ15 = listOf(32767, 0, 0)) to "unsupported_attitude",
+            gap.copy(attitudeQ15 = listOf(32767, 32767, 0)) to "unsupported_attitude",
             gap.copy(timestampNs = first.timestampNs!! + 250_000_000) to "sensor_gap")
         for ((bad, reason) in cases) {
             val converter = SpatialPoseConverter(checkNotNull(calibrate()), 0)
@@ -296,7 +403,7 @@ class SpatialPoseConverterTest {
         return Triple(hold(neutral), hold(upHead).map { it.copy(gravityRaw = listOf(-400, 700, -600)) }, hold(returnHead))
     }
     private fun report(q: TQ, time: Long, worldGravity: List<Double> = listOf(0.0, 0.0, -1.0)) = MotionReport(time,
-        listOf(q.x, q.y, q.z).map { (it * if (q.w < 0) -32768 else 32768).roundToInt() },
+        listOf(q.x, q.y, q.z).map { (it * if (q.w < 0) -32768 else 32768).roundToInt().coerceIn(-32768, 32767) },
         listOf(30000, -31000, 22000), listOf(0, 0, 0),
         q.inverse().rotate(worldGravity).map { (it * 1000).roundToInt() }, time / tick * 4)
     private fun vector(expected: List<Double>, actual: List<Double>, tolerance: Double) {
@@ -311,10 +418,12 @@ class SpatialPoseConverterTest {
         operator fun times(b: TQ) = TQ(w*b.w-x*b.x-y*b.y-z*b.z, w*b.x+x*b.w+y*b.z-z*b.y,
             w*b.y-x*b.z+y*b.w+z*b.x, w*b.z+x*b.y-y*b.x+z*b.w)
         fun inverse() = TQ(w, -x, -y, -z)
+        fun dot(b: TQ) = w*b.w + x*b.x + y*b.y + z*b.z
         fun rotate(v: List<Double>): List<Double> = (this * TQ(0.0, v[0], v[1], v[2]) * inverse())
             .let { listOf(it.x, it.y, it.z) }
         fun rotvec(): List<Double> {
-            val n = sqrt(x*x+y*y+z*z); val scale = 2 * atan2(n, w) / n
+            val sign = if (w < 0) -1.0 else 1.0
+            val n = sqrt(x*x+y*y+z*z); val scale = sign * if (n < 1e-10) 2.0 else 2 * atan2(n, w * sign) / n
             return listOf(x*scale, y*scale, z*scale)
         }
     }

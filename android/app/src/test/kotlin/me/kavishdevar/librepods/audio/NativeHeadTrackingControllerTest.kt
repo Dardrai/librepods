@@ -361,6 +361,30 @@ class NativeHeadTrackingControllerTest {
         }
     }
 
+    @Test fun validIdentityReportsAfterStartupKeepTheFastSourceAlive() = runBlocking {
+        Target().use { f ->
+            var clock = HOST_START
+            val timing = HeadTrackingTiming(); val poses = mutableListOf<SpatialPose>()
+            val source = flow<MotionSample?> {
+                for (tick in 1..20) {
+                    clock += 20_000_000
+                    emit(MotionSample(if (tick == 1) report(tick) else
+                        report(tick).copy(attitudeQ15 = listOf(0, 0, 0)), clock))
+                    delay(10)
+                }
+                awaitCancellation()
+            }
+            val job = async { streamNativeHeadTracking(f.device, source, identity, 0, { true }, timing,
+                now = { clock }) { pose, _ -> poses += pose } }
+            try {
+                waitUntil { poses.size == 19 }
+                assertEquals(1, f.started.size)
+                assertFalse(timing.snapshot().getBoolean("fallback_rate"))
+            } finally { job.cancelAndJoin() }
+            assertEquals(f.started.toList(), f.released.toList())
+        }
+    }
+
     private suspend fun waitUntil(condition: () -> Boolean) = withTimeout(3_000) {
         while (!condition()) delay(10)
     }

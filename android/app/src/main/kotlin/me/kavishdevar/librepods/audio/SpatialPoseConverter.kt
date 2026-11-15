@@ -75,7 +75,8 @@ internal class SpatialPoseProfile private constructor(val headFromRaw: List<List
         }
 
         private fun meanHold(values: List<Q>): Q? {
-            val mean = values.reduce(Q::plus).unit()
+            val first = values.first()
+            val mean = values.map { if (first.dot(it) < 0) -it else it }.reduce(Q::plus).unit()
             return mean.takeIf { q -> values.all { (q.inverse() * it).rotationVector().norm() <= radians(2.0) } }
         }
 
@@ -102,15 +103,18 @@ internal class SpatialPoseProfile private constructor(val headFromRaw: List<List
 internal data class SpatialPose(val timestampNs: Long, val discontinuity: Int,
     val rotationVector: List<Float>, val angularVelocity: List<Float>, val intervalNs: Long)
 
-/** Pure positive-w conversion for a caller-validated session; no stream, device, or audio ownership.
+/** Canonical Q15 conversion for a caller-validated session; no stream, device, or audio ownership.
  * The caller retires this instance on role, transport or known reference changes. Invalid input after
  * startup also retires it. A forward 100–250 ms report gap only re-primes the rate; it emits no pose.
  * Rates are head-body finite differences over intervalNs (normally ~20 ms),
  * not instantaneous raw-gyro rates. No prediction or latency compensation is applied.
+ * Output reference is the first valid head pose, keeping ordinary turns away from HID's pi branch.
+ * shortcut: full relative half-turns still need hemisphere-aware prediction in Android's native renderer.
  */
 internal class SpatialPoseConverter(private val profile: SpatialPoseProfile, private val discontinuity: Int) {
     private val rawFromHead = Q.fromMatrix(List(3) { r -> List(3) { c -> profile.headFromRaw[c][r] } })
     private var previous: Q? = null
+    private var initialHeadInverse: Q? = null
     private var previousTime = 0L
     private var previousCounter: Long? = null
     var invalidReason: String? = null
@@ -137,6 +141,7 @@ internal class SpatialPoseConverter(private val profile: SpatialPoseProfile, pri
                 if (time <= reference) return retire("sensor_time_changed")
                 if (!counterFollows(profile.referenceCounter, report.counter)) return retire("sensor_counter_changed")
             }
+            initialHeadInverse = head.inverse()
             previous = head; previousTime = time; previousCounter = report.counter
             return null
         }
@@ -152,7 +157,7 @@ internal class SpatialPoseConverter(private val profile: SpatialPoseProfile, pri
             previous = head; previousTime = time; previousCounter = report.counter
             return null
         }
-        val rotation = head.rotationVector()
+        val rotation = (checkNotNull(initialHeadInverse) * head).rotationVector()
         if (!rotation.norm().isFinite()) return retire("unsupported_attitude")
         previous = head; previousTime = time; previousCounter = report.counter
         return SpatialPose(time, discontinuity, rotation.floats(), omega.floats(), dt)
@@ -162,10 +167,8 @@ internal class SpatialPoseConverter(private val profile: SpatialPoseProfile, pri
 }
 
 private fun attitude(report: MotionReport): Q? {
-    if (report.attitudeQ15.all { it == 0 }) return null
-    val q = report.quaternionQ15PositiveW()?.let { Q(it[0], it[1], it[2], it[3]) } ?: return null
-    // Near w=0 the untransmitted sign cannot safely identify the continuing quaternion branch.
-    return q.takeIf { it.w > 0.1 }
+    // Pro 3 captures prove whole-XYZ canonical sign flips at raw w=0; q and -q are one rotation.
+    return report.quaternionQ15PositiveW()?.let { Q(it[0], it[1], it[2], it[3]) }
 }
 
 private fun counterFollows(before: Long?, after: Long?): Boolean = before == null || after != null &&
@@ -188,6 +191,8 @@ private data class V(val x: Double, val y: Double, val z: Double) {
 
 private data class Q(val w: Double, val x: Double, val y: Double, val z: Double) {
     operator fun plus(b: Q) = Q(w + b.w, x + b.x, y + b.y, z + b.z)
+    operator fun unaryMinus() = Q(-w, -x, -y, -z)
+    fun dot(b: Q) = w*b.w + x*b.x + y*b.y + z*b.z
     operator fun times(b: Q) = Q(w*b.w - x*b.x - y*b.y - z*b.z,
         w*b.x + x*b.w + y*b.z - z*b.y, w*b.y - x*b.z + y*b.w + z*b.x,
         w*b.z + x*b.y - y*b.x + z*b.w)

@@ -184,11 +184,15 @@ internal class RootHeadTrackerSink(
                     gate.checkFresh(now)
                     if (protocol.reporting && now >= pacer.deadline) {
                         gate.pose(now)?.let { pose ->
-                            HeadTrackerUhidProtocol.input(pose, inputEvent)
-                            val submittedAt = SystemClock.elapsedRealtimeNanos()
-                            send(descriptor, inputEvent)
-                            metrics.input(pose.timestampNanos, submittedAt)
-                            pacer.sent(SystemClock.elapsedRealtimeNanos())
+                            val emitted = HeadTrackerUhidProtocol.poseAtHostTime(pose, now)
+                            if (emitted == null) metrics.skipped()
+                            else {
+                                HeadTrackerUhidProtocol.input(emitted, inputEvent)
+                                val submittedAt = SystemClock.elapsedRealtimeNanos()
+                                send(descriptor, inputEvent)
+                                metrics.input(pose.timestampNanos, submittedAt, emitted !== pose)
+                            }
+                            pacer.advance(SystemClock.elapsedRealtimeNanos())
                         }
                     }
                 }

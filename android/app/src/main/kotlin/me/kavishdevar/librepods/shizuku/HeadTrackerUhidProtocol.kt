@@ -3,7 +3,10 @@ package me.kavishdevar.librepods.shizuku
 
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import kotlin.math.atan2
+import kotlin.math.cos
 import kotlin.math.roundToInt
+import kotlin.math.sin
 import kotlin.math.sqrt
 
 /** Standard Android pose values only. This codec never interprets an earbud's raw sensor units. */
@@ -72,6 +75,7 @@ internal class HeadTrackerUhidProtocol(address: String) {
         const val FRAME_BYTES = 40
         const val FRAME_MAGIC = 0x31505448 // ASCII HTP1, little endian.
         const val FRESH_NANOS = 250_000_000L
+        const val MAX_EXTRAPOLATION_NANOS = 20_000_000L
         const val STARTUP_NANOS = 5_000_000_000L
         const val START = 2; const val STOP = 3; const val OPEN = 4; const val CLOSE = 5
         const val GET_REPORT = 9; const val GET_REPORT_REPLY = 10; const val CREATE2 = 11
@@ -97,6 +101,39 @@ internal class HeadTrackerUhidProtocol(address: String) {
             fun norm(first: Int) = sqrt((first until first + 3).sumOf { values[it].toDouble() * values[it] })
             require(norm(0) <= Math.PI + ROTATION_TOLERANCE && norm(3) <= 32.0) { "pose_out_of_range" }
             return Pose(timestamp, discontinuity, values)
+        }
+
+        /** Extrapolate only elapsed host age, preserving the measurement's original freshness. */
+        fun poseAtHostTime(pose: Pose, atNs: Long): Pose? {
+            if (atNs < pose.timestampNanos) return null
+            val age = atNs - pose.timestampNanos
+            if (age > MAX_EXTRAPOLATION_NANOS) return null
+            val values = pose.values
+            if (age == 0L || (3..5).all { values[it] == 0f }) return pose
+            fun quaternion(x: Double, y: Double, z: Double): DoubleArray {
+                val angle = sqrt(x*x + y*y + z*z)
+                val scale = if (angle < 1e-12) 0.5 else sin(angle / 2) / angle
+                return doubleArrayOf(cos(angle / 2), x*scale, y*scale, z*scale)
+            }
+            val q = quaternion(values[0].toDouble(), values[1].toDouble(), values[2].toDouble())
+            val seconds = age / 1e9
+            val d = quaternion(values[3]*seconds, values[4]*seconds, values[5]*seconds)
+            // Body angular velocity is intrinsic: right-multiply the measured orientation.
+            val product = doubleArrayOf(
+                q[0]*d[0] - q[1]*d[1] - q[2]*d[2] - q[3]*d[3],
+                q[0]*d[1] + q[1]*d[0] + q[2]*d[3] - q[3]*d[2],
+                q[0]*d[2] - q[1]*d[3] + q[2]*d[0] + q[3]*d[1],
+                q[0]*d[3] + q[1]*d[2] - q[2]*d[1] + q[3]*d[0],
+            )
+            val norm = sqrt(product.sumOf { it*it })
+            val hemisphere = if (product[0] < 0) -1.0 else 1.0
+            for (index in product.indices) product[index] *= hemisphere / norm
+            val vectorNorm = sqrt((1..3).sumOf { product[it]*product[it] })
+            val scale = if (vectorNorm < 1e-12) 2.0 else 2 * atan2(vectorNorm, product[0]) / vectorNorm
+            val advanced = values.copyOf()
+            for (index in 0..2) advanced[index] = (product[index + 1] * scale).toFloat()
+            if ((0..2).all { advanced[it] == values[it] }) return pose
+            return Pose(pose.timestampNanos, pose.discontinuity, advanced)
         }
 
         fun input(pose: Pose, destination: ByteArray = event(INPUT2)): ByteArray = destination.apply {
@@ -165,23 +202,23 @@ internal class HeadTrackerPoseGate {
 internal class HeadTrackerReportPacer {
     private var enabled = false
     private var interval = 10_000_000L
-    private var lastInput: Long? = null
+    private var lastSlot: Long? = null
     var deadline = Long.MAX_VALUE
         private set
 
     fun reporting(value: Boolean, intervalNanos: Long, now: Long) {
         require(intervalNanos in 10_000_000L..100_000_000L)
-        if (!value) { lastInput = null; deadline = Long.MAX_VALUE }
+        if (!value) { lastSlot = null; deadline = Long.MAX_VALUE }
         else if (!enabled) deadline = now
-        else if (interval != intervalNanos) deadline = lastInput?.let { it + intervalNanos } ?: now
+        else if (interval != intervalNanos) deadline = lastSlot?.let { it + intervalNanos } ?: now
         enabled = value; interval = intervalNanos
     }
 
-    fun sent(now: Long) {
+    fun advance(now: Long) {
         check(enabled && now >= deadline)
         val next = deadline + interval
         deadline = if (next <= now) now + interval else next
-        lastInput = now
+        lastSlot = now
     }
 }
 
@@ -190,6 +227,7 @@ internal data class HeadTrackerSinkStats(
     val intervalCount: Long = 0, val intervalMinNanos: Long = 0, val intervalMeanNanos: Double = 0.0,
     val intervalMaxNanos: Long = 0, val sourceAgeCount: Long = 0, val sourceAgeMinNanos: Long = 0,
     val sourceAgeMeanNanos: Double = 0.0, val sourceAgeMaxNanos: Long = 0,
+    val sourceReuses: Long = 0, val extrapolatedInputs: Long = 0, val skippedInputs: Long = 0,
 )
 
 /** Constant-space host timing only; intervals exclude host-disabled windows. */
@@ -197,6 +235,9 @@ internal class HeadTrackerSinkMetrics {
     private var accepted = 0L
     private var inputs = 0L
     private var repeats = 0L
+    private var reuses = 0L
+    private var extrapolated = 0L
+    private var skipped = 0L
     private var lastPoseTimestamp: Long? = null
     private var lastInput: Long? = null
     private class Range {
@@ -210,17 +251,22 @@ internal class HeadTrackerSinkMetrics {
     private val intervals = Range()
     private val ages = Range()
     @Synchronized fun accepted() { ++accepted }
+    @Synchronized fun skipped() { ++skipped }
     @Synchronized fun idle() { lastInput = null }
-    @Synchronized fun input(poseTimestamp: Long, now: Long) {
+    @Synchronized fun input(poseTimestamp: Long, now: Long, extrapolated: Boolean = false) {
         require(poseTimestamp <= now)
         lastInput?.let { intervals.add(now - it) }
         ages.add(now - poseTimestamp)
-        if (lastPoseTimestamp == poseTimestamp) ++repeats
+        if (lastPoseTimestamp == poseTimestamp) {
+            ++reuses
+            if (!extrapolated) ++repeats
+        }
+        if (extrapolated) ++this.extrapolated
         ++inputs; lastInput = now; lastPoseTimestamp = poseTimestamp
     }
     @Synchronized fun snapshot() = HeadTrackerSinkStats(accepted, inputs, repeats,
         intervals.count, intervals.min, intervals.mean, intervals.max,
-        ages.count, ages.min, ages.mean, ages.max)
+        ages.count, ages.min, ages.mean, ages.max, reuses, extrapolated, skipped)
 }
 
 /** Confirmation belongs to one exact selected address; a stuck native read cannot renew it. */

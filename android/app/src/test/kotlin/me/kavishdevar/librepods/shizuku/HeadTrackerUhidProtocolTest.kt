@@ -4,6 +4,9 @@ package me.kavishdevar.librepods.shizuku
 import org.junit.Assert.*
 import org.junit.Test
 import java.security.MessageDigest
+import kotlin.math.cos
+import kotlin.math.sin
+import kotlin.math.sqrt
 
 class HeadTrackerUhidProtocolTest {
     @Test fun halHandshakeNeedsBothSuccessfulFeatureReads() {
@@ -195,18 +198,18 @@ class HeadTrackerUhidProtocolTest {
         repeat(100) { index ->
             val due = start + index * period
             assertEquals(due, pacer.deadline)
-            pacer.sent(due + 500_000) // A millisecond poll can return slightly after its deadline.
+            pacer.advance(due + 500_000) // A millisecond poll can return slightly after its deadline.
         }
         assertEquals(start + 100 * period, pacer.deadline)
         val late = pacer.deadline + 35_000_000
-        pacer.sent(late)
+        pacer.advance(late)
         assertEquals(late + period, pacer.deadline) // Skip missed periods; never replay a burst.
     }
 
     @Test fun hostRateChangesRespectTheLastSubmissionAndOffResetsFirstInput() {
         val pacer = HeadTrackerReportPacer()
         pacer.reporting(true, 10_000_000, start)
-        pacer.sent(start)
+        pacer.advance(start)
         pacer.reporting(true, 20_000_000, start + 1)
         assertEquals(start + 20_000_000, pacer.deadline)
         pacer.reporting(true, 10_000_000, start + 2)
@@ -216,7 +219,7 @@ class HeadTrackerUhidProtocolTest {
         pacer.reporting(true, 10_000_000, start + 4)
         assertEquals(start + 4, pacer.deadline)
         val firstFresh = start + 3_000_000_000
-        pacer.sent(firstFresh)
+        pacer.advance(firstFresh)
         assertEquals(firstFresh + 10_000_000, pacer.deadline)
     }
 
@@ -237,6 +240,106 @@ class HeadTrackerUhidProtocolTest {
         assertEquals(2L, stats.snapshot().intervalCount)
         assertEquals(3L, stats.snapshot().acceptedPoses); assertEquals(4L, stats.snapshot().sourceAgeCount)
         assertEquals(3L, first.hidInputs) // Snapshots do not change under the observer.
+    }
+
+    @Test fun hostAgeIntegrationAdvancesAllBodyAxesWithoutChangingSourceMetadata() {
+        for (axis in 0..2) for (sign in listOf(-1f, 1f)) {
+            val values = FloatArray(6).apply { this[axis] = sign * 0.3f; this[axis + 3] = sign * 2f }
+            val measured = HeadTrackerUhidProtocol.decodePose(frame(start, 37, *values), start)
+            val before = measured.values.copyOf()
+            for (age in listOf(5_000_000L, 20_000_000L)) {
+                val advanced = checkNotNull(HeadTrackerUhidProtocol.poseAtHostTime(measured, start + age))
+                assertNotSame(measured, advanced)
+                assertEquals(sign * (0.3 + 2 * age / 1e9), advanced.values[axis].toDouble(), 1e-7)
+                for (other in (0..2).filter { it != axis }) assertEquals(0f, advanced.values[other], 0f)
+                assertEquals(start, advanced.timestampNanos); assertEquals(37, advanced.discontinuity)
+                assertArrayEquals(values.copyOfRange(3, 6), advanced.values.copyOfRange(3, 6), 0f)
+            }
+            assertArrayEquals(before, measured.values, 0f)
+        }
+    }
+
+    @Test fun coupledBodyMotionRightMultipliesTheMeasuredOrientation() {
+        for (values in listOf(
+            floatArrayOf(0f, 0f, (Math.PI / 2).toFloat(), 2f, 0f, 0f),
+            floatArrayOf(0.2f, -0.4f, 0.3f, 1.2f, -0.7f, 2.1f),
+        )) {
+            val measured = HeadTrackerUhidProtocol.decodePose(frame(start, 0, *values), start)
+            for (age in listOf(5_000_000L, 20_000_000L)) {
+                val advanced = checkNotNull(HeadTrackerUhidProtocol.poseAtHostTime(measured, start + age))
+                val delta = FloatArray(3) { (values[it + 3] * age / 1e9).toFloat() }
+                for (axis in 0..2) {
+                    val unit = DoubleArray(3) { if (it == axis) 1.0 else 0.0 }
+                    // Independent Rodrigues matrices check orientation composition, not rotvec addition.
+                    val expected = rotate(values, rotate(delta, unit))
+                    assertArrayEquals(expected, rotate(advanced.values, unit), 2e-7)
+                }
+            }
+        }
+    }
+
+    @Test fun crossingPiReturnsTheEquivalentPrincipalRotationVector() {
+        val measured = HeadTrackerUhidProtocol.decodePose(frame(start, 0, 0f, 0f, (Math.PI - 0.01).toFloat(), 0f, 0f, 2f), start)
+        val advanced = checkNotNull(HeadTrackerUhidProtocol.poseAtHostTime(measured, start + 20_000_000))
+        assertEquals(-Math.PI + 0.03, advanced.values[2].toDouble(), 2e-7)
+        assertEquals(0f, advanced.values[0], 0f); assertEquals(0f, advanced.values[1], 0f)
+        HeadTrackerUhidProtocol.decodePose(frame(advanced.timestampNanos, advanced.discontinuity, *advanced.values), start + 20_000_000)
+    }
+
+    @Test fun hostAgeIntegrationIsBoundedAndCannotExtendSourceFreshness() {
+        val measured = HeadTrackerUhidProtocol.decodePose(frame(start, 0, 0f, 0f, 0f, 0f, 1f), start)
+        assertSame(measured, HeadTrackerUhidProtocol.poseAtHostTime(measured, start))
+        val still = pose(start, 0.3f)
+        assertSame(still, HeadTrackerUhidProtocol.poseAtHostTime(still, start + 20_000_000))
+        assertNull(HeadTrackerUhidProtocol.poseAtHostTime(measured, start - 1))
+        assertNull(HeadTrackerUhidProtocol.poseAtHostTime(measured, start + 20_000_001))
+        assertNull(HeadTrackerUhidProtocol.poseAtHostTime(measured, Long.MAX_VALUE))
+        val advanced = checkNotNull(HeadTrackerUhidProtocol.poseAtHostTime(measured, start + 20_000_000))
+        assertEquals(start, advanced.timestampNanos)
+        val gate = HeadTrackerPoseGate()
+        gate.reporting(true, start); gate.accept(measured, start)
+        assertEquals(start + HeadTrackerUhidProtocol.FRESH_NANOS, gate.deadline)
+        expired { gate.checkFresh(advanced.timestampNanos + HeadTrackerUhidProtocol.FRESH_NANOS + 1) }
+    }
+
+    @Test fun skippedSlotsAdvanceTheCadenceWithoutAnImmediatePollLoop() {
+        val pacer = HeadTrackerReportPacer()
+        val stats = HeadTrackerSinkMetrics()
+        pacer.reporting(true, 10_000_000, start)
+        repeat(4) { index ->
+            val now = start + index * 10_000_000L
+            assertEquals(now, pacer.deadline)
+            stats.skipped(); pacer.advance(now)
+            assertTrue(pacer.deadline > now)
+        }
+        assertEquals(4L, stats.snapshot().skippedInputs)
+        assertEquals(0L, stats.snapshot().hidInputs); assertEquals(0L, stats.snapshot().intervalCount)
+        pacer.reporting(true, 20_000_000, start + 35_000_000)
+        assertEquals(start + 50_000_000, pacer.deadline)
+    }
+
+    @Test fun sourceReuseDistinguishesAdvancedInputsFromHeldRepeatsAndSkippedSlots() {
+        val stats = HeadTrackerSinkMetrics()
+        stats.accepted(); stats.input(start, start)
+        stats.input(start, start + 5_000_000)
+        stats.input(start, start + 10_000_000, extrapolated = true)
+        stats.skipped()
+        stats.accepted(); stats.input(start + 15_000_000, start + 20_000_000, extrapolated = true)
+        val snapshot = stats.snapshot()
+        assertEquals(2L, snapshot.acceptedPoses); assertEquals(4L, snapshot.hidInputs)
+        assertEquals(2L, snapshot.sourceReuses); assertEquals(1L, snapshot.heldRepeats)
+        assertEquals(2L, snapshot.extrapolatedInputs); assertEquals(1L, snapshot.skippedInputs)
+        assertEquals(4L, snapshot.sourceAgeCount); assertEquals(10_000_000L, snapshot.sourceAgeMaxNanos)
+    }
+
+    private fun rotate(rotation: FloatArray, vector: DoubleArray): DoubleArray {
+        val angle = sqrt((0..2).sumOf { rotation[it].toDouble() * rotation[it] })
+        if (angle == 0.0) return vector.copyOf()
+        val axis = DoubleArray(3) { rotation[it] / angle }
+        val dot = axis.indices.sumOf { axis[it] * vector[it] }
+        val cross = doubleArrayOf(axis[1]*vector[2] - axis[2]*vector[1],
+            axis[2]*vector[0] - axis[0]*vector[2], axis[0]*vector[1] - axis[1]*vector[0])
+        return DoubleArray(3) { vector[it]*cos(angle) + cross[it]*sin(angle) + axis[it]*dot*(1 - cos(angle)) }
     }
 
     @Test fun routeConfirmationIsExactBoundedAndCannotSurviveClockReversalOrClear() {
