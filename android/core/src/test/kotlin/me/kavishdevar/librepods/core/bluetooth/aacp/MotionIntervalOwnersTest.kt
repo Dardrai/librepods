@@ -4,8 +4,10 @@ import com.google.protobuf.ByteString
 import me.kavishdevar.librepods.core.bluetooth.aacp.packet.AACPPacket
 import me.kavishdevar.librepods.core.bluetooth.aacp.packet.RTBuddyPacket
 import me.kavishdevar.librepods.core.bluetooth.aacp.rtbuddy.proto.SensorDataWX
+import me.kavishdevar.librepods.core.bluetooth.aacp.rtbuddy.proto.SensorCommand
 import me.kavishdevar.librepods.core.bluetooth.aacp.rtbuddy.proto.SensorDescriptor
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.SensorDataWxBuddyPayload
+import me.kavishdevar.librepods.core.data.apple.BuddyState
 import org.junit.Assert.*
 import org.junit.Test
 import java.io.ByteArrayOutputStream
@@ -17,6 +19,77 @@ import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.nanoseconds
 
 class MotionIntervalOwnersTest {
+    @Test fun lateHeartDiscoveryAndItsDuplicateDoNotRestartOrResetLiveMotion() {
+        Fixture().use { fixture ->
+            assertTrue(fixture.manager.setHeadTrackingEnabled(true, Any(), 10.milliseconds))
+            fixture.manager.feed(motionFrame(27, 1))
+            val states = fixture.motionStates.toList()
+            val writes = fixture.commands()
+            assertEquals(BuddyState.ACTIVE, states.last())
+            fixture.clock = 2_000
+            val heart = announcement(4, 30, heart = true)
+            fixture.manager.feed(heart)
+            fixture.manager.feed(heart)
+            assertEquals(writes, fixture.commands())
+            assertEquals(states, fixture.motionStates.toList())
+            fixture.manager.feed(motionFrame(27, 2))
+            assertEquals(2, fixture.motionReports.size)
+            assertEquals(listOf(BuddyState.WAITING, BuddyState.ACTIVE, BuddyState.ACTIVE), fixture.motionStates.toList())
+            val timing = fixture.sourceTiming.snapshot()
+            assertEquals(1L, timing["motion_start_count"])
+            assertEquals(1_000L, timing["last_motion_start_at_nanos"])
+            assertEquals(10_000L, timing["last_motion_start_interval_us"])
+            assertEquals(1L, timing["motion_mapping_changes"])
+            assertEquals(1L, timing["heart_mapping_changes"])
+            assertEquals(2_000L, timing["last_heart_mapping_change_at_nanos"])
+        }
+    }
+
+    @Test fun realMotionRemapAndSameAddressSequenceRestartRearmOnlyTheCurrentMotionAddress() {
+        Fixture().use { fixture ->
+            assertTrue(fixture.manager.setHeadTrackingEnabled(true, Any(), 10.milliseconds))
+            fixture.manager.feed(motionFrame(27, 1))
+            fixture.manager.feed(announcement(4, 30, heart = true))
+            fixture.clock = 3_000
+            fixture.manager.feed(announcement(5, 28))
+            assertEquals(listOf(4 to 1, 1 to 10_000, 4 to 1, 1 to 10_000), fixture.commands())
+            assertEquals(listOf(27, 27, 28, 28), fixture.writes.map { packet ->
+                ((packet as RTBuddyPacket).rtBuddyPayload as SensorDataWxBuddyPayload).data.serviceSettings.serviceValue })
+            assertEquals(BuddyState.WAITING, fixture.motionStates.last())
+            fixture.manager.feed(motionFrame(27, 2))
+            assertEquals(1, fixture.motionReports.size)
+            fixture.manager.feed(motionFrame(28, 3))
+            assertEquals(2, fixture.motionReports.size)
+            fixture.clock = 4_000
+            val restart = announcement(1, 28)
+            fixture.manager.feed(restart)
+            assertEquals(listOf(4 to 1, 1 to 10_000), fixture.commands().takeLast(2))
+            assertEquals(6, fixture.writes.size)
+            assertEquals(BuddyState.WAITING, fixture.motionStates.last())
+            fixture.manager.feed(restart)
+            assertEquals(6, fixture.writes.size)
+            val timing = fixture.sourceTiming.snapshot()
+            assertEquals(3L, timing["motion_start_count"])
+            assertEquals(4_000L, timing["last_motion_start_at_nanos"])
+            assertEquals(3L, timing["motion_mapping_changes"])
+            assertEquals(2L, timing["heart_mapping_changes"])
+        }
+    }
+
+    @Test fun legacyMotionWaitsWhenHeartClaimsItsAddressThenStartsTheDiscoveredNativeServiceAtTenMs() {
+        Fixture(announceMotion = false).use { fixture ->
+            assertTrue(fixture.manager.setHeadTrackingEnabled(true, Any(), 10.milliseconds))
+            assertEquals(listOf(1 to 40_000), fixture.commands())
+            fixture.manager.feed(announcement(3, 16, heart = true))
+            assertEquals(listOf(1 to 40_000), fixture.commands()) // Never Stop or configure the new heart address.
+            fixture.manager.feed(announcement(4, 27))
+            assertEquals(listOf(1 to 40_000, 4 to 1, 1 to 10_000), fixture.commands())
+            fixture.manager.feed(announcement(4, 27))
+            assertEquals(3, fixture.writes.size)
+            assertEquals(2L, fixture.sourceTiming.snapshot()["motion_start_count"])
+        }
+    }
+
     @Test fun initialFastWriteFailureReturnsFalseSoTheSameOwnerCanUseTheBaseline() {
         val fixture = Fixture()
         val owner = Any()
@@ -201,15 +274,19 @@ class MotionIntervalOwnersTest {
     private class Fixture(
         val owners: MotionOwners = MotionOwners(),
         baselineUs: Int? = null,
+        announceMotion: Boolean = true,
     ) : AutoCloseable {
         val writes = CopyOnWriteArrayList<AACPPacket>()
+        val motionStates = CopyOnWriteArrayList<BuddyState>()
+        val motionReports = CopyOnWriteArrayList<SensorReports.Motion>()
+        val sourceTiming = MotionSourceTiming()
+        @Volatile var clock = 1_000L
         @Volatile var accept: (Pair<Int, Int>) -> Boolean = { true }
-        val manager = RTBuddyManager({ writes += it; accept(command(it)) }, { true }, { true }, { 9 }, {}, {}, {}, {},
-            motionIntervalUs = baselineUs, sharedMotionOwners = owners)
+        val manager = RTBuddyManager({ writes += it; accept(command(it)) }, { true }, { true }, { 9 },
+            { motionReports += it }, {}, { motionStates += it }, {}, motionIntervalUs = baselineUs,
+            sharedMotionOwners = owners, sourceTiming = sourceTiming, sourceClockNanos = { clock })
         init {
-            manager.feed(RTBuddyPacket.create(SensorDataWxBuddyPayload(SensorDataWX.newBuilder()
-                .setSeq(3).setLogType(3).addSensorDescriptor(SensorDescriptor.newBuilder()
-                    .setServiceValue(27).setSensorDescriptor(ByteString.copyFrom(motionDictionary()))).build())).rawPacket)
+            if (announceMotion) manager.feed(announcement(3, 27))
         }
         fun commands() = writes.map(::command)
         override fun close() = manager.close()
@@ -223,7 +300,23 @@ class MotionIntervalOwnersTest {
             return bytes[0].toInt() to value
         }
 
-        private fun motionDictionary(): ByteArray {
+        private fun announcement(sequence: Int, service: Int, heart: Boolean = false): ByteArray =
+            RTBuddyPacket.create(SensorDataWxBuddyPayload(SensorDataWX.newBuilder().setSeq(sequence).setLogType(3)
+                .addSensorDescriptor(SensorDescriptor.newBuilder().setServiceValue(service)
+                    .setSensorDescriptor(ByteString.copyFrom(dictionary(heart)))).build())).rawPacket
+
+        private fun motionFrame(service: Int, counter: Long): ByteArray {
+            val payload = ByteArray(58).apply {
+                this[0] = 1
+                for (index in 0..7) this[1 + index] = ((counter * 10_000_000) ushr (8 * index)).toByte()
+                for (index in 0..3) this[54 + index] = (counter ushr (8 * index)).toByte()
+            }
+            return RTBuddyPacket.create(SensorDataWxBuddyPayload(SensorDataWX.newBuilder().setLogType(3)
+                .setCommand(SensorCommand.newBuilder().setServiceValue(service)
+                    .setPayload(ByteString.copyFrom(payload))).build())).rawPacket
+        }
+
+        private fun dictionary(heart: Boolean = false): ByteArray {
             val out = ByteArrayOutputStream()
             fun word(value: Int) = ByteArray(4) { (value ushr (it * 8)).toByte() }
             fun item(kind: Int, count: Int, bytes: ByteArray) {
@@ -235,9 +328,10 @@ class MotionIntervalOwnersTest {
             out.write(byteArrayOf(0xd3.toByte(), 0, 0, 0, 4, 0, 0, 0x81.toByte()))
             for ((key, kind, value) in listOf(
                 Triple("VendorID", 4, number(1452)),
-                Triple("AccessoryService", 9, "devmotion6\u0000".toByteArray()),
-                Triple("MaxReportSize", 4, number(191)),
-                Triple("ReportDescriptor", 10, SensorDescriptorLayout.MOTION_DESCRIPTOR),
+                Triple(if (heart) "HeartRateService" else "AccessoryService", 9,
+                    (if (heart) "HeartRate\u0000" else "devmotion6\u0000").toByteArray()),
+                Triple("MaxReportSize", 4, number(if (heart) 601 else 191)),
+                Triple("ReportDescriptor", 10, if (heart) SensorDescriptorLayout.HEART_DESCRIPTOR else SensorDescriptorLayout.MOTION_DESCRIPTOR),
             )) {
                 val bytes = (key + '\u0000').toByteArray()
                 item(9, bytes.size, bytes)

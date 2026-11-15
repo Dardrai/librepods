@@ -35,6 +35,13 @@ internal class MotionSourceTiming {
     private var motionReports = 0L
     private var deviceClockNonIncreasing = 0L
     private var counterNonUnitSteps = 0L
+    private var motionStarts = 0L
+    private var lastMotionStart = 0L
+    private var lastMotionStartIntervalUs = 0L
+    private var motionMappingChanges = 0L
+    private var heartMappingChanges = 0L
+    private var lastMotionMappingChange = 0L
+    private var lastHeartMappingChange = 0L
     private var previousRead = 0L
     private var previousDevice: Long? = null
     private var previousCounter: Long? = null
@@ -59,6 +66,20 @@ internal class MotionSourceTiming {
 
     @Synchronized fun readProcessed(readAtNanos: Long, finishedAtNanos: Long) {
         if (readAtNanos > 0) readWork.add(finishedAtNanos - readAtNanos, finishedAtNanos)
+    }
+
+    @Synchronized fun mappingChanged(motion: Boolean, heart: Boolean, atNanos: Long) {
+        if (atNanos <= 0) return
+        if (motion) { motionMappingChanges++; lastMotionMappingChange = atNanos }
+        if (heart) { heartMappingChanges++; lastHeartMappingChange = atNanos }
+    }
+
+    /** Successful host start writes; this is not a firmware acknowledgement or measured rate. */
+    @Synchronized fun motionStarted(intervalUs: Int, atNanos: Long) {
+        if (atNanos <= 0 || intervalUs <= 0) return
+        motionStarts++
+        lastMotionStart = atNanos
+        lastMotionStartIntervalUs = intervalUs.toLong()
     }
 
     @Synchronized fun dispatch(readAtNanos: Long, attemptedAtNanos: Long) {
@@ -100,6 +121,13 @@ internal class MotionSourceTiming {
         put("motion_reports", motionReports)
         put("device_clock_non_increasing", deviceClockNonIncreasing)
         put("counter_non_unit_steps", counterNonUnitSteps)
+        put("motion_start_count", motionStarts)
+        put("last_motion_start_at_nanos", lastMotionStart)
+        put("last_motion_start_interval_us", lastMotionStartIntervalUs)
+        put("motion_mapping_changes", motionMappingChanges)
+        put("heart_mapping_changes", heartMappingChanges)
+        put("last_motion_mapping_change_at_nanos", lastMotionMappingChange)
+        put("last_heart_mapping_change_at_nanos", lastHeartMappingChange)
         readInterval.append(this, "read_interval")
         readWait.append(this, "read_wait")
         readWork.append(this, "read_work")

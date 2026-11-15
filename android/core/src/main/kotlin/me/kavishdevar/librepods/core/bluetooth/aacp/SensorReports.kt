@@ -10,7 +10,10 @@ internal class SensorReports {
             internal set
     }
     data class HeartRate(val bpm: Int, val confidence: Int)
-    data class Batch(val mappingChanged: Boolean, val motion: Motion?, val heartRate: HeartRate?)
+    data class Batch(val motionMappingChanged: Boolean, val heartRateMappingChanged: Boolean,
+        val motion: Motion?, val heartRate: HeartRate?) {
+        val mappingChanged get() = motionMappingChanged || heartRateMappingChanged
+    }
     var motionService: Int? = null
         private set
     var heartRateService: Int? = null
@@ -21,26 +24,32 @@ internal class SensorReports {
     private var lastDescriptorSequence: Int? = null
 
     fun receive(data: SensorDataWX, legacyMotionService: Int?): Batch {
+        val previousMotion = effectiveMotionService(legacyMotionService)
         val changed = discover(data)
-        return Batch(changed, motion(data, legacyMotionService), heartRate(data))
+        // A heart descriptor can also retire a legacy fallback address it now owns.
+        val motionChanged = (changed and MOTION_MAPPING_CHANGED) != 0 ||
+            previousMotion != effectiveMotionService(legacyMotionService)
+        return Batch(motionChanged, (changed and HEART_MAPPING_CHANGED) != 0,
+            motion(data, legacyMotionService), heartRate(data))
     }
 
-    private fun discover(data: SensorDataWX): Boolean {
-        if (data.logType !in setOf(1, 3) || data.sensorDescriptorCount !in 1..96) return false
+    private fun discover(data: SensorDataWX): Int {
+        if (data.logType !in setOf(1, 3) || data.sensorDescriptorCount !in 1..96) return 0
         val announced = data.sensorDescriptorList.mapNotNull { descriptor ->
-            val service = descriptor.serviceValue.takeIf { it in 1..127 } ?: return false
+            val service = descriptor.serviceValue.takeIf { it in 1..127 } ?: return 0
             SensorDescriptorLayout.parse(descriptor.sensorDescriptor.toByteArray())?.let { service to it }
         }
         val restart = data.seq == 1 && (lastDescriptorSequence ?: 0) > 1
         if (announced.any { item -> announced.any {
-                (item.first == it.first) != (item.second == it.second) } }) return false
+                (item.first == it.first) != (item.second == it.second) } }) return 0
         var motion = if (restart) null else motionService
         var heart = if (restart) null else heartRateService
         for ((service, kind) in announced) when (kind) {
-            SensorDescriptorLayout.Kind.MOTION -> { if (heart == service) return false; motion = service }
-            SensorDescriptorLayout.Kind.HEART_RATE -> { if (motion == service) return false; heart = service }
+            SensorDescriptorLayout.Kind.MOTION -> { if (heart == service) return 0; motion = service }
+            SensorDescriptorLayout.Kind.HEART_RATE -> { if (motion == service) return 0; heart = service }
         }
-        val changed = restart || motion != motionService || heart != heartRateService
+        val changed = (if (restart || motion != motionService) MOTION_MAPPING_CHANGED else 0) or
+            (if (restart || heart != heartRateService) HEART_MAPPING_CHANGED else 0)
         motionService = motion
         heartRateService = heart
         motionDescriptorSeen = motionDescriptorSeen || motion != null
@@ -49,10 +58,12 @@ internal class SensorReports {
         return changed
     }
 
+    private fun effectiveMotionService(fallback: Int?): Int? = motionService ?:
+        fallback?.takeUnless { motionDescriptorSeen || it == heartRateService }
+
     private fun motion(data: SensorDataWX, fallback: Int?): Motion? {
         if (data.logType !in setOf(1, 3, 5)) return null
-        val service = motionService ?: fallback?.takeUnless { motionDescriptorSeen || it == heartRateService }
-            ?: return null
+        val service = effectiveMotionService(fallback) ?: return null
         val packed = data.anotherSensorStream.toByteArray()
         val bytes = if (packed.isNotEmpty() && !data.hasCommand() && motionService != null) {
             if (!((data.logType in setOf(1, 3) && packed.size in setOf(58, 60)) ||
@@ -81,6 +92,8 @@ internal class SensorReports {
     }
 
     companion object {
+        private const val MOTION_MAPPING_CHANGED = 1
+        private const val HEART_MAPPING_CHANGED = 2
         private val HEART_TAILS = listOf("100000", "100080", "200000", "208000", "200280", "208280")
             .map { tail -> tail.chunked(2).map { it.toInt(16).toByte() }.toByteArray() }
     }

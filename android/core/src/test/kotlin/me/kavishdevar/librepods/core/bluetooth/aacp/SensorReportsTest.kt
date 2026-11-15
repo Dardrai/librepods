@@ -44,6 +44,66 @@ class SensorReportsTest {
         this[30] = 0; this[31] = 0x80.toByte()
     }
 
+    @Test fun lateHeartMappingsAndDuplicatesLeaveTheNativeMotionMappingIntact() {
+        val parser = SensorReports()
+        val initial = parser.receive(announcement(3, 27, dictionary()), 16)
+        assertTrue(initial.motionMappingChanged)
+        assertFalse(initial.heartRateMappingChanged)
+        val heart = announcement(4, 30, dictionary("HeartRate",
+            descriptor = SensorDescriptorLayout.HEART_DESCRIPTOR, maximum = 601))
+        val changed = parser.receive(heart, 16)
+        assertFalse(changed.motionMappingChanged)
+        assertTrue(changed.heartRateMappingChanged)
+        assertEquals(27, parser.motionService)
+        assertNotNull(parser.receive(command(27, movement()), 16).motion)
+        assertFalse(parser.receive(heart, 16).mappingChanged)
+        val remappedHeart = parser.receive(announcement(5, 31, dictionary("HeartRate",
+            descriptor = SensorDescriptorLayout.HEART_DESCRIPTOR, maximum = 601)), 16)
+        assertFalse(remappedHeart.motionMappingChanged)
+        assertTrue(remappedHeart.heartRateMappingChanged)
+        val remappedMotion = parser.receive(announcement(6, 28, dictionary()), 16)
+        assertTrue(remappedMotion.motionMappingChanged)
+        assertFalse(remappedMotion.heartRateMappingChanged)
+    }
+
+    @Test fun trueSequenceRestartInvalidatesBothMappingsEvenWithTheSameServiceNumbers() {
+        val parser = SensorReports()
+        parser.receive(announcement(3, 27, dictionary()), 16)
+        parser.receive(announcement(4, 30, dictionary("HeartRate",
+            descriptor = SensorDescriptorLayout.HEART_DESCRIPTOR, maximum = 601)), 16)
+        val restart = announcement(1, 27, dictionary()).toBuilder()
+            .addSensorDescriptor(SensorDescriptor.newBuilder().setServiceValue(30).setSensorDescriptor(
+                ByteString.copyFrom(dictionary("HeartRate",
+                    descriptor = SensorDescriptorLayout.HEART_DESCRIPTOR, maximum = 601)))).build()
+        val changed = parser.receive(restart, 16)
+        assertTrue(changed.motionMappingChanged)
+        assertTrue(changed.heartRateMappingChanged)
+        assertEquals(27, parser.motionService)
+        assertEquals(30, parser.heartRateService)
+        assertFalse(parser.receive(restart, 16).mappingChanged)
+    }
+
+    @Test fun heartDiscoveryRetiresAConflictingLegacyFallbackAndConflictingNativeLayoutsDoNotMutateMaps() {
+        val legacy = SensorReports()
+        val claimed = legacy.receive(announcement(3, 16, dictionary("HeartRate",
+            descriptor = SensorDescriptorLayout.HEART_DESCRIPTOR, maximum = 601)), 16)
+        assertTrue(claimed.motionMappingChanged)
+        assertTrue(claimed.heartRateMappingChanged)
+        assertNull(legacy.receive(command(16, movement()), 16).motion)
+
+        val parser = SensorReports()
+        parser.receive(announcement(3, 27, dictionary()), 16)
+        val conflict = announcement(4, 28, dictionary()).toBuilder()
+            .addSensorDescriptor(SensorDescriptor.newBuilder().setServiceValue(28).setSensorDescriptor(
+                ByteString.copyFrom(dictionary("HeartRate",
+                    descriptor = SensorDescriptorLayout.HEART_DESCRIPTOR, maximum = 601)))).build()
+        assertFalse(parser.receive(conflict, 16).mappingChanged)
+        assertEquals(27, parser.motionService)
+        assertNull(parser.heartRateService)
+        assertNotNull(parser.receive(command(27, movement()), 16).motion)
+        assertNull(parser.receive(command(28, movement()), 16).motion)
+    }
+
     @Test fun exactDescriptorDictionariesRejectUnknownVendorsNamesLayoutsAndEveryTruncation() {
         val motion = dictionary()
         assertEquals(SensorDescriptorLayout.Kind.MOTION, SensorDescriptorLayout.parse(motion))

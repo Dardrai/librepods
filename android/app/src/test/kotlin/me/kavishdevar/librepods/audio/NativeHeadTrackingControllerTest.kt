@@ -233,7 +233,7 @@ class NativeHeadTrackingControllerTest {
                 }
                 awaitCancellation()
             }
-            val job = async { streamNativeHeadTracking(f.device, source, identity, 7, { true }, timing,
+            val job = async { streamCalibratedHeadMotion(f.device, source, identity, 7, { true }, timing,
                 now = { clock }) { pose, arrival -> poses += pose; arrivals += arrival } }
             try {
                 waitUntil { poses.size == 2 }
@@ -241,10 +241,39 @@ class NativeHeadTrackingControllerTest {
                 assertEquals(listOf(60_000_000L, 80_000_000L), poses.map { it.timestampNs })
                 assertTrue(poses.all { it.angularVelocity.all { n -> n == 0f } })
                 assertEquals(listOf(HOST_START + 40_000_000, HOST_START + 80_000_000), arrivals)
-                assertEquals(5_000, timing.snapshot().getLong("requested_interval_us"))
+                assertEquals(10_000, timing.snapshot().getLong("requested_interval_us"))
             } finally { job.cancelAndJoin() }
             assertEquals(1, f.started.size); assertEquals(f.started.toList(), f.released.toList())
             verify(f.device, never()).stopHeadTracking()
+        }
+    }
+
+    @Test fun hundredHertzSourceKeepsOriginalTimesAndDoesNotFallBack() = runBlocking {
+        Target().use { f ->
+            var clock = HOST_START
+            val timing = HeadTrackingTiming()
+            val poses = mutableListOf<Pair<SpatialPose, Long>>()
+            val source = flow<MotionSample?> {
+                for (tick in 1..101) {
+                    clock += 10_000_000
+                    emit(MotionSample(report(tick).copy(timestampNs = tick * 10_000_000L,
+                        counter = tick * 2L), clock))
+                }
+                awaitCancellation()
+            }
+            val job = async { streamCalibratedHeadMotion(f.device, source, identity, 3, { true }, timing,
+                now = { clock }) { pose, arrival -> poses += pose to arrival } }
+            try {
+                waitUntil { poses.size == 100 }
+                assertEquals(10_000L, timing.snapshot().getLong("requested_interval_us"))
+                assertFalse(timing.snapshot().getBoolean("fallback_rate"))
+                assertEquals(101L, timing.snapshot().getLong("source_samples"))
+                assertEquals((2..101).map { it * 10_000_000L }, poses.map { it.first.timestampNs })
+                assertEquals((2..101).map { HOST_START + it * 10_000_000L }, poses.map { it.second })
+                assertTrue(poses.all { it.first.discontinuity == 3 })
+                assertEquals(1, f.started.size)
+            } finally { job.cancelAndJoin() }
+            assertEquals(f.started.toList(), f.released.toList())
         }
     }
 
@@ -258,7 +287,7 @@ class NativeHeadTrackingControllerTest {
                 if (loseOwner) current.set(false)
                 clock += 20_000_000; emit(MotionSample(report(if (loseOwner) 3 else 1), clock))
             }
-            val failure = runCatching { streamNativeHeadTracking(f.device, source, identity, 0, current::get,
+            val failure = runCatching { streamCalibratedHeadMotion(f.device, source, identity, 0, current::get,
                 now = { clock }) { pose, _ -> poses += pose } }.exceptionOrNull()
             assertNotNull(failure); assertEquals(1, poses.size)
             assertEquals(if (loseOwner) "owner_changed" else "sensor_time_changed", failure?.message)
@@ -277,7 +306,7 @@ class NativeHeadTrackingControllerTest {
                 clock += 20_000_000; emit(MotionSample(report(3), clock - 25_000_000))
                 awaitCancellation()
             }
-            val job = async { streamNativeHeadTracking(f.device, source, identity, 0, { true }, timing,
+            val job = async { streamCalibratedHeadMotion(f.device, source, identity, 0, { true }, timing,
                 now = { clock }) { pose, arrival -> poses += pose to arrival } }
             try {
                 waitUntil { poses.size == 1 }
@@ -298,7 +327,7 @@ class NativeHeadTrackingControllerTest {
                 for (tick in 1..2) { clock += 20_000_000; emit(MotionSample(report(tick), clock)) }
                 awaitCancellation()
             }
-            val job = async { streamNativeHeadTracking(f.device, source, identity, 0, { true }, timing,
+            val job = async { streamCalibratedHeadMotion(f.device, source, identity, 0, { true }, timing,
                 now = { clock }) { pose, _ -> poses += pose } }
             try {
                 waitUntil { poses.size == 1 }
@@ -314,7 +343,7 @@ class NativeHeadTrackingControllerTest {
         Target().use { f ->
             val timing = HeadTrackingTiming()
             val source = flow<MotionSample?> { emit(null); awaitCancellation() }
-            val job = async { streamNativeHeadTracking(f.device, source, identity, 0, { true }, timing,
+            val job = async { streamCalibratedHeadMotion(f.device, source, identity, 0, { true }, timing,
                 now = { HOST_START }) { _, _ -> fail("No measurements exist") } }
             try {
                 waitUntil { timing.snapshot().getBoolean("fallback_rate") }
@@ -336,7 +365,7 @@ class NativeHeadTrackingControllerTest {
                 clock.set(firstArrival + 180_000_000)
                 awaitCancellation()
             }
-            val job = async { streamNativeHeadTracking(f.device, source, identity, 0, { true }, timing,
+            val job = async { streamCalibratedHeadMotion(f.device, source, identity, 0, { true }, timing,
                 now = clock::get, onFallback = { fallbackAt.set(clock.get()) }) { _, _ ->
                 fail("One attitude only primes the converter; fallback cannot fabricate a pose")
             } }
@@ -359,7 +388,7 @@ class NativeHeadTrackingControllerTest {
                 for (tick in 1..2) { clock += 20_000_000; emit(MotionSample(report(tick), clock)) }
                 awaitCancellation()
             }
-            val job = async { streamNativeHeadTracking(f.device, source, identity, 0, { true }, timing,
+            val job = async { streamCalibratedHeadMotion(f.device, source, identity, 0, { true }, timing,
                 now = { clock }, tryFast = false) { pose, _ -> poses += pose } }
             try {
                 waitUntil { poses.size == 1 }
@@ -384,7 +413,7 @@ class NativeHeadTrackingControllerTest {
                 }
                 awaitCancellation()
             }
-            val job = async { streamNativeHeadTracking(f.device, source, identity, 0, { true }, timing,
+            val job = async { streamCalibratedHeadMotion(f.device, source, identity, 0, { true }, timing,
                 now = { clock }) { pose, _ -> poses += pose } }
             try {
                 waitUntil { poses.size == 19 }

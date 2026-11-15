@@ -27,12 +27,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.collectLatest
-import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 import me.kavishdevar.librepods.BuildConfig
 import me.kavishdevar.librepods.core.devices.AirPodsModel
 import me.kavishdevar.librepods.core.devices.AppleDevice
@@ -43,7 +41,6 @@ import me.kavishdevar.librepods.core.utils.HeadTracking
 import me.kavishdevar.librepods.core.utils.MotionSample
 import me.kavishdevar.librepods.shizuku.HeadTrackerUhidProtocol
 import me.kavishdevar.librepods.shizuku.ShizukuAudioClient
-import kotlin.time.Duration.Companion.milliseconds
 
 data class NativeHeadTrackingState(val enabled: Boolean? = null, val calibrated: Boolean = false,
     val available: Boolean = false, val active: Boolean = false, val busy: Boolean = false,
@@ -136,7 +133,7 @@ class NativeHeadTrackingController internal constructor(
         }
     }
 
-    private fun calibrating() = synchronized(calibrationOwners) { calibrationOwners.isNotEmpty() }
+    internal fun isCalibrationActive() = synchronized(calibrationOwners) { calibrationOwners.isNotEmpty() }
 
     private inline fun withChoice(epoch: Long, action: () -> Unit) = synchronized(choiceLock) {
         if (choiceEpoch.get() == epoch) action()
@@ -163,17 +160,11 @@ class NativeHeadTrackingController internal constructor(
     private fun current() = !closed.get() && runCatching(deviceCurrent).getOrDefault(false) &&
         device.connectionState.value == ConnectionState.CONNECTED
 
-    private fun key(): SpatialPoseProfileKey? {
-        val metadata = device.metadata.value
-        val role = device.state.value.budRoleRaw.toList()
-        if (metadata.model != AirPodsModel.AIRPODS_PRO_3 || role.firstOrNull() !in listOf(1, 2) ||
-            metadata.modelNumber.isBlank() || metadata.version1.isBlank()) return null
-        return SpatialPoseProfileKey(device.macAddress.value, role, spatialPoseModelIdentity(metadata.modelNumber), metadata.version1)
-    }
+    private fun key() = spatialPoseProfileKey(device)
 
     private fun sourceCurrent(socket: BluetoothSocket, key: SpatialPoseProfileKey) = current() && access.hasRootPrivileges && hostIdle.get() &&
         hostCheckedAt.get().let { it != Long.MIN_VALUE && SystemClock.elapsedRealtime() - it in 0..500 } &&
-        !calibrating() && device.aacp.ownsAudioSocket(socket) && key() == key &&
+        !isCalibrationActive() && device.aacp.ownsAudioSocket(socket) && key() == key &&
         !listOf(DeviceComponent.LEFT, DeviceComponent.RIGHT).all { side ->
             device.state.value.componentState.any { it.component == side && it.status == ComponentStatus.IN_CASE }
         }
@@ -220,7 +211,7 @@ class NativeHeadTrackingController internal constructor(
                         delay(100)
                         continue
                     }
-                    if (choice?.enabled != false && !calibrating() && current() && BuildConfig.DEBUG &&
+                    if (choice?.enabled != false && !isCalibrationActive() && current() && BuildConfig.DEBUG &&
                         device.metadata.value.model == AirPodsModel.AIRPODS_PRO_3) {
                         access.connect() // Reconnects existing authorization; it never requests a root grant.
                         if (access.hasRootPrivileges) {
@@ -312,7 +303,7 @@ class NativeHeadTrackingController internal constructor(
                     reporting.collectLatest { enabled ->
                         withChoice(epoch) { mutableState.update { it.copy(active = false) } }
                         if (enabled) {
-                            streamNativeHeadTracking(device, motion, profile,
+                            streamCalibratedHeadMotion(device, motion, profile,
                                 discontinuity.getAndIncrement() and 255, ::owns, sessionTiming,
                                 tryFast = fallbackSocket !== socket, onFallback = { fallbackSocket = socket }) { pose, arrivalNs ->
                                 val frame = HeadTrackerUhidProtocol.little(ByteArray(HeadTrackerUhidProtocol.FRAME_BYTES))
@@ -341,7 +332,7 @@ class NativeHeadTrackingController internal constructor(
         } catch (cancelled: CancellationException) { throw cancelled }
         catch (error: Exception) {
             withChoice(epoch) {
-                if (error is NativeHeadTrackingPoseFault && owns()) {
+                if (error is CalibratedHeadMotionFault && owns()) {
                     failedSocket = socket; failedKey = key; poseFaultReason = error.message
                 }
                 else retryAfter.set(SystemClock.elapsedRealtime() + 2_000)
@@ -375,68 +366,3 @@ class NativeHeadTrackingController internal constructor(
 
 @Suppress("DEPRECATION")
 private fun Bundle.flag(name: String) = get(name) as? Boolean
-
-private class NativeHeadTrackingPoseFault(reason: String) : IllegalStateException(reason)
-
-/** Each reporting interval owns its source and a new clock/rate history, never another reader's. */
-internal suspend fun streamNativeHeadTracking(device: AppleDevice, motion: Flow<MotionSample?>,
-    profile: SpatialPoseProfile, discontinuity: Int, current: () -> Boolean,
-    timing: HeadTrackingTiming = HeadTrackingTiming(), now: () -> Long = { SystemClock.elapsedRealtimeNanos() },
-    tryFast: Boolean = true, onFallback: () -> Unit = {},
-    submit: (SpatialPose, Long) -> Unit) {
-    val owner = Any()
-    try {
-        check(current()) { "owner_changed" }
-        val startedAt = now()
-        val fast = tryFast && device.startHeadTracking(owner, 5.milliseconds)
-        if (!fast) {
-            onFallback()
-            check(current() && device.startHeadTracking(owner, 20.milliseconds)) { "motion_unavailable" }
-        }
-        timing.begin(); timing.requested(if (fast) 5_000 else 20_000, fallback = !fast)
-        val converter = SpatialPoseConverter(profile, discontinuity)
-        var previousCounter: Long? = null
-        val firstAttitude = kotlinx.coroutines.CompletableDeferred<Unit>()
-        val lastAttitudeAt = AtomicLong()
-        kotlinx.coroutines.coroutineScope {
-            val fallback = if (fast) launch(Dispatchers.IO) {
-                val received = withTimeoutOrNull(1_500) { firstAttitude.await(); true } == true
-                if (received) {
-                    while (current()) {
-                        delay(25)
-                        if (now() - lastAttitudeAt.get() >= 150_000_000L) break
-                    }
-                }
-                if (current()) {
-                    // Keep this socket at its working rate even if root freshness closes during this write.
-                    onFallback()
-                    check(device.startHeadTracking(owner, 20.milliseconds)) { "motion_unavailable" }
-                    timing.requested(20_000, fallback = true)
-                }
-            } else null
-            try {
-                motion.filterNotNull().collect { sample ->
-                    check(current()) { "owner_changed" }
-                    val collectedAt = now()
-                    if (sample.arrivalNs > collectedAt) throw NativeHeadTrackingPoseFault("host_clock_changed")
-                    if (sample.arrivalNs < startedAt) return@collect
-                    if (collectedAt - sample.arrivalNs > HeadTrackerUhidProtocol.FRESH_NANOS) {
-                        timing.stale(); return@collect
-                    }
-                    val report = sample.report
-                    if (report.counter != null && report.counter == previousCounter) return@collect
-                    previousCounter = report.counter
-                    timing.sample(sample, collectedAt)
-                    val pose = converter.accept(report)
-                    pose?.let { submit(it, sample.arrivalNs) }
-                    if (converter.invalidated) throw NativeHeadTrackingPoseFault(converter.invalidReason ?: "motion_changed")
-                    if (pose != null || report.attitudeQ15.any { it != 0 }) {
-                        lastAttitudeAt.set(sample.arrivalNs)
-                        firstAttitude.complete(Unit)
-                    }
-                }
-                error("motion_ended")
-            } finally { fallback?.cancelAndJoin() }
-        }
-    } finally { device.stopHeadTracking(owner) }
-}

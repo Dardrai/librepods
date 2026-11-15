@@ -118,7 +118,9 @@ internal class RTBuddyManager(
             if (remoteAllowed()) continue
             val data = (packet.rtBuddyPayload as? SensorDataWxBuddyPayload)?.data ?: continue
             val batch = reports.receive(data, legacyMotion())
-            if (batch.mappingChanged) {
+            if (batch.mappingChanged) sourceTiming?.mappingChanged(
+                batch.motionMappingChanged, batch.heartRateMappingChanged, sourceClockNanos())
+            if (batch.motionMappingChanged) {
                 // The previous address can now name another sensor; never send it a delayed Stop.
                 motionLive = null
                 motionAppliedIntervalUs = null
@@ -126,11 +128,13 @@ internal class RTBuddyManager(
                 stopRetry = false
                 motionSince = now()
                 lastMotion = 0
-                lastHeart = 0
                 if (motionWanted) onMotionState(BuddyState.WAITING)
-                if (heartWanted) onHeartRateState(BuddyState.WAITING)
-                if (motionWanted && !suspended) startMotion()
             }
+            if (batch.heartRateMappingChanged) {
+                lastHeart = 0
+                if (heartWanted) onHeartRateState(BuddyState.WAITING)
+            }
+            if (batch.motionMappingChanged && motionWanted && !suspended) startMotion()
             if (suspended) continue
             if (motionWanted && !motionStopping && batch.motion != null) {
                 lastMotion = now()
@@ -279,6 +283,7 @@ internal class RTBuddyManager(
                 return
             }
             motionAppliedIntervalUs = period
+            sourceTiming?.motionStarted(period, sourceClockNanos())
             motionSince = now()
             return
         }
@@ -295,6 +300,7 @@ internal class RTBuddyManager(
             return
         }
         motionAppliedIntervalUs = period
+        sourceTiming?.motionStarted(period, sourceClockNanos())
         motionSince = now()
     }
 
