@@ -222,6 +222,7 @@
     <ID>CyclomaticComplexMethod:NativeGameSnapshot.kt:NativeGameSnapshot.Companion$fun parse: NativeGameSnapshot?</ID>
     <ID>CyclomaticComplexMethod:NativeGameTransportClient.kt:NativeGameTransportClient$private fun accept</ID>
     <ID>CyclomaticComplexMethod:NativeHeadTrackingController.kt:NativeHeadTrackingController$private suspend fun runSensor</ID>
+    <ID>CyclomaticComplexMethod:NativeHeadTrackingController.kt:internal suspend fun streamNativeHeadTracking</ID>
     <ID>CyclomaticComplexMethod:NativePlaybackRelease.kt:NativePlaybackRelease$@SuppressLint("MissingPermission", "SoonBlockedPrivateApi") fun run: Boolean</ID>
     <ID>CyclomaticComplexMethod:NativePlaybackRelease.kt:NativePlaybackRelease.Companion$internal fun releaseProfiles: Boolean</ID>
     <ID>CyclomaticComplexMethod:NativeQuickControls.kt:NativeQuickControls$private fun source: LiveValueSource&lt;Long&gt;</ID>
@@ -237,6 +238,7 @@
     <ID>CyclomaticComplexMethod:QuickSettingsState.kt:internal fun nativeQuickSettings: List&lt;QuickSettingState&gt;</ID>
     <ID>CyclomaticComplexMethod:QuickSettingsState.kt:private fun quickSettings: List&lt;QuickSettingState&gt;</ID>
     <ID>CyclomaticComplexMethod:RootHeadTrackerProbe.kt:RootHeadTrackerProbe$fun disable: Bundle</ID>
+    <ID>CyclomaticComplexMethod:RootHeadTrackerProbe.kt:RootHeadTrackerProbe.Lease$fun state: Bundle</ID>
     <ID>CyclomaticComplexMethod:RootHeadTrackerProbe.kt:RootHeadTrackerProbe.Lease$private fun run</ID>
     <ID>CyclomaticComplexMethod:RootUsbAbsoluteVolume.kt:RootUsbAbsoluteVolume$private fun proof: Proof</ID>
     <ID>CyclomaticComplexMethod:SettingsRefresher.kt:SettingsRefresher$suspend fun refresh: DeviceSettingsRefreshResult</ID>

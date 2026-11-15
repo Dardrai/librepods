@@ -47,6 +47,7 @@
     <ID>ComplexCondition:RTBuddyManager.kt:RTBuddyManager$closed || !isCurrent() || motionStopping || us !in 20_000..1_000_000 || us % 1000 != 0L</ID>
     <ID>ComplexCondition:RTBuddyManager.kt:RTBuddyManager$closed || !isCurrent() || service !in 1..127 || value &lt; 0</ID>
     <ID>ComplexCondition:RTBuddyManager.kt:RTBuddyManager$closed || descriptorsRequested || !isCurrent() || remoteAllowed()</ID>
+    <ID>ComplexCondition:RTBuddyManager.kt:RTBuddyManager$enabled &amp;&amp; us != null &amp;&amp; (us !in 5_000..1_000_000 || interval != us.microseconds)</ID>
     <ID>ComplexCondition:RTBuddyManager.kt:RTBuddyManager$motionLive != null || suspended || !motionWanted || !isCurrent()</ID>
     <ID>ComplexCondition:RTBuddyManager.kt:RTBuddyManager$packet.kind == 2 &amp;&amp; packet.device == remoteService &amp;&amp; motionLive == packet.device &amp;&amp; packet.payload.size == 58 &amp;&amp; motionWanted &amp;&amp; !suspended &amp;&amp; !motionStopping</ID>
     <ID>ComplexCondition:RecentProximityReports.kt:RecentProximityReports$observedAt &lt; 0 || observedNanos &lt; 0 || observedNanos &gt; nowNanos || nowNanos - observedNanos &gt;= MAX_AGE_NANOS</ID>
