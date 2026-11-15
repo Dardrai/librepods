@@ -330,6 +330,24 @@ class ListeningModePanelTest {
             QuickSetting.CONVERSATION_AWARENESS to true), changes)
     }
 
+    @Test fun gameFailureCaptionKeepsTheChoiceEditableAndPanelOpen() {
+        val current = mutableStateOf(snapshot(listOf(QuickSettingState(QuickSetting.GAME_MODE,
+            checked = true, supported = true, enabled = true, descriptionRes = R.string.native_game_mode_start_failed))))
+        val changes = mutableListOf<Pair<QuickSetting, Boolean>>()
+        compose.setContent { fixture(Profile(), current.value) { setting, value -> changes += setting to value } }
+        val game = control(QuickSetting.GAME_MODE).performScrollTo().assertIsOn().assertIsEnabled()
+        game.assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription,
+            RuntimeEnvironment.getApplication().getString(R.string.native_game_mode_start_failed))).performClick()
+        assertEquals(listOf(QuickSetting.GAME_MODE to false), changes)
+        compose.runOnIdle { current.value = current.value.copy(quickSettings = listOf(
+            QuickSettingState(QuickSetting.GAME_MODE, checked = false, supported = true, enabled = true,
+                descriptionRes = R.string.native_game_mode_restore_failed))) }
+        game.assertIsDisplayed().assertIsOff().assertIsEnabled()
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription,
+                RuntimeEnvironment.getApplication().getString(R.string.native_game_mode_restore_failed))).performClick()
+        assertEquals(listOf(QuickSetting.GAME_MODE to false, QuickSetting.GAME_MODE to true), changes)
+    }
+
     @Test fun bookkeepingFlagsNeverReplaceSimpleOnOffCaptions() {
         val current = mutableStateOf(snapshot(QuickSetting.entries.map { setting ->
             QuickSettingState(setting, checked = setting == QuickSetting.EAR_DETECTION,

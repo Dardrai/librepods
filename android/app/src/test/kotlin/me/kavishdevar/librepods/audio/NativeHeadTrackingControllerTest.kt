@@ -333,6 +333,7 @@ class NativeHeadTrackingControllerTest {
                 waitUntil { poses.size == 1 }
                 assertEquals(20_000, timing.snapshot().getLong("requested_interval_us"))
                 assertTrue(timing.snapshot().getBoolean("fallback_rate"))
+                assertEquals("fast_request_refused", timing.snapshot().getString("first_fallback_reason"))
             } finally { job.cancelAndJoin() }
             assertEquals(2, f.started.size); assertSame(f.started[0], f.started[1])
             assertEquals(listOf(f.started[0]), f.released.toList())
@@ -347,6 +348,7 @@ class NativeHeadTrackingControllerTest {
                 now = { HOST_START }) { _, _ -> fail("No measurements exist") } }
             try {
                 waitUntil { timing.snapshot().getBoolean("fallback_rate") }
+                assertEquals("attitude_startup_timeout", timing.snapshot().getString("first_fallback_reason"))
                 assertEquals(20_000, timing.snapshot().getLong("requested_interval_us"))
                 assertEquals(2, f.started.size); assertSame(f.started[0], f.started[1])
                 assertTrue(f.released.isEmpty())
@@ -372,6 +374,9 @@ class NativeHeadTrackingControllerTest {
             try {
                 waitUntil { timing.snapshot().getBoolean("fallback_rate") }
                 assertTrue(fallbackAt.get() - firstArrival in 150_000_000L until 250_000_000L)
+                assertEquals("attitude_stall", timing.snapshot().getString("first_fallback_reason"))
+                assertEquals(fallbackAt.get(), timing.snapshot().getLong("first_fallback_at_nanos"))
+                assertEquals(firstArrival, timing.snapshot().getLong("first_fallback_last_attitude_at_nanos"))
                 assertEquals(20_000L, timing.snapshot().getLong("requested_interval_us"))
                 assertEquals(2, f.started.size); assertSame(f.started[0], f.started[1])
                 assertTrue(f.released.isEmpty())
@@ -395,6 +400,7 @@ class NativeHeadTrackingControllerTest {
                 assertEquals(1, f.started.size)
                 assertEquals(20_000L, timing.snapshot().getLong("requested_interval_us"))
                 assertTrue(timing.snapshot().getBoolean("fallback_rate"))
+                assertEquals("socket_fallback", timing.snapshot().getString("first_fallback_reason"))
             } finally { job.cancelAndJoin() }
             assertEquals(f.started.toList(), f.released.toList())
         }

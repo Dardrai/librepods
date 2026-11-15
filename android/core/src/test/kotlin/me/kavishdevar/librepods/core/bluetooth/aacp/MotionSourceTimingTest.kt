@@ -65,6 +65,54 @@ class MotionSourceTimingTest {
         assertEquals(5L, timing.snapshot()["counter_step_count"])
     }
 
+    @Test fun activeGapsExcludeIdleAndMarkMidGapRateChangesAsMixed() {
+        val timing = MotionSourceTiming()
+        timing.readReturned(10, 80)
+        timing.motionStarted(10_000, 20)
+        timing.readReturned(100, 80)
+        timing.motionPublished(report(10, 2), 100, 110)
+        timing.readReturned(150, 80)
+        timing.motionPublished(report(50, 10), 150, 170)
+        timing.motionStopped()
+        timing.readReturned(10_000, 80)
+        timing.motionStarted(10_000, 20_000)
+        timing.readReturned(21_000, 80)
+        timing.motionPublished(report(30_000, 20), 21_000, 21_010)
+        timing.motionIntervalChanged(20_000, 21_020)
+        timing.readReturned(21_090, 80)
+        timing.motionPublished(report(30_080, 36), 21_090, 21_120)
+        timing.readReturned(21_100, 80)
+        timing.motionPublished(report(30_090, 38), 21_100, 21_130)
+        val stats = timing.snapshot()
+        assertEquals(2L, stats["motion_start_count"])
+        assertEquals(1L, stats["motion_interval_change_count"])
+        assertEquals(21_020L, stats["last_motion_interval_change_at_nanos"])
+        assertEquals(20_000L, stats["motion_interval_us"])
+        assertEquals(3L, stats["active_read_interval_count"])
+        assertEquals(90L, stats["active_read_interval_max_nanos"])
+        assertEquals(110L, stats["active_publish_interval_max_nanos"])
+        assertEquals(21_120L, stats["active_publish_interval_max_at_nanos"])
+        assertEquals(0L, stats["active_publish_interval_max_requested_us"])
+        assertEquals(80L, stats["active_device_interval_max_nanos"])
+        assertTrue(requireNotNull(stats["read_interval_max_nanos"]) > 1_000L)
+        assertTrue(requireNotNull(stats["device_interval_max_nanos"]) > 1_000L)
+    }
+
+    @Test fun uniformRateGapsKeepTheirIntervalButChangingAwayAndBackMakesTheGapMixed() {
+        val timing = MotionSourceTiming()
+        timing.motionStarted(10_000, 10)
+        timing.motionPublished(report(100, 2), 100, 110)
+        timing.motionPublished(report(200, 4), 200, 210)
+        assertEquals(10_000L, timing.snapshot()["active_publish_interval_max_requested_us"])
+        timing.motionIntervalChanged(20_000, 220)
+        timing.motionIntervalChanged(10_000, 230)
+        timing.motionPublished(report(400, 8), 400, 410)
+        val stats = timing.snapshot()
+        assertEquals(200L, stats["active_publish_interval_max_nanos"])
+        assertEquals(410L, stats["active_publish_interval_max_at_nanos"])
+        assertEquals(0L, stats["active_publish_interval_max_requested_us"])
+    }
+
     @Test fun batchedMotionIsMeasuredBeforeDownstreamConflationAndRetiredSourcesCannotPublish() {
         val timing = MotionSourceTiming()
         var clock = 110L

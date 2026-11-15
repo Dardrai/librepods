@@ -64,8 +64,10 @@ class NativeGameModeControlsTest {
         for (issue in listOf(Issue.REQUEST_FAILED, Issue.REPORT_UNCONFIRMED, Issue.CLOCK_UNCONFIRMED)) {
             assertEquals(R.string.native_game_mode_start_failed,
                 nativeGameModeDescription(supported.copy(issue = issue), true))
-            assertEquals(R.string.native_game_mode_unavailable,
+            assertEquals(R.string.native_game_mode_start_failed,
                 nativeGameModeDescription(supported.copy(available = false, issue = issue), true))
+            assertEquals(R.string.native_game_mode_description,
+                nativeGameModeDescription(supported.copy(issue = issue), false))
         }
         assertEquals(R.string.native_game_mode_waiting,
             nativeGameModeDescription(supported.copy(issue = Issue.WAITING_FOR_AUDIO), true))
@@ -75,10 +77,23 @@ class NativeGameModeControlsTest {
             nativeGameModeDescription(supported.copy(issue = Issue.UNSUPPORTED), true))
         val failedRestore = supported.copy(issue = Issue.RESTORE_UNCONFIRMED, remoteRestorePending = true)
         assertEquals(R.string.native_game_mode_restore_failed, nativeGameModeDescription(failedRestore, false))
-        assertEquals(R.string.native_game_mode_restore_failed,
+        assertEquals(R.string.native_game_mode_start_failed,
             nativeGameModeDescription(supported.copy(issue = Issue.CLOCK_UNCONFIRMED, remoteRestorePending = true), true))
         assertEquals(R.string.native_game_mode_stopping,
             nativeGameModeDescription(failedRestore.copy(restoring = true), false))
+    }
+
+    @Test fun failedStartCleanupDescribesTheUsersOnChoice() {
+        for (issue in listOf(Issue.REQUEST_FAILED, Issue.REPORT_UNCONFIRMED, Issue.CLOCK_UNCONFIRMED,
+            Issue.RESTORE_UNCONFIRMED, Issue.OWNER_LOST)) {
+            for (restoring in listOf(false, true)) {
+                val failed = State(desiredOn = true, available = true, restoring = restoring,
+                    remoteRestorePending = true, issue = issue)
+                assertEquals(R.string.native_game_mode_start_failed, nativeGameModeDescription(failed, true))
+                assertEquals(if (restoring) R.string.native_game_mode_stopping else R.string.native_game_mode_restore_failed,
+                    nativeGameModeDescription(failed, false))
+            }
+        }
     }
 
     @Test fun normalRestoreObligationIsNotAnErrorDuringStartupOrActivePlayback() {

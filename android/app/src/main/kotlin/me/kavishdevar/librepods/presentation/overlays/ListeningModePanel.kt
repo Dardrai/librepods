@@ -113,7 +113,7 @@ private fun QuickSettingsToggle(state: QuickSettingState, backdrop: Backdrop,
     val title = stringResource(if (state.recoveryOff) {
         if (state.setting == QuickSetting.HEARING_AID) R.string.hearing_aid_recovery_off else R.string.media_assist_recovery_off
     } else quickSettingLabel(state.setting))
-    val description = if (state.recoveryOff) "" else stringResource(when (state.checked) {
+    val description = if (state.recoveryOff) "" else stringResource(state.descriptionRes ?: when (state.checked) {
         true -> R.string.on
         false -> R.string.off
         null -> R.string.not_available

@@ -8,6 +8,6 @@
     <string name="native_game_mode_starting">Turning on…</string>
     <string name="native_game_mode_stopping">Turning off…</string>
     <string name="native_game_mode_unavailable">Game Mode is unavailable.</string>
-    <string name="native_game_mode_start_failed">Game Mode couldn’t start. Try again.</string>
+    <string name="native_game_mode_start_failed">Game Mode isn’t active. Try again.</string>
     <string name="native_game_mode_restore_failed">Couldn’t turn off Game Mode.</string>
 </resources>

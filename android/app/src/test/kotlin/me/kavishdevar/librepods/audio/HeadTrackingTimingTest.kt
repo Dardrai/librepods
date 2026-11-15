@@ -63,7 +63,21 @@ class HeadTrackingTimingTest {
         assertEquals(100L, json.getJSONObject("sink").getLong("hid_inputs"))
         assertEquals(123.5, json.getJSONObject("sink").getDouble("host_source_age_mean_nanos"), 0.0)
         assertEquals("off", json.getString("reason"))
-        assertFalse(json.toString().contains("attitude")); assertFalse(json.toString().contains("mac"))
+        assertFalse(json.toString().contains("attitude_q15")); assertFalse(json.toString().contains("mac"))
+    }
+
+    @Test fun firstFallbackDecisionSurvivesLaterReportingEpochsWithoutClaimingAWriteSucceeded() {
+        val stats = HeadTrackingTiming()
+        stats.begin(); stats.requested(10_000)
+        stats.fallingBack(1_200, "attitude_stall", 1_000)
+        assertFalse(stats.snapshot().getBoolean("fallback_rate"))
+        stats.requested(20_000, fallback = true)
+        stats.begin(); stats.fallingBack(2_000, "socket_fallback")
+        val value = stats.snapshot()
+        assertEquals(1_200L, value.getLong("first_fallback_at_nanos"))
+        assertEquals("attitude_stall", value.getString("first_fallback_reason"))
+        assertEquals(1_000L, value.getLong("first_fallback_last_attitude_at_nanos"))
+        assertTrue(value.getBoolean("fallback_rate"))
     }
 
     private fun sample(tick: Int, arrival: Long) = MotionSample(MotionReport(tick * 5_000_000L,

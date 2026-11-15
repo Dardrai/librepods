@@ -12,6 +12,8 @@ import me.kavishdevar.librepods.dongle.appleUiState
 import me.kavishdevar.librepods.dongle.appleControlBytes
 import me.kavishdevar.librepods.dongle.canWriteControl
 import me.kavishdevar.librepods.utils.NativeGameModeController
+import me.kavishdevar.librepods.R
+import me.kavishdevar.librepods.presentation.screens.apple.nativeGameModeDescription
 
 internal enum class QuickSetting {
     CONVERSATION_AWARENESS, EAR_DETECTION, GAME_MODE, PERSONALIZED_VOLUME,
@@ -27,7 +29,8 @@ internal enum class QuickSetting {
 }
 
 internal data class QuickSettingState(val setting: QuickSetting, val checked: Boolean?,
-    val supported: Boolean, val enabled: Boolean, val pending: Boolean = false, val reading: Boolean = false, val requested: Boolean = false, val recoveryOff: Boolean = false, val retained: Boolean = false)
+    val supported: Boolean, val enabled: Boolean, val pending: Boolean = false, val reading: Boolean = false, val requested: Boolean = false, val recoveryOff: Boolean = false, val retained: Boolean = false,
+    val descriptionRes: Int? = null)
 
 internal fun nativeQuickSettings(metadata: AppleMetadata, state: AppleState, settings: AppleSettings,
     game: NativeGameModeController.State?, loudSoundWritable: Boolean, profileAvailable: Boolean,
@@ -40,7 +43,11 @@ internal fun nativeQuickSettings(metadata: AppleMetadata, state: AppleState, set
         game != null && (game.hostSupported || settings.nativeGameModeEnabled)
     val gameToggle = QuickSettingState(QuickSetting.GAME_MODE, settings.nativeGameModeEnabled.takeIf { gameSupported },
         gameSupported, gameSupported && idle && pending.isEmpty() && (game?.available == true || settings.nativeGameModeEnabled), game?.restoring == true || game?.let { it.desiredOn && !it.active && it.issue in setOf(
-                NativeGameModeController.Issue.WAITING_FOR_AUDIO, NativeGameModeController.Issue.WAITING_FOR_TIMING) } == true)
+                NativeGameModeController.Issue.WAITING_FOR_AUDIO, NativeGameModeController.Issue.WAITING_FOR_TIMING) } == true,
+        descriptionRes = game?.let { nativeGameModeDescription(it, settings.nativeGameModeEnabled) }?.takeIf {
+            it in setOf(R.string.native_game_mode_start_failed, R.string.native_game_mode_restore_failed,
+                R.string.native_game_mode_stopping)
+        })
     val loudSupported = metadata.model != AirPodsModel.UNKNOWN && BaseCapability.LOUD_SOUND_REDUCTION in AirPodsSpecs.getSpec(metadata.model).baseCapabilities &&
         (protectedSettingsSupported || state.loudSoundReductionEnabled)
     val loud = QuickSettingState(QuickSetting.LOUD_SOUND_REDUCTION,

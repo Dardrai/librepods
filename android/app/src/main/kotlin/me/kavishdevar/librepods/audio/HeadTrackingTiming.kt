@@ -29,10 +29,19 @@ internal class HeadTrackingTiming {
     private var stale = 0L
     private var requestedUs = 0L
     private var fallback = false
+    private var firstFallbackAt = 0L
+    private var firstFallbackReason: String? = null
+    private var lastAttitudeAtFallback = 0L
 
     @Synchronized fun begin() { epochs++; previousDevice = null; previousArrival = 0 }
     @Synchronized fun requested(intervalUs: Long, fallback: Boolean = false) {
         requestedUs = intervalUs; this.fallback = fallback
+    }
+    @Synchronized fun fallingBack(atNanos: Long, reason: String, lastAttitudeAtNanos: Long = 0) {
+        if (firstFallbackReason != null) return
+        firstFallbackAt = atNanos
+        firstFallbackReason = reason
+        lastAttitudeAtFallback = lastAttitudeAtNanos
     }
     @Synchronized fun sample(value: MotionSample, collectedAt: Long) {
         require(collectedAt >= value.arrivalNs)
@@ -52,6 +61,9 @@ internal class HeadTrackingTiming {
         putInt("version", 1); putLong("source_epochs", epochs); putLong("source_samples", samples)
         putLong("submitted_poses", submitted); putLong("stale_samples_dropped", stale)
         putLong("requested_interval_us", requestedUs); putBoolean("fallback_rate", fallback)
+        putLong("first_fallback_at_nanos", firstFallbackAt)
+        putString("first_fallback_reason", firstFallbackReason)
+        putLong("first_fallback_last_attitude_at_nanos", lastAttitudeAtFallback)
         putString("age_scope", "parsed_source_callback_to_app_collection")
         putBoolean("excludes_acoustic_latency", true)
         deviceIntervals.write(this, "device_interval")

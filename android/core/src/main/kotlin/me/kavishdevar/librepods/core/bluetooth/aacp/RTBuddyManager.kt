@@ -121,6 +121,7 @@ internal class RTBuddyManager(
             if (batch.mappingChanged) sourceTiming?.mappingChanged(
                 batch.motionMappingChanged, batch.heartRateMappingChanged, sourceClockNanos())
             if (batch.motionMappingChanged) {
+                sourceTiming?.motionStopped()
                 // The previous address can now name another sensor; never send it a delayed Stop.
                 motionLive = null
                 motionAppliedIntervalUs = null
@@ -156,6 +157,7 @@ internal class RTBuddyManager(
             if (packet.device == 0 || packet.response || packet.status) continue
             val connects = packet.kind == 0 && RemoteHid.motionDescriptor(packet.payload)
             if (connects || (packet.device == remoteService && packet.kind in setOf(0, 1))) {
+                sourceTiming?.motionStopped()
                 // A replacement address may name another sensor; never send the previous address a Stop.
                 val same = connects && remoteService == packet.device && motionLive == packet.device
                 if (same) stopMotion()
@@ -305,6 +307,7 @@ internal class RTBuddyManager(
     }
 
     private fun stopMotion(retry: Boolean = false) {
+        sourceTiming?.motionStopped()
         remoteRequested = false
         val service = motionLive ?: return
         val sent = if (motionRemote) {
@@ -340,7 +343,10 @@ internal class RTBuddyManager(
         if (period == motionAppliedIntervalUs) return true
         val sent = if (motionRemote) sendRaw(RemoteHid.feature(nextSequence(), service, 1, period))
             else command(service, period)
-        if (sent) motionAppliedIntervalUs = period
+        if (sent) {
+            motionAppliedIntervalUs = period
+            sourceTiming?.motionIntervalChanged(period, sourceClockNanos())
+        }
         // Releases remain authoritative on failure; reconciliation retries restoration.
         return sent
     }
@@ -430,6 +436,7 @@ internal class RTBuddyManager(
     override fun close() {
         if (closed) return
         closed = true
+        sourceTiming?.motionStopped()
         scope.cancel()
         if (sharedMotionOwners == null) motionOwners.clear()
         motionWanted = false

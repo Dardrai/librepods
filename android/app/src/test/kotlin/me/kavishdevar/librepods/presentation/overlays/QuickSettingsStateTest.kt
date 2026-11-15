@@ -5,6 +5,7 @@ import me.kavishdevar.librepods.core.devices.*
 import me.kavishdevar.librepods.dongle.DongleProtocol
 import me.kavishdevar.librepods.dongle.DongleState
 import me.kavishdevar.librepods.utils.NativeGameModeController
+import me.kavishdevar.librepods.R
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -124,9 +125,37 @@ class QuickSettingsStateTest {
         assertEquals(true, control.checked)
         assertTrue(control.enabled)
         assertFalse(control.pending)
+        assertNull(control.descriptionRes)
         val waiting = controls(settings = AppleSettings(nativeGameModeEnabled = true),
             game = state.copy(active = false, issue = NativeGameModeController.Issue.WAITING_FOR_AUDIO))[QuickSetting.GAME_MODE]!!
         assertTrue(waiting.pending)
+        assertNull(waiting.descriptionRes)
+    }
+
+    @Test fun gameFailuresKeepTheImmediateChoiceButDoNotDescribeItAsConfirmedOnOrOff() {
+        for (enabled in listOf(false, true)) {
+            for (restoring in listOf(false, true)) {
+                val game = NativeGameModeController.State(desiredOn = enabled, available = true,
+                    hostSupported = true, restoring = restoring, remoteRestorePending = true,
+                    issue = NativeGameModeController.Issue.CLOCK_UNCONFIRMED)
+                val control = controls(settings = AppleSettings(nativeGameModeEnabled = enabled), game = game)
+                    .getValue(QuickSetting.GAME_MODE)
+                assertEquals(enabled, control.checked)
+                assertTrue(control.enabled)
+                assertEquals(when {
+                    enabled -> R.string.native_game_mode_start_failed
+                    restoring -> R.string.native_game_mode_stopping
+                    else -> R.string.native_game_mode_restore_failed
+                }, control.descriptionRes)
+            }
+        }
+        val failed = NativeGameModeController.State(desiredOn = true, available = true, hostSupported = true,
+            issue = NativeGameModeController.Issue.REQUEST_FAILED)
+        assertEquals(R.string.native_game_mode_start_failed,
+            controls(settings = AppleSettings(nativeGameModeEnabled = true), game = failed)
+                .getValue(QuickSetting.GAME_MODE).descriptionRes)
+        assertNull(controls(settings = AppleSettings(nativeGameModeEnabled = false), game = failed)
+            .getValue(QuickSetting.GAME_MODE).descriptionRes)
     }
 
     @Test fun ordinaryWritesDeferOnlyTypedHearingChangesWhileChoicesAndGameModeStayEditable() {

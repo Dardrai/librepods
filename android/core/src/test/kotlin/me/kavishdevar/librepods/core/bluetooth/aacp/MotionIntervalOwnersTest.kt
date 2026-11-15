@@ -172,6 +172,28 @@ class MotionIntervalOwnersTest {
         } finally { fixture.close() }
     }
 
+    @Test fun onlySuccessfulChangedLiveRatesAreTimedAndTheyDoNotCountAsStarts() {
+        Fixture().use { fixture ->
+            val owner = Any()
+            assertTrue(fixture.manager.setHeadTrackingEnabled(true, owner, 10.milliseconds))
+            fixture.clock = 2_000
+            fixture.accept = { it != (1 to 20_000) }
+            assertFalse(fixture.manager.setHeadTrackingEnabled(true, owner, 20.milliseconds))
+            assertEquals(0L, fixture.sourceTiming.snapshot()["motion_interval_change_count"])
+            assertEquals(10_000L, fixture.sourceTiming.snapshot()["motion_interval_us"])
+            fixture.accept = { true }
+            fixture.clock = 3_000
+            assertTrue(fixture.manager.setHeadTrackingEnabled(true, owner, 20.milliseconds))
+            fixture.clock = 4_000
+            assertTrue(fixture.manager.reconcileHeadTracking())
+            val stats = fixture.sourceTiming.snapshot()
+            assertEquals(1L, stats["motion_start_count"])
+            assertEquals(1L, stats["motion_interval_change_count"])
+            assertEquals(3_000L, stats["last_motion_interval_change_at_nanos"])
+            assertEquals(20_000L, stats["motion_interval_us"])
+        }
+    }
+
     @Test fun releaseDuringFailedRateWriteCannotReplayTheOwnersPreviousRequest() {
         val fixture = Fixture(baselineUs = 80_000)
         val ordinary = Any()

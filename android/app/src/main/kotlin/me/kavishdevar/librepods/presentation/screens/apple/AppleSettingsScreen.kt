@@ -434,7 +434,7 @@ fun AppleSettingsScreen(
                         )
                     },
                     navigateToEqualizer = navigateToEqualizer,
-                    gameModeVisible = gameMode.available || settings.nativeGameModeEnabled,
+                    gameModeVisible = gameMode.hostSupported || gameMode.available || settings.nativeGameModeEnabled,
                     gameModeEnabled = gameMode.available,
                     gameModeChecked = settings.nativeGameModeEnabled,
                     gameModeDescription = stringResource(nativeGameModeDescription(gameMode, settings.nativeGameModeEnabled)),
@@ -612,6 +612,12 @@ fun AppleSettingsScreen(
 }
 
 internal fun nativeGameModeDescription(state: NativeGameModeController.State, enabled: Boolean): Int = when {
+    enabled && !state.active && state.issue in setOf(
+        NativeGameModeController.Issue.REQUEST_FAILED,
+        NativeGameModeController.Issue.REPORT_UNCONFIRMED,
+        NativeGameModeController.Issue.CLOCK_UNCONFIRMED,
+        NativeGameModeController.Issue.RESTORE_UNCONFIRMED,
+        NativeGameModeController.Issue.OWNER_LOST) -> R.string.native_game_mode_start_failed
     state.restoring -> R.string.native_game_mode_stopping
     state.issue == NativeGameModeController.Issue.RESTORE_UNCONFIRMED ||
         (state.remoteRestorePending && !state.active && state.issue in setOf(
@@ -625,7 +631,7 @@ internal fun nativeGameModeDescription(state: NativeGameModeController.State, en
         NativeGameModeController.Issue.WAITING_FOR_TIMING -> R.string.native_game_mode_waiting_timing
         NativeGameModeController.Issue.REQUEST_FAILED,
         NativeGameModeController.Issue.REPORT_UNCONFIRMED,
-        NativeGameModeController.Issue.CLOCK_UNCONFIRMED -> R.string.native_game_mode_start_failed
+        NativeGameModeController.Issue.CLOCK_UNCONFIRMED -> R.string.native_game_mode_description
         NativeGameModeController.Issue.NONE -> if (enabled && !state.active) R.string.native_game_mode_starting
             else R.string.native_game_mode_description
         else -> R.string.native_game_mode_unavailable

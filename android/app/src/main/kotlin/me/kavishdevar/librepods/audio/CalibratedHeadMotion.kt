@@ -40,6 +40,7 @@ internal suspend fun streamCalibratedHeadMotion(device: AppleDevice, motion: Flo
         val startedAt = now()
         val fast = tryFast && device.startHeadTracking(owner, 10.milliseconds)
         if (!fast) {
+            timing.fallingBack(now(), if (tryFast) "fast_request_refused" else "socket_fallback")
             onFallback()
             check(current() && device.startHeadTracking(owner, 20.milliseconds)) { "motion_unavailable" }
         }
@@ -51,14 +52,20 @@ internal suspend fun streamCalibratedHeadMotion(device: AppleDevice, motion: Flo
         kotlinx.coroutines.coroutineScope {
             val fallback = if (fast) launch(Dispatchers.IO) {
                 val received = withTimeoutOrNull(1_500) { firstAttitude.await(); true } == true
+                var fallbackAt = now()
+                var fallbackLastAttitudeAt = lastAttitudeAt.get()
                 if (received) {
                     while (current()) {
                         delay(25)
-                        if (now() - lastAttitudeAt.get() >= 150_000_000L) break
+                        fallbackAt = now()
+                        fallbackLastAttitudeAt = lastAttitudeAt.get()
+                        if (fallbackAt - fallbackLastAttitudeAt >= 150_000_000L) break
                     }
                 }
                 if (current()) {
                     // Keep this socket at its working rate even if root freshness closes during this write.
+                    timing.fallingBack(fallbackAt, if (received) "attitude_stall" else "attitude_startup_timeout",
+                        fallbackLastAttitudeAt)
                     onFallback()
                     check(device.startHeadTracking(owner, 20.milliseconds)) { "motion_unavailable" }
                     timing.requested(20_000, fallback = true)
