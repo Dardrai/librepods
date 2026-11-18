@@ -166,13 +166,13 @@ internal class SpatialHeadTrackingProbe(
                             val profile = result.profile
                             check(profile != null) { "calibration_rejected" }
                             converter = SpatialPoseConverter(profile, 0)
+                            calibrated = true
                             phase = 3
                             profile
                         }
                         val saved = runCatching { SpatialPoseProfileStore(context).save(SpatialPoseProfileKey(request.expectedMac,
                             roleRaw, metadata.modelNumber, metadata.version1), calibratedProfile) }.getOrDefault(false)
                         check(saved) { "profile_save_failed" }
-                        calibrated = true
                         if (!BuildConfig.DEBUG) {
                             reason = "Calibration complete."
                             return@coroutineScope
