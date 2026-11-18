@@ -38,7 +38,8 @@ import androidx.compose.ui.unit.dp
 
 internal val quickSettingsOrder = listOf(QuickSetting.CONVERSATION_AWARENESS, QuickSetting.PERSONALIZED_VOLUME,
     QuickSetting.EAR_DETECTION, QuickSetting.GAME_MODE, QuickSetting.LOUD_SOUND_REDUCTION,
-    QuickSetting.EN352_PROTECTION, QuickSetting.HEARING_AID, QuickSetting.MEDIA_ASSIST)
+    QuickSetting.EN352_PROTECTION, QuickSetting.HEARING_AID, QuickSetting.MEDIA_ASSIST,
+    QuickSetting.SPATIAL_AUDIO, QuickSetting.HEAD_TRACKING)
 
 /** Presentation preferences only: these callbacks never change the AirPods settings. */
 @Composable
@@ -85,6 +86,8 @@ internal fun quickSettingLabel(setting: QuickSetting): Int = when (setting) {
     QuickSetting.EN352_PROTECTION -> R.string.ppe
     QuickSetting.HEARING_AID -> R.string.hearing_aid
     QuickSetting.MEDIA_ASSIST -> R.string.media_assist
+    QuickSetting.SPATIAL_AUDIO -> R.string.quick_settings_spatial_audio
+    QuickSetting.HEAD_TRACKING -> R.string.spatial_calibration_title
 }
 
 @Composable
@@ -97,4 +100,6 @@ internal fun quickSettingIcon(setting: QuickSetting): ImageVector = when (settin
     QuickSetting.EN352_PROTECTION -> QuickSettingIcons.Protection
     QuickSetting.HEARING_AID -> QuickSettingIcons.Hearing
     QuickSetting.MEDIA_ASSIST -> LocalIcons.current.Headphones
+    QuickSetting.SPATIAL_AUDIO -> QuickSettingIcons.SpatialAudio
+    QuickSetting.HEAD_TRACKING -> QuickSettingIcons.HeadTracking
 }

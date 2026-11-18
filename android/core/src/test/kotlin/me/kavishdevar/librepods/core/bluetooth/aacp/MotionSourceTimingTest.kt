@@ -14,9 +14,140 @@ import org.junit.Test
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
 
 class MotionSourceTimingTest {
+    @Test fun stagesKeepOnlyIndependentMaximaAndPreserveNullFalseAndExceptions() {
+        val timing = MotionSourceTiming()
+        var clock = 100L
+        var calls = 0
+        val absent: Any? = timing.measure(MotionSourceTiming.Stage.PARSE, { clock }) {
+            calls++; clock += 7; null
+        }
+        assertNull(absent)
+        assertEquals(1, calls)
+        assertFalse(timing.measure(MotionSourceTiming.Stage.SENSOR_SEND, { clock }) {
+            clock += 30; false
+        })
+        val failure = IllegalStateException("unchanged")
+        try {
+            timing.measure(MotionSourceTiming.Stage.SENSOR_SEND, { clock }) {
+                clock += 40; throw failure
+            }
+            fail("original failure must propagate")
+        } catch (actual: IllegalStateException) { assertSame(failure, actual) }
+        val before = timing.snapshot()
+        assertEquals(2L, before["sensor_send_count"])
+        assertEquals(40L, before["sensor_send_max_nanos"])
+        assertEquals(177L, before["sensor_send_max_at_nanos"])
+        timing.stageFinished(MotionSourceTiming.Stage.SENSOR_SEND, 0, 500)
+        timing.stageFinished(MotionSourceTiming.Stage.SENSOR_SEND, 500, 400)
+        timing.measure(MotionSourceTiming.Stage.SENSOR_SEND, { clock }) { clock += 2 }
+        assertEquals(3L, timing.snapshot()["sensor_send_count"])
+        assertEquals(2L, before["sensor_send_count"])
+        assertEquals(177L, timing.snapshot()["sensor_send_max_at_nanos"])
+        assertEquals(before.keys, timing.snapshot().keys)
+    }
+
+    @Test fun publicationSeparatesMonitorWaitFromCheckedBodyAndRejectsReplacedOwner() {
+        val timing = MotionSourceTiming()
+        val monitor = Any()
+        val owner = Any()
+        var current = owner
+        var published = 0
+        val clock = AtomicLong(100)
+        val attempted = CountDownLatch(1)
+        val failure = AtomicReference<Throwable?>()
+        lateinit var publisher: Thread
+        synchronized(monitor) {
+            publisher = thread {
+                try {
+                    assertTrue(timing.publication(monitor, { clock.get().also { attempted.countDown() } }) {
+                        publishForTransport(monitor, owner, { current }) {
+                            published++; clock.addAndGet(30)
+                        }
+                    })
+                } catch (error: Throwable) { failure.set(error) }
+            }
+            assertTrue(attempted.await(2, TimeUnit.SECONDS))
+            clock.set(200)
+        }
+        publisher.join(2_000)
+        assertFalse(publisher.isAlive)
+        assertNull(failure.get())
+        val stats = timing.snapshot()
+        assertEquals(100L, stats["publication_wait_max_nanos"])
+        assertEquals(200L, stats["publication_wait_max_at_nanos"])
+        assertEquals(30L, stats["publication_body_max_nanos"])
+        assertEquals(230L, stats["publication_body_max_at_nanos"])
+        synchronized(monitor) { current = Any() }
+        assertFalse(timing.publication(monitor, clock::get) {
+            publishForTransport(monitor, owner, { current }) { published++ }
+        })
+        assertEquals(1, published)
+        assertEquals(2L, timing.snapshot()["publication_body_count"])
+        val expected = IllegalArgumentException("body")
+        try {
+            timing.publication(monitor, clock::get) { clock.addAndGet(5); throw expected }
+            fail("publication failure must propagate")
+        } catch (actual: IllegalArgumentException) { assertSame(expected, actual) }
+        assertEquals(3L, timing.snapshot()["publication_body_count"])
+        assertFalse(Thread.holdsLock(monitor))
+    }
+
+    @Test fun feedAttributesActiveAndMotionWorkSeparatelyWithoutChangingBatchDelivery() {
+        val timing = MotionSourceTiming()
+        var clock = 110L
+        var current = true
+        var delivered = 0
+        val manager = RTBuddyManager({ true }, { true }, { current }, { 9 },
+            { _, _ -> delivered++; clock += 23 }, {}, { if (it == BuddyState.ACTIVE) clock += 17 }, {},
+            sourceTiming = timing, sourceClockNanos = { clock })
+        try {
+            assertTrue(manager.setHeadTrackingEnabled(true))
+            manager.feed(frame(10, 4) + frame(15, 5), 100)
+            val stats = timing.snapshot()
+            assertEquals(2, delivered)
+            assertEquals(1L, stats["feed_reconcile_count"])
+            assertEquals(5L, stats["feed_parse_count"])
+            assertEquals(2L, stats["active_callback_count"])
+            assertEquals(17L, stats["active_callback_max_nanos"])
+            assertEquals(127L, stats["active_callback_max_at_nanos"])
+            assertEquals(2L, stats["motion_callback_count"])
+            assertEquals(23L, stats["motion_callback_max_nanos"])
+            assertEquals(150L, stats["motion_callback_max_at_nanos"])
+            assertEquals(80L, stats["feed_work_max_nanos"])
+            current = false
+            manager.feed(frame(20, 6), 190)
+            assertEquals(stats["feed_parse_count"], timing.snapshot()["feed_parse_count"])
+            assertEquals(2, delivered)
+        } finally { manager.close() }
+    }
+
+    @Test fun failedMotionCallbackIsTimedOnceAndDoesNotPublishOrConsumeTheNextReport() {
+        val timing = MotionSourceTiming()
+        var clock = 110L
+        var calls = 0
+        val expected = IllegalStateException("callback")
+        val manager = RTBuddyManager({ true }, { true }, { true }, { 9 },
+            { _, _ -> calls++; clock += 250; throw expected }, {}, {}, {},
+            sourceTiming = timing, sourceClockNanos = { clock })
+        try {
+            assertTrue(manager.setHeadTrackingEnabled(true))
+            try {
+                manager.feed(frame(10, 4) + frame(15, 5), 100)
+                fail("original callback failure must propagate")
+            } catch (actual: IllegalStateException) { assertSame(expected, actual) }
+            assertEquals(1, calls)
+            assertEquals(1L, timing.snapshot()["motion_callback_count"])
+            assertEquals(250L, timing.snapshot()["motion_callback_max_nanos"])
+            assertEquals(360L, timing.snapshot()["motion_callback_max_at_nanos"])
+            assertEquals(250L, timing.snapshot()["feed_work_max_nanos"])
+            assertEquals(0L, timing.snapshot()["motion_reports"])
+        } finally { manager.close() }
+    }
+
     @Test fun onlyClockCorroboratedSixteenBitCrossingsIncrementTheWrapDiagnostic() {
         val timing = MotionSourceTiming()
         timing.motionPublished(report(1_000_000_000, 65534), 100, 110)
@@ -181,14 +312,14 @@ class MotionSourceTimingTest {
         val timing = MotionSourceTiming()
         var clock = 110L
         var current = true
-        var delivered = 0
+        val receipts = mutableListOf<Long>()
         val manager = RTBuddyManager({ true }, { true }, { current }, { 9 },
-            { delivered++; clock += 20 }, {}, {}, {}, sourceTiming = timing, sourceClockNanos = { clock })
+            { _, receivedAt -> receipts += receivedAt; clock += 20 }, {}, {}, {}, sourceTiming = timing, sourceClockNanos = { clock })
         try {
             assertTrue(manager.setHeadTrackingEnabled(true))
             manager.feed(frame(10, 4) + frame(15, 5), 100)
             val snapshot = timing.snapshot()
-            assertEquals(2, delivered)
+            assertEquals(listOf(100L, 100L), receipts)
             assertEquals(2L, snapshot["motion_reports"])
             assertEquals(5L, snapshot["device_interval_max_nanos"])
             assertEquals(1L, snapshot["counter_step_max"])
@@ -197,7 +328,7 @@ class MotionSourceTimingTest {
             assertEquals(40L, snapshot["feed_work_max_nanos"])
             current = false
             manager.feed(frame(20, 6), 150)
-            assertEquals(2, delivered)
+            assertEquals(listOf(100L, 100L), receipts)
             assertEquals(2L, timing.snapshot()["motion_reports"])
         } finally { manager.close() }
     }
@@ -206,7 +337,7 @@ class MotionSourceTimingTest {
         val timing = MotionSourceTiming()
         val clock = AtomicLong(110)
         val attempted = CountDownLatch(1)
-        val manager = RTBuddyManager({ true }, { true }, { true }, { 9 }, {}, {}, {}, {},
+        val manager = RTBuddyManager({ true }, { true }, { true }, { 9 }, { _, _ -> }, {}, {}, {},
             sourceTiming = timing, sourceClockNanos = { clock.get().also { attempted.countDown() } })
         lateinit var feeder: Thread
         try {

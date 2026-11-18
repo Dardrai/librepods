@@ -10,7 +10,7 @@ import java.util.Timer
 import java.util.TimerTask
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.SynchronousQueue
+import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
@@ -32,7 +32,8 @@ internal class RootHeadTrackerProbe(
     private var active: Lease? = null
     private var last: Lease? = null
     @Volatile private var closed = false
-    private val preferenceChecks = ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS, SynchronousQueue<Runnable>(),
+    // Future completion precedes the worker's next take; one pending check bridges that handoff.
+    private val preferenceChecks = ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS, ArrayBlockingQueue<Runnable>(1),
         { action -> Thread(action, "head-tracker-preference-owner").apply { isDaemon = true } }, ThreadPoolExecutor.AbortPolicy())
 
     fun start(address: String, owner: IPlaybackRecoveryOwner, poses: ParcelFileDescriptor,
@@ -70,23 +71,35 @@ internal class RootHeadTrackerProbe(
             check(!closed && now() < deadline && permitted()) { "permission_denied" }
             val ownerCheck = preferenceChecks.submit<Boolean> { owner.asBinder().isBinderAlive && owner.isCurrent }
             val current = try { ownerCheck.get(minOf(500, (deadline - now()).coerceAtLeast(1)), TimeUnit.MILLISECONDS) }
-                finally { ownerCheck.cancel(true) }
+                finally { ownerCheck.cancel(true); preferenceChecks.remove(ownerCheck as Runnable) }
             check(current && owner.asBinder().isBinderAlive && now() < deadline) { "owner_changed" }
         }
         var result: Bundle? = null
-        mutate(false) {
-            check(!closed && now() < deadline && permitted()) { "permission_denied" }
-            val before = platform.read(selected)
-            check(before.nativePair && before.device() != null && before.mutationApi) { "device_unavailable" }
+        while (result == null) {
             requireOwner()
-            platform.setHeadTrackerEnabled(selected, false)
-            synchronized(lock) { active?.takeIf { it.address == selected } }?.stop("native_disabled")
-            val after = platform.read(selected)
-            check(now() < deadline && after.headTrackerEnabled == false && after.deviceEnabled == before.deviceEnabled) { "state_changed" }
-            result = after.bundle("ok").apply { putBoolean("applied", true) }
+            var actionStarted = false
+            try {
+                mutate(false) {
+                    actionStarted = true
+                    check(!closed && now() < deadline && permitted()) { "permission_denied" }
+                    val before = platform.read(selected)
+                    check(before.nativePair && before.device() != null && before.mutationApi) { "device_unavailable" }
+                    requireOwner()
+                    platform.setHeadTrackerEnabled(selected, false)
+                    synchronized(lock) { active?.takeIf { it.address == selected } }?.stop("native_disabled")
+                    val after = platform.read(selected)
+                    check(now() < deadline && after.headTrackerEnabled == false && after.deviceEnabled == before.deviceEnabled) { "state_changed" }
+                    result = after.bundle("ok").apply { putBoolean("applied", true) }
+                }
+            } catch (error: IllegalStateException) {
+                // A different Binder may deliver Atmos retirement after this Off. Never replay an entered action.
+                if (actionStarted || error.message != "busy" || now() >= deadline) throw error
+                Thread.sleep(10)
+            }
         }
         checkNotNull(result)
     } catch (error: Exception) {
+        if (error is InterruptedException) Thread.currentThread().interrupt()
         failure(error.message?.takeIf { it in setOf("owner_changed", "permission_denied", "device_unavailable", "state_changed") }
             ?: "unavailable")
     }
@@ -336,6 +349,19 @@ internal class RootHeadTrackerProbe(
                     putLong("host_source_age_min_nanos", stats.sourceAgeMinNanos)
                     putDouble("host_source_age_mean_nanos", stats.sourceAgeMeanNanos)
                     putLong("host_source_age_max_nanos", stats.sourceAgeMaxNanos)
+                    fun timing(name: String, range: HeadTrackerTimingRange) {
+                        putLong("${name}_count", range.count); putLong("${name}_min_nanos", range.minNanos)
+                        putDouble("${name}_mean_nanos", range.meanNanos); putLong("${name}_max_nanos", range.maxNanos)
+                    }
+                    timing("new_source_host_age", stats.newSourceAge)
+                    timing("reused_source_host_age", stats.reusedSourceAge)
+                    timing("pipe_frame_host_age", stats.pipeFrameHostAge)
+                    timing("hid_deadline_lateness", stats.deadlineLateness)
+                    putLong("hid_overdue_slots", stats.overdueSlots)
+                    putLong("hid_missed_periods", stats.missedPeriods)
+                    putLong("timing_clock_anomalies", stats.timingClockAnomalies)
+                    putString("pipe_age_scope", "bluetooth_read_completion_to_root_pipe_receipt")
+                    putString("deadline_scope", "scheduled_hid_slot_to_pre_write_host_time_after_first_input")
                     putString("age_scope", "host_frame_timestamp_to_uhid_submission")
                     putBoolean("excludes_acoustic_latency", true)
                 }) }

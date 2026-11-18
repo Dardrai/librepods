@@ -428,6 +428,8 @@
     <string name="companion_reconnect">Reconnect to PC</string>
     <string name="companion_cancel">Cancel transfer</string>
     <string name="companion_unlink">Unlink PC</string>
+    <string name="companion_unlink_pending">Removing the saved PC link…</string>
+    <string name="companion_unlink_failed">Couldn’t remove the saved link. Tap to try again.</string>
     <string name="companion_link">Link PC</string>
     <string name="companion_setup">In NTPods, open Settings → Phone connection. Select this phone and the same AirPods, then enter its 8-digit linking code here. Older NTPods versions can use their full linking code.</string>
     <string name="companion_pc">Paired PC</string>

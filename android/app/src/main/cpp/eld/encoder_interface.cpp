@@ -47,14 +47,23 @@ uint64_t real_us() { return state.host.monotonic_us ? state.host.monotonic_us() 
 struct StageTiming {
     uint64_t& maximum;
     uint64_t* slow_calls;
+    std::array<uint64_t, kPcmReadDurationBuckets>* durations;
     const uint64_t started = real_us();
-    explicit StageTiming(uint64_t& max, uint64_t* slow = nullptr) : maximum(max), slow_calls(slow) {}
+    explicit StageTiming(uint64_t& max, uint64_t* slow = nullptr,
+                         std::array<uint64_t, kPcmReadDurationBuckets>* buckets = nullptr)
+        : maximum(max), slow_calls(slow), durations(buckets) {}
     ~StageTiming() {
         const auto finished = real_us();
         if (!started || !finished || finished < started) return;
         const auto elapsed = finished - started;
         maximum = std::max(maximum, elapsed);
         if (slow_calls && elapsed >= 1000) ++*slow_calls;
+        if (durations) {
+            constexpr uint64_t limits[] = {100, 500, 1000, 5000, 10000, 20000};
+            size_t bucket = 0;
+            while (bucket < kPcmReadDurationBuckets - 1 && elapsed >= limits[bucket]) ++bucket;
+            ++(*durations)[bucket];
+        }
     }
 };
 uint64_t period_us() { return uint64_t(state.clock.effective_interval_tenths) * 1000; }
@@ -158,6 +167,8 @@ void restart_clock_locked(bool new_transport = false) {
     state.due_us = 0;
     state.last_send_us = 0;
     state.last_media_submit_us = 0;
+    if (!new_transport) ++state.status.feeding_resets;
+    state.status.feeding_read_calls = state.status.feeding_read_bytes = 0;
     // Feeding reset/flush is not a new RTP stream. Preserve AU/timestamp continuity.
     if (new_transport) {
         state.timestamp = 0;
@@ -281,15 +292,20 @@ void send_frames(uint64_t now_us) {
                 void* pcm = state.config.pcm_sample_bytes == 4 ? static_cast<void*>(state.pcm_q31.data()) : state.pcm.data();
                 auto* destination = static_cast<uint8_t*>(pcm) + state.filled;
                 ++state.status.pcm_read_calls;
+                ++state.status.feeding_read_calls;
                 uint32_t count;
                 {
-                    const StageTiming timing(state.status.pcm_read_max_us, &state.status.pcm_read_slow_calls);
+                    const StageTiming timing(state.status.pcm_read_max_us, &state.status.pcm_read_slow_calls,
+                                             &state.status.pcm_read_duration_counts);
                     count = state.read(destination, static_cast<uint32_t>(remaining));
                 }
                 if (count > remaining || count % (kChannels * state.config.pcm_sample_bytes) != 0) {
                     fatal = true;
                 } else {
                     state.status.pcm_read_bytes += count;
+                    state.status.feeding_read_bytes += count;
+                    if (!count) ++state.status.pcm_zero_reads;
+                    else if (count < remaining) ++state.status.pcm_short_reads;
                     state.filled += count;
                     if (state.filled < kFrameSamples * kChannels * state.config.pcm_sample_bytes) {
                         opportunity_blocked = true;
@@ -360,7 +376,7 @@ void send_frames(uint64_t now_us) {
                             ++state.status.packets;
                             ++queued; // Include this callback's AUs in the queue12 snapshot.
                             if (produced > 1) ++state.status.catch_up_aus;
-                            if (state.primer) --state.primer;
+                            if (state.primer) { --state.primer; ++state.status.primer_aus; }
                             else {
                                 const auto submitted_us = real_us();
                                 commit_clock(submitted_us, queued);
@@ -425,7 +441,9 @@ bool encoder_ready() {
 const EncoderInterface* encoder_interface() { return &interface; }
 EncoderStatus encoder_status() {
     std::lock_guard<std::mutex> lock(mutex);
-    return state.status;
+    auto status = state.status;
+    status.primer_remaining = status.active ? state.primer : 0;
+    return status;
 }
 uint64_t encoder_clock_begin(const uint8_t* peer, size_t size, uint64_t generation,
                              uint32_t interval, uint32_t drift_ms) {

@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.os.Binder
 import android.os.Build
 import android.os.Bundle
+import android.os.IBinder
 import android.os.ParcelFileDescriptor
 import android.os.Process
 import me.kavishdevar.librepods.BuildConfig
@@ -31,6 +32,7 @@ class ShizukuAudioService @JvmOverloads constructor(context: Context,
     private var callConnection: NativeCallConnection? = null
     private var mediaPause: Pair<IPlaybackRecoveryOwner, OwnedMediaPause>? = null
     private var volumeChecking = false
+    private var volumeRepairing = false
     private var spatialMutating = false
     private val usbVolume = RootUsbAbsoluteVolume(originalContext)
     private val dongleHid by lazy { RootDongleHid(originalContext, expectedUid, ::enforceCaller) }
@@ -39,10 +41,25 @@ class ShizukuAudioService @JvmOverloads constructor(context: Context,
     private var spatialAudio: SpatialAudioAccess? = null
     @Volatile private var headTrackerProbe: RootHeadTrackerProbe? = null
     @Volatile private var headTrackerSink: RootHeadTrackerSink? = null
+    @Volatile private var atmosHeadTracking: RootAtmosHeadTracking? = null
+    @Volatile private var atmosSpatial: RootSpatialControl? = null
     private val volumeSync by lazy {
-        BluetoothVolumeSync(shellContext, audio = ShizukuVolumeSyncAudio(shellContext,
+        BluetoothVolumeSync(shellContext, audio = volumeRepairAudio(ShizukuVolumeSyncAudio(shellContext,
             binder = { checkNotNull(SystemServiceHelper.getSystemService(it)) },
-            packageName = shellContext.packageName), granted = { !cleanupFailed.get() })
+            packageName = shellContext.packageName)), granted = { !cleanupFailed.get() })
+    }
+
+    private fun volumeRepairAudio(audio: BluetoothVolumeSync.Audio) = object : BluetoothVolumeSync.Audio by audio {
+        private fun beforeWrite() = synchronized(lock) {
+            check(volumeChecking)
+            if (!volumeRepairing) {
+                volumeRepairing = true
+                // Retire locally before even a sub-poll-period repair; never stop for observation alone.
+                atmosHeadTracking?.retireForVolumeRepair()
+            }
+        }
+        override fun setVolume(index: Int) { beforeWrite(); audio.setVolume(index) }
+        override fun setAbsolute(route: BluetoothVolumeSync.Route) { beforeWrite(); audio.setAbsolute(route) }
     }
 
     override fun ensureOwnBackgroundAudio(): Boolean {
@@ -82,7 +99,7 @@ class ShizukuAudioService @JvmOverloads constructor(context: Context,
             }
         } finally {
             Binder.restoreCallingIdentity(identity)
-            synchronized(lock) { volumeChecking = false }
+            synchronized(lock) { volumeRepairing = false; volumeChecking = false }
         }
     }
 
@@ -133,6 +150,8 @@ class ShizukuAudioService @JvmOverloads constructor(context: Context,
 
     override fun retireOwner(owner: IPlaybackRecoveryOwner) {
         enforceCaller()
+        atmosHeadTracking?.retire(owner)
+        atmosSpatial?.retire(owner)
         headTrackerProbe?.finish(owner)
         spatialAudio?.retire(owner)
         releaseUsbAbsoluteVolume(owner)
@@ -151,6 +170,30 @@ class ShizukuAudioService @JvmOverloads constructor(context: Context,
     override fun restoreSpatialAudio(address: String, owner: IPlaybackRecoveryOwner): Bundle =
         spatialAudioCall(true) { it.restore(address, owner) }
 
+    override fun inspectAtmosSpatial(address: String, owner: IPlaybackRecoveryOwner): Bundle =
+        atmosSpatialCall { it.inspect(address, owner) }
+
+    override fun setAtmosSpatial(address: String, owner: IPlaybackRecoveryOwner, spatialEnabled: Boolean,
+        headTrackingEnabled: Boolean, choiceEpoch: Long): Bundle =
+        atmosSpatialCall { it.set(address, owner, spatialEnabled, headTrackingEnabled, choiceEpoch) }
+
+    private fun atmosSpatialCall(action: (RootSpatialControl) -> Bundle): Bundle {
+        enforceCaller()
+        if (Process.myUid() != 0) return SpatialBackendSnapshot.unavailable("root_required")
+        if (originalContext.packageManager.checkPermission(Manifest.permission.BLUETOOTH_CONNECT,
+                BuildConfig.APPLICATION_ID) != PackageManager.PERMISSION_GRANTED)
+            return SpatialBackendSnapshot.unavailable("permission_denied")
+        val identity = Binder.clearCallingIdentity()
+        return try {
+            val manager = synchronized(lock) {
+                if (cleanupFailed.get()) return SpatialBackendSnapshot.unavailable("helper_unavailable")
+                atmosSpatial ?: RootSpatialControl(shellContext).also { atmosSpatial = it }
+            }
+            action(manager)
+        } catch (_: Exception) { SpatialBackendSnapshot.unavailable("unavailable") }
+        finally { Binder.restoreCallingIdentity(identity) }
+    }
+
     override fun startHeadTrackerProbe(address: String, owner: IPlaybackRecoveryOwner,
         poses: ParcelFileDescriptor, events: IHeadTrackerEvents, seconds: Int): Bundle =
         openHeadTracker(address, owner, poses, events, seconds, false)
@@ -158,6 +201,35 @@ class ShizukuAudioService @JvmOverloads constructor(context: Context,
     override fun openHeadTracking(address: String, owner: IPlaybackRecoveryOwner,
         poses: ParcelFileDescriptor, events: IHeadTrackerEvents, enablePreference: Boolean): Bundle =
         openHeadTracker(address, owner, poses, events, null, enablePreference)
+
+    override fun openAtmosHeadTracking(address: String, owner: IPlaybackRecoveryOwner, socket: IBinder,
+        source: Bundle, permit: Bundle, poses: ParcelFileDescriptor): AtmosTrackingLease {
+        try {
+            enforceCaller()
+            check(BuildConfig.DEBUG && Process.myUid() == 0 && headTrackerPermission()) { "atmos_unavailable" }
+            return synchronized(lock) {
+                check(atmosAdmissionRejection() == null) { "atmos_busy" }
+                val manager = atmosHeadTracking ?: RootAtmosHeadTracking(shellContext, ::enforceCaller,
+                    ::atmosAdmissionRejection, { peer, epoch -> atmosSpatial?.authorizes(peer, epoch) == true })
+                    .also { atmosHeadTracking = it }
+                // Reserve before releasing the same lock used by Android sensor registration.
+                manager.open(address, owner, socket, source, permit, poses)
+            }
+        } catch (error: Exception) { poses.close(); throw error }
+    }
+
+    private fun atmosAdmissionRejection(): String? = synchronized(lock) {
+        when {
+            cleanupFailed.get() -> "cleanup_failed"
+            volumeRepairing -> "volume_repairing"
+            spatialMutating -> "spatial_mutating"
+            playbackRecovery != null -> "playback_recovery"
+            playbackRelease != null -> "playback_release"
+            callConnection != null -> "call_connection"
+            !probeIsQuiet() -> "probe_not_quiet"
+            else -> null
+        }
+    }
 
     private fun headTrackerAccess(): RootHeadTrackerProbe = synchronized(lock) {
         check(!cleanupFailed.get()) { "helper_unavailable" }
@@ -220,7 +292,8 @@ class ShizukuAudioService @JvmOverloads constructor(context: Context,
         while (true) {
             val reserved = synchronized(lock) {
                 if (!cleanup) check(!cleanupFailed.get() && !volumeChecking && playbackRecovery == null &&
-                    playbackRelease == null && callConnection == null && probeIsQuiet()) { "busy" }
+                    playbackRelease == null && callConnection == null && probeIsQuiet() &&
+                    atmosHeadTracking?.hasLiveLease() != true) { "busy" }
                 if (spatialMutating) false else { spatialMutating = true; true }
             }
             if (reserved) break
@@ -575,6 +648,8 @@ class ShizukuAudioService @JvmOverloads constructor(context: Context,
         if (!cleanupFailed.compareAndSet(false, true)) return
         synchronized(lock) { headTrackerProbe }?.close()
         headTrackerSink?.close()
+        atmosHeadTracking?.close()
+        atmosSpatial?.close()
         val routes = synchronized(lock) {
             playbackRecovery?.cancel(); playbackRelease?.cancel(); callConnection?.binderDied()
             mediaPause?.second?.close(); mediaPause = null

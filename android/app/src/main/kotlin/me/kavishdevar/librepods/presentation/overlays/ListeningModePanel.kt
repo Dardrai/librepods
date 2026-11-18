@@ -111,7 +111,13 @@ internal fun ListeningModePanel(snapshot: ListeningModeSnapshot?, commandFailed:
 private fun QuickSettingsToggle(state: QuickSettingState, backdrop: Backdrop,
     onToggle: (QuickSetting, Boolean) -> Unit, modifier: Modifier = Modifier, compact: Boolean = false) {
     val title = stringResource(if (state.recoveryOff) {
-        if (state.setting == QuickSetting.HEARING_AID) R.string.hearing_aid_recovery_off else R.string.media_assist_recovery_off
+        when (state.setting) {
+            QuickSetting.HEARING_AID -> R.string.hearing_aid_recovery_off
+            QuickSetting.MEDIA_ASSIST -> R.string.media_assist_recovery_off
+            QuickSetting.SPATIAL_AUDIO -> R.string.spatial_audio_recovery_off
+            QuickSetting.HEAD_TRACKING -> R.string.head_tracking_recovery_off
+            else -> quickSettingLabel(state.setting)
+        }
     } else quickSettingLabel(state.setting))
     val description = if (state.recoveryOff) "" else stringResource(state.descriptionRes ?: when (state.checked) {
         true -> R.string.on

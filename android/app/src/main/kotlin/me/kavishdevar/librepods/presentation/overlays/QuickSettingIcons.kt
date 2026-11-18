@@ -43,6 +43,20 @@ internal object QuickSettingIcons {
         moveTo(12f, 2f); lineTo(12f, 22f); moveTo(16f, 7f); lineTo(16f, 17f)
         moveTo(20f, 10f); lineTo(20f, 14f)
     }
+    val SpatialAudio = outline("SpatialAudio") {
+        moveTo(8f, 9f); curveTo(8f, 4f, 16f, 4f, 16f, 9f)
+        lineTo(16f, 13f); curveTo(16f, 18f, 8f, 18f, 8f, 13f); close()
+        moveTo(4f, 6f); curveTo(1f, 9f, 1f, 15f, 4f, 18f)
+        moveTo(20f, 6f); curveTo(23f, 9f, 23f, 15f, 20f, 18f)
+        moveTo(7f, 21f); curveTo(10f, 22f, 14f, 22f, 17f, 21f)
+    }
+    val HeadTracking = outline("HeadTracking") {
+        moveTo(8f, 9f); curveTo(8f, 4f, 16f, 4f, 16f, 9f)
+        lineTo(16f, 13f); curveTo(16f, 18f, 8f, 18f, 8f, 13f); close()
+        moveTo(5f, 13f); curveTo(0f, 15f, 3f, 21f, 12f, 21f)
+        curveTo(21f, 21f, 24f, 15f, 19f, 13f)
+        moveTo(19f, 10f); lineTo(19f, 13f); lineTo(22f, 13f)
+    }
 }
 
 private fun outline(name: String, draw: PathBuilder.() -> Unit): ImageVector =

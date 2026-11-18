@@ -38,6 +38,23 @@ import kotlin.coroutines.suspendCoroutine
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [37], application = Application::class, shadows = [HearingModeSocketShadow::class])
 class AacpInitialAttReadTest {
+    @Test fun settingsSystemQueriesStayOutsideTheMotionPublicationMonitor() = runBlocking<Unit> {
+        val context = spy(RuntimeEnvironment.getApplication() as Application)
+        val audio = mock(AudioManager::class.java)
+        doReturn(audio).`when`(context).getSystemService(AudioManager::class.java)
+        fixture(context = context) { device, script, socket ->
+            var queriedUnderLock = false
+            `when`(audio.mode).thenAnswer {
+                if (Thread.holdsLock(device.aacp)) queriedUnderLock = true
+                AudioManager.MODE_NORMAL
+            }
+            withTimeout(2_000) { initialize(device, socket) }
+            assertEquals(3, script.reads.size)
+            assertFalse(queriedUnderLock)
+            verify(audio, atLeastOnce()).mode
+        }
+    }
+
     @Test fun identityExperimentsUseOneSnapshotForBothStartupPasses() = runBlocking<Unit> {
         fixture { device, _, socket ->
             device.updateSettings { it.copy(experimentalHearingCapability = true, experimentalMacSourceAnnouncement = true) }
@@ -552,10 +569,10 @@ class AacpInitialAttReadTest {
     }
 
     private suspend fun fixture(model: AirPodsModel = AirPodsModel.AIRPODS_PRO_3,
+        context: Application = RuntimeEnvironment.getApplication(),
         block: suspend (AppleDevice, Script, BluetoothSocket) -> Unit) {
         val script = Script()
         mockConstruction(ATTManager::class.java, withSettings().defaultAnswer { script.answer(it) }).use { built ->
-            val context = RuntimeEnvironment.getApplication()
             shadowOf(context).grantPermissions(Manifest.permission.BLUETOOTH_CONNECT)
             val adapter = context.getSystemService(BluetoothManager::class.java).adapter
             val device = AppleDevice(context, adapter, adapter.getRemoteDevice("00:11:22:33:44:55"), ConnectionState.CONNECTED)

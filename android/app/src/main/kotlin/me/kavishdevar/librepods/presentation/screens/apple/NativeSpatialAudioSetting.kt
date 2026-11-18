@@ -6,25 +6,18 @@ import android.media.AudioManager
 import android.media.Spatializer
 import android.os.Bundle
 import android.provider.Settings
-import android.widget.Toast
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import me.kavishdevar.librepods.audio.NativeHeadTrackingState
 import me.kavishdevar.librepods.R
@@ -79,47 +72,26 @@ private fun NativeSpatialAudioRow(viewModel: AppleViewModel, index: Int, count: 
     DisposableEffect(live) { onDispose { live.set(false) } }
     val access = remember(context, viewModel) { ShizukuAudioClient(context, requireRoot = true) }
     DisposableEffect(access) { onDispose { access.close() } }
-    var resumes by remember { mutableIntStateOf(0) }
-    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { access.connect(); resumes++ }
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { access.connect() }
     val bridge by access.state.collectAsState()
-    val rootReady = bridge.connected && access.hasRootPrivileges
-    val headTracking by (viewModel.headTrackingController?.state ?:
+    val controller = viewModel.headTrackingController
+    val headTracking by (controller?.state ?:
         remember { MutableStateFlow(NativeHeadTrackingState()) }).collectAsState()
+    val rootReady = headTracking.spatialSupported || bridge.connected && access.hasRootPrivileges
     val connected = connection == ConnectionState.CONNECTED && token != null
-    var snapshot by remember(live) { mutableStateOf<FixedSpatialState?>(null) }
-    var requested by remember(live) { mutableStateOf<Boolean?>(null) }
-    var busy by remember(live) { mutableStateOf(false) }
-    val scope = rememberCoroutineScope()
     val current = remember(live) { { live.get() && token != null && viewModel.ownsSpatialAudio(token) } }
-
-    LaunchedEffect(live, rootReady, resumes, headTracking.enabled, headTracking.busy) {
-        if (rootReady && connected && current() && !headTracking.busy) {
-            val result = access.inspectSpatialAudio(viewModel.spatialAudioAddress, current)
-            if (current()) snapshot = FixedSpatialState.read(result)
-        }
-    }
-    SpatialAudioSettingContent(snapshot, connected, rootReady, busy || headTracking.busy, requested, index = index, count = count,
+    val snapshot = if (headTracking.spatialSupported) FixedSpatialState(headTracking.spatialEnabled,
+        headTracking.spatialAvailable || headTracking.spatialEnabled == true ||
+            headTracking.spatialEnabled == null && headTracking.desiredSpatialEnabled != null,
+        headTracking.reason) else if (rootReady && (controller == null || headTracking.reason != "loading"))
+        FixedSpatialState(null, false, "unavailable") else null
+    SpatialAudioSettingContent(snapshot, connected, rootReady, headTracking.busy || headTracking.spatialBusy,
+        index = index, count = count,
         requestRoot = access::requestPermission,
         openSystemSettings = { context.startActivity(Intent(Settings.ACTION_SOUND_SETTINGS)) },
         change = { enabled ->
-            if (!busy && snapshot?.writable == true && current()) {
-                requested = enabled
-                busy = true
-                scope.launch {
-                    try {
-                        val result = access.setFixedSpatialEnabled(viewModel.spatialAudioAddress, enabled, current)
-                        if (current()) {
-                            if (result.getBoolean("applied", false)) snapshot = FixedSpatialState.read(result)
-                            else {
-                                snapshot = null
-                                Toast.makeText(context, R.string.spatial_audio_change_failed, Toast.LENGTH_SHORT).show()
-                                val fresh = access.inspectSpatialAudio(viewModel.spatialAudioAddress, current)
-                                if (current()) snapshot = FixedSpatialState.read(fresh)
-                            }
-                        }
-                    } finally { if (live.get()) { requested = null; busy = false } }
-                }
-            }
+            if (!headTracking.busy && !headTracking.spatialBusy && snapshot?.writable == true && current() &&
+                (headTracking.spatialEnabled != null || !enabled)) controller?.setSpatialEnabled(enabled)
         })
 }
 
@@ -130,10 +102,17 @@ internal fun SpatialAudioSettingContent(
     change: (Boolean) -> Unit,
     index: Int = 0, count: Int = 1,
 ) {
-    val title = stringResource(R.string.spatial_audio_fixed)
+    val title = stringResource(R.string.quick_settings_spatial_audio)
     val needsRoot = connected && !rootReady
     val needsSystemSettings = connected && rootReady && snapshot?.reason == "global_disabled"
-    if (needsRoot || needsSystemSettings) {
+    val recovery = connected && rootReady && !busy && snapshot?.writable == true && snapshot.checked == null
+    if (recovery) {
+        StyledListItemContent(
+            content = { Text(title, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface) },
+            supportingContent = { Text(stringResource(R.string.spatial_audio_recovery_off), style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)) },
+            orientation = StyledListItemOrientation.Vertical, index = index, count = count, onClick = { change(false) })
+    } else if (needsRoot || needsSystemSettings) {
         StyledListItemContent(
             content = { Text(title, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface) },
             supportingContent = { Text(stringResource(if (needsRoot) R.string.spatial_audio_root

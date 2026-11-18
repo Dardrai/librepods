@@ -6,6 +6,7 @@ import me.kavishdevar.librepods.dongle.DongleProtocol
 import me.kavishdevar.librepods.dongle.DongleState
 import me.kavishdevar.librepods.utils.NativeGameModeController
 import me.kavishdevar.librepods.R
+import me.kavishdevar.librepods.audio.NativeHeadTrackingState
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -17,13 +18,14 @@ class QuickSettingsStateTest {
         ControlCommandIdentifier.PPE_TOGGLE_CONFIG to byteArrayOf(2))
     private fun controls(state: AppleState = AppleState(), settings: AppleSettings = AppleSettings(),
         game: NativeGameModeController.State? = null, metadata: AppleMetadata = this.metadata,
-        pending: Set<QuickSetting> = emptySet(), profile: Boolean = false, protectedAccess: Boolean = true) =
+        pending: Set<QuickSetting> = emptySet(), profile: Boolean = false, protectedAccess: Boolean = true,
+        spatial: NativeHeadTrackingState? = null) =
         nativeQuickSettings(metadata, state, settings, game, true, profile, pending,
-            protectedSettingsSupported = protectedAccess).associateBy { it.setting }
+            protectedSettingsSupported = protectedAccess, spatial = spatial).associateBy { it.setting }
 
     @Test fun unknownAccessoryValuesStayUnknownAndCachedPreferencesDoNotBecomeReceivedProof() {
         val empty = controls()
-        assertEquals(8, empty.size)
+        assertEquals(10, empty.size)
         assertTrue(empty.filterKeys { it != QuickSetting.EAR_DETECTION }.values.all { it.checked == null && !it.enabled })
         assertEquals(true, empty[QuickSetting.EAR_DETECTION]!!.checked)
         assertTrue(empty[QuickSetting.EAR_DETECTION]!!.enabled)
@@ -132,6 +134,23 @@ class QuickSettingsStateTest {
         assertNull(waiting.descriptionRes)
     }
 
+    @Test fun gameModeTileKeepsOnLabelDuringAutomaticRestoration() {
+        val active = NativeGameModeController.State(desiredOn = true, available = true, active = true,
+            hostSupported = true)
+        val restoring = active.copy(active = false, restoring = true, remoteRestorePending = true)
+        val on = AppleSettings(nativeGameModeEnabled = true)
+        for (state in listOf(active, restoring, active)) {
+            val tile = controls(settings = on, game = state).getValue(QuickSetting.GAME_MODE)
+            assertEquals(true, tile.checked)
+            assertNull(tile.descriptionRes)
+            assertTrue(tile.enabled)
+        }
+        val off = controls(settings = on.copy(nativeGameModeEnabled = false), game = restoring)
+            .getValue(QuickSetting.GAME_MODE)
+        assertEquals(false, off.checked)
+        assertEquals(R.string.native_game_mode_stopping, off.descriptionRes)
+    }
+
     @Test fun gameFailuresKeepTheImmediateChoiceButDoNotDescribeItAsConfirmedOnOrOff() {
         for (enabled in listOf(false, true)) {
             for (restoring in listOf(false, true)) {
@@ -171,7 +190,7 @@ class QuickSettingsStateTest {
             NativeGameModeController.State(available = true, hostSupported = true), true, true, ordinaryBusy = busy,
             protectedSettingsSupported = true).associateBy { it.setting }
         val ready = choices(false)
-        assertTrue(ready.values.all { it.enabled })
+        assertTrue(ready.values.filter { it.supported }.all { it.enabled })
         val busy = choices(true)
         for (setting in QuickSetting.entries) {
             val expected = ready.getValue(setting).let {
@@ -180,6 +199,60 @@ class QuickSettingsStateTest {
             }
             assertEquals(setting.name, expected, busy.getValue(setting))
         }
+    }
+
+    @Test fun spatialControlsRequireKnownBackendSupportAndKeepOffAvailableWithoutCalibration() {
+        val keys = setOf(QuickSetting.SPATIAL_AUDIO, QuickSetting.HEAD_TRACKING)
+        for (value in listOf<NativeHeadTrackingState?>(null, NativeHeadTrackingState())) {
+            val unknown = controls(spatial = value)
+            for (key in keys) {
+                assertFalse(unknown.getValue(key).supported)
+                assertNull(unknown.getValue(key).checked)
+                assertFalse(unknown.getValue(key).enabled)
+            }
+        }
+        val available = NativeHeadTrackingState(enabled = false, calibrated = true, available = true,
+            spatialEnabled = false, spatialAvailable = true, spatialSupported = true)
+        val ready = controls(spatial = available)
+        for (key in keys) {
+            assertTrue(ready.getValue(key).supported)
+            assertEquals(false, ready.getValue(key).checked)
+            assertTrue("Head On may enable Spatial Audio first", ready.getValue(key).enabled)
+        }
+        for (busy in listOf(available.copy(busy = true), available.copy(spatialBusy = true)))
+            for (key in keys) {
+                val control = controls(spatial = busy).getValue(key)
+                assertTrue(control.supported)
+                assertEquals(false, control.checked)
+                assertFalse(control.enabled)
+            }
+        val onWithoutReadiness = NativeHeadTrackingState(enabled = true, spatialEnabled = true, spatialSupported = true)
+        for (key in keys) {
+            val control = controls(spatial = onWithoutReadiness).getValue(key)
+            assertTrue(control.supported)
+            assertEquals(true, control.checked)
+            assertTrue("An existing On state can always be turned off", control.enabled)
+        }
+        val disconnected = nativeQuickSettings(metadata, AppleState(), AppleSettings(), null, false, false,
+            connected = false, spatial = available).associateBy { it.setting }
+        for (key in keys) assertFalse(disconnected.getValue(key).enabled)
+        for (key in keys) assertFalse(controls(metadata = metadata.copy(model = AirPodsModel.UNKNOWN),
+            spatial = available).getValue(key).supported)
+        assertFalse(controls(spatial = available.copy(calibrated = false)).getValue(QuickSetting.HEAD_TRACKING).supported)
+        assertFalse(controls(spatial = available.copy(available = false)).getValue(QuickSetting.HEAD_TRACKING).enabled)
+    }
+
+    @Test fun combinedBackendUncertaintyKeepsKnownTilesVisibleAndOffersOnlySafeOff() {
+        val uncertain = NativeHeadTrackingState(calibrated = true, spatialSupported = true,
+            desiredSpatialEnabled = false, desiredTrackingEnabled = false)
+        for (key in setOf(QuickSetting.SPATIAL_AUDIO, QuickSetting.HEAD_TRACKING)) {
+            val control = controls(spatial = uncertain).getValue(key)
+            assertTrue(control.supported); assertTrue(control.enabled); assertTrue(control.recoveryOff)
+            assertNull(control.checked)
+        }
+        val loading = controls(spatial = NativeHeadTrackingState(spatialEnabled = true, spatialAvailable = true))
+        assertFalse("Android readback alone cannot claim combined renderer support",
+            loading.getValue(QuickSetting.SPATIAL_AUDIO).supported)
     }
 
     @Test fun clinicalModesRequireExistingFittingAndInactiveCustomTransparencyToEnableButCanTurnOffWithoutThem() {

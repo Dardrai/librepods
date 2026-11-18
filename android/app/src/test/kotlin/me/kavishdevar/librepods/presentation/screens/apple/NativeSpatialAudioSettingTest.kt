@@ -109,7 +109,7 @@ class NativeSpatialAudioSettingTest {
             }
         }
         assertEquals(0, roots)
-        compose.onNodeWithText("Fixed Spatial Audio").performClick()
+        compose.onNodeWithText("Spatial Audio").performClick()
         assertEquals(1, roots)
         assertTrue(writes.isEmpty())
     }
@@ -128,6 +128,21 @@ class NativeSpatialAudioSettingTest {
         assertEquals(0, writes)
     }
 
+    @Test fun unconfirmedCombinedStateOffersAnExplicitOffActionInsteadOfAFakeOffToggle() {
+        val writes = mutableListOf<Boolean>()
+        compose.setContent {
+            LibrePodsTheme(designSystem = DesignSystem.Apple) {
+                StyledList { item { index, count ->
+                    SpatialAudioSettingContent(FixedSpatialState(null, true, "waiting_for_owner"), true, true,
+                        change = writes::add, index = index, count = count)
+                } }
+            }
+        }
+        compose.onAllNodes(isToggleable()).assertCountEquals(0)
+        compose.onNodeWithText("Turn off Spatial Audio").performClick()
+        assertEquals(listOf(false), writes)
+    }
+
     @Test fun aConnectedRootBridgeRefreshesItsRenderedRowAndReadbackWithoutDuplicatingSiblings() {
         val viewModel = mock(AppleViewModel::class.java)
         val socket = mock(BluetoothSocket::class.java)
@@ -140,6 +155,16 @@ class NativeSpatialAudioSettingTest {
         val bridge = MutableStateFlow(BridgeState())
         val enabled = AtomicBoolean(true)
         val writes = mutableListOf<Boolean>()
+        val controller = mock(NativeHeadTrackingController::class.java)
+        val head = MutableStateFlow(NativeHeadTrackingState())
+        `when`(viewModel.headTrackingController).thenReturn(controller)
+        `when`(controller.state).thenReturn(head)
+        doAnswer {
+            val choice = it.getArgument<Boolean>(0)
+            writes += choice
+            head.value = head.value.copy(spatialEnabled = choice, enabled = false)
+            null
+        }.`when`(controller).setSpatialEnabled(anyBoolean())
         mockConstruction(ShizukuAudioClient::class.java) { client, _ ->
             `when`(client.state).thenReturn(bridge)
             `when`(client.hasRootPrivileges).thenReturn(true)
@@ -166,7 +191,10 @@ class NativeSpatialAudioSettingTest {
             compose.onAllNodes(isToggleable()).assertCountEquals(0)
             val client = clients.constructed().single()
             verify(client, never()).requestPermission()
-            compose.runOnIdle { bridge.value = BridgeState(connected = true, backend = "root") }
+            compose.runOnIdle {
+                bridge.value = BridgeState(connected = true, backend = "root")
+                head.value = NativeHeadTrackingState(spatialEnabled = true, spatialAvailable = true, spatialSupported = true)
+            }
             awaitSpatialToggle(true)
             compose.onNode(isToggleable()).assertIsOn().assertIsEnabled()
             compose.onNodeWithText("Allow root access to control spatial audio on this phone.").assertDoesNotExist()
@@ -180,12 +208,12 @@ class NativeSpatialAudioSettingTest {
             compose.onNode(isToggleable()).assertIsOn().assertIsEnabled()
             assertEquals(listOf(false, true), writes)
             assertSingleSpatialRows()
-            runBlocking { verify(client, times(1)).inspectSpatialAudio(eq(address) ?: address, anyCurrent()) }
-            compose.runOnIdle { bridge.value = BridgeState() }
-            compose.waitUntil(5_000) {
-                compose.onAllNodesWithText("Allow root access to control spatial audio on this phone.").fetchSemanticsNodes().size == 1
+            runBlocking {
+                verify(client, never()).inspectSpatialAudio(eq(address) ?: address, anyCurrent())
+                verify(client, never()).setFixedSpatialEnabled(eq(address) ?: address, anyBoolean(), anyCurrent())
             }
-            compose.onNodeWithText("Allow root access to control spatial audio on this phone.").assertIsDisplayed()
+            compose.runOnIdle { bridge.value = BridgeState() }
+            compose.onNodeWithText("Allow root access to control spatial audio on this phone.").assertDoesNotExist()
             compose.runOnIdle { bridge.value = BridgeState(connected = true, backend = "root") }
             awaitSpatialToggle(true)
             compose.onNode(isToggleable()).assertIsOn().assertIsEnabled()
@@ -210,7 +238,7 @@ class NativeSpatialAudioSettingTest {
         }
         for (scale in listOf(1f, 1.6f)) {
             compose.runOnIdle { fontScale.value = scale }
-            val title = compose.onNodeWithText("Fixed Spatial Audio", useUnmergedTree = true).assertIsDisplayed()
+            val title = compose.onNodeWithText("Spatial Audio", useUnmergedTree = true).assertIsDisplayed()
             val explanation = compose.onNodeWithText("Allow root access to control spatial audio on this phone.", useUnmergedTree = true)
                 .assertIsDisplayed()
             val titleBounds = title.fetchSemanticsNode().boundsInRoot
@@ -246,7 +274,8 @@ class NativeSpatialAudioSettingTest {
         val viewModel = mock(AppleViewModel::class.java)
         val socket = mock(BluetoothSocket::class.java)
         val controller = mock(NativeHeadTrackingController::class.java)
-        val head = MutableStateFlow(NativeHeadTrackingState(enabled = false, calibrated = true, available = true))
+        val head = MutableStateFlow(NativeHeadTrackingState(enabled = false, calibrated = true, available = true,
+            spatialEnabled = true, spatialAvailable = true, spatialSupported = true))
         val nativeHead = AtomicBoolean(false)
         val address = "AA:BB:CC:DD:EE:FF"
         `when`(viewModel.connectionState).thenReturn(MutableStateFlow(ConnectionState.CONNECTED))
@@ -275,18 +304,18 @@ class NativeSpatialAudioSettingTest {
                 nativeHead.set(true)
                 head.value = head.value.copy(enabled = true)
             }
-            awaitSpatialToggle(false)
-            compose.onAllNodesWithText("Fixed Spatial Audio", useUnmergedTree = true).assertCountEquals(1)
+            awaitSpatialToggle(true)
+            compose.onAllNodesWithText("Spatial Audio", useUnmergedTree = true).assertCountEquals(1)
             compose.runOnIdle {
                 nativeHead.set(false)
-                head.value = head.value.copy(enabled = false)
+                head.value = head.value.copy(enabled = false, spatialEnabled = false)
             }
-            awaitSpatialToggle(true)
+            awaitSpatialToggle(false)
         }
     }
 
     private fun assertSingleSpatialRows() {
-        compose.onAllNodesWithText("Fixed Spatial Audio", useUnmergedTree = true).assertCountEquals(1)
+        compose.onAllNodesWithText("Spatial Audio", useUnmergedTree = true).assertCountEquals(1)
         compose.onAllNodesWithText("Before spatial", useUnmergedTree = true).assertCountEquals(1)
         compose.onAllNodesWithText("After spatial", useUnmergedTree = true).assertCountEquals(1)
     }

@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <set>
+#include <type_traits>
 #include <vector>
 
 #ifndef ELD_TEST_PCM_BYTES
@@ -34,6 +35,35 @@ unsigned empty_encodes = 0, failures = 0, reads = 0, closes = 0, zero_inputs = 0
 unsigned note8_codec_reads = 0, note8_peer_reads = 0, custom_codec_reads = 0, custom_peer_reads = 0;
 size_t read_limit = kTestPcmBytes;
 size_t pcm_available = SIZE_MAX;
+using ModelSample = std::conditional_t<kTestPcmWidth == 4, int32_t, int16_t>;
+struct ProducerModel {
+    static constexpr size_t capacity_frames = 480 * 64;
+    std::array<uint8_t, capacity_frames * 2 * kTestPcmWidth> ring{};
+    uint64_t produced = 0, consumed = 0, encoded = 0;
+    static ModelSample sample(uint64_t frame) { return static_cast<ModelSample>(frame % 30000 + 1); }
+    uint64_t resident() const { return produced - consumed; }
+    void produce_until(uint64_t elapsed_us) {
+        // One AU of initial source prefill, then an independent 48 kHz producer.
+        const uint64_t target = 480 + elapsed_us * 48 / 1000;
+        assert(target >= produced && target - consumed <= capacity_frames);
+        for (; produced < target; ++produced) {
+            const auto value = sample(produced);
+            auto* frame = ring.data() + (produced % capacity_frames) * 2 * kTestPcmWidth;
+            std::memcpy(frame, &value, kTestPcmWidth);
+            std::memcpy(frame + kTestPcmWidth, &value, kTestPcmWidth);
+        }
+    }
+    uint32_t read(uint8_t* out, uint32_t capacity) {
+        const auto frames = std::min(uint64_t(capacity / (2 * kTestPcmWidth)), resident());
+        for (uint64_t i = 0; i < frames; ++i)
+            std::memcpy(out + i * 2 * kTestPcmWidth,
+                        ring.data() + ((consumed + i) % capacity_frames) * 2 * kTestPcmWidth,
+                        2 * kTestPcmWidth);
+        consumed += frames;
+        return static_cast<uint32_t>(frames * 2 * kTestPcmWidth);
+    }
+};
+ProducerModel* producer_model = nullptr;
 uint8_t cie[20]{};
 std::array<uint8_t, eld::kEncoderCodecStorage> native_cie{};
 std::set<void*> allocations;
@@ -55,6 +85,7 @@ uint32_t read_pcm(uint8_t* out, uint32_t capacity) {
     if (negative_read) return UINT32_MAX;
     if (unaligned_read) return capacity - 1;
     if (oversized_read) return capacity + 4;
+    if (producer_model) return producer_model->read(out, static_cast<uint32_t>(std::min(size_t(capacity), read_limit)));
     const auto count = static_cast<uint32_t>(std::min({read_limit, size_t(capacity), pcm_available}));
     if (pcm_available != SIZE_MAX) pcm_available -= count;
     std::memset(out, 0x42, count);
@@ -134,6 +165,7 @@ void defaults() {
     empty_encodes = 0;
     read_limit = kTestPcmBytes;
     pcm_available = SIZE_MAX;
+    producer_model = nullptr;
     enqueue_delay_us = 0;
     pcm_read_delay_us = encode_delay_us = 0;
     read_clock_fault = 0;
@@ -157,6 +189,13 @@ template<typename Sample> int mock_encode(const Sample* pcm, size_t frames, uint
     if (fail_encode) return ELD_FDK_CODEC;
     const bool zero = std::all_of(pcm, pcm + 960, [](auto sample) { return sample == 0; });
     if (zero) ++zero_inputs;
+    else if (producer_model) {
+        for (size_t i = 0; i < frames; ++i)
+            for (size_t channel = 0; channel < 2; ++channel)
+                assert(pcm[i * 2 + channel] == ProducerModel::sample(producer_model->encoded + i));
+        producer_model->encoded += frames;
+        assert(producer_model->encoded <= producer_model->consumed);
+    }
     else assert(std::all_of(pcm, pcm + 960, [](auto sample) {
         return sample == (sizeof(Sample) == 4 ? 0x42424242 : 0x4242);
     }));
@@ -315,6 +354,108 @@ void timing_cases() {
         assert(health.pcm_read_max_us == 0 && health.pcm_read_slow_calls == 0);
         assert(health.encode_max_us == 0 && health.enqueue_max_us == 0 && health.callback_max_us == 0);
     }
+    defaults();
+}
+void diagnostic_cases() {
+    auto begin = [] {
+        defaults(); monotonic_now = 1000000; start();
+        for (unsigned i = 0; i < 10; ++i) tick(i);
+    };
+    constexpr std::array<uint64_t, 6> limits{100, 500, 1000, 5000, 10000, 20000};
+    for (uint64_t duration : {0U, 99U, 100U, 499U, 500U, 999U, 1000U,
+                              4999U, 5000U, 9999U, 10000U, 19999U, 20000U, 20001U}) {
+        begin(); pcm_read_delay_us = duration; tick(10);
+        const auto health = encoder_status();
+        size_t bucket = 0;
+        while (bucket < limits.size() && duration >= limits[bucket]) ++bucket;
+        for (size_t i = 0; i < health.pcm_read_duration_counts.size(); ++i)
+            assert(health.pcm_read_duration_counts[i] == (finite_clock && i == bucket ? 1U : 0U));
+    }
+    for (unsigned fault : {1U, 2U}) {
+        begin(); read_clock_fault = fault; tick(10);
+        for (auto count : encoder_status().pcm_read_duration_counts) assert(count == 0);
+    }
+    begin(); pcm_available = kTestPcmBytes / 2; tick(10); tick(11);
+    auto health = encoder_status();
+    assert(health.pcm_short_reads == 1 && health.pcm_zero_reads == 1 && health.underflows == 2);
+    assert(health.feeding_read_calls == 2 && health.feeding_read_bytes == kTestPcmBytes / 2);
+    pcm_available = SIZE_MAX; tick(12);
+    health = encoder_status();
+    assert(health.pcm_short_reads == 1 && health.pcm_zero_reads == 1);
+    assert(health.feeding_read_calls == 3 && health.feeding_read_bytes == kTestPcmBytes);
+    assert(health.pcm_read_calls == 3 && health.pcm_read_bytes == kTestPcmBytes);
+    const auto counts = health.pcm_read_duration_counts;
+    encoder->reset(); health = encoder_status();
+    assert(health.feeding_resets == 1 && health.feeding_read_calls == 0 && health.feeding_read_bytes == 0);
+    assert(health.primer_remaining == 10 && health.primer_aus == 10);
+    assert(health.pcm_read_calls == 3 && health.pcm_read_duration_counts == counts);
+    accept = false; tick(13);
+    assert(encoder_status().primer_remaining == 10 && encoder_status().primer_aus == 10);
+    accept = true; empty_encodes = 1; tick(14);
+    assert(encoder_status().primer_remaining == 10 && encoder_status().primer_aus == 10);
+    tick(15);
+    assert(encoder_status().primer_remaining == 9 && encoder_status().primer_aus == 11);
+    encoder->flush(); health = encoder_status();
+    assert(health.feeding_resets == 2 && health.primer_remaining == 10 && health.primer_aus == 11);
+    encoder->cleanup(); health = encoder_status();
+    assert(health.primer_remaining == 0 && health.primer_aus == 11 && health.feeding_resets == 2);
+    defaults(); start(); health = encoder_status();
+    assert(health.feeding_resets == 0 && health.primer_aus == 0 && health.pcm_read_calls == 0);
+    for (auto count : health.pcm_read_duration_counts) assert(count == 0);
+    encoder->cleanup();
+}
+void source_conservation_cases() {
+    defaults(); monotonic_now = 1000000; start();
+    ProducerModel source;
+    producer_model = &source;
+    uint64_t now = 1000000;
+    auto deliver = [&](uint64_t time) {
+        source.produce_until(time - 1000000);
+        send_at(time);
+        assert(source.consumed == source.encoded);
+        assert(encoder_status().pcm_read_bytes == source.consumed * 2 * kTestPcmWidth);
+        assert(encoder_status().underflows == 0 && encoder_status().host_discards == 0);
+    };
+    for (unsigned i = 0; i < 10; ++i) deliver(1000000 + i * 10000);
+    assert(source.produced == 4800 && source.consumed == 0);
+    assert(encoder_status().primer_aus == 10 && encoder_status().primer_remaining == 0);
+    for (unsigned i = 10; i <= 60; ++i) {
+        now = 1000000 + i * 10000; deliver(now);
+        assert(source.resident() == 4800); // Equal rates retain the primer's upstream reserve.
+    }
+    if (finite_clock) {
+        const uint8_t target[] = {1,2,3,4,5,6};
+        for (uint32_t interval : {11U, 9U}) {
+            assert(encoder_clock_begin(target, 6, encoder_status().generation, interval, 80));
+            now += 10000; deliver(now);
+            auto clock = encoder_clock_status();
+            assert(clock.phase == EncoderClockPhase::Active);
+            const auto anchor_resident = source.resident(), anchor_encoded = source.encoded;
+            for (unsigned i = 0; i < 200 && clock.phase == EncoderClockPhase::Active; ++i) {
+                now += 10000; deliver(now); clock = encoder_clock_status();
+            }
+            assert(clock.phase == EncoderClockPhase::Completed);
+            assert(clock.actual_frames == source.encoded - anchor_encoded);
+            const auto reserve_change = int64_t(source.resident()) - int64_t(anchor_resident);
+            assert(reserve_change == -clock.signed_progress_frames);
+            assert(interval == 11 ? reserve_change >= 80 * 48 : reserve_change <= -80 * 48);
+            const auto steady_resident = source.resident();
+            for (unsigned i = 0; i < 50; ++i) {
+                now += 10000; deliver(now);
+                assert(source.resident() == steady_resident);
+            }
+        }
+    }
+    const auto before_reset = source.resident();
+    encoder->reset();
+    assert(encoder_status().feeding_resets == 1 && encoder_status().feeding_read_calls == 0);
+    for (unsigned i = 0; i < 10; ++i) { now += 10000; deliver(now); }
+    assert(source.resident() == before_reset + 4800 && encoder_status().primer_aus == 20);
+    assert(encoder_status().feeding_read_calls == 0 && encoder_status().feeding_read_bytes == 0);
+    now += 10000; deliver(now);
+    assert(source.resident() == before_reset + 4800 && encoder_status().feeding_read_calls == 1);
+    assert(encoder_status().feeding_read_bytes == kTestPcmBytes);
+    encoder->cleanup();
     defaults();
 }
 void clock_cases() {
@@ -708,6 +849,8 @@ int main(int argc, char** argv) {
     eld::clock_cases();
     eld::clock_catch_up_cases();
     eld::timing_cases();
+    eld::diagnostic_cases();
+    eld::source_conservation_cases();
     encoder->cleanup();
     assert(allocations.empty());
     return 0;

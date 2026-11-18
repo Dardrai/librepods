@@ -84,6 +84,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.ConcurrentHashMap
+import java.util.function.LongSupplier
 import kotlin.time.Clock
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
@@ -169,6 +170,7 @@ class AACPManager(private val device: AppleDevice,
 
     @Volatile private var rtBuddyManager: RTBuddyManager? = null
     @Volatile private var motionSourceTiming = MotionSourceTiming()
+    private val sourceClockNanos = LongSupplier { SystemClock.elapsedRealtimeNanos() }
     @Volatile private var motionOwners = MotionOwners()
     private val legacyMotionOwner = Any()
 
@@ -176,14 +178,19 @@ class AACPManager(private val device: AppleDevice,
     fun motionSourceTimingSnapshot(): Map<String, Long> = motionSourceTiming.snapshot()
 
     private fun createSensorSession(expected: BluetoothSocket, timing: MotionSourceTiming) = RTBuddyManager(
-        sendPacket = { sendPacket(it, expected) },
-        sendRaw = { sendAudioPacket(expected, it) },
+        sendPacket = { packet -> timing.measure(MotionSourceTiming.Stage.SENSOR_SEND, sourceClockNanos) {
+            sendPacket(packet, expected)
+        } },
+        sendRaw = { bytes -> timing.measure(MotionSourceTiming.Stage.SENSOR_SEND, sourceClockNanos) {
+            sendAudioPacket(expected, bytes)
+        } },
         isCurrent = { ownsAudioSocket(expected) },
         firmwareMajor = { device.metadata.value.firmwareMajor },
-        onMotion = { report ->
-            val arrivalNs = SystemClock.elapsedRealtimeNanos()
-            publishForTransport(this, expected, ::captureAudioSocket) {
-                HeadTracking.addMotion(report.report, report.vertical.toFloat(), report.horizontal.toFloat(), arrivalNs)
+        onMotion = { report, readAtNanos ->
+            timing.publication(this, sourceClockNanos) {
+                publishForTransport(this, expected, ::captureAudioSocket) {
+                    HeadTracking.addMotion(report.report, report.vertical.toFloat(), report.horizontal.toFloat(), readAtNanos)
+                }
             }
         },
         onHeartRate = { report ->
@@ -192,10 +199,12 @@ class AACPManager(private val device: AppleDevice,
             }
         },
         onMotionState = { state ->
-            publishForTransport(this, expected, ::captureAudioSocket) {
-                if (state != BuddyState.ACTIVE) HeadTracking.reset()
-                if (needsMotionStateUpdate(device.state.value.headTrackingState, state))
-                    device.updateState { it.copy(headTrackingState = state) }
+            timing.publication(this, sourceClockNanos) {
+                publishForTransport(this, expected, ::captureAudioSocket) {
+                    if (state != BuddyState.ACTIVE) HeadTracking.reset()
+                    if (needsMotionStateUpdate(device.state.value.headTrackingState, state))
+                        device.updateState { it.copy(headTrackingState = state) }
+                }
             }
         },
         onHeartRateState = { state ->
@@ -208,7 +217,7 @@ class AACPManager(private val device: AppleDevice,
             ?.headTrackingInterval?.inWholeMicroseconds?.takeIf { it in 20_000..1_000_000 && it % 1000 == 0L }?.toInt(),
         sharedMotionOwners = motionOwners,
         sourceTiming = timing,
-        sourceClockNanos = SystemClock::elapsedRealtimeNanos,
+        sourceClockNanos = sourceClockNanos,
     )
 
     private suspend fun sendDelayedInitPackets(expected: BluetoothSocket, settings: me.kavishdevar.librepods.core.devices.AppleSettings): Boolean {
@@ -314,12 +323,18 @@ class AACPManager(private val device: AppleDevice,
         else captureAudioSocket()?.let(::ControlSessionRefresh)
     }
 
-    internal fun prepareHearingConfirmationRefresh(original: BluetoothSocket, owner: Any, mode: HearingMode): ControlSessionRefresh? = synchronized(this) {
-        if (ownsAudioSocket(original) && refreshAllowed(owner, mode)) ControlSessionRefresh(original, owner, mode) else null
+    internal fun prepareHearingConfirmationRefresh(original: BluetoothSocket, owner: Any, mode: HearingMode): ControlSessionRefresh? {
+        if (!refreshAllowed(owner, mode)) return null
+        return synchronized(this) {
+            if (ownsAudioSocket(original) && refreshAllowed(owner, mode)) ControlSessionRefresh(original, owner, mode) else null
+        }
     }
 
-    internal fun prepareAccommodationsConfirmationRefresh(original: BluetoothSocket, owner: Any): ControlSessionRefresh? = synchronized(this) {
-        if (ownsAudioSocket(original) && refreshAllowed(owner, null)) ControlSessionRefresh(original, owner) else null
+    internal fun prepareAccommodationsConfirmationRefresh(original: BluetoothSocket, owner: Any): ControlSessionRefresh? {
+        if (!refreshAllowed(owner, null)) return null
+        return synchronized(this) {
+            if (ownsAudioSocket(original) && refreshAllowed(owner, null)) ControlSessionRefresh(original, owner) else null
+        }
     }
 
     private fun refreshAllowed(owner: Any?, mode: HearingMode?): Boolean = !device.attOperationPending && when {
@@ -344,6 +359,7 @@ class AACPManager(private val device: AppleDevice,
         try {
             val sensorState = device.state.value
             val heartWanted = sensorState.hrmState != BuddyState.INACTIVE
+            if (!stillCurrent()) return false
             synchronized(this) {
                 if (request.cancelled || !stillCurrent() || !ownsAudioSocket(request.original) ||
                     !refreshAllowed(request.confirmationOwner, request.hearingMode)) return false
@@ -405,6 +421,7 @@ class AACPManager(private val device: AppleDevice,
         }
 
         val pending = PendingConnect(connectingSocket, preserveNearbyBattery)
+        if (!stillCurrent()) { runCatching { connectingSocket.close() }; return false }
         val previous = synchronized(this) {
             if (requestEpoch != connectionEpoch.get() || !stillCurrent()) null else {
                 val retired = socket to rtBuddyManager
@@ -428,9 +445,10 @@ class AACPManager(private val device: AppleDevice,
         connectingSocket.let { socket ->
             try {
                 onPendingSocket(socket)
+                val allowed = stillCurrent()
                 val current = synchronized(this) {
                     this.socket === socket && pendingConnect === pending && !pending.cancelled &&
-                        requestEpoch == connectionEpoch.get() && stillCurrent()
+                        requestEpoch == connectionEpoch.get() && allowed && stillCurrent()
                 }
                 if (!current) {
                     cancelPendingConnect(socket, hearingRefresh)
@@ -455,9 +473,10 @@ class AACPManager(private val device: AppleDevice,
 
             val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
             val sourceTiming = MotionSourceTiming()
+            val allowed = stillCurrent()
             val published = synchronized(this) {
                 if (this.socket !== socket || pendingConnect !== pending || pending.cancelled ||
-                    requestEpoch != connectionEpoch.get() || !stillCurrent()) false else {
+                    requestEpoch != connectionEpoch.get() || !allowed || !stillCurrent()) false else {
                     connectionScope?.cancel()
                     connectionScope = scope
                     pendingConnect = null

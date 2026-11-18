@@ -118,9 +118,11 @@ class RemoteHidTest {
         val announcement = motionAnnouncement().apply { this[16] = (this[16].toInt() and 0x80 or 6).toByte() }
         val raw = mutableListOf<ByteArray>()
         val motion = mutableListOf<SensorReports.Motion>()
+        val receipts = mutableListOf<Long>()
         var current = true
         val manager = RTBuddyManager({ error("RemoteHID must not guess a WX service") },
-            { raw += it; true }, { current }, { 9 }, { motion += it }, {}, {}, {}, remoteAllowed = { true })
+            { raw += it; true }, { current }, { 9 }, { report, receivedAt -> motion += report; receipts += receivedAt },
+            {}, {}, {}, remoteAllowed = { true })
         try {
             manager.requestDescriptors()
             manager.feed(announcement)
@@ -138,8 +140,12 @@ class RemoteHidTest {
             fun input() = frame("input").apply { this[16] = (this[16].toInt() and 0x80 or 6).toByte() }
             manager.feed(frame("input"))
             assertTrue(motion.isEmpty())
-            manager.feed(input())
+            val report = input()
+            manager.feed(report.copyOfRange(0, 18), 100)
+            assertTrue(motion.isEmpty())
+            manager.feed(report.copyOfRange(18, report.size), 200)
             assertNotNull(motion.single().report)
+            assertEquals(listOf(200L), receipts)
             assertTrue(manager.setMotionInterval(kotlin.time.Duration.parse("20ms")))
             assertFalse(manager.setMotionInterval(kotlin.time.Duration.parse("5ms")))
             manager.setSuspended(true)
@@ -152,7 +158,7 @@ class RemoteHidTest {
             manager.feed(input())
             assertEquals(count, raw.size)
         } finally { manager.close() }
-        val gated = RTBuddyManager({ true }, { error("RemoteHID model gate") }, { true }, { null }, {}, {}, {}, {})
+        val gated = RTBuddyManager({ true }, { error("RemoteHID model gate") }, { true }, { null }, { _, _ -> }, {}, {}, {})
         try { gated.feed(motionAnnouncement()); gated.setHeadTrackingEnabled(true) } finally { gated.close() }
     }
 
@@ -165,7 +171,7 @@ class RemoteHidTest {
             val stop = bytes.size == 26 && bytes.takeLast(4).all { it == 0.toByte() }
             if (stop) retry.countDown()
             !(stop && rejectStop)
-        }, { true }, { null }, {}, {}, {}, {}, remoteAllowed = { true })
+        }, { true }, { null }, { _, _ -> }, {}, {}, {}, remoteAllowed = { true })
         try {
             assertTrue(raw.isEmpty())
             manager.setHeadTrackingEnabled(true)

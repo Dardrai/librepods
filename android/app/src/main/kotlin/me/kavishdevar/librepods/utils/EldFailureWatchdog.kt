@@ -31,6 +31,12 @@ internal class EldFailureWatchdog(private val plan: EldCodecHookPlan,
     }
     fun clear() { streaming.clear(); policy.clear(); schedule() }
 
+    fun protectsHealthyEld(native: Any, device: Any?): Boolean {
+        if (device == null) return false
+        val peer = runCatching { plan.address.invoke(native, device) as ByteArray }.getOrNull() ?: return false
+        return policy.protectsHealthyEld(peer.map { it.toInt() and 255 }, Target(native, device))
+    }
+
     private fun schedule() { handler.post { reconcile() } }
     private fun reconcile() {
         val owner = policy.candidate()

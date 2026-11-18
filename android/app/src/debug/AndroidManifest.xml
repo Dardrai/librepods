@@ -1,6 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <queries><package android:name="com.aspiro.tidal" /></queries>
     <application>
+        <provider
+            android:name="me.kavishdevar.librepods.utils.TidalTransitionProvider"
+            android:authorities="${applicationId}.tidal.transition"
+            android:grantUriPermissions="true"
+            android:exported="true" />
+        <receiver
+            android:name="me.kavishdevar.librepods.utils.AtmosHeadTrackingReceiver"
+            android:exported="false" />
+        <receiver
+            android:name="me.kavishdevar.librepods.utils.TidalBufferProbeReceiver"
+            android:exported="false" />
         <receiver
             android:name="me.kavishdevar.librepods.utils.NativeGameProbeReceiver"
             android:exported="false" />

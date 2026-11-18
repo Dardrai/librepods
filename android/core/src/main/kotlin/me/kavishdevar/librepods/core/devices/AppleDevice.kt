@@ -9,6 +9,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.media.AudioManager
 import android.os.Build
+import android.os.SystemClock
 import android.telephony.TelephonyManager
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
@@ -252,6 +253,7 @@ class AppleDevice(
     }
 
     val aacp = AACPManager(this)
+    private val settingsAudioIdle = SettingsAudioIdle(aacp, SystemClock::elapsedRealtimeNanos, ::readNativeCallIdle)
     val att = ATTManager(this)
     private val hearingLock = Mutex()
     private var hearingConfirmationOwner: Any? = null
@@ -565,21 +567,19 @@ class AppleDevice(
         hearingConfirmationOwner === owner && state.value.hearingModes.pending == mode
     }
 
-    internal fun canRefreshHearingConfirmation(owner: Any, mode: HearingMode): Boolean = synchronized(aacp) {
-        ownsHearingConfirmation(owner, mode) && confirmationAudioIdle()
-    }
+    internal fun canRefreshHearingConfirmation(owner: Any, mode: HearingMode): Boolean =
+        confirmationAudioIdle() && synchronized(aacp) { ownsHearingConfirmation(owner, mode) && confirmationAudioIdle() }
 
     internal fun ownsAccommodationsConfirmation(owner: Any): Boolean = synchronized(aacp) {
         accommodationsConfirmationOwner === owner && state.value.accommodationsRequest.pending
     }
 
-    internal fun canRefreshAccommodationsConfirmation(owner: Any): Boolean = synchronized(aacp) {
-        ownsAccommodationsConfirmation(owner) && confirmationAudioIdle()
-    }
+    internal fun canRefreshAccommodationsConfirmation(owner: Any): Boolean =
+        confirmationAudioIdle() && synchronized(aacp) { ownsAccommodationsConfirmation(owner) && confirmationAudioIdle() }
 
     private fun confirmationAudioIdle(): Boolean = !state.value.microphoneState.isActive &&
         !aacp.isMicrophoneRequested() && !state.value.recordingState.isRecording &&
-        state.value.audioSource.type != AudioSourceType.CALL && nativeCallIdle()
+        state.value.audioSource.type != AudioSourceType.CALL && settingsAudioIdle.isIdle()
 
     private suspend fun reopenForConfirmation(request: AACPManager.ControlSessionRefresh, current: () -> Boolean): Boolean =
         withContext(Dispatchers.IO) {
@@ -591,7 +591,7 @@ class AppleDevice(
         }
 
     @Suppress("DEPRECATION")
-    private fun nativeCallIdle(): Boolean = runCatching {
+    private fun readNativeCallIdle(): Boolean = runCatching {
         context.getSystemService(AudioManager::class.java)?.mode == AudioManager.MODE_NORMAL &&
             (context.checkSelfPermission(Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED ||
                 context.getSystemService(TelephonyManager::class.java)?.callState == TelephonyManager.CALL_STATE_IDLE)
@@ -731,6 +731,7 @@ class AppleDevice(
                 ATTHandle.LOUD_SOUND_REDUCTION -> if (!validATTValue(handle, requested) || !validATTValue(handle, baseline) ||
                     metadata.value.model == AirPodsModel.UNKNOWN || BaseCapability.LOUD_SOUND_REDUCTION !in AirPodsSpecs.getSpec(metadata.value.model).baseCapabilities) return@withLock false
             }
+            if (!current()) return@withLock false
             val reserved = synchronized(aacp) {
                 if (attOperationPending || !current()) false else { attOperationPending = true; true }
             }
@@ -886,6 +887,7 @@ class AppleDevice(
             fun ownsRead() = aacp.ownsAudioSocket(transport) && connectionState.value == ConnectionState.CONNECTED &&
                 state.value.controlSession == session
             fun current() = ownsRead() && confirmationAudioIdle()
+            if (!current()) return@withLock null
             val reserved = synchronized(aacp) {
                 if (attOperationPending || !current()) false else { attOperationPending = true; true }
             }
@@ -897,6 +899,7 @@ class AppleDevice(
                     att.readCharacteristic(handle, ::current) {
                         attempted = true
                         onAttempt()
+                        if (!current()) return@readCharacteristic
                         synchronized(aacp) {
                             if (current()) updateState { when (handle) {
                                 ATTHandle.HEARING_AID -> it.copy(hearingAidReadStatus = SettingsReadStatus.READING)
@@ -906,6 +909,7 @@ class AppleDevice(
                         }
                     }
                 }?.copyOf()?.takeIf { validATTValue(handle, it) }
+                if (!current()) return@withLock null
                 synchronized(aacp) {
                     if (!current() || !attempted) null else { publishATTValue(handle, value); published = true; value }
                 }
@@ -913,7 +917,7 @@ class AppleDevice(
                 throw cancelled
             } catch (error: Exception) {
                 Log.w(TAG, "ATT setting read failed: ${error.javaClass.simpleName}")
-                synchronized(aacp) { if (current()) { publishATTValue(handle, null); published = true } }
+                if (current()) synchronized(aacp) { if (current()) { publishATTValue(handle, null); published = true } }
                 null
             } finally {
                 synchronized(aacp) {

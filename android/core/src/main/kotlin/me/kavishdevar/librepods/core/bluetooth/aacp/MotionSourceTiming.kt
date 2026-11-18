@@ -4,9 +4,17 @@ import me.kavishdevar.librepods.core.bluetooth.aacp.rtbuddy.proto.SensorDataWX
 import me.kavishdevar.librepods.core.data.apple.BuddyState
 import me.kavishdevar.librepods.core.data.apple.MotionReport
 import me.kavishdevar.librepods.core.data.apple.motionCounterStep
+import java.util.function.LongSupplier
 
 /** Constant-space timing before StateFlow conflation; no packet, identity, or pose history. */
 internal class MotionSourceTiming {
+    internal enum class Stage(val prefix: String) {
+        RECONCILE("feed_reconcile"), PARSE("feed_parse"),
+        ACTIVE_CALLBACK("active_callback"), MOTION_CALLBACK("motion_callback"),
+        PUBLICATION_WAIT("publication_wait"), PUBLICATION_BODY("publication_body"),
+        SENSOR_SEND("sensor_send"),
+    }
+
     private class ControlMetadata {
         var count = 0L
         var sequence = 0L
@@ -42,6 +50,12 @@ internal class MotionSourceTiming {
             out["${prefix}_max$unit"] = max
             out["${prefix}_max_at_nanos"] = maxAt
         }
+
+        fun appendMaximum(out: MutableMap<String, Long>, prefix: String) {
+            out["${prefix}_count"] = count
+            out["${prefix}_max_nanos"] = max
+            out["${prefix}_max_at_nanos"] = maxAt
+        }
     }
 
     private var reads = 0L
@@ -75,6 +89,7 @@ internal class MotionSourceTiming {
     private val dispatchDelay = Metric()
     private val feedWait = Metric()
     private val feedWork = Metric()
+    private val stages = Array(Stage.entries.size) { Metric() }
     private val publishDelay = Metric()
     private val deviceInterval = Metric()
     private val counterStep = Metric()
@@ -85,6 +100,33 @@ internal class MotionSourceTiming {
     private val motionCommandAck = ControlMetadata()
     private val motionIntervalEcho = ControlMetadata()
     private var lastMotionIntervalEchoUs = 0L
+
+    /** Elapsed work includes scheduling pauses; maxima are independent, not a per-feed trace. */
+    @Synchronized fun stageFinished(stage: Stage, startedAtNanos: Long, finishedAtNanos: Long) {
+        if (startedAtNanos > 0) stages[stage.ordinal].add(finishedAtNanos - startedAtNanos, finishedAtNanos)
+    }
+
+    inline fun <T> measure(stage: Stage, clock: LongSupplier, block: () -> T): T {
+        val started = clock.asLong
+        try { return block() }
+        finally { stageFinished(stage, started, clock.asLong) }
+    }
+
+    /** The original publication and ownership check remain inside the same monitor. */
+    inline fun <T> publication(monitor: Any, clock: LongSupplier, block: () -> T): T {
+        val attempted = clock.asLong
+        var entered = 0L
+        try {
+            return synchronized(monitor) {
+                entered = clock.asLong
+                block()
+            }
+        } finally {
+            val finished = clock.asLong
+            stageFinished(Stage.PUBLICATION_WAIT, attempted, entered)
+            stageFinished(Stage.PUBLICATION_BODY, entered, finished)
+        }
+    }
 
     /** Socket-lifetime observations, including stop ACKs; neither ACKs nor echoes confirm an applied rate. */
     @Synchronized fun motionControlReceived(data: SensorDataWX, selectedService: Int?, readAtNanos: Long) {
@@ -228,6 +270,7 @@ internal class MotionSourceTiming {
         dispatchDelay.append(this, "dispatch_delay")
         feedWait.append(this, "feed_wait")
         feedWork.append(this, "feed_work")
+        for (stage in Stage.entries) stages[stage.ordinal].appendMaximum(this, stage.prefix)
         publishDelay.append(this, "publish_delay")
         deviceInterval.append(this, "device_interval")
         counterStep.append(this, "counter_step", nanos = false)

@@ -11,8 +11,10 @@ import android.os.SystemClock
 import android.util.Log
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -34,6 +36,7 @@ data class CompanionState(
     val busy: Boolean = false,
     val detail: String = "Pair this phone with your PC in Bluetooth settings, then link NTPods.",
     val settingsIssue: Boolean = false,
+    val unlinkPending: Boolean = false,
 )
 
 internal data class CompanionStatus(val connected: Boolean, val busy: Boolean, val available: Boolean)
@@ -56,8 +59,8 @@ class CompanionHandoffController internal constructor(
     private val allCallsIdle: () -> Boolean = { false },
     private val media: suspend (String) -> CompanionMediaSample = { CompanionMediaSample() },
     private val retryWait: suspend (Long) -> Unit = { delay(it) },
+    private val store: CompanionLinkStorage = CompanionLinkStore(context),
 ) : AutoCloseable {
-    private val store = CompanionLinkStore(context)
     private val mutableState = MutableStateFlow(CompanionState())
     val state = mutableState.asStateFlow()
     @Volatile private var link: CompanionLink? = null
@@ -66,6 +69,7 @@ class CompanionHandoffController internal constructor(
     @Volatile private var session: Session? = null
     @Volatile private var closed = false
     @Volatile private var epoch = 0L
+    @Volatile private var unlinking = false
     @Volatile private var intentGeneration = 0L
     private data class PendingSwitch(val id: String, val target: String)
     private var pendingSwitch: PendingSwitch? = null
@@ -78,7 +82,7 @@ class CompanionHandoffController internal constructor(
             val observedIntent = intentGeneration
             val observedEpoch = epoch
             val binding = link
-            val valid: () -> Boolean = { !closed && observedIntent == intentGeneration && observedEpoch == epoch &&
+            val valid: () -> Boolean = { !closed && !unlinking && observedIntent == intentGeneration && observedEpoch == epoch &&
                 link === binding && call == null && session?.transaction == null && pendingSwitch == null }
             valid
         } },
@@ -108,7 +112,7 @@ class CompanionHandoffController internal constructor(
         withContext(Dispatchers.IO) {
             commit {
                 synchronized(this@CompanionHandoffController) {
-                    if (!current() || closed) return@synchronized false
+                    if (!current() || closed || unlinking) return@synchronized false
                     val selected = candidate.copy(key = candidate.key.copyOf())
                     try { store.save(selected) } catch (_: Exception) { selected.key.fill(0); return@synchronized false }
                     disconnect("PC link changed")
@@ -311,10 +315,12 @@ class CompanionHandoffController internal constructor(
             val generation = epoch
             try {
                 val saved = storage.withLock { withContext(Dispatchers.IO) { store.load() } }
-                if (!closed && generation == epoch && link == null && saved != null) {
-                    link = saved
-                    mutableState.value = CompanionState(linked = true, detail = "Connecting to NTPods…")
-                    reconnect()
+                synchronized(this@CompanionHandoffController) {
+                    if (!closed && !unlinking && generation == epoch && link == null && saved != null) {
+                        link = saved
+                        mutableState.value = CompanionState(linked = true, detail = "Connecting to NTPods…")
+                        reconnect()
+                    } else saved?.key?.fill(0)
                 }
             } catch (_: Exception) {
                 if (!closed && generation == epoch) mutableState.value = CompanionState(detail = "Saved PC link is unavailable. Link your PC again.")
@@ -324,7 +330,7 @@ class CompanionHandoffController internal constructor(
 
     @SuppressLint("MissingPermission")
     fun link(peer: String, device: String, token: String) {
-        if (closed) return
+        if (closed || unlinking) return
         val selected = CompanionLink(CompanionProtocol.address(peer), CompanionProtocol.address(device),
             CompanionProtocol.hexBytes(token.trim().lowercase(), 32))
         require(peer != device) { "Select your PC and AirPods separately" }
@@ -333,19 +339,24 @@ class CompanionHandoffController internal constructor(
             "Pair both devices in Bluetooth settings first"
         }
         pairing.discardPending()
-        disconnect("PC link changed")
-        val generation = ++epoch
+        val generation = synchronized(this) {
+            if (closed || unlinking) { selected.key.fill(0); return }
+            disconnect("PC link changed")
+            ++epoch
+        }
         scope.launch {
             try {
                 storage.withLock {
-                    if (closed || generation != epoch) return@launch
+                    if (closed || generation != epoch || unlinking) { selected.key.fill(0); return@launch }
                     withContext(Dispatchers.IO) { store.save(selected) }
                 }
-                if (closed || generation != epoch) { selected.key.fill(0); return@launch }
-                link?.key?.fill(0)
-                link = selected
-                mutableState.value = CompanionState(linked = true, detail = "Connecting to NTPods…")
-                reconnect()
+                synchronized(this@CompanionHandoffController) {
+                    if (closed || generation != epoch || unlinking) { selected.key.fill(0); return@launch }
+                    link?.key?.fill(0)
+                    link = selected
+                    mutableState.value = CompanionState(linked = true, detail = "Connecting to NTPods…")
+                    reconnect()
+                }
             } catch (cancelled: CancellationException) {
                 selected.key.fill(0)
                 throw cancelled
@@ -357,13 +368,28 @@ class CompanionHandoffController internal constructor(
     }
 
     fun unlink() {
+        synchronized(this) {
+            if (closed || unlinking) return
+            unlinking = true
+            val previous = link
+            link = null
+            disconnect("PC unlink pending")
+            previous?.key?.fill(0)
+            mutableState.value = CompanionState(busy = true, unlinkPending = true)
+        }
         pairing.discardPending()
-        ++epoch
-        disconnect("PC unlinked")
-        link?.key?.fill(0)
-        link = null
-        scope.launch { storage.withLock { withContext(Dispatchers.IO) { store.clear() } } }
-        mutableState.value = CompanionState()
+        scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            withContext(NonCancellable + Dispatchers.IO) {
+                val removed = try {
+                    storage.withLock { store.clear() }
+                    true
+                } catch (_: Exception) { false }
+                synchronized(this@CompanionHandoffController) {
+                    unlinking = false
+                    if (!closed) mutableState.value = CompanionState(unlinkPending = !removed)
+                }
+            }
+        }
     }
 
     @Synchronized fun reconnect() {

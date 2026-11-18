@@ -110,15 +110,21 @@ internal data class SpatialPose(val timestampNs: Long, val discontinuity: Int,
  * Rates are head-body finite differences over intervalNs (normally ~20 ms),
  * not instantaneous raw-gyro rates. No prediction or latency compensation is applied.
  * Output reference is the first valid head pose, keeping ordinary turns away from HID's pi branch.
+ * A caller-validated runtime fences startup zero placeholders and requires a fresh nonzero pair;
+ * standalone calibration/probe callers stay strict. The saved anatomical basis never changes.
  * shortcut: full relative half-turns still need hemisphere-aware prediction in Android's native renderer.
  */
-internal class SpatialPoseConverter(private val profile: SpatialPoseProfile, private val discontinuity: Int) {
+internal class SpatialPoseConverter(private val profile: SpatialPoseProfile, private val discontinuity: Int,
+    private val fenceStartupZeros: Boolean = false) {
     private val rawFromHead = Q.fromMatrix(List(3) { r -> List(3) { c -> profile.headFromRaw[c][r] } })
     private var previous: Q? = null
     private var initialHeadInverse: Q? = null
     private var previousTime = 0L
     private var previousCounter: Long? = null
+    private var producedPose = false
     var invalidReason: String? = null
+        private set
+    var verifiedSensorGap = false
         private set
     val invalidated get() = invalidReason != null
 
@@ -129,7 +135,8 @@ internal class SpatialPoseConverter(private val profile: SpatialPoseProfile, pri
     fun accept(report: MotionReport): SpatialPose? {
         if (invalidated) return null
         // Sensor startup uses zero-filled attitude; it cannot establish a reference or fresh rate.
-        if (previous == null && report.attitudeQ15.all { it == 0 }) return null
+        val attitudeWasZero = report.attitudeQ15.all { it == 0 }
+        if (previous == null && attitudeWasZero && !fenceStartupZeros) return null
         val time = report.timestampNs
         val raw = attitude(report)
         if (time == null || time <= 0) return retire("sensor_time_unavailable")
@@ -142,14 +149,33 @@ internal class SpatialPoseConverter(private val profile: SpatialPoseProfile, pri
                 if (time <= reference) return retire("sensor_time_changed")
                 if (!counterFollows(profile.referenceCounter, report.counter, reference, time)) return retire("sensor_counter_changed")
             }
-            initialHeadInverse = head.inverse()
+            initialHeadInverse = if (fenceStartupZeros && attitudeWasZero) null else head.inverse()
             previous = head; previousTime = time; previousCounter = report.counter
             return null
         }
         val dt = time - previousTime
         if (dt <= 0) return retire("sensor_time_changed")
         if (!counterFollows(previousCounter, report.counter, previousTime, time)) return retire("sensor_counter_changed")
-        if (dt >= 250_000_000L) return retire("sensor_gap")
+        if (dt >= 250_000_000L) {
+            val beforeCounter = previousCounter; val afterCounter = report.counter
+            val step = if (beforeCounter != null && afterCounter != null)
+                motionCounterStep(beforeCounter, afterCounter, previousTime, time) else 0L
+            // Retire this reference regardless. Only a settled, finite, clock-corroborated
+            // missing-report gap may ask its owner for an entirely new output lease.
+            verifiedSensorGap = producedPose && step in 1..0x7fffffffL &&
+                abs(dt - step * 5_000_000L) <= 5_000_000L &&
+                (old.inverse() * head).rotationVector().norm().isFinite()
+            return retire("sensor_gap")
+        }
+        if (fenceStartupZeros && !producedPose && (attitudeWasZero || initialHeadInverse == null)) {
+            // A restarted stream can deliver a retained attitude before its zero-filled startup.
+            // Keep validating every placeholder's metadata, but none can establish a reference or
+            // rate. The first subsequent nonzero report only primes; another must prove continuity.
+            if (dt > 100_000_000L && (previousCounter == null || report.counter == null)) return retire("sensor_gap")
+            initialHeadInverse = if (attitudeWasZero) null else head.inverse()
+            previous = head; previousTime = time; previousCounter = report.counter
+            return null
+        }
         val omega = (old.inverse() * head).rotationVector() * (1e9 / dt)
         if (!omega.norm().isFinite() || omega.norm() > 32.0) return retire("reference_discontinuity")
         if (dt > 100_000_000L) {
@@ -161,6 +187,7 @@ internal class SpatialPoseConverter(private val profile: SpatialPoseProfile, pri
         val rotation = (checkNotNull(initialHeadInverse) * head).rotationVector()
         if (!rotation.norm().isFinite()) return retire("unsupported_attitude")
         previous = head; previousTime = time; previousCounter = report.counter
+        producedPose = true
         return SpatialPose(time, discontinuity, rotation.floats(), omega.floats(), dt)
     }
 

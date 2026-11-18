@@ -12,6 +12,11 @@ available in the app settings.
 For upgrade history and known limitations, see
 [Pixel fork on the Android rewrite](PIXEL-REWRITE.md).
 
+The separate spatial-audio preview uses a signed debug build. On the supported
+Pixel and Tidal versions, it defaults to a 100 ms output buffer for compatible
+Atmos playback and paces decoder input while head tracking is active. The
+regular GitHub APK does not include these experimental Tidal hooks.
+
 ## Root Requirement
 
 - The APK requires Android 13 or later. Rootless control also needs the updated

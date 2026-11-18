@@ -22,7 +22,7 @@ class KotlinModule: XposedModule() {
     private var eldAudioFormatHook: XposedInterface.HookHandle? = null
     private val eldAudioFormatObserved = AtomicBoolean(false)
     private val gameBridgeInstalled = AtomicBoolean(false)
-    private var gameBridgeContext: Context? = null
+    @Volatile private var gameBridgeContext: Context? = null
     private var gameBridge: AutoCloseable? = null
     private val hfpBridgeInstalled = AtomicBoolean(false)
     private var hfpBridgeContext: Context? = null
@@ -33,7 +33,9 @@ class KotlinModule: XposedModule() {
     private var usbVolumePolicy: UsbAbsoluteVolumeSystemPolicy? = null
     private var usbVolumeDiscovery: AutoCloseable? = null
     private var usbVolumeFailureLogged = false
+    private var moduleProcess = ""
     override fun onModuleLoaded(param: ModuleLoadedParam) {
+        moduleProcess = param.processName
         log(Log.INFO, TAG, "module initialized at :: ${param.processName}")
         log(Log.INFO, TAG, "framework: $frameworkName($frameworkVersionCode) API $apiVersion")
     }
@@ -136,6 +138,12 @@ class KotlinModule: XposedModule() {
 
     @SuppressLint("UnsafeDynamicallyLoadedCode")
     override fun onPackageLoaded(param: PackageLoadedParam) {
+        if (me.kavishdevar.librepods.BuildConfig.DEBUG && param.isFirstPackage &&
+            param.packageName == TidalBufferProbePolicy.PACKAGE && moduleProcess == TidalBufferProbePolicy.PACKAGE) {
+            runCatching { TidalBufferProbeHooks.install(this, param.defaultClassLoader) }
+                .onFailure { log(Log.WARN, TidalBufferProbeHooks.TAG, "hook unavailable: ${it.javaClass.simpleName}") }
+            return
+        }
         if (param.packageName == "com.google.android.bluetooth" || param.packageName == "com.android.bluetooth") {
             log(Log.INFO, TAG, "Bluetooth app detected, hooking l2c_fcr_chk_chan_modes")
             try {
@@ -359,7 +367,7 @@ class KotlinModule: XposedModule() {
             log(Log.WARN, TAG, "ELD native bridge unavailable; keeping stock codecs")
             return
         }
-        val plan = try {
+        val (plan, hostLoader) = try {
             val nativeClass = Class.forName("com.android.bluetooth.a2dp.A2dpNativeInterface", false, loader)
             val owner = if (sdk == 37) "AdapterService" else "AdapterApp"
             val adapterClass = Class.forName("com.android.bluetooth.btservice.$owner", false, loader)
@@ -369,7 +377,7 @@ class KotlinModule: XposedModule() {
             check(NativeBridge.pinEldHostLoader(hostLoader)) { "Bluetooth loader pin unavailable" }
             EldCodecHookPlan.discover(hostLoader, sdk) {
                 runCatching { NativeBridge.getEldNativeCodecIndex() }.getOrNull()
-            }
+            } to hostLoader
         } catch (_: Throwable) {
             log(Log.WARN, TAG, "ELD Java signatures unavailable; keeping stock codecs")
             return
@@ -390,6 +398,9 @@ class KotlinModule: XposedModule() {
                 }
             }.getOrNull()
         }, report = { log(Log.WARN, TAG, it) })
+        val automaticOverride = EldCodecOverrideGuard()
+        val automaticOverrideObserved = AtomicBoolean(false)
+        val automaticOverrideCaptured = AtomicBoolean(false)
         fun rejected() = log(Log.ERROR, TAG, "ELD codec mapping rejected an unexpected carrier")
         try {
             handles += hook(plan.init).intercept { chain ->
@@ -426,7 +437,22 @@ class KotlinModule: XposedModule() {
                 val active = ready()
                 val args = try { boundary.preference(chain.args.toTypedArray(), active) }
                     catch (_: Throwable) { if (!active) return@intercept chain.proceed(); rejected(); return@intercept false }
-                if (args == null) false else chain.proceed(args)
+                if (args == null) false else {
+                    val blocked = automaticOverride.hasRequest && runCatching {
+                        val native = chain.thisObject ?: return@runCatching false
+                        val peer = (plan.address.invoke(native, args[0]) as ByteArray).map { it.toInt() and 255 }
+                        val codecs = (args[1] as Array<*>).map { it?.let(plan.objects::fields) }
+                        automaticOverride.shouldBlock(peer, codecs,
+                            enabled = { getRemotePreferences("me.kavishdevar.librepods").getBoolean("aac_eld_hook", false) },
+                            healthy = { active && EldCodecOverrideGuard.bonded(args[0]) && watchdog.protectsHealthyEld(native, args[0]) },
+                            idle = { EldCodecOverrideGuard.idle(gameBridgeContext) })
+                    }.getOrDefault(false)
+                    if (blocked) {
+                        if (automaticOverrideObserved.compareAndSet(false, true))
+                            log(Log.INFO, TAG, "Ignored automatic Pixel device-service AAC override for healthy selected AAC-ELD")
+                        false
+                    } else chain.proceed(args)
+                }
             }
             handles += hook(plan.priorities).intercept { chain ->
                 val original = chain.proceed()
@@ -465,6 +491,22 @@ class KotlinModule: XposedModule() {
         // have been published. Native readiness is sticky until ELD objects are retired.
         try { NativeBridge.setEldJavaBridgeReady(true) }
         catch (_: Throwable) { log(Log.ERROR, TAG, "ELD Java readiness acknowledgement failed") }
+        if (sdk == 37) try {
+            val incoming = EldCodecPreferenceBinderPlan.discover(hostLoader, sdk)
+            hook(incoming.preference).intercept { chain ->
+                val callingUid = android.os.Binder.getCallingUid()
+                val captured = EldCodecOverrideGuard.capture(gameBridgeContext, callingUid,
+                    chain.args.getOrNull(0) as? android.bluetooth.BluetoothDevice, chain.args.getOrNull(1),
+                    chain.args.getOrNull(2) as? android.content.AttributionSource, plan.objects)
+                if (captured != null && automaticOverrideCaptured.compareAndSet(false, true))
+                    log(Log.INFO, TAG, "Scoped Pixel codec request captured")
+                // Always retain platform permission/attribution checks; suppress only at the native boundary.
+                automaticOverride.withRequest(captured) { chain.proceed() }
+            }
+            log(Log.INFO, TAG, "Scoped Pixel automatic codec preference guard ready")
+        } catch (failure: Throwable) {
+            log(Log.WARN, TAG, "Automatic codec preference guard unavailable; keeping stock requests: ${EldCodecOverrideGuard.failure(failure)}")
+        }
     }
 
     private fun hookSettingsController(param: PackageLoadedParam, className: String) {

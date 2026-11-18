@@ -367,10 +367,14 @@ private fun CompanionLinkSetup(pods: List<CompanionDeviceOption>, ready: Boolean
 internal fun CompanionSettingsContent(state: CompanionState, enabled: Boolean,
     onLink: () -> Unit, onReconnect: () -> Unit, onUnlink: () -> Unit, onPhone: () -> Unit, onPc: () -> Unit,
     onCancel: () -> Unit, onManage: (() -> Unit)? = null, onLocalPhone: (() -> Unit)? = null) {
-    StyledList(key = Triple(state.linked, state.connected, state.busy),
+    StyledList(key = listOf(state.linked, state.connected, state.busy, state.unlinkPending),
         title = stringResource(if (onManage == null) R.string.companion_connection_title else R.string.companion_title),
         description = if (state.linked) stringResource(R.string.companion_description) else null) {
-        if (state.linked) {
+        if (state.unlinkPending) {
+            styledListItem(contentText = stringResource(R.string.companion_unlink),
+                supportingText = stringResource(if (state.busy) R.string.companion_unlink_pending else R.string.companion_unlink_failed),
+                orientation = StyledListItemOrientation.Vertical, enabled = enabled && !state.busy, onClick = onUnlink)
+        } else if (state.linked) {
             item { _, _ ->
                 Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceContainerHigh).padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)) {

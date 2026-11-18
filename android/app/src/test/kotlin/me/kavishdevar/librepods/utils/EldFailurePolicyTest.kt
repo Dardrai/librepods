@@ -53,4 +53,36 @@ class EldFailurePolicyTest {
         assertNull(policy.candidate()); assertFalse(policy.current(owner)); assertNull(policy.tick(owner).fallback)
         select(); policy.clear(); assertNull(policy.candidate()); assertNull(policy.owner)
     }
+    @Test fun overrideProtectionRequiresTheCurrentSelectedConnectedHealthyPeerAndFreshGeneration() {
+        select()
+        assertFalse(policy.protectsHealthyEld(peer, "target"))
+        health = EldEncoderHealth(peer, 0, false)
+        assertFalse(policy.protectsHealthyEld(peer, "target"))
+        health = EldEncoderHealth(peer, 3, false)
+        assertTrue(policy.protectsHealthyEld(peer, "target"))
+        assertFalse(policy.protectsHealthyEld(peer.reversed(), "target"))
+        assertFalse(policy.protectsHealthyEld(peer, "old target"))
+        health = health!!.copy(generation = 2)
+        assertFalse(policy.protectsHealthyEld(peer, "target"))
+        health = health!!.copy(generation = 4, failed = true)
+        assertFalse(policy.protectsHealthyEld(peer, "target"))
+        health = health!!.copy(failed = false)
+        assertTrue(policy.protectsHealthyEld(peer, "target"))
+        policy.codec(peer, 1)
+        assertFalse(policy.protectsHealthyEld(peer, "target"))
+        select(); policy.disconnected(peer)
+        assertFalse(policy.protectsHealthyEld(peer, "target"))
+        select(); policy.clear()
+        assertFalse(policy.protectsHealthyEld(peer, "target"))
+    }
+    @Test fun nativeFailureStillAllowsTheExistingWatchdogFallbackAndRetiredGenerationCannotBeProtected() {
+        health = EldEncoderHealth(peer, 1, true); select()
+        assertFalse(policy.protectsHealthyEld(peer, "target"))
+        val owner = checkNotNull(policy.owner)
+        assertEquals(owner, policy.tick(owner).fallback)
+        health = health!!.copy(failed = false)
+        assertFalse(policy.protectsHealthyEld(peer, "target"))
+        health = health!!.copy(generation = 2)
+        assertTrue(policy.protectsHealthyEld(peer, "target"))
+    }
 }

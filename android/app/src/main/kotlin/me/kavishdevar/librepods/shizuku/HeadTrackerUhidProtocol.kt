@@ -176,7 +176,7 @@ internal class HeadTrackerPoseGate {
     private var lastTimestamp = 0L
     private var latest: HeadTrackerUhidProtocol.Companion.Pose? = null
     val hasPose get() = latest != null
-    val deadline get() = if (!enabled) Long.MAX_VALUE else latest?.timestampNanos?.plus(HeadTrackerUhidProtocol.FRESH_NANOS)
+    val deadline get() = if (!enabled) Long.MAX_VALUE else latest?.timestampNanos?.plus(ACTIVE_GAP_NANOS)
         ?: (enabledAt + HeadTrackerUhidProtocol.STARTUP_NANOS)
 
     fun reporting(value: Boolean, now: Long) {
@@ -195,8 +195,16 @@ internal class HeadTrackerPoseGate {
     }
 
     fun checkFresh(now: Long) { check(now <= deadline) { if (latest == null) "pose_startup_timeout" else "pose_stale" } }
-    fun pose(now: Long): HeadTrackerUhidProtocol.Companion.Pose? { checkFresh(now); return latest }
+    fun pose(now: Long): HeadTrackerUhidProtocol.Companion.Pose? {
+        checkFresh(now)
+        return latest?.takeIf { now - it.timestampNanos <= HeadTrackerUhidProtocol.FRESH_NANOS }
+    }
     fun input(now: Long): ByteArray? = pose(now)?.let { HeadTrackerUhidProtocol.input(it) }
+
+    companion object {
+        // A delayed delivery can resume the same sensor without extending the accepted pose age.
+        const val ACTIVE_GAP_NANOS = 400_000_000L
+    }
 }
 
 /** Keep the host's periodic cadence without accumulating each poll's rounding delay or catch-up bursts. */
@@ -223,6 +231,11 @@ internal class HeadTrackerReportPacer {
     }
 }
 
+/** Created only for a cached stats read, never for an individual pose. */
+internal data class HeadTrackerTimingRange(
+    val count: Long = 0, val minNanos: Long = 0, val meanNanos: Double = 0.0, val maxNanos: Long = 0,
+)
+
 internal data class HeadTrackerSinkStats(
     val acceptedPoses: Long = 0, val hidInputs: Long = 0, val heldRepeats: Long = 0,
     val intervalCount: Long = 0, val intervalMinNanos: Long = 0, val intervalMeanNanos: Double = 0.0,
@@ -231,6 +244,11 @@ internal data class HeadTrackerSinkStats(
     val sourceReuses: Long = 0, val extrapolatedInputs: Long = 0, val skippedInputs: Long = 0,
     val maxHidGapAtNanos: Long = 0, val sourceAgeAtMaxHidGapNanos: Long = 0,
     val previousSourceTimestampAtMaxHidGapNanos: Long = 0, val sourceTimestampAtMaxHidGapNanos: Long = 0,
+    val newSourceAge: HeadTrackerTimingRange = HeadTrackerTimingRange(),
+    val reusedSourceAge: HeadTrackerTimingRange = HeadTrackerTimingRange(),
+    val pipeFrameHostAge: HeadTrackerTimingRange = HeadTrackerTimingRange(),
+    val deadlineLateness: HeadTrackerTimingRange = HeadTrackerTimingRange(),
+    val overdueSlots: Long = 0, val missedPeriods: Long = 0, val timingClockAnomalies: Long = 0,
 )
 
 /** Constant-space host timing only; intervals exclude host-disabled windows. */
@@ -247,6 +265,9 @@ internal class HeadTrackerSinkMetrics {
     private var sourceAgeAtMaxGap = 0L
     private var previousSourceAtMaxGap = 0L
     private var sourceAtMaxGap = 0L
+    private var overdue = 0L
+    private var missed = 0L
+    private var clockAnomalies = 0L
     private class Range {
         var count = 0L; var min = 0L; var mean = 0.0; var max = 0L
         fun add(value: Long) {
@@ -254,14 +275,52 @@ internal class HeadTrackerSinkMetrics {
             if (count++ == 0L) { min = value; max = value } else { min = minOf(min, value); max = maxOf(max, value) }
             mean += (value.toDouble() - mean) / count
         }
+        fun snapshot() = HeadTrackerTimingRange(count, min, mean, max)
     }
     private val intervals = Range()
     private val ages = Range()
-    @Synchronized fun accepted() { ++accepted }
-    @Synchronized fun skipped() { ++skipped }
+    private val newAges = Range()
+    private val reusedAges = Range()
+    private val pipeAges = Range()
+    private val lateness = Range()
+
+    private fun validHostAge(timestamp: Long, now: Long): Boolean {
+        if (timestamp > 0 && now >= timestamp) return true
+        ++clockAnomalies
+        return false
+    }
+
+    private fun scheduled(deadline: Long, now: Long, interval: Long) {
+        if (deadline == 0L && interval == 0L) return // Existing callers need not supply scheduling data.
+        if (interval !in 10_000_000L..100_000_000L || !validHostAge(deadline, now)) {
+            if (interval !in 10_000_000L..100_000_000L) ++clockAnomalies
+            return
+        }
+        val delay = now - deadline
+        lateness.add(delay)
+        val periods = delay / interval
+        if (periods > 0) { ++overdue; missed += periods }
+    }
+
+    @Synchronized fun accepted(poseTimestamp: Long = 0, receivedAt: Long = 0) {
+        ++accepted
+        // This is parsed-callback timestamp to pipe receipt, not socket or sensor transit time.
+        if (poseTimestamp == 0L && receivedAt == 0L) return
+        if (validHostAge(poseTimestamp, receivedAt)) pipeAges.add(receivedAt - poseTimestamp)
+    }
+    @Synchronized fun skipped(deadline: Long = 0, now: Long = 0, interval: Long = 0) {
+        ++skipped
+        if (lastInput != null) scheduled(deadline, now, interval)
+    }
     @Synchronized fun idle() { lastInput = null }
-    @Synchronized fun input(poseTimestamp: Long, now: Long, extrapolated: Boolean = false) {
+    @Synchronized fun input(poseTimestamp: Long, now: Long, extrapolated: Boolean = false,
+        deadline: Long = 0, interval: Long = 0) {
         require(poseTimestamp <= now)
+        // Before the first fresh input, the pacer deadline still names HAL enable/startup.
+        if (lastInput != null) scheduled(deadline, now, interval)
+        if (validHostAge(poseTimestamp, now)) {
+            (if (lastPoseTimestamp == poseTimestamp) reusedAges else newAges).add(now - poseTimestamp)
+        }
         lastInput?.let {
             val gap = now - it
             val maximum = intervals.count == 0L || gap > intervals.max
@@ -284,7 +343,8 @@ internal class HeadTrackerSinkMetrics {
     @Synchronized fun snapshot() = HeadTrackerSinkStats(accepted, inputs, repeats,
         intervals.count, intervals.min, intervals.mean, intervals.max,
         ages.count, ages.min, ages.mean, ages.max, reuses, extrapolated, skipped,
-        maxGapAt, sourceAgeAtMaxGap, previousSourceAtMaxGap, sourceAtMaxGap)
+        maxGapAt, sourceAgeAtMaxGap, previousSourceAtMaxGap, sourceAtMaxGap,
+        newAges.snapshot(), reusedAges.snapshot(), pipeAges.snapshot(), lateness.snapshot(), overdue, missed, clockAnomalies)
 }
 
 /** Confirmation belongs to one exact selected address; a stuck native read cannot renew it. */

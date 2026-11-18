@@ -4,6 +4,7 @@ package me.kavishdevar.librepods.audio
 import android.app.Application
 import android.bluetooth.BluetoothSocket
 import android.os.Bundle
+import java.time.Duration
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -20,6 +21,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.launch
@@ -36,6 +38,8 @@ import me.kavishdevar.librepods.core.devices.AppleSettings
 import me.kavishdevar.librepods.core.devices.AppleState
 import me.kavishdevar.librepods.core.devices.ConnectionState
 import me.kavishdevar.librepods.shizuku.ShizukuAudioClient
+import me.kavishdevar.librepods.shizuku.HeadTrackerPoseGate
+import me.kavishdevar.librepods.shizuku.HeadTrackerUhidProtocol
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -43,6 +47,8 @@ import org.mockito.ArgumentMatchers.any
 import org.mockito.ArgumentMatchers.eq
 import org.mockito.Mockito.*
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.RuntimeEnvironment
+import org.robolectric.shadows.ShadowSystemClock
 import org.robolectric.annotation.Config
 import org.robolectric.util.ReflectionHelpers
 
@@ -52,7 +58,11 @@ class NativeHeadTrackingControllerTest {
     private val identity = checkNotNull(SpatialPoseProfile.fromBasis(listOf(
         listOf(1.0, 0.0, 0.0), listOf(0.0, 1.0, 0.0), listOf(0.0, 0.0, 1.0))))
 
-    private inner class Target(calibrated: Boolean = true, rejectFirstStart: Boolean = false) : AutoCloseable {
+    private inner class Target(calibrated: Boolean = true, rejectFirstStart: Boolean = false,
+        spatialInitiallyOn: Boolean = true, nativeAtmos: Boolean = false, atmosSupported: Boolean = false,
+        headInitiallyOn: Boolean? = false, clearSavedChoices: Boolean = true, atmosKnown: Boolean = true,
+        rootInitiallyReady: Boolean = true, source: Flow<MotionSample?> = MutableStateFlow(null),
+        atmosAbsent: Boolean = false) : AutoCloseable {
         val parent = CoroutineScope(SupervisorJob())
         val started = CopyOnWriteArrayList<Any>()
         val released = CopyOnWriteArrayList<Any>()
@@ -64,10 +74,52 @@ class NativeHeadTrackingControllerTest {
         })
         val aacp = mock(AACPManager::class.java)
         val socket = mock(BluetoothSocket::class.java)
-        var disable: (() -> Boolean) -> Bundle = { Bundle().apply { putBoolean("applied", true) } }
+        val rootReady = AtomicBoolean(rootInitiallyReady)
+        var openNative: ((() -> Boolean) -> ShizukuAudioClient.HeadTrackerLease)? = null
+        val reporting = AtomicReference<(Boolean, Long) -> Unit>()
+        var disable: (() -> Boolean) -> Bundle = {
+            synchronized(snapshot) { snapshot.putBoolean("head_tracker_enabled", false) }
+            Bundle().apply { putBoolean("applied", true) }
+        }
+        var fixed: (Boolean, () -> Boolean) -> Bundle = { enabled, current ->
+            check(current())
+            synchronized(snapshot) {
+                snapshot.putBoolean("device_enabled", enabled); snapshot.putBoolean("enabled", enabled)
+                snapshot.putBoolean("head_tracker_enabled", false)
+                Bundle(snapshot).apply { putBoolean("applied", true) }
+            }
+        }
+        val atmosphere = Bundle().apply {
+            if (atmosAbsent) putString("reason", "backend_absent")
+            putInt("version", 1); putBoolean("supported", atmosSupported); putBoolean("known", atmosSupported && atmosKnown)
+            putBoolean("route_verified", atmosSupported)
+            putBoolean("available", atmosSupported); putBoolean("desired_spatial", spatialInitiallyOn)
+            putBoolean("desired_tracking", headInitiallyOn == true); putLong("accepted_generation", 0)
+            putBoolean("actual_audio", false); putBoolean("output_committed", false)
+        }
+        var setAtmos: (Boolean, Boolean, Long, () -> Boolean) -> Bundle = { spatial, tracking, epoch, current ->
+            check(current())
+            synchronized(atmosphere) {
+                if (atmosphere.getBoolean("supported") && atmosphere.getBoolean("route_verified")) {
+                    atmosphere.putBoolean("known", true)
+                    atmosphere.putBoolean("desired_spatial", spatial); atmosphere.putBoolean("desired_tracking", tracking)
+                    atmosphere.putLong("accepted_generation", epoch)
+                }
+                Bundle(atmosphere).apply { putBoolean("applied", atmosphere.getBoolean("supported") && atmosphere.getBoolean("known")) }
+            }
+        }
         val bridge = mock(ShizukuAudioClient::class.java, withSettings().defaultAnswer { invocation ->
-            if (invocation.method.name.substringBefore('$') == "disableHeadTracking")
-                disable(invocation.getArgument(1)) else RETURNS_DEFAULTS.answer(invocation)
+            when (invocation.method.name.substringBefore('$')) {
+                "disableHeadTracking" -> disable(invocation.getArgument(1))
+                "setFixedSpatialEnabled" -> fixed(invocation.getArgument(1), invocation.getArgument(2))
+                "inspectAtmosSpatial" -> synchronized(atmosphere) { Bundle(atmosphere) }
+                "setAtmosSpatial" -> setAtmos(invocation.getArgument(1), invocation.getArgument(2),
+                    invocation.getArgument(3), invocation.getArgument(4))
+                "openHeadTracking" -> {
+                    reporting.set(invocation.getArgument(4)); openNative?.invoke(invocation.getArgument(3))
+                }
+                else -> RETURNS_DEFAULTS.answer(invocation)
+            }
         })
         val profiles = mock(SpatialPoseProfileStore::class.java)
         val current = AtomicBoolean(true)
@@ -77,26 +129,31 @@ class NativeHeadTrackingControllerTest {
             modelNumber = "A3064", version1 = "8-test"))
         val snapshot = Bundle().apply {
             putInt("version", 1)
-            putBoolean("known", true); putBoolean("head_tracker_enabled", false)
-            putBoolean("device_enabled", true); putBoolean("enabled", true); putBoolean("route_selected", true)
+            putBoolean("known", true); headInitiallyOn?.let { putBoolean("head_tracker_enabled", it) }
+            putBoolean("device_enabled", spatialInitiallyOn); putBoolean("enabled", spatialInitiallyOn)
+            putBoolean("route_selected", true); putBoolean("fixed_supported", true)
         }
         val controller: NativeHeadTrackingController
         init {
+            if (clearSavedChoices) RuntimeEnvironment.getApplication().getSharedPreferences("spatial-controls", 0).edit().clear().commit()
             `when`(device.macAddress).thenReturn(MacAddress(MAC))
+            `when`(device.context).thenReturn(RuntimeEnvironment.getApplication())
             `when`(device.connectionState).thenReturn(MutableStateFlow(ConnectionState.CONNECTED))
             `when`(device.aacp).thenReturn(aacp)
             `when`(device.state).thenReturn(states); `when`(device.metadata).thenReturn(metadata)
             `when`(device.settings).thenReturn(MutableStateFlow(AppleSettings()))
             `when`(aacp.captureAudioSocket()).thenReturn(socket)
             `when`(aacp.ownsAudioSocket(socket)).thenReturn(true)
-            `when`(bridge.hasRootPrivileges).thenReturn(true)
+            `when`(bridge.hasRootPrivileges).thenAnswer { rootReady.get() }
             `when`(profiles.load(any<SpatialPoseProfileKey>() ?: key())).thenReturn(if (calibrated) identity else null)
             doAnswer { released += it.getArgument<Any>(0); true }.`when`(device).stopHeadTracking(any<Any>() ?: Any())
             runBlocking {
-                `when`(bridge.inspectSpatialAudio(eq(MAC) ?: MAC, anyCurrent())).thenReturn(snapshot)
+                `when`(bridge.inspectSpatialAudio(eq(MAC) ?: MAC, anyCurrent())).thenAnswer {
+                    synchronized(snapshot) { Bundle(snapshot) }
+                }
             }
             controller = NativeHeadTrackingController(device, parent, blocked::get, current::get,
-                bridge, profiles, MutableStateFlow(null), Dispatchers.Default)
+                bridge, profiles, source, Dispatchers.Default, enableAtmos = nativeAtmos)
         }
         override fun close() { controller.close(); parent.cancel() }
     }
@@ -107,6 +164,31 @@ class NativeHeadTrackingControllerTest {
             val source = requireNotNull(f.controller.timingSnapshot().getBundle("source"))
             assertEquals(12L, source.getLong("reads"))
             assertEquals(30L, source.getLong("feed_wait_max_nanos"))
+            assertTrue(f.started.isEmpty())
+        }
+    }
+
+    @Test fun sourceRejectionRetainsExactHostFreshnessBoundaryAndBlockedState() = runBlocking {
+        Target().use { f ->
+            ReflectionHelpers.getField<kotlinx.coroutines.Job>(f.controller, "runner").cancelAndJoin()
+            val idle = ReflectionHelpers.getField<AtomicBoolean>(f.controller, "hostIdle")
+            val checked = ReflectionHelpers.getField<AtomicLong>(f.controller, "hostCheckedAt")
+            fun rejection() = ReflectionHelpers.callInstanceMethod<AtmosSourceRejection?>(f.controller, "sourceRejection",
+                ReflectionHelpers.ClassParameter.from(BluetoothSocket::class.java, f.socket),
+                ReflectionHelpers.ClassParameter.from(SpatialPoseProfileKey::class.java, checkNotNull(spatialPoseProfileKey(f.device))))
+            idle.set(true)
+            val now = android.os.SystemClock.elapsedRealtime()
+            checked.set(now - 500)
+            assertNull(rejection())
+            checked.set(now - 501)
+            val stale = checkNotNull(rejection())
+            assertEquals("host_check_stale", stale.reason)
+            assertEquals(501L, stale.snapshot().getLong("host_age_ms"))
+            assertEquals(true, stale.hostIdle)
+            checked.set(now); idle.set(false)
+            assertEquals("host_blocked", rejection()?.reason)
+            f.current.set(false)
+            assertEquals("device_not_current", rejection()?.reason)
             assertTrue(f.started.isEmpty())
         }
     }
@@ -148,6 +230,357 @@ class NativeHeadTrackingControllerTest {
             assertTrue(f.started.isEmpty())
             assertFalse(mockingDetails(f.bridge).invocations.any { it.method.name.substringBefore('$') in
                 setOf("openHeadTracking", "requestPermission", "setFixedSpatialEnabled", "disableHeadTracking") })
+        }
+    }
+
+    @Test fun spatialOffStillOffersHeadOnWithoutChangingThePreferenceOnInspection() = runBlocking {
+        Target(spatialInitiallyOn = false).use { f ->
+            waitUntil { f.controller.state.value.available }
+            assertEquals(false, f.controller.state.value.enabled)
+            assertEquals(false, f.controller.state.value.spatialEnabled)
+            assertTrue(f.controller.state.value.spatialAvailable)
+            assertTrue(f.started.isEmpty())
+            assertFalse(mockingDetails(f.bridge).invocations.any { it.method.name.substringBefore('$') in
+                setOf("openHeadTracking", "setFixedSpatialEnabled", "disableHeadTracking", "requestPermission") })
+        }
+    }
+
+    @Test fun unresolvedNativeAtmosMasterNeverClaimsAndroidReadbackControlsItsRenderer() = runBlocking {
+        Target(nativeAtmos = true, spatialInitiallyOn = false).use { f ->
+            waitUntil { f.controller.state.value.available }
+            assertNull(f.controller.state.value.spatialEnabled)
+            assertFalse(f.controller.state.value.spatialAvailable)
+            f.controller.setSpatialEnabled(true)
+            f.controller.setSpatialEnabled(false)
+            delay(150)
+            assertFalse(f.controller.state.value.spatialBusy)
+            assertFalse(mockingDetails(f.bridge).invocations.any { it.method.name.substringBefore('$') in
+                setOf("setFixedSpatialEnabled", "disableHeadTracking") })
+        }
+    }
+
+    @Test fun knownAtmosMasterIsVisibleWhilePausedWithoutClaimingRenderedAudio() = runBlocking {
+        Target(nativeAtmos = true, atmosSupported = true, spatialInitiallyOn = false).use { f ->
+            waitUntil { f.controller.state.value.spatialAvailable && f.atmosphere.getLong("accepted_generation") > 0 }
+            assertTrue(f.controller.state.value.spatialSupported)
+            assertEquals(false, f.controller.state.value.spatialEnabled)
+            assertFalse(f.controller.state.value.actualAudio)
+            assertNull(f.controller.state.value.renderedSpatial)
+            assertFalse(f.atmosphere.getBoolean("desired_spatial")); assertFalse(f.atmosphere.getBoolean("desired_tracking"))
+            assertFalse(mockingDetails(f.bridge).invocations.any { it.method.name.substringBefore('$') in
+                setOf("setFixedSpatialEnabled", "disableHeadTracking") })
+        }
+    }
+
+    @Test fun confirmedAbsentDolbyLeavesAndroidSpatialAndHeadTrackingUsable() = runBlocking {
+        Target(nativeAtmos = true, atmosAbsent = true, spatialInitiallyOn = false).use { f ->
+            waitUntil { f.controller.state.value.spatialAvailable }
+            assertEquals(false, f.controller.state.value.spatialEnabled)
+            f.controller.setSpatialEnabled(true)
+            waitUntil { !f.controller.state.value.spatialBusy && f.controller.state.value.spatialEnabled == true }
+            f.controller.setEnabled(true)
+            waitUntil { mockingDetails(f.bridge).invocations.any { it.method.name.substringBefore('$') == "openHeadTracking" } }
+        }
+    }
+
+    @Test fun unownedOptionalBackendCanAdoptObservedOffWithoutInventingAnOn() = runBlocking {
+        Target(nativeAtmos = true, atmosSupported = true, spatialInitiallyOn = false, atmosKnown = false).use { f ->
+            waitUntil { f.atmosphere.getLong("accepted_generation") > 0 && f.controller.state.value.spatialAvailable }
+            assertTrue(f.controller.state.value.spatialSupported)
+            assertEquals(false, f.controller.state.value.spatialEnabled)
+            assertFalse(f.atmosphere.getBoolean("desired_spatial")); assertFalse(f.atmosphere.getBoolean("desired_tracking"))
+            assertFalse(mockingDetails(f.bridge).invocations.any { it.method.name.substringBefore('$') in
+                setOf("setFixedSpatialEnabled", "disableHeadTracking") })
+        }
+    }
+
+    @Test fun observedNativeHeadPreferenceMigratesOnlyWithItsCurrentCalibration() = runBlocking {
+        Target(nativeAtmos = true, atmosSupported = true, headInitiallyOn = true).use { f ->
+            waitUntil { f.atmosphere.getLong("accepted_generation") > 0 }
+            assertTrue(f.atmosphere.getBoolean("desired_spatial")); assertTrue(f.atmosphere.getBoolean("desired_tracking"))
+            assertFalse(mockingDetails(f.bridge).invocations.any { it.method.name.substringBefore('$') in
+                setOf("setFixedSpatialEnabled", "disableHeadTracking") })
+        }
+        Target(nativeAtmos = true, atmosSupported = true, headInitiallyOn = true, calibrated = false).use { f ->
+            waitUntil { f.controller.state.value.spatialAvailable }
+            delay(200)
+            assertEquals(0L, f.atmosphere.getLong("accepted_generation"))
+            assertFalse(mockingDetails(f.bridge).invocations.any { it.method.name.substringBefore('$') == "setAtmosSpatial" })
+        }
+        Target(nativeAtmos = true, atmosSupported = true, headInitiallyOn = null).use { f ->
+            waitUntil { f.controller.state.value.spatialAvailable }
+            delay(200)
+            assertEquals(0L, f.atmosphere.getLong("accepted_generation"))
+            assertFalse(mockingDetails(f.bridge).invocations.any { it.method.name.substringBefore('$') == "setAtmosSpatial" })
+        }
+    }
+
+    @Test fun combinedSpatialOffDisablesBothAndSurvivesControllerReplacement() = runBlocking {
+        Target(nativeAtmos = true, atmosSupported = true).use { f ->
+            waitUntil { f.controller.state.value.spatialAvailable && f.atmosphere.getLong("accepted_generation") > 0 }
+            f.controller.setSpatialEnabled(false)
+            waitUntil { !f.controller.state.value.spatialBusy && f.controller.state.value.spatialEnabled == false }
+            assertFalse(f.atmosphere.getBoolean("desired_spatial")); assertFalse(f.atmosphere.getBoolean("desired_tracking"))
+            assertEquals(false, f.controller.state.value.enabled)
+            val methods = mockingDetails(f.bridge).invocations.map { it.method.name.substringBefore('$') }
+            assertTrue(methods.indexOf("disableHeadTracking") < methods.lastIndexOf("setFixedSpatialEnabled"))
+        }
+        Target(nativeAtmos = true, atmosSupported = true, clearSavedChoices = false).use { f ->
+            waitUntil { f.atmosphere.getLong("accepted_generation") > 0 && !f.controller.state.value.spatialBusy }
+            assertFalse(f.atmosphere.getBoolean("desired_spatial")); assertFalse(f.atmosphere.getBoolean("desired_tracking"))
+        }
+    }
+
+    @Test fun newerOffFencesALateAtmosOnBeforeEitherPoseProviderCanStart() = runBlocking {
+        Target(nativeAtmos = true, atmosSupported = true).use { f ->
+            waitUntil { f.controller.state.value.spatialAvailable && f.atmosphere.getLong("accepted_generation") > 0 }
+            val original = f.setAtmos
+            val entered = CountDownLatch(1); val release = CountDownLatch(1)
+            f.setAtmos = { spatial, tracking, epoch, current ->
+                if (tracking) { entered.countDown(); check(release.await(2, TimeUnit.SECONDS)) }
+                original(spatial, tracking, epoch, current)
+            }
+            f.controller.setEnabled(true)
+            assertTrue(entered.await(2, TimeUnit.SECONDS))
+            f.controller.setEnabled(false)
+            assertEquals(false, f.controller.state.value.enabled)
+            release.countDown()
+            waitUntil { !f.controller.state.value.busy && !f.atmosphere.getBoolean("desired_tracking") }
+            assertTrue("Head Off preserves the already selected fixed-spatial choice", f.atmosphere.getBoolean("desired_spatial"))
+            assertFalse(mockingDetails(f.bridge).invocations.any { it.method.name.substringBefore('$') == "openHeadTracking" })
+            assertEquals(false, f.controller.state.value.desiredTrackingEnabled)
+        }
+    }
+
+    @Test fun acceptedPolicyRequiresExactGenerationAndNeverMeansRenderedAudio() {
+        val value = Bundle().apply {
+            putInt("version", 1); putBoolean("supported", true); putBoolean("known", true)
+            putBoolean("desired_spatial", true); putBoolean("desired_tracking", false)
+            putLong("accepted_generation", 5); putLong("applied_generation", 0); putBoolean("actual_audio", false)
+        }
+        assertTrue(acceptedAtmosSpatial(value, true, false, 5))
+        assertFalse(acceptedAtmosSpatial(value, true, false, 6))
+        assertFalse(acceptedAtmosSpatial(value, true, true, 5))
+        assertFalse(acceptedAtmosSpatial(value, false, true, 5))
+        for (field in listOf("supported", "known")) {
+            assertFalse(acceptedAtmosSpatial(Bundle(value).apply { putBoolean(field, false) }, true, false, 5))
+        }
+    }
+
+    @Test fun acceptedMasterOwnershipOutlivesPendingButNotANewerChoice() = runBlocking {
+        Target(nativeAtmos = true, atmosSupported = true).use { f ->
+            waitUntil { f.controller.state.value.spatialAvailable && f.atmosphere.getLong("accepted_generation") > 0 }
+            val original = f.setAtmos
+            val owner = AtomicReference<() -> Boolean>()
+            f.setAtmos = { spatial, tracking, epoch, current -> owner.set(current); original(spatial, tracking, epoch, current) }
+            f.controller.setSpatialEnabled(false)
+            waitUntil { !f.controller.state.value.spatialBusy && f.controller.state.value.spatialEnabled == false }
+            val acceptedOwner = requireNotNull(owner.get())
+            assertTrue("Clearing the UI request must not revoke the root heartbeat", acceptedOwner())
+            f.controller.setSpatialEnabled(true)
+            assertFalse("A newer choice immediately fences the preceding root owner", acceptedOwner())
+        }
+    }
+
+    @Test fun actualAudioNeedsCommittedOutputFromTheAcceptedGeneration() = runBlocking {
+        Target(nativeAtmos = true, atmosSupported = true).use { f ->
+            waitUntil { f.atmosphere.getLong("accepted_generation") > 0 && f.controller.state.value.spatialAvailable }
+            synchronized(f.atmosphere) {
+                f.atmosphere.putBoolean("actual_audio", true); f.atmosphere.putBoolean("output_committed", true)
+                f.atmosphere.putBoolean("actual_spatial", true); f.atmosphere.putBoolean("actual_tracking", false)
+                f.atmosphere.putLong("applied_generation", f.atmosphere.getLong("accepted_generation"))
+            }
+            ReflectionHelpers.getField<AtomicBoolean>(f.controller, "forceInspect").set(true)
+            waitUntil { f.controller.state.value.actualAudio }
+            assertEquals(true, f.controller.state.value.renderedSpatial)
+            synchronized(f.atmosphere) { f.atmosphere.putLong("applied_generation", 0) }
+            ReflectionHelpers.getField<AtomicBoolean>(f.controller, "forceInspect").set(true)
+            waitUntil { !f.controller.state.value.actualAudio }
+            assertNull(f.controller.state.value.renderedSpatial)
+        }
+    }
+
+    @Test fun savedOffWaitsForExistingRootAuthorizationAndRouteBeforeRearming() = runBlocking {
+        Target(nativeAtmos = true, atmosSupported = true, spatialInitiallyOn = false).use { f ->
+            waitUntil { f.atmosphere.getLong("accepted_generation") > 0 }
+        }
+        Target(nativeAtmos = true, atmosSupported = true, clearSavedChoices = false, rootInitiallyReady = false).use { f ->
+            delay(200)
+            assertFalse(mockingDetails(f.bridge).invocations.any { it.method.name.substringBefore('$') in
+                setOf("setAtmosSpatial", "setFixedSpatialEnabled", "disableHeadTracking") })
+            f.rootReady.set(true)
+            ReflectionHelpers.getField<AtomicBoolean>(f.controller, "forceInspect").set(true)
+            waitUntil { f.atmosphere.getLong("accepted_generation") > 0 }
+            assertFalse(f.atmosphere.getBoolean("desired_spatial")); assertFalse(f.atmosphere.getBoolean("desired_tracking"))
+        }
+    }
+
+    @Test fun freshSameEpochAcknowledgementRecoversAnUnconfirmedWriteWithoutChangingTheIntent() = runBlocking {
+        Target(nativeAtmos = true, atmosSupported = true, spatialInitiallyOn = false).use { f ->
+            waitUntil { f.atmosphere.getLong("accepted_generation") > 0 && f.controller.state.value.spatialAvailable }
+            f.setAtmos = { _, _, _, _ -> Bundle(f.atmosphere).apply { putBoolean("applied", false) } }
+            f.controller.setSpatialEnabled(true)
+            waitUntil { !f.controller.state.value.spatialBusy && f.snapshot.getBoolean("device_enabled") &&
+                f.atmosphere.getLong("accepted_generation") < f.controller.timingSnapshot().getLong("choice_epoch") }
+            val epoch = f.controller.timingSnapshot().getLong("choice_epoch")
+            synchronized(f.atmosphere) {
+                f.atmosphere.putBoolean("desired_spatial", true); f.atmosphere.putBoolean("desired_tracking", false)
+                f.atmosphere.putLong("accepted_generation", epoch)
+            }
+            ReflectionHelpers.getField<AtomicBoolean>(f.controller, "forceInspect").set(true)
+            waitUntil { f.controller.state.value.spatialEnabled == true && !f.controller.state.value.spatialBusy }
+            assertEquals(epoch, f.controller.timingSnapshot().getLong("choice_epoch"))
+            assertFalse(f.controller.state.value.actualAudio)
+        }
+    }
+
+    @Test fun sameEpochWithADifferentPairCannotSuppressSavedOffRecovery() = runBlocking {
+        Target(nativeAtmos = true, atmosSupported = true, spatialInitiallyOn = false).use { f ->
+            waitUntil { f.atmosphere.getLong("accepted_generation") > 0 && f.controller.state.value.spatialEnabled == false }
+            f.setAtmos = { _, _, _, _ -> Bundle(f.atmosphere).apply { putBoolean("applied", false) } }
+            clearInvocations(f.bridge)
+            synchronized(f.atmosphere) { f.atmosphere.putBoolean("desired_spatial", true) }
+            ReflectionHelpers.getField<AtomicBoolean>(f.controller, "forceInspect").set(true)
+            waitUntil { f.controller.state.value.spatialEnabled == null && mockingDetails(f.bridge).invocations.any {
+                it.method.name.substringBefore('$') == "setAtmosSpatial"
+            } }
+            assertFalse(ReflectionHelpers.callInstanceMethod<Boolean>(f.controller, "atmosPolicyCurrent"))
+            assertEquals(false, f.controller.state.value.desiredSpatialEnabled)
+            assertEquals(false, f.controller.state.value.desiredTrackingEnabled)
+        }
+    }
+
+    @Test fun atmosWaitsForNativeRegistrationAndRetiresBeforeNativeCleanup() = runBlocking {
+        Target(nativeAtmos = true, atmosSupported = true).use { f ->
+            waitUntil { f.atmosphere.getLong("accepted_generation") > 0 && f.controller.state.value.spatialAvailable }
+            val entered = CountDownLatch(1); val registered = CountDownLatch(1)
+            val cleanup = AtomicBoolean(false)
+            f.openNative = { current ->
+                entered.countDown(); check(registered.await(2, TimeUnit.SECONDS)); check(current())
+                synchronized(f.snapshot) { f.snapshot.putBoolean("head_tracker_enabled", true) }
+                ShizukuAudioClient.HeadTrackerLease(Bundle(), { Bundle() }, {
+                    assertFalse(f.controller.timingSnapshot().getBundle("atmos")!!.getBoolean("android_provider_ready"))
+                    cleanup.set(true); Bundle()
+                })
+            }
+            f.controller.setEnabled(true)
+            assertTrue(entered.await(2, TimeUnit.SECONDS))
+            assertFalse(f.controller.timingSnapshot().getBundle("atmos")!!.getBoolean("production_ready"))
+            registered.countDown()
+            waitUntil { f.controller.timingSnapshot().getBundle("atmos")!!.getBoolean("production_ready") }
+            f.controller.setEnabled(false)
+            assertFalse(f.controller.timingSnapshot().getBundle("atmos")!!.getBoolean("production_ready"))
+            waitUntil { cleanup.get() }
+        }
+    }
+
+    @Test fun preservedIntentReacquiresOnlyAfterLostOwnershipHasAReadyRouteAgain() = runBlocking {
+        Target(nativeAtmos = true, atmosSupported = true, spatialInitiallyOn = false).use { f ->
+            waitUntil { f.atmosphere.getLong("accepted_generation") > 0 && f.controller.state.value.spatialAvailable }
+            val epoch = f.atmosphere.getLong("accepted_generation")
+            synchronized(f.atmosphere) {
+                f.atmosphere.putBoolean("known", false); f.atmosphere.putBoolean("route_verified", false)
+                f.atmosphere.putLong("accepted_generation", 0)
+            }
+            f.blocked.set(true)
+            clearInvocations(f.bridge)
+            ReflectionHelpers.getField<AtomicBoolean>(f.controller, "forceInspect").set(true)
+            delay(200)
+            assertFalse(mockingDetails(f.bridge).invocations.any { it.method.name.substringBefore('$') == "setAtmosSpatial" })
+            synchronized(f.atmosphere) { f.atmosphere.putBoolean("route_verified", true) }
+            f.blocked.set(false)
+            ReflectionHelpers.getField<AtomicBoolean>(f.controller, "forceInspect").set(true)
+            waitUntil { f.atmosphere.getLong("accepted_generation") == epoch }
+            assertFalse(f.atmosphere.getBoolean("desired_spatial")); assertFalse(f.atmosphere.getBoolean("desired_tracking"))
+        }
+    }
+
+    @Test fun explicitHeadOnEnablesAndVerifiesSpatialBeforeOpeningItsLease() = runBlocking {
+        Target(spatialInitiallyOn = false).use { f ->
+            waitUntil { f.controller.state.value.available }
+            f.controller.setEnabled(true)
+            waitUntil { mockingDetails(f.bridge).invocations.any { it.method.name.substringBefore('$') == "openHeadTracking" } }
+            val writes = mockingDetails(f.bridge).invocations.map { it.method.name.substringBefore('$') }
+            assertTrue(writes.indexOf("setFixedSpatialEnabled") < writes.indexOf("openHeadTracking"))
+            assertTrue(f.snapshot.getBoolean("device_enabled"))
+            assertTrue(f.snapshot.getBoolean("enabled"))
+            assertEquals(1, writes.count { it == "setFixedSpatialEnabled" })
+        }
+    }
+
+    @Test fun headOnCannotOpenALeaseFromAnUnconfirmedSpatialWrite() = runBlocking {
+        Target(spatialInitiallyOn = false).use { f ->
+            waitUntil { f.controller.state.value.available }
+            f.fixed = { _, _ -> Bundle(f.snapshot).apply { putBoolean("applied", true) } }
+            f.controller.setEnabled(true)
+            waitUntil { !f.controller.state.value.busy }
+            assertEquals(false, f.controller.state.value.enabled)
+            assertEquals(false, f.controller.state.value.spatialEnabled)
+            assertFalse(mockingDetails(f.bridge).invocations.any { it.method.name.substringBefore('$') == "openHeadTracking" })
+            assertTrue(f.started.isEmpty())
+        }
+    }
+
+    @Test fun lateSpatialPreparationCannotOverrideHeadOffOrOpenItsFormerLease() = runBlocking {
+        Target(spatialInitiallyOn = false).use { f ->
+            waitUntil { f.controller.state.value.available }
+            val entered = CountDownLatch(1); val release = CountDownLatch(1)
+            val owner = AtomicReference<() -> Boolean>()
+            f.fixed = { _, current ->
+                owner.set(current); entered.countDown(); release.await(2, TimeUnit.SECONDS)
+                Bundle(f.snapshot).apply {
+                    putBoolean("applied", true); putBoolean("enabled", true); putBoolean("device_enabled", true)
+                }
+            }
+            try {
+                f.controller.setEnabled(true)
+                assertTrue(entered.await(2, TimeUnit.SECONDS))
+                f.controller.setEnabled(false)
+                assertFalse(owner.get().invoke())
+                release.countDown()
+                waitUntil { !f.controller.state.value.busy && f.controller.state.value.enabled == false }
+                assertFalse(mockingDetails(f.bridge).invocations.any { it.method.name.substringBefore('$') == "openHeadTracking" })
+            } finally { release.countDown() }
+        }
+    }
+
+    @Test fun spatialPreparationReadbackLosesAuthorityWhenItsDeviceOwnerChanges() = runBlocking {
+        Target(spatialInitiallyOn = false).use { f ->
+            waitUntil { f.controller.state.value.available }
+            val entered = CountDownLatch(1); val release = CountDownLatch(1)
+            val owner = AtomicReference<() -> Boolean>()
+            f.fixed = { _, current ->
+                owner.set(current); entered.countDown(); release.await(2, TimeUnit.SECONDS)
+                Bundle(f.snapshot).apply {
+                    putBoolean("applied", true); putBoolean("enabled", true); putBoolean("device_enabled", true)
+                }
+            }
+            try {
+                f.controller.setEnabled(true)
+                assertTrue(entered.await(2, TimeUnit.SECONDS))
+                f.current.set(false)
+                assertFalse(owner.get().invoke())
+                release.countDown()
+                waitUntil { !f.controller.state.value.available }
+                assertEquals(false, f.controller.state.value.spatialEnabled)
+                assertFalse(mockingDetails(f.bridge).invocations.any { it.method.name.substringBefore('$') == "openHeadTracking" })
+            } finally { release.countDown() }
+        }
+    }
+
+    @Test fun explicitSpatialChangesUseReadbackAndOffDisablesHeadTrackingFirst() = runBlocking {
+        Target(spatialInitiallyOn = false).use { f ->
+            waitUntil { f.controller.state.value.spatialAvailable }
+            f.controller.setSpatialEnabled(true)
+            waitUntil { !f.controller.state.value.spatialBusy && f.controller.state.value.spatialEnabled == true }
+            assertEquals(false, f.controller.state.value.enabled)
+            f.controller.setSpatialEnabled(false)
+            waitUntil { !f.controller.state.value.spatialBusy && f.controller.state.value.spatialEnabled == false }
+            assertEquals(false, f.controller.state.value.enabled)
+            val writes = mockingDetails(f.bridge).invocations.map { it.method.name.substringBefore('$') }
+                .filter { it in setOf("setFixedSpatialEnabled", "disableHeadTracking") }
+            assertEquals(listOf("setFixedSpatialEnabled", "disableHeadTracking", "setFixedSpatialEnabled"), writes)
+            assertTrue(f.started.isEmpty())
         }
     }
 
@@ -436,26 +869,94 @@ class NativeHeadTrackingControllerTest {
         }
     }
 
-    @Test fun staleSamplesAreNotRestampedAndTheFirstFreshSamplePrimesWithoutAnExtraDrop() = runBlocking {
+    @Test fun verifiedGapReacquiresAFreshRootLeaseOnceThenLatchesAnEarlyRepeat() = runBlocking {
+        val source = flow<MotionSample?> { throw CalibratedHeadMotionFault("sensor_gap", verifiedSensorGap = true) }
+        Target(source = source).use { f ->
+            val opened = java.util.concurrent.atomic.AtomicInteger()
+            val finished = java.util.concurrent.atomic.AtomicInteger()
+            f.openNative = { current ->
+                assertTrue(current())
+                val attempt = opened.incrementAndGet()
+                assertEquals("Old lease cleanup precedes any new root acquisition", attempt - 1, finished.get())
+                synchronized(f.snapshot) { f.snapshot.putBoolean("head_tracker_enabled", true) }
+                f.reporting.get().invoke(true, 10_000_000)
+                ShizukuAudioClient.HeadTrackerLease(Bundle(), { Bundle() }, { finished.incrementAndGet(); Bundle() })
+            }
+            waitUntil { f.controller.state.value.available }
+            f.controller.setEnabled(true)
+            waitUntil { finished.get() == 1 }
+            assertEquals(1, opened.get())
+            delay(100); assertEquals("Retry waits for the Android elapsed-time deadline", 1, opened.get())
+            ShadowSystemClock.advanceBy(Duration.ofMillis(2_001))
+            waitUntil { finished.get() == 2 }
+            assertEquals(2, opened.get()); assertEquals(2, finished.get())
+            assertEquals("motion_changed", f.controller.state.value.reason)
+            assertEquals("sensor_gap", f.controller.timingSnapshot().getString("pose_fault_reason"))
+            assertTrue(f.controller.state.value.enabled == true)
+            ShadowSystemClock.advanceBy(Duration.ofMillis(2_200))
+            delay(250); assertEquals("An exhausted budget cannot become a third automatic lease", 2, opened.get())
+            assertEquals(f.started.toSet(), f.released.toSet())
+        }
+    }
+
+    @Test fun sharedRuntimeRetiresAVerifiedGapAndOnlyANewInvocationCanPrimeAgain() = runBlocking {
+        Target().use { f ->
+            var clock = HOST_START
+            val poses = mutableListOf<SpatialPose>(); val recovery = HeadMotionGapRecovery()
+            val source = flow<MotionSample?> {
+                for (tick in 1..2) { clock += 20_000_000; emit(MotionSample(report(tick), clock)) }
+                clock += 30_000_000
+                emit(MotionSample(report(2).copy(timestampNs = 40_000_000L + 288_887_000, counter = 8L + 58), clock))
+            }
+            val failure = runCatching { streamCalibratedHeadMotion(f.device, source, identity, 7, { true },
+                now = { clock }, tryFast = false, recovery = recovery) { pose, _ -> poses += pose } }.exceptionOrNull()
+            assertTrue(failure is CalibratedHeadMotionFault)
+            assertTrue((failure as CalibratedHeadMotionFault).verifiedSensorGap)
+            assertEquals(1, poses.size); assertEquals(7, poses.single().discontinuity)
+            assertEquals(f.started.toSet(), f.released.toSet()); assertTrue(recovery.failed(failure.verifiedSensorGap))
+            val nextSource = flow<MotionSample?> {
+                clock += 20_000_000; emit(MotionSample(report(20), clock))
+                assertEquals("The new epoch's first sample is only a reference", 1, poses.size)
+                clock += 20_000_000; emit(MotionSample(report(21), clock))
+            }
+            runCatching { streamCalibratedHeadMotion(f.device, nextSource, identity, 8, { true },
+                now = { clock }, tryFast = false, recovery = recovery) { pose, _ -> poses += pose } }
+            assertEquals(listOf(7, 8), poses.map { it.discontinuity })
+            assertEquals(420_000_000L, poses.last().timestampNs)
+            assertNotSame(f.started[0], f.started[1]); assertEquals(f.started.toSet(), f.released.toSet())
+        }
+    }
+
+    @Test fun androidPoseGateReceivesOriginalReceiptTimeOncePerRead() = runBlocking {
         Target().use { f ->
             var clock = HOST_START
             val timing = HeadTrackingTiming(); val poses = mutableListOf<Pair<SpatialPose, Long>>()
+            val gate = HeadTrackerPoseGate().apply { reporting(true, clock) }
             val source = flow<MotionSample?> {
                 clock += 300_000_000
                 emit(MotionSample(report(1), HOST_START + 1))
                 clock += 20_000_000; emit(MotionSample(report(2), clock - 30_000_000))
-                clock += 20_000_000; emit(MotionSample(report(3), clock - 25_000_000))
+                clock += 20_000_000
+                val receipt = clock - 25_000_000
+                emit(MotionSample(report(3), receipt))
+                emit(MotionSample(report(4), receipt))
+                clock += 20_000_000; emit(MotionSample(report(5), clock - 5_000_000))
                 awaitCancellation()
             }
             val job = async { streamCalibratedHeadMotion(f.device, source, identity, 0, { true }, timing,
-                now = { clock }) { pose, arrival -> poses += pose to arrival } }
+                now = { clock }) { pose, arrival ->
+                check(gate.accept(HeadTrackerUhidProtocol.Companion.Pose(arrival, pose.discontinuity,
+                    (pose.rotationVector + pose.angularVelocity).toFloatArray()), clock))
+                poses += pose to arrival
+            } }
             try {
-                waitUntil { poses.size == 1 }
-                assertEquals(HOST_START + 315_000_000, poses.single().second)
+                waitUntil { poses.size >= 2 }
+                assertEquals(listOf(report(3).timestampNs, report(5).timestampNs), poses.map { it.first.timestampNs })
+                assertEquals(listOf(HOST_START + 315_000_000, HOST_START + 355_000_000), poses.map { it.second })
                 val stats = timing.snapshot()
                 assertEquals(1, stats.getLong("stale_samples_dropped"))
-                assertEquals(2, stats.getLong("source_samples"))
-                assertEquals(27_500_000.0, stats.getDouble("app_collection_age_mean_nanos"), 0.0)
+                assertEquals(4, stats.getLong("source_samples"))
+                assertEquals(21_250_000.0, stats.getDouble("app_collection_age_mean_nanos"), 0.0)
             } finally { job.cancelAndJoin() }
         }
     }
@@ -549,26 +1050,28 @@ class NativeHeadTrackingControllerTest {
         }
     }
 
-    @Test fun oneFreshAttitudeThenAStallFallsBackBeforeTheRootFreshnessWindow() = runBlocking {
+    @Test fun oneFreshPoseThenAStallFallsBackBeforeTheRootFreshnessWindow() = runBlocking {
         Target().use { f ->
             val clock = AtomicLong(HOST_START)
             val timing = HeadTrackingTiming(); val fallbackAt = AtomicLong()
             val firstArrival = HOST_START + 20_000_000
+            val poseArrival = firstArrival + 20_000_000
+            var poses = 0
             val source = flow<MotionSample?> {
                 clock.set(firstArrival); emit(MotionSample(report(1), firstArrival))
-                clock.set(firstArrival + 180_000_000)
+                clock.set(poseArrival); emit(MotionSample(report(2), poseArrival))
+                clock.set(poseArrival + 180_000_000)
                 awaitCancellation()
             }
             val job = async { streamCalibratedHeadMotion(f.device, source, identity, 0, { true }, timing,
-                now = clock::get, onFallback = { fallbackAt.set(clock.get()) }) { _, _ ->
-                fail("One attitude only primes the converter; fallback cannot fabricate a pose")
-            } }
+                now = clock::get, onFallback = { fallbackAt.set(clock.get()) }) { _, _ -> poses++ } }
             try {
                 waitUntil { timing.snapshot().getBoolean("fallback_rate") }
-                assertTrue(fallbackAt.get() - firstArrival in 150_000_000L until 250_000_000L)
+                assertEquals(1, poses)
+                assertTrue(fallbackAt.get() - poseArrival in 150_000_000L until 250_000_000L)
                 assertEquals("attitude_stall", timing.snapshot().getString("first_fallback_reason"))
                 assertEquals(fallbackAt.get(), timing.snapshot().getLong("first_fallback_at_nanos"))
-                assertEquals(firstArrival, timing.snapshot().getLong("first_fallback_last_attitude_at_nanos"))
+                assertEquals(poseArrival, timing.snapshot().getLong("first_fallback_last_attitude_at_nanos"))
                 assertEquals(20_000L, timing.snapshot().getLong("requested_interval_us"))
                 assertEquals(2, f.started.size); assertSame(f.started[0], f.started[1])
                 assertTrue(f.released.isEmpty())
@@ -605,7 +1108,7 @@ class NativeHeadTrackingControllerTest {
             val source = flow<MotionSample?> {
                 for (tick in 1..20) {
                     clock += 20_000_000
-                    emit(MotionSample(if (tick == 1) report(tick) else
+                    emit(MotionSample(if (tick <= 2) report(tick) else
                         report(tick).copy(attitudeQ15 = listOf(0, 0, 0)), clock))
                     delay(10)
                 }
@@ -617,6 +1120,62 @@ class NativeHeadTrackingControllerTest {
                 waitUntil { poses.size == 19 }
                 assertEquals(1, f.started.size)
                 assertFalse(timing.snapshot().getBoolean("fallback_rate"))
+            } finally { job.cancelAndJoin() }
+            assertEquals(f.started.toList(), f.released.toList())
+        }
+    }
+
+    @Test fun persistentStartupZerosCannotRefreshTheRootPoseStartupDeadline() = runBlocking {
+        Target().use { f ->
+            var clock = HOST_START
+            val gate = HeadTrackerPoseGate().apply { reporting(true, HOST_START) }
+            val source = flow<MotionSample?> {
+                for (tick in 1..251) {
+                    clock += 20_000_000
+                    emit(MotionSample(report(tick).copy(attitudeQ15 = listOf(0, 0, 0)), clock))
+                    assertFalse(gate.hasPose)
+                    assertEquals(HOST_START + HeadTrackerUhidProtocol.STARTUP_NANOS, gate.deadline)
+                    gate.checkFresh(clock)
+                }
+                fail("Persistent placeholders must not outlive the root startup budget")
+            }
+            val error = runCatching {
+                streamCalibratedHeadMotion(f.device, source, identity, 0, { true }, now = { clock },
+                    tryFast = false) { pose, arrival ->
+                    gate.accept(HeadTrackerUhidProtocol.Companion.Pose(arrival, pose.discontinuity,
+                        (pose.rotationVector + pose.angularVelocity).toFloatArray()), arrival)
+                    fail("A startup zero is not a usable pose")
+                }
+            }.exceptionOrNull()
+            assertEquals("pose_startup_timeout", error?.message)
+            assertEquals(f.started.toList(), f.released.toList())
+        }
+    }
+
+    @Test fun aRetainedStartupAttitudeAndZeroRunDoNotStartTheSteadyStallWatchdog() = runBlocking {
+        Target().use { f ->
+            val clock = AtomicLong(HOST_START)
+            val timing = HeadTrackingTiming(); val poses = mutableListOf<SpatialPose>()
+            val source = flow<MotionSample?> {
+                clock.addAndGet(20_000_000)
+                emit(MotionSample(report(1).copy(attitudeQ15 = listOf(-18261, 22093, 169)), clock.get()))
+                clock.addAndGet(200_000_000)
+                emit(MotionSample(report(2).copy(attitudeQ15 = listOf(0, 0, 0)), clock.get()))
+                delay(100) // The old first-attitude gate would enter its 150 ms steady watchdog.
+                assertTrue(poses.isEmpty()); assertEquals(1, f.started.size)
+                assertFalse(timing.snapshot().getBoolean("fallback_rate"))
+                for (tick in 3..4) {
+                    clock.addAndGet(20_000_000)
+                    emit(MotionSample(report(tick).copy(attitudeQ15 = listOf(-13479, 22145, 129)), clock.get()))
+                }
+                awaitCancellation()
+            }
+            val job = async { streamCalibratedHeadMotion(f.device, source, identity, 0, { true }, timing,
+                now = clock::get) { pose, _ -> poses += pose } }
+            try {
+                waitUntil { poses.size == 1 }
+                assertEquals(1, f.started.size); assertFalse(timing.snapshot().getBoolean("fallback_rate"))
+                assertEquals(80_000_000L, poses.single().timestampNs)
             } finally { job.cancelAndJoin() }
             assertEquals(f.started.toList(), f.released.toList())
         }
@@ -653,6 +1212,56 @@ class NativeHeadTrackingControllerTest {
                 assertEquals(clock.get(), poses.last().second)
                 assertEquals(1L, timing.snapshot().getLong("stale_samples_dropped"))
                 assertEquals(3L, timing.snapshot().getLong("source_samples"))
+            } finally { job.cancelAndJoin(); HeadTracking.reset() }
+        }
+    }
+
+    @Test fun bufferedDeliveryKeepsSensorVelocityAndHostFreshnessSeparate() = runBlocking {
+        HeadTracking.reset()
+        Target().use { f ->
+            val clock = AtomicLong(HOST_START)
+            val poses = mutableListOf<Pair<SpatialPose, Long>>()
+            val job = async(start = CoroutineStart.UNDISPATCHED) {
+                streamCalibratedHeadMotion(f.device, HeadTracking.motionSamples, identity, 0,
+                    { true }, now = clock::get, tryFast = false) { pose, arrival -> poses += pose to arrival }
+            }
+            try {
+                val sensorStart = 100_000_000_000L // Deliberately a different clock epoch from BOOTTIME.
+                val arrivalStart = HOST_START + 100_000_000L
+                // Two 10 ms physical samples arrive in separate reads 1 us apart.
+                for (tick in 1..2) {
+                    val sample = report(tick).copy(timestampNs = sensorStart + tick * 10_000_000L,
+                        counter = tick * 2L, attitudeQ15 = listOf(0, 0, tick * 164))
+                    clock.set(arrivalStart + (tick - 1) * 1_000L)
+                    HeadTracking.addMotion(sample, 0f, 0f, clock.get())
+                }
+                waitUntil { poses.size == 1 }
+                val (pose, arrival) = poses.single()
+                assertEquals(sensorStart + 20_000_000L, pose.timestampNs)
+                assertEquals(10_000_000L, pose.intervalNs)
+                assertEquals(arrivalStart + 1_000L, arrival)
+                assertEquals(1.0, pose.angularVelocity[2].toDouble(), 0.002)
+                assertEquals(0f, pose.angularVelocity[0], 0f)
+                assertEquals(0f, pose.angularVelocity[1], 0f)
+
+                // Android's root gate uses BOOTTIME for freshness, never the foreign sensor epoch.
+                val measured = HeadTrackerUhidProtocol.Companion.Pose(arrival, pose.discontinuity,
+                    (pose.rotationVector + pose.angularVelocity).toFloatArray())
+                val gate = HeadTrackerPoseGate().apply { reporting(true, HOST_START) }
+                assertTrue(gate.accept(measured, arrival))
+                val emitted = checkNotNull(HeadTrackerUhidProtocol.poseAtHostTime(
+                    checkNotNull(gate.pose(arrival + 5_000_000L)), arrival + 5_000_000L))
+                assertEquals(pose.rotationVector[2] + pose.angularVelocity[2] * 0.005f, emitted.values[2], 0.000001f)
+                assertEquals(pose.angularVelocity[2], emitted.values[5], 0f)
+                assertEquals(arrival, emitted.timestampNanos)
+                assertNull(gate.pose(arrival + HeadTrackerUhidProtocol.FRESH_NANOS + 1))
+                assertEquals(arrival + HeadTrackerPoseGate.ACTIVE_GAP_NANOS, gate.deadline)
+                assertNull(HeadTrackerUhidProtocol.poseAtHostTime(measured,
+                    arrival + HeadTrackerUhidProtocol.MAX_EXTRAPOLATION_NANOS + 1))
+                assertThrows(IllegalStateException::class.java) {
+                    gate.checkFresh(gate.deadline + 1)
+                }
+                Unit
             } finally { job.cancelAndJoin(); HeadTracking.reset() }
         }
     }

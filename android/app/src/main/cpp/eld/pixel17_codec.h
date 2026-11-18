@@ -14,6 +14,27 @@ inline constexpr size_t kPixel17CodecStorage = 45;
 inline constexpr size_t kPixel17CodecVtableEntries = 9;
 inline constexpr uint64_t kPixel17EldCodecId = 0x8001004cffULL;
 
+enum class Pixel17NegotiationReject : uint8_t {
+    None, Arguments, Quarantined, PeerCapabilities, PeerConfiguration, User, Audio, Count
+};
+struct Pixel17CodecHintSnapshot {
+    int32_t type = 0, priority = 0;
+    uint32_t rate = 0, bits = 0, channels = 0;
+    uint8_t specific_nonzero = 0;
+};
+struct Pixel17NegotiationStatus {
+    // Counters cover this owned codec object's lifetime, including feasibility checks.
+    uint64_t config_calls = 0, peer_calls = 0;
+    uint64_t rejected[static_cast<size_t>(Pixel17NegotiationReject::Count)]{};
+    Pixel17NegotiationReject last_reason = Pixel17NegotiationReject::None;
+    uint64_t last_boottime_ns = 0;
+    bool last_peer_update = false, last_capability = false, hints_known = false;
+    int32_t source_index = 0, source_priority = 0;
+    Pixel17CodecHintSnapshot user{}, audio{};
+    size_t peer_bytes = 0;
+    uint8_t peer[kPixel17CodecStorage]{};
+};
+
 // The final eight bytes are not CodecId. Their meaning is unknown; preserve them on reads/copies.
 struct Pixel17NativeConfig {
     int32_t codec_type;
@@ -62,6 +83,9 @@ void pixel17_codec_quarantine();
 
 bool pixel17_codec_info(const void* codec, uint8_t* out, size_t size);
 bool pixel17_codec_get_config(const void* codec, Pixel17NativeConfig* out);
+// Copies passive diagnostics without taking the host codec lock or invoking host callbacks.
+Pixel17NegotiationStatus pixel17_codec_negotiation_status(const void* codec);
+const char* pixel17_negotiation_reject_name(Pixel17NegotiationReject reason);
 // Explicit-size entry points are also used by the native ABI callbacks with their proven 45-byte arrays.
 // Status is an eight-bit A2DP result: zero succeeds; nonzero fails.
 uint8_t pixel17_codec_set_config(void* codec, const uint8_t* peer, size_t peer_size,

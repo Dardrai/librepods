@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 #include "fdk_encoder.h"
+#include <array>
 #include <cstddef>
 #include <cstdint>
 
@@ -51,6 +52,7 @@ struct EncoderHost {
     uint32_t pcm_sample_bytes = 2;
 };
 inline constexpr size_t kEncoderCodecStorage = 45;
+inline constexpr size_t kPcmReadDurationBuckets = 7;
 struct EncoderStatus {
     uint64_t generation;
     uint64_t packets;
@@ -78,6 +80,18 @@ struct EncoderStatus {
     uint64_t encode_max_us;
     uint64_t enqueue_max_us;
     uint64_t callback_max_us;
+    // Per-init aggregates, retained across feeding reset/flush and cleanup.
+    // Disjoint read durations: <100, <500, <1000, <5000, <10000, <20000, >=20000 us.
+    // Only valid host-clock samples count; these do not measure upstream queue age.
+    std::array<uint64_t, kPcmReadDurationBuckets> pcm_read_duration_counts;
+    uint64_t primer_aus; // Accepted silence AUs; rejected/empty outputs do not count.
+    uint64_t feeding_resets; // Successful reset/flush calls, excluding initial init.
+    uint64_t pcm_zero_reads;
+    uint64_t pcm_short_reads; // Nonzero, valid reads smaller than the requested remainder.
+    // Since the latest feeding start; these clear on init or successful reset/flush.
+    uint64_t feeding_read_calls;
+    uint64_t feeding_read_bytes;
+    uint32_t primer_remaining; // Current accepted-AU remainder, zero while inactive.
 };
 
 enum class EncoderClockPhase : uint32_t {

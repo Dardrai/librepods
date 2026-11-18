@@ -139,7 +139,7 @@ class MotionIntervalOwnersTest {
     @Test fun anOwnerWaitingForDescriptorsIsAcceptedWithoutAStartWrite() {
         val owners = MotionOwners()
         val manager = RTBuddyManager({ error("No known motion service") }, { true }, { true }, { null },
-            {}, {}, {}, {}, sharedMotionOwners = owners)
+            { _, _ -> }, {}, {}, {}, sharedMotionOwners = owners)
         val owner = Any()
         try {
             assertTrue(manager.setHeadTrackingEnabled(true, owner, 5.milliseconds))
@@ -309,7 +309,7 @@ class MotionIntervalOwnersTest {
     @Test fun invalidRequestsAndLegacyFallbackCannotRaiseTheLegacyRate() {
         val writes = mutableListOf<AACPPacket>()
         var current = true
-        val manager = RTBuddyManager({ writes += it; true }, { true }, { current }, { 9 }, {}, {}, {}, {})
+        val manager = RTBuddyManager({ writes += it; true }, { true }, { current }, { 9 }, { _, _ -> }, {}, {}, {})
         try {
             assertFalse(manager.setHeadTrackingEnabled(true, Any(), 4.milliseconds))
             assertFalse(manager.setHeadTrackingEnabled(true, Any(), 5.milliseconds + 500.nanoseconds))
@@ -337,7 +337,7 @@ class MotionIntervalOwnersTest {
         @Volatile var clock = 1_000L
         @Volatile var accept: (Pair<Int, Int>) -> Boolean = { true }
         val manager = RTBuddyManager({ writes += it; accept(command(it)) }, { true }, { true }, { 9 },
-            { motionReports += it }, {}, { motionStates += it }, {}, motionIntervalUs = baselineUs,
+            { report, _ -> motionReports += report }, {}, { motionStates += it }, {}, motionIntervalUs = baselineUs,
             sharedMotionOwners = owners, sourceTiming = sourceTiming, sourceClockNanos = { clock })
         init {
             if (announceMotion) manager.feed(announcement(3, 27))

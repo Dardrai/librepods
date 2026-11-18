@@ -2,6 +2,7 @@
 package me.kavishdevar.librepods.services
 
 import android.os.Bundle
+import org.json.JSONArray
 import org.json.JSONObject
 
 /** A cached read: dumping timing never starts a sensor or makes a root/Bluetooth call. */
@@ -11,6 +12,7 @@ internal fun headTrackingTimingJson(value: Bundle): JSONObject = JSONObject().ap
         val item = value.get(key)
         when (item) {
             is Bundle -> put(key, headTrackingTimingJson(item))
+            is LongArray -> put(key, JSONArray(item))
             is Number, is Boolean, is String -> put(key, item)
             null -> put(key, JSONObject.NULL)
         }

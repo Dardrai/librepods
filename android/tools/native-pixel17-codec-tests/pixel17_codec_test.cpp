@@ -228,8 +228,10 @@ void negotiation_and_status() {
     peer[10] = 0;
     result.fill(0x5a);
     check(method<ConfigFn>(object, 5)(object, peer.data(), false, result.data()) != 0);
+    check(pixel17_codec_negotiation_status(object).last_reason == Pixel17NegotiationReject::PeerConfiguration);
     check(std::memcmp(saved.data(), object, saved.size()) == 0 && result[0] == 0x5a);
     check(!method<PeerFn>(object, 6)(object, peer.data()));
+    check(pixel17_codec_negotiation_status(object).last_reason == Pixel17NegotiationReject::PeerCapabilities);
     check(std::memcmp(saved.data(), object, saved.size()) == 0,
           "Rejecting peer capabilities must preserve the previous valid selection");
     check(make_capabilities(peer.data(), peer.size()));
@@ -290,6 +292,82 @@ void selectable_requires_peer_capabilities() {
     dispose(object);
 }
 
+void passive_negotiation_diagnostics() {
+    void* object = pixel17_codec_create(5, 10001);
+    void* other = pixel17_codec_create(5, 6001);
+    check(object && other);
+    auto status = pixel17_codec_negotiation_status(object);
+    check(status.config_calls == 0 && status.peer_calls == 0 && status.last_reason == Pixel17NegotiationReject::None);
+    std::array<uint8_t, 45> peer{}, out{};
+    check(make_capabilities(peer.data(), peer.size()));
+    Pixel17NativeConfig user{5, 0, 2, kPixel17PcmMask, 2, 0x12345678, {0, 0, 0, 0}, UINT64_MAX};
+    Pixel17NativeConfig audio{0, 0, 2, kPixel17PcmMask == 4 ? 1U : 4U, 2, 0xaabbccdd, {0, 0, 0, 0}, UINT64_MAX};
+    put(object, config_offsets[3], user); put(object, config_offsets[4], audio);
+    std::vector<uint8_t> saved(object_size);
+    std::memcpy(saved.data(), object, saved.size()); out.fill(0x5a);
+    check(pixel17_codec_set_config(object, peer.data(), peer.size(), true, out.data(), out.size()) != 0);
+    check(std::memcmp(saved.data(), object, saved.size()) == 0 && out[0] == 0x5a,
+          "Recording a rejection must not alter codec records or output");
+    status = pixel17_codec_negotiation_status(object);
+    check(status.config_calls == 1 && status.peer_calls == 0 && status.last_reason == Pixel17NegotiationReject::Audio);
+    check(status.rejected[static_cast<size_t>(Pixel17NegotiationReject::Audio)] == 1 && status.hints_known);
+    check(status.source_index == 5 && status.source_priority == 10001 && status.last_capability && !status.last_peer_update);
+    check(status.user.type == user.codec_type && status.user.rate == user.sample_rate && status.user.bits == user.bits_per_sample);
+    check(status.audio.type == audio.codec_type && status.audio.bits == audio.bits_per_sample && status.audio.specific_nonzero == 0);
+    check(status.peer_bytes == kCodecInfoSize && !std::memcmp(status.peer, peer.data(), status.peer_bytes));
+    const auto captured = status;
+    peer[0] ^= 0xff;
+    check(!std::memcmp(pixel17_codec_negotiation_status(object).peer, captured.peer, sizeof(status.peer)),
+          "Diagnostic peer bytes must be a bounded copy, not an input alias");
+    check(pixel17_codec_negotiation_status(other).config_calls == 0,
+          "Another registry object must not inherit this rejection");
+    check(make_capabilities(peer.data(), peer.size()));
+    audio.bits_per_sample = kPixel17PcmMask; put(object, config_offsets[4], audio);
+    user.channel_mode = 1; user.codec_specific[2] = -1; put(object, config_offsets[3], user);
+    check(pixel17_codec_set_config(object, peer.data(), peer.size(), true, out.data(), out.size()) != 0);
+    status = pixel17_codec_negotiation_status(object);
+    check(status.last_reason == Pixel17NegotiationReject::User && status.user.channels == 1 && status.user.specific_nonzero == 4);
+    user.channel_mode = 2; user.codec_specific[2] = 0; put(object, config_offsets[3], user);
+    check(pixel17_codec_set_config(object, peer.data(), peer.size(), true, out.data(), out.size()) == 0);
+    const auto after_success = pixel17_codec_negotiation_status(object);
+    check(after_success.config_calls == 3 && after_success.last_reason == Pixel17NegotiationReject::User &&
+          after_success.last_boottime_ns == status.last_boottime_ns,
+          "A successful feasibility check must not erase the previous rejection");
+    check(pixel17_codec_set_peer(object, peer.data(), peer.size()));
+    check(!pixel17_codec_set_peer(object, nullptr, peer.size()));
+    status = pixel17_codec_negotiation_status(object);
+    check(status.peer_calls == 2 && status.last_reason == Pixel17NegotiationReject::Arguments &&
+          status.last_peer_update && !status.hints_known && status.peer_bytes == 0);
+    check(pixel17_codec_negotiation_status(nullptr).config_calls == 0);
+    check_extensions(object);
+    dispose(object); dispose(other);
+}
+
+void concurrent_negotiation_snapshot() {
+    void* object = pixel17_codec_create(5, 10001); check(object);
+    std::array<uint8_t, 45> peer{}, out{};
+    check(make_capabilities(peer.data(), peer.size()));
+    Pixel17NativeConfig user{5, 0, 2, kPixel17PcmMask, 2, 0, {0, 0, 0, 0}, 0};
+    Pixel17NativeConfig audio{0, 0, 1, kPixel17PcmMask, 2, 0, {0, 0, 0, 0}, 0};
+    put(object, config_offsets[3], user); put(object, config_offsets[4], audio);
+    std::atomic<bool> done{false};
+    std::thread writer([&] {
+        for (size_t i = 0; i < 500; ++i)
+            check(pixel17_codec_set_config(object, peer.data(), peer.size(), true, out.data(), out.size()) != 0);
+        done = true;
+    });
+    uint64_t previous = 0;
+    do {
+        const auto status = pixel17_codec_negotiation_status(object);
+        check(status.config_calls >= previous && status.config_calls == status.rejected[static_cast<size_t>(Pixel17NegotiationReject::Audio)]);
+        if (status.config_calls) check(status.hints_known && status.audio.rate == 1 && status.user.rate == 2 && status.peer_bytes == kCodecInfoSize);
+        previous = status.config_calls;
+    } while (!done);
+    writer.join();
+    check(pixel17_codec_negotiation_status(object).config_calls == 500);
+    dispose(object);
+}
+
 void bounds_and_lossless_copies() {
     void* object = pixel17_codec_create(5, 0);
     check(object);
@@ -340,6 +418,8 @@ void destruction_waits_for_reader_and_slots_are_bounded() {
         std::unique_lock<std::mutex> guard(block_mutex);
         check(changed.wait_for(guard, std::chrono::seconds(2), [] { return reader_entered; }));
     }
+    check(pixel17_codec_negotiation_status(selected).config_calls == 0,
+          "A diagnostic snapshot must remain available while the host codec lock is blocked");
     const auto deleting = method<void (*)(void*)>(selected, 1);
     std::thread destroyer([&] { deleting(selected); destroyed = true; });
     for (int i = 0; i < 200 && pixel17_codec_owns(selected); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -402,6 +482,7 @@ void quarantine_preserves_destruction() {
     check(make_capabilities(info.data(), info.size()));
     check(!pixel17_codec_info(object, out.data(), out.size()));
     check(pixel17_codec_set_config(object, info.data(), info.size(), true, out.data(), out.size()) != 0);
+    check(pixel17_codec_negotiation_status(object).last_reason == Pixel17NegotiationReject::Quarantined);
     check(!pixel17_codec_set_peer(object, info.data(), info.size()));
     const auto before = debug_calls.load();
     method<void (*)(void*, int)>(object, 8)(object, 74);
@@ -424,6 +505,8 @@ int main(int argc, char** argv) {
     constructor_failure_cleanup();
     negotiation_and_status();
     selectable_requires_peer_capabilities();
+    passive_negotiation_diagnostics();
+    concurrent_negotiation_snapshot();
     bounds_and_lossless_copies();
     destruction_waits_for_reader_and_slots_are_bounded();
     debug_lifetime();

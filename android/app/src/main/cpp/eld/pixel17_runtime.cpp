@@ -391,6 +391,36 @@ void debug_codec(const void* codec,int fd) {
         static_cast<unsigned>(clock.phase),static_cast<unsigned>(clock.stop_reason),
         static_cast<unsigned long long>(clock.stop_media_age_us),clock.stop_host_queue_length,
         static_cast<long long>(clock.signed_progress_frames));
+    dprintf(fd,"  Feeding: resets_since_init=%llu primer_aus_since_init=%llu primer_remaining=%u read_calls_since_reset=%llu pcm_bytes_since_reset=%llu\n"
+        "  PCM read results since init: zero=%llu short_nonzero=%llu\n"
+        "  PCM read duration counts since init (us <100,<500,<1000,<5000,<10000,<20000,>=20000; valid clocks only): %llu,%llu,%llu,%llu,%llu,%llu,%llu\n",
+        static_cast<unsigned long long>(status.feeding_resets),static_cast<unsigned long long>(status.primer_aus),
+        status.primer_remaining,static_cast<unsigned long long>(status.feeding_read_calls),
+        static_cast<unsigned long long>(status.feeding_read_bytes),static_cast<unsigned long long>(status.pcm_zero_reads),
+        static_cast<unsigned long long>(status.pcm_short_reads),
+        static_cast<unsigned long long>(status.pcm_read_duration_counts[0]),static_cast<unsigned long long>(status.pcm_read_duration_counts[1]),
+        static_cast<unsigned long long>(status.pcm_read_duration_counts[2]),static_cast<unsigned long long>(status.pcm_read_duration_counts[3]),
+        static_cast<unsigned long long>(status.pcm_read_duration_counts[4]),static_cast<unsigned long long>(status.pcm_read_duration_counts[5]),
+        static_cast<unsigned long long>(status.pcm_read_duration_counts[6]));
+    const auto negotiation=pixel17_codec_negotiation_status(codec);
+    dprintf(fd,"  Negotiation object-lifetime: config_calls=%llu peer_calls=%llu rejects=",
+        static_cast<unsigned long long>(negotiation.config_calls),static_cast<unsigned long long>(negotiation.peer_calls));
+    for(size_t i=1;i<static_cast<size_t>(Pixel17NegotiationReject::Count);++i)
+        dprintf(fd,"%s%s:%llu",i==1 ? "" : ",",pixel17_negotiation_reject_name(static_cast<Pixel17NegotiationReject>(i)),
+            static_cast<unsigned long long>(negotiation.rejected[i]));
+    dprintf(fd,"\n  Last negotiation reject: reason=%s operation=%s capability=%d boottime_ns=%llu hints_known=%d source_index=%d source_priority=%d\n",
+        pixel17_negotiation_reject_name(negotiation.last_reason),negotiation.last_peer_update ? "peer" : "config",
+        negotiation.last_capability,static_cast<unsigned long long>(negotiation.last_boottime_ns),negotiation.hints_known,
+        negotiation.source_index,negotiation.source_priority);
+    if(negotiation.hints_known) {
+        for(const auto* hint:{&negotiation.user,&negotiation.audio})
+            dprintf(fd,"    %s: type=%d priority=%d rate_mask=%u bits_mask=%u channels_mask=%u specific_nonzero_mask=%u\n",
+                hint==&negotiation.user ? "user" : "audio",hint->type,hint->priority,hint->rate,hint->bits,hint->channels,
+                static_cast<unsigned>(hint->specific_nonzero));
+    }
+    dprintf(fd,"    peer_cie_bytes=%zu hex=",negotiation.peer_bytes);
+    for(size_t i=0;i<negotiation.peer_bytes;++i) dprintf(fd,"%02x",static_cast<unsigned>(negotiation.peer[i]));
+    dprintf(fd,"\n");
 }
 struct Hook { const char* name; void* replacement; void** original; void* target=nullptr; };
 bool transaction(const Image& image,Hook* hooks,size_t count,RuntimeHook install,RuntimeUnhook remove) {

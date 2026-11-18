@@ -8,6 +8,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import org.robolectric.util.ReflectionHelpers
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -295,6 +296,24 @@ class RootHeadTrackerProbeTest {
         } finally { pipe[1].close(); probe.close() }
     }
 
+    @Test fun ordinaryRegistrationBusyOrSinkFailureNeverReservesPreferenceCleanup() {
+        for (busy in listOf(true, false)) {
+            val platform = Platform().apply { state = initial.copy(headTrackerEnabled = true) }
+            val mutations = CopyOnWriteArrayList<Boolean>()
+            val probe = RootHeadTrackerProbe(platform, { _, _, _ -> error("sink_open_failed") }, { cleanup, action ->
+                mutations += cleanup
+                if (busy) error("busy") else action()
+            }, { true }) { System.nanoTime() / 1_000_000 }
+            val pipe = ParcelFileDescriptor.createPipe()
+            try {
+                assertFalse(probe.openNormal(address, Owner(), pipe[0], Events(), false).getBoolean("ready"))
+            } finally { pipe[1].close(); probe.close() }
+            assertEquals(listOf(false), mutations)
+            assertTrue(platform.writes.isEmpty())
+            assertEquals(true, platform.state.headTrackerEnabled)
+        }
+    }
+
     @Test fun explicitOffDisablesAlreadyTruePreferenceEvenAfterNormalSessionHasClosed() {
         val platform = Platform().apply { state = initial.copy(headTrackerEnabled = true) }
         val owner = Owner(); val probe = probe(platform); val pipe = ParcelFileDescriptor.createPipe()
@@ -310,6 +329,39 @@ class RootHeadTrackerProbeTest {
         } finally { pipe[1].close(); probe.close() }
     }
 
+    @Test fun explicitOffAcceptsNextOwnerCheckBeforeWorkerReturnsToQueue() {
+        val platform = Platform().apply { state = initial.copy(headTrackerEnabled = true) }
+        val probe = probe(platform)
+        val original = ReflectionHelpers.getField<java.util.concurrent.ThreadPoolExecutor>(probe, "preferenceChecks")
+        val queue = original.queue; original.shutdownNow()
+        val workerReleased = CountDownLatch(1); val secondSubmitted = CountDownLatch(1)
+        val executions = AtomicInteger(); val completed = AtomicInteger()
+        val executor = object : java.util.concurrent.ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS,
+            queue, java.util.concurrent.ThreadFactory { action -> Thread(action).apply { isDaemon = true } },
+            java.util.concurrent.ThreadPoolExecutor.AbortPolicy()) {
+            override fun execute(command: Runnable) {
+                try { super.execute(command) }
+                finally { if (executions.incrementAndGet() == 2) secondSubmitted.countDown() }
+            }
+            override fun afterExecute(command: Runnable, error: Throwable?) {
+                if (completed.incrementAndGet() == 1) check(workerReleased.await(2, TimeUnit.SECONDS))
+            }
+        }
+        ReflectionHelpers.setField(probe, "preferenceChecks", executor)
+        val result = AtomicReference<android.os.Bundle>()
+        val off = kotlin.concurrent.thread { result.set(probe.disable(address, Owner())) }
+        try {
+            assertTrue(secondSubmitted.await(1, TimeUnit.SECONDS))
+            // Future.get has completed, but the first worker is deliberately not available for queue.take yet.
+            assertTrue(platform.writes.isEmpty())
+            workerReleased.countDown()
+            off.join(1_500); assertFalse(off.isAlive)
+            assertTrue(result.get().toString(), result.get().getBoolean("applied"))
+            assertEquals(listOf(false), platform.writes)
+            assertEquals(2, executions.get())
+        } finally { workerReleased.countDown(); off.join(1_500); probe.close() }
+    }
+
     @Test fun explicitOffRefusesStaleOwnerUnknownDeviceAndRevokedPermission() {
         for (trigger in listOf("owner", "pair", "permission", "address")) {
             val platform = Platform().apply { state = initial.copy(headTrackerEnabled = true) }
@@ -321,6 +373,56 @@ class RootHeadTrackerProbeTest {
                 assertTrue(platform.writes.isEmpty())
             } finally { probe.close() }
         }
+    }
+
+    @Test fun explicitOffWaitsForDelayedAtmosRetirementAndNeverWritesForAnInvalidatedOwner() {
+        for (invalidateOwner in listOf(false, true)) {
+            val platform = Platform().apply { state = initial.copy(headTrackerEnabled = true) }
+            val owner = Owner(); val nativeLive = AtomicBoolean(true); val admissionBlocked = CountDownLatch(1)
+            val actions = AtomicInteger()
+            val probe = probe(platform, mutate = { cleanup, action ->
+                assertFalse(cleanup)
+                if (nativeLive.get()) { admissionBlocked.countDown(); throw IllegalStateException("busy") }
+                actions.incrementAndGet(); action()
+            })
+            val result = AtomicReference<android.os.Bundle>()
+            val off = kotlin.concurrent.thread { result.set(probe.disable(address, owner)) }
+            try {
+                assertTrue(admissionBlocked.await(1, TimeUnit.SECONDS))
+                assertTrue(platform.writes.isEmpty())
+                if (invalidateOwner) owner.current = false
+                nativeLive.set(false) // The scoped one-way retirement arrives after Off's first admission attempt.
+                off.join(1_500); assertFalse(off.isAlive)
+                assertEquals(!invalidateOwner, result.get().getBoolean("applied"))
+                assertEquals(if (invalidateOwner) emptyList<Boolean>() else listOf(false), platform.writes)
+                assertEquals(if (invalidateOwner) 0 else 1, actions.get())
+            } finally { owner.current = false; nativeLive.set(false); off.join(1_500); probe.close() }
+        }
+    }
+
+    @Test fun explicitOffNeverRetriesBusyAfterEnteringTheMutationAction() {
+        val platform = Platform().apply { state = initial.copy(headTrackerEnabled = true) }
+        val calls = AtomicInteger()
+        val probe = probe(platform, mutate = { _, action ->
+            calls.incrementAndGet(); action(); throw IllegalStateException("busy")
+        })
+        try {
+            assertFalse(probe.disable(address, Owner()).getBoolean("applied"))
+            assertEquals(1, calls.get()); assertEquals(listOf(false), platform.writes)
+        } finally { probe.close() }
+    }
+
+    @Test fun explicitOffAdmissionRetryStopsAtItsOriginalDeadline() {
+        val platform = Platform().apply { state = initial.copy(headTrackerEnabled = true) }
+        val time = java.util.concurrent.atomic.AtomicLong(100)
+        val calls = AtomicInteger()
+        val probe = RootHeadTrackerProbe(platform, { _, _, _ -> error("no sink") }, { _, _ ->
+            calls.incrementAndGet(); time.addAndGet(3_000); throw IllegalStateException("busy")
+        }, { true }, time::get)
+        try {
+            assertFalse(probe.disable(address, Owner()).getBoolean("applied"))
+            assertEquals(1, calls.get()); assertTrue(platform.writes.isEmpty())
+        } finally { probe.close() }
     }
 
     @Test fun blockedOffOwnerHasOneBoundedPollerAndCannotWriteAfterTimeout() {
@@ -339,6 +441,8 @@ class RootHeadTrackerProbeTest {
             assertTrue(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started) < 1_500)
             repeat(3) { assertFalse(probe.disable(address, owner).getBoolean("applied")) }
             assertEquals(1, calls.get()); assertTrue(platform.writes.isEmpty())
+            val executor = ReflectionHelpers.getField<java.util.concurrent.ThreadPoolExecutor>(probe, "preferenceChecks")
+            assertEquals(1, executor.poolSize); assertTrue(executor.queue.isEmpty())
             release.countDown(); Thread.sleep(30); assertTrue(platform.writes.isEmpty())
         } finally { release.countDown(); probe.close() }
     }
@@ -398,7 +502,12 @@ class RootHeadTrackerProbeTest {
             stats = HeadTrackerSinkStats(2, 3, 1, 2, 10, 11.5, 13, 3, 0, 5.0, 10,
                 sourceReuses = 2, extrapolatedInputs = 1, skippedInputs = 4,
                 maxHidGapAtNanos = 150_000_000, sourceAgeAtMaxHidGapNanos = 5_000_000,
-                previousSourceTimestampAtMaxHidGapNanos = 8_000_000, sourceTimestampAtMaxHidGapNanos = 145_000_000)
+                previousSourceTimestampAtMaxHidGapNanos = 8_000_000, sourceTimestampAtMaxHidGapNanos = 145_000_000,
+                newSourceAge = HeadTrackerTimingRange(2, 1, 2.0, 3),
+                reusedSourceAge = HeadTrackerTimingRange(1, 4, 4.0, 4),
+                pipeFrameHostAge = HeadTrackerTimingRange(3, 5, 6.0, 7),
+                deadlineLateness = HeadTrackerTimingRange(4, 8, 9.0, 10),
+                overdueSlots = 11, missedPeriods = 12, timingClockAnomalies = 13)
         }
         val probe = probe(platform, sink); val pipe = ParcelFileDescriptor.createPipe(); val owner = Owner()
         try {
@@ -416,6 +525,18 @@ class RootHeadTrackerProbeTest {
             assertEquals(11.5, stats.getDouble("hid_interval_mean_nanos"), 0.0)
             assertEquals(5.0, stats.getDouble("host_source_age_mean_nanos"), 0.0)
             assertEquals("host_frame_timestamp_to_uhid_submission", stats.getString("age_scope"))
+            assertEquals(2L, stats.getLong("new_source_host_age_count"))
+            assertEquals(1L, stats.getLong("new_source_host_age_min_nanos"))
+            assertEquals(2.0, stats.getDouble("new_source_host_age_mean_nanos"), 0.0)
+            assertEquals(3L, stats.getLong("new_source_host_age_max_nanos"))
+            assertEquals(4L, stats.getLong("reused_source_host_age_max_nanos"))
+            assertEquals(7L, stats.getLong("pipe_frame_host_age_max_nanos"))
+            assertEquals(10L, stats.getLong("hid_deadline_lateness_max_nanos"))
+            assertEquals(11L, stats.getLong("hid_overdue_slots"))
+            assertEquals(12L, stats.getLong("hid_missed_periods"))
+            assertEquals(13L, stats.getLong("timing_clock_anomalies"))
+            assertEquals("bluetooth_read_completion_to_root_pipe_receipt", stats.getString("pipe_age_scope"))
+            assertEquals("scheduled_hid_slot_to_pre_write_host_time_after_first_input", stats.getString("deadline_scope"))
             assertTrue(stats.getBoolean("excludes_acoustic_latency"))
         } finally { pipe[1].close(); probe.close() }
     }

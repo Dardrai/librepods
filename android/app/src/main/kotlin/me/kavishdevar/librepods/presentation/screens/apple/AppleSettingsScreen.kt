@@ -618,7 +618,7 @@ internal fun nativeGameModeDescription(state: NativeGameModeController.State, en
         NativeGameModeController.Issue.CLOCK_UNCONFIRMED,
         NativeGameModeController.Issue.RESTORE_UNCONFIRMED,
         NativeGameModeController.Issue.OWNER_LOST) -> R.string.native_game_mode_start_failed
-    state.restoring -> R.string.native_game_mode_stopping
+    state.restoring -> if (enabled) R.string.native_game_mode_starting else R.string.native_game_mode_stopping
     state.issue == NativeGameModeController.Issue.RESTORE_UNCONFIRMED ||
         (state.remoteRestorePending && !state.active && state.issue in setOf(
             NativeGameModeController.Issue.REQUEST_FAILED,

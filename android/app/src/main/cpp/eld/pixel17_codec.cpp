@@ -7,6 +7,7 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <time.h>
 #include <unordered_map>
 
 namespace eld {
@@ -31,6 +32,8 @@ struct Context {
     void* object;
     std::array<uintptr_t, kPixel17CodecVtableEntries + 2> vtable{};
     size_t readers = 0;
+    std::mutex diagnostic_mutex;
+    Pixel17NegotiationStatus negotiation{};
 };
 std::unordered_map<const void*, std::shared_ptr<Context>> registry;
 
@@ -87,6 +90,40 @@ bool accepts(const Pixel17NativeConfig& config, int32_t index, bool type_require
     for (auto value : config.codec_specific) if (value) return false;
     // Padding and opaque_tail are never assigned a guessed semantic or normalized in caller records.
     return true;
+}
+
+Pixel17CodecHintSnapshot hint_snapshot(const Pixel17NativeConfig& config) {
+    Pixel17CodecHintSnapshot out{config.codec_type, config.codec_priority, config.sample_rate,
+        config.bits_per_sample, config.channel_mode, 0};
+    for (size_t i = 0; i < 4; ++i) if (config.codec_specific[i]) out.specific_nonzero |= 1U << i;
+    return out;
+}
+void note_negotiation(Context& context, bool peer_update, bool capability, Pixel17NegotiationReject reason,
+                      const uint8_t* peer = nullptr, const Pixel17NativeConfig* user = nullptr,
+                      const Pixel17NativeConfig* audio = nullptr, int32_t index = 0, int32_t priority = 0) {
+    // This mutex is never held across a host call or host/registry lock acquisition.
+    std::lock_guard<std::mutex> guard(context.diagnostic_mutex);
+    auto& status = context.negotiation;
+    auto increment = [](uint64_t& count) { if (count != UINT64_MAX) ++count; };
+    increment(peer_update ? status.peer_calls : status.config_calls);
+    if (reason == Pixel17NegotiationReject::None) return;
+    increment(status.rejected[static_cast<size_t>(reason)]);
+    status.last_reason = reason;
+    status.last_boottime_ns = 0;
+#if defined(CLOCK_BOOTTIME)
+    timespec now{};
+    if (!clock_gettime(CLOCK_BOOTTIME, &now) && now.tv_sec >= 0 && now.tv_nsec >= 0 && now.tv_nsec < 1000000000 &&
+        uint64_t(now.tv_sec) <= (UINT64_MAX - uint64_t(now.tv_nsec)) / 1000000000)
+        status.last_boottime_ns = uint64_t(now.tv_sec) * 1000000000 + uint64_t(now.tv_nsec);
+#endif
+    status.last_peer_update = peer_update; status.last_capability = capability;
+    status.hints_known = user && audio;
+    status.source_index = index; status.source_priority = priority;
+    status.user = user ? hint_snapshot(*user) : Pixel17CodecHintSnapshot{};
+    status.audio = audio ? hint_snapshot(*audio) : Pixel17CodecHintSnapshot{};
+    status.peer_bytes = peer ? kCodecInfoSize : 0;
+    std::memset(status.peer, 0, sizeof(status.peer));
+    if (peer) std::memcpy(status.peer, peer, kCodecInfoSize);
 }
 
 void destroy(void* object, size_t slot) {
@@ -237,6 +274,25 @@ size_t pixel17_codec_active_objects() {
 }
 void pixel17_codec_quarantine() { quarantined.store(true); }
 
+Pixel17NegotiationStatus pixel17_codec_negotiation_status(const void* object) {
+    const auto lease = acquire(object);
+    if (!lease) return {};
+    std::lock_guard<std::mutex> guard(lease.context->diagnostic_mutex);
+    return lease.context->negotiation;
+}
+const char* pixel17_negotiation_reject_name(Pixel17NegotiationReject reason) {
+    switch (reason) {
+        case Pixel17NegotiationReject::None: return "none";
+        case Pixel17NegotiationReject::Arguments: return "arguments";
+        case Pixel17NegotiationReject::Quarantined: return "quarantined";
+        case Pixel17NegotiationReject::PeerCapabilities: return "peer-capabilities";
+        case Pixel17NegotiationReject::PeerConfiguration: return "peer-configuration";
+        case Pixel17NegotiationReject::User: return "user";
+        case Pixel17NegotiationReject::Audio: return "audio";
+        default: return "unknown";
+    }
+}
+
 bool pixel17_codec_info(const void* object, uint8_t* out, size_t size) {
     if (!out || size < kCodecInfoSize || size > kPixel17CodecStorage) return false;
     const auto lease = acquire(object);
@@ -257,22 +313,33 @@ bool pixel17_codec_get_config(const void* object, Pixel17NativeConfig* out) {
 }
 uint8_t pixel17_codec_set_config(void* object, const uint8_t* peer, size_t peer_size,
                                 bool capability, uint8_t* out, size_t out_size) {
-    if (!peer || !out || peer_size < kCodecInfoSize || peer_size > kPixel17CodecStorage ||
-        out_size < kCodecInfoSize || out_size > kPixel17CodecStorage) return kUnsupportedConfiguration;
     const auto lease = acquire(object);
-    if (!lease || quarantined.load()) return kUnsupportedConfiguration;
+    auto reject = [&](Pixel17NegotiationReject reason, const uint8_t* observed_peer = nullptr,
+                      const Pixel17NativeConfig* user = nullptr, const Pixel17NativeConfig* audio = nullptr,
+                      int32_t index = 0, int32_t priority = 0) {
+        if (lease) note_negotiation(*lease.context, false, capability, reason, observed_peer, user, audio, index, priority);
+        return kUnsupportedConfiguration;
+    };
+    if (!peer || !out || peer_size < kCodecInfoSize || peer_size > kPixel17CodecStorage ||
+        out_size < kCodecInfoSize || out_size > kPixel17CodecStorage) return reject(Pixel17NegotiationReject::Arguments);
+    if (!lease) return kUnsupportedConfiguration;
+    if (quarantined.load()) return reject(Pixel17NegotiationReject::Quarantined);
     std::array<uint8_t, kPixel17CodecStorage> selected{}, saved_peer{};
     if (capability) {
-        if (!select_configuration(peer, peer_size, selected.data(), selected.size())) return kUnsupportedConfiguration;
+        if (!select_configuration(peer, peer_size, selected.data(), selected.size()))
+            return reject(Pixel17NegotiationReject::PeerCapabilities, peer);
     } else {
-        if (!valid_configuration(peer, peer_size)) return kUnsupportedConfiguration;
+        if (!valid_configuration(peer, peer_size)) return reject(Pixel17NegotiationReject::PeerConfiguration, peer);
         std::memcpy(selected.data(), peer, kCodecInfoSize);
     }
     std::memcpy(saved_peer.data(), peer, peer_size);
     CodecLock guard(object);
     const auto index = load<int32_t>(object, kIndex);
-    if (quarantined.load() || !accepts(load<Pixel17NativeConfig>(object, kUser), index, true) ||
-        !accepts(load<Pixel17NativeConfig>(object, kAudio), index, false)) return kUnsupportedConfiguration;
+    if (quarantined.load()) return reject(Pixel17NegotiationReject::Quarantined, peer);
+    const auto user = load<Pixel17NativeConfig>(object, kUser), audio = load<Pixel17NativeConfig>(object, kAudio);
+    const auto priority = load<int32_t>(object, kPriority);
+    if (!accepts(user, index, true)) return reject(Pixel17NegotiationReject::User, peer, &user, &audio, index, priority);
+    if (!accepts(audio, index, false)) return reject(Pixel17NegotiationReject::Audio, peer, &user, &audio, index, priority);
     const auto fixed = fixed_config(index, load<int32_t>(object, kPriority));
     store(object, kCurrent, fixed);
     store(object, kSelectable, fixed);
@@ -280,19 +347,26 @@ uint8_t pixel17_codec_set_config(void* object, const uint8_t* peer, size_t peer_
     std::memcpy(static_cast<uint8_t*>(object) + (capability ? kPeerCaps : kPeerConfig),
                 saved_peer.data(), saved_peer.size());
     std::memcpy(out, selected.data(), out_size);
+    note_negotiation(*lease.context, false, capability, Pixel17NegotiationReject::None);
     return 0;
 }
 bool pixel17_codec_set_peer(void* object, const uint8_t* peer, size_t peer_size) {
-    if (!peer || peer_size < kCodecInfoSize || peer_size > kPixel17CodecStorage) return false;
     const auto lease = acquire(object);
-    if (!lease || quarantined.load()) return false;
+    auto reject = [&](Pixel17NegotiationReject reason, const uint8_t* observed_peer = nullptr) {
+        if (lease) note_negotiation(*lease.context, true, true, reason, observed_peer);
+        return false;
+    };
+    if (!peer || peer_size < kCodecInfoSize || peer_size > kPixel17CodecStorage) return reject(Pixel17NegotiationReject::Arguments);
+    if (!lease) return false;
+    if (quarantined.load()) return reject(Pixel17NegotiationReject::Quarantined);
     std::array<uint8_t, kPixel17CodecStorage> selected{}, saved_peer{};
-    if (!select_configuration(peer, peer_size, selected.data(), selected.size())) return false;
+    if (!select_configuration(peer, peer_size, selected.data(), selected.size())) return reject(Pixel17NegotiationReject::PeerCapabilities, peer);
     std::memcpy(saved_peer.data(), peer, peer_size);
     CodecLock guard(object);
-    if (quarantined.load()) return false;
+    if (quarantined.load()) return reject(Pixel17NegotiationReject::Quarantined, peer);
     std::memcpy(static_cast<uint8_t*>(object) + kPeerCaps, saved_peer.data(), saved_peer.size());
     store(object, kSelectable, fixed_config(load<int32_t>(object, kIndex), load<int32_t>(object, kPriority)));
+    note_negotiation(*lease.context, true, true, Pixel17NegotiationReject::None);
     return true;
 }
 bool pixel17_copy_config(const void* bytes, size_t size, Pixel17NativeConfig* out) {

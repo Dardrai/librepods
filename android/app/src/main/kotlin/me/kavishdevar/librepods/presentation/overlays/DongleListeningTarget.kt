@@ -50,7 +50,7 @@ internal data class DongleListeningTarget private constructor(
 
     fun write(setting: QuickSetting, enabled: Boolean): Boolean {
         val current = snapshot() ?: return false
-        val toggle = current.quickSettings.first { it.setting == setting }
+        val toggle = current.quickSettings.firstOrNull { it.setting == setting } ?: return false
         if (!toggle.enabled || toggle.checked == null || toggle.checked == enabled) return false
         setting.control?.let { id ->
             val number = id.value.toInt() and 255

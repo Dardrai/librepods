@@ -89,7 +89,7 @@ internal class HeadTrackingTiming {
         putLong("first_fallback_at_nanos", firstFallbackAt)
         putString("first_fallback_reason", firstFallbackReason)
         putLong("first_fallback_last_attitude_at_nanos", lastAttitudeAtFallback)
-        putString("age_scope", "parsed_source_callback_to_app_collection")
+        putString("age_scope", "bluetooth_read_completion_to_app_collection")
         putBoolean("excludes_acoustic_latency", true)
         putLong("latest_epoch_request_at_nanos", epochRequestAt)
         putLong("latest_epoch_first_collection_at_nanos", firstCollectionAt)

@@ -21,7 +21,7 @@ internal interface CompanionLinkStorage {
 }
 
 /** The peer allowlist and its secret are encrypted together and excluded from Android backup. */
-internal class CompanionLinkStore(context: Context, pending: Boolean = false) : CompanionLinkStorage {
+internal class CompanionLinkStore(context: Context, private val pending: Boolean = false) : CompanionLinkStorage {
     private val file = AtomicFile(File(context.noBackupFilesDir, if (pending) "companion-link-pending" else "companion-link"))
     private val alias = if (pending) "librepods.companion.pending.v1" else "librepods.companion.link.v1"
     private fun key(): SecretKey {
@@ -62,5 +62,10 @@ internal class CompanionLinkStore(context: Context, pending: Boolean = false) : 
         }
     }
 
-    override fun clear() = file.delete()
+    override fun clear() {
+        file.delete()
+        check(pending || listOf("", ".new", ".bak").none { File(file.baseFile.path + it).exists() }) {
+            "Could not remove the saved PC link"
+        }
+    }
 }

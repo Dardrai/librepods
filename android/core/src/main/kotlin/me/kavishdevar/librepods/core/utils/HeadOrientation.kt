@@ -27,7 +27,7 @@ import me.kavishdevar.librepods.core.data.apple.MotionReport
 
 data class Acceleration(val vertical: Float = 0f, val horizontal: Float = 0f)
 
-/** Parsed-source arrival uses Android elapsedRealtimeNanos, independently of the sensor clock. */
+/** Arrival is when the Bluetooth read completed, on Android's elapsedRealtimeNanos clock. */
 data class MotionSample(val report: MotionReport, val arrivalNs: Long) {
     init { require(arrivalNs > 0) }
 }

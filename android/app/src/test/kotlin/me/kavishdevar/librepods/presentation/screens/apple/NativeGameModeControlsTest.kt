@@ -104,5 +104,7 @@ class NativeGameModeControlsTest {
             nativeGameModeDescription(starting.copy(active = true), true))
         assertEquals(R.string.native_game_mode_stopping,
             nativeGameModeDescription(starting.copy(restoring = true), false))
+        assertEquals(R.string.native_game_mode_starting,
+            nativeGameModeDescription(starting.copy(restoring = true), true))
     }
 }

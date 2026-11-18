@@ -17,7 +17,7 @@ import me.kavishdevar.librepods.core.utils.MotionSample
 import me.kavishdevar.librepods.shizuku.HeadTrackerUhidProtocol
 import kotlin.time.Duration.Companion.milliseconds
 
-internal class CalibratedHeadMotionFault(reason: String) : IllegalStateException(reason)
+internal class CalibratedHeadMotionFault(reason: String, val verifiedSensorGap: Boolean = false) : IllegalStateException(reason)
 
 internal fun spatialPoseProfileKey(device: AppleDevice): SpatialPoseProfileKey? {
     val metadata = device.metadata.value
@@ -33,6 +33,8 @@ internal suspend fun streamCalibratedHeadMotion(device: AppleDevice, motion: Flo
     profile: SpatialPoseProfile, discontinuity: Int, current: () -> Boolean,
     timing: HeadTrackingTiming = HeadTrackingTiming(), now: () -> Long = { SystemClock.elapsedRealtimeNanos() },
     tryFast: Boolean = true, onFallback: () -> Unit = {},
+    recovery: HeadMotionGapRecovery? = null,
+    recoveryActive: () -> Boolean = { true },
     submit: (SpatialPose, Long) -> Unit) {
     val owner = Any()
     try {
@@ -45,14 +47,16 @@ internal suspend fun streamCalibratedHeadMotion(device: AppleDevice, motion: Flo
             check(current() && device.startHeadTracking(owner, 20.milliseconds)) { "motion_unavailable" }
         }
         timing.begin(startedAt); timing.requested(if (fast) 10_000 else 20_000, fallback = !fast)
-        val converter = SpatialPoseConverter(profile, discontinuity)
+        val converter = SpatialPoseConverter(profile, discontinuity, fenceStartupZeros = true)
         var previousCounter: Long? = null
-        val firstAttitude = kotlinx.coroutines.CompletableDeferred<Unit>()
+        var lastSubmittedReceipt = 0L
+        val firstPose = kotlinx.coroutines.CompletableDeferred<Unit>()
         val lastAttitudeAt = AtomicLong()
         kotlinx.coroutines.coroutineScope {
             val fallback = if (fast) launch(Dispatchers.IO) {
                 // Cold audio startup can take ~1.8 s; leave 2 s for fallback within the sink's 5 s startup budget.
-                val received = withTimeoutOrNull(3_000) { firstAttitude.await(); true } == true
+                // A retained nonzero tail is not ready: startup zeros can still follow it.
+                val received = withTimeoutOrNull(3_000) { firstPose.await(); true } == true
                 var fallbackAt = now()
                 var fallbackLastAttitudeAt = lastAttitudeAt.get()
                 if (received) {
@@ -92,14 +96,22 @@ internal suspend fun streamCalibratedHeadMotion(device: AppleDevice, motion: Flo
                             report.timestampNs == profile.referenceTimestampNs && report.counter == profile.referenceCounter
                         if (!converter.invalidated && !savedReference && report.attitudeQ15.any { it != 0 })
                             timing.validAttitude(collectedAt)
-                        pose?.let {
-                            submit(it, sample.arrivalNs)
-                            timing.poseSubmitted(now())
+                        // Both sinks require increasing timestamps, even when one read contains multiple reports.
+                        if (pose != null && sample.arrivalNs > lastSubmittedReceipt) {
+                            submit(pose, sample.arrivalNs)
+                            lastSubmittedReceipt = sample.arrivalNs
+                            val submittedAt = now()
+                            timing.poseSubmitted(submittedAt)
+                            recovery?.let { budget ->
+                                if (recoveryActive()) budget.submitted(sample.arrivalNs, submittedAt)
+                                else budget.withheld()
+                            }
                         }
-                        if (converter.invalidated) throw CalibratedHeadMotionFault(converter.invalidReason ?: "motion_changed")
+                        if (converter.invalidated) throw CalibratedHeadMotionFault(converter.invalidReason ?: "motion_changed",
+                            converter.verifiedSensorGap)
                         if (pose != null || report.attitudeQ15.any { it != 0 }) {
                             lastAttitudeAt.set(sample.arrivalNs)
-                            firstAttitude.complete(Unit)
+                            if (pose != null) firstPose.complete(Unit)
                         }
                     } finally { timing.collectorFinished(callbackStartedAt, now()) }
                 }

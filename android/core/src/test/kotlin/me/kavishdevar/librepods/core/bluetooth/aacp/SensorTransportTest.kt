@@ -16,7 +16,7 @@ class SensorTransportTest {
     @Test fun motionOwnersShareOneStreamAndReleaseOnlyTheirOwnRequest() {
         val writes = mutableListOf<AACPPacket>()
         val states = mutableListOf<BuddyState>()
-        val manager = RTBuddyManager({ writes += it; true }, { true }, { true }, { 9 }, {}, {}, { states += it }, {})
+        val manager = RTBuddyManager({ writes += it; true }, { true }, { true }, { 9 }, { _, _ -> }, {}, { states += it }, {})
         // Equal values still represent two independent clients.
         data class Owner(val name: String)
         val screen = Owner("motion")
@@ -42,13 +42,13 @@ class SensorTransportTest {
         val owners = MotionOwners()
         val released = Any()
         val live = Any()
-        val original = RTBuddyManager({ true }, { true }, { true }, { 9 }, {}, {}, {}, {}, sharedMotionOwners = owners)
+        val original = RTBuddyManager({ true }, { true }, { true }, { 9 }, { _, _ -> }, {}, {}, {}, sharedMotionOwners = owners)
         original.setHeadTrackingEnabled(true, released)
         original.setHeadTrackingEnabled(true, live)
         original.close()
         owners.set(released, false) // AACP accepts release during the manager-free refresh gap.
         val writes = mutableListOf<AACPPacket>()
-        val replacement = RTBuddyManager({ writes += it; true }, { true }, { true }, { 9 }, {}, {}, {}, {}, sharedMotionOwners = owners)
+        val replacement = RTBuddyManager({ writes += it; true }, { true }, { true }, { 9 }, { _, _ -> }, {}, {}, {}, sharedMotionOwners = owners)
         try {
             replacement.reconcileHeadTracking()
             assertEquals(1, writes.size)
@@ -63,12 +63,12 @@ class SensorTransportTest {
     @Test fun releasingTheLastOwnerDuringControlRefreshCannotRestartOnTheReplacement() {
         val owners = MotionOwners()
         val owner = Any()
-        val original = RTBuddyManager({ true }, { true }, { true }, { 9 }, {}, {}, {}, {}, sharedMotionOwners = owners)
+        val original = RTBuddyManager({ true }, { true }, { true }, { 9 }, { _, _ -> }, {}, {}, {}, sharedMotionOwners = owners)
         original.setHeadTrackingEnabled(true, owner)
         original.close()
         owners.set(owner, false)
         val writes = mutableListOf<AACPPacket>()
-        val replacement = RTBuddyManager({ writes += it; true }, { true }, { true }, { 9 }, {}, {}, {}, {}, sharedMotionOwners = owners)
+        val replacement = RTBuddyManager({ writes += it; true }, { true }, { true }, { 9 }, { _, _ -> }, {}, {}, {}, sharedMotionOwners = owners)
         try {
             replacement.reconcileHeadTracking()
             replacement.setSuspended(true)
@@ -79,7 +79,7 @@ class SensorTransportTest {
 
     @Test fun caseRetirementClearsEveryOwnerAndMicrophoneResumeDoesNotReplayThem() {
         val writes = mutableListOf<AACPPacket>()
-        val manager = RTBuddyManager({ writes += it; true }, { true }, { true }, { 9 }, {}, {}, {}, {})
+        val manager = RTBuddyManager({ writes += it; true }, { true }, { true }, { 9 }, { _, _ -> }, {}, {}, {})
         try {
             manager.setHeadTrackingEnabled(true, Any())
             manager.setHeadTrackingEnabled(true, Any())
@@ -94,7 +94,7 @@ class SensorTransportTest {
 
     @Test fun requestedIntervalsUpdateTheLiveStreamWithoutRaisingLegacyRate() {
         val writes = mutableListOf<AACPPacket>()
-        val manager = RTBuddyManager({ writes += it; true }, { true }, { true }, { 9 }, {}, {}, {}, {})
+        val manager = RTBuddyManager({ writes += it; true }, { true }, { true }, { 9 }, { _, _ -> }, {}, {}, {})
         try {
             assertFalse(manager.setMotionInterval(kotlin.time.Duration.parse("5ms")))
             manager.setHeadTrackingEnabled(true)
@@ -144,7 +144,7 @@ class SensorTransportTest {
     @Test fun failedDescriptorWriteCanRetryAndSuccessfulWriteIsDeduplicated() {
         val writes = mutableListOf<AACPPacket>()
         var accept = false
-        val manager = RTBuddyManager({ writes.add(it); accept }, { true }, { true }, { 9 }, {}, {}, {}, {})
+        val manager = RTBuddyManager({ writes.add(it); accept }, { true }, { true }, { 9 }, { _, _ -> }, {}, {}, {})
         try {
             manager.requestDescriptors()
             assertEquals(1, writes.size)
@@ -161,7 +161,7 @@ class SensorTransportTest {
     @Test fun sensorIntentSuspendsAndResumesOnlyTheCapturedTransport() {
         val writes = CopyOnWriteArrayList<AACPPacket>()
         var current = true
-        val manager = RTBuddyManager({ writes.add(it); true }, { true }, { current }, { 9 }, {}, {}, {}, {})
+        val manager = RTBuddyManager({ writes.add(it); true }, { true }, { current }, { 9 }, { _, _ -> }, {}, {}, {})
         try {
             manager.requestDescriptors(); manager.requestDescriptors()
             assertEquals(1, writes.size)
@@ -190,7 +190,7 @@ class SensorTransportTest {
     @Test fun failedHeartInitializationStopsWaitingAndUnknownFirmwareDoesNotGuessMotionService() {
         val inactive = CountDownLatch(1)
         val writes = CopyOnWriteArrayList<AACPPacket>()
-        val manager = RTBuddyManager({ writes.add(it); true }, { false }, { true }, { null }, {}, {}, {},
+        val manager = RTBuddyManager({ writes.add(it); true }, { false }, { true }, { null }, { _, _ -> }, {}, {},
             { if (it == BuddyState.INACTIVE) inactive.countDown() })
         try {
             assertTrue(manager.setHeadTrackingEnabled(true))

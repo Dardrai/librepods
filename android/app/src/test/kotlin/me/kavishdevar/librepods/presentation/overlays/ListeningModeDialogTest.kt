@@ -27,6 +27,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import me.kavishdevar.librepods.LibrePodsApplication
 import me.kavishdevar.librepods.companion.PosixAtomicFileShadow
 import me.kavishdevar.librepods.R
+import me.kavishdevar.librepods.audio.NativeHeadTrackingController
+import me.kavishdevar.librepods.audio.NativeHeadTrackingState
 import me.kavishdevar.librepods.core.bluetooth.MacAddress
 import me.kavishdevar.librepods.core.bluetooth.aacp.AACPManager
 import me.kavishdevar.librepods.core.bluetooth.aacp.packet.ControlCommandPacket
@@ -535,7 +537,7 @@ class ListeningModeDialogTest {
         val popup = open(target)
         assertEquals(0, output(target).available())
         val current = requireNotNull(ReflectionHelpers.callInstanceMethod<ListeningModeSnapshot?>(popup, "getSnapshot"))
-        assertEquals(8, current.quickSettings.size)
+        assertEquals(10, current.quickSettings.size)
         for ((setting, expected, enabled) in listOf(
             Triple(QuickSetting.EAR_DETECTION, 1, false),
             Triple(QuickSetting.CONVERSATION_AWARENESS, 1, true),
@@ -549,6 +551,36 @@ class ListeningModeDialogTest {
         }
         assertFalse("Unloaded ATT settings cannot be written from the panel", popup.writeQuickSetting(QuickSetting.LOUD_SOUND_REDUCTION, true))
         assertFalse("Clinical settings need current reports and a fitting", popup.writeQuickSetting(QuickSetting.HEARING_AID, true))
+        assertFalse("Unknown spatial support cannot send settings", popup.writeQuickSetting(QuickSetting.SPATIAL_AUDIO, true))
+        assertFalse("Head tracking needs its current controller", popup.writeQuickSetting(QuickSetting.HEAD_TRACKING, true))
+    }
+
+    @Test fun spatialQuickSettingsUseTheCurrentControllerAndKeepTheirPanelOpen() {
+        val target = device()
+        val state = MutableStateFlow(NativeHeadTrackingState(enabled = true, calibrated = true, available = true,
+            spatialEnabled = true, spatialAvailable = true, spatialSupported = true))
+        val controller = mock(NativeHeadTrackingController::class.java)
+        doReturn(state).`when`(controller).state
+        app.nativeHeadTrackingControllers[target.macAddress] = controller
+        devices.value = mapOf(target.macAddress to target)
+        val popup = open(target)
+        assertTrue("Opening the spatial controls never writes", mockingDetails(controller).invocations.all { it.method.name == "getState" })
+        assertTrue(popup.writeQuickSetting(QuickSetting.SPATIAL_AUDIO, false))
+        verify(controller).setSpatialEnabled(false)
+        state.value = state.value.copy(enabled = false, spatialEnabled = false)
+        await {
+            ReflectionHelpers.callInstanceMethod<ListeningModeSnapshot?>(popup, "getSnapshot")?.quickSettings
+                ?.first { it.setting == QuickSetting.SPATIAL_AUDIO }?.checked == false
+        }
+        assertTrue(popup.writeQuickSetting(QuickSetting.HEAD_TRACKING, true))
+        verify(controller).setEnabled(true)
+        assertTrue("Spatial toggles leave their panel open", popup.isShowing)
+        assertEquals("Spatial toggles never use accessory control packets", 0, output(target).available())
+        devices.value = mapOf(target.macAddress to device())
+        assertFalse(popup.writeQuickSetting(QuickSetting.SPATIAL_AUDIO, true))
+        assertFalse(popup.writeQuickSetting(QuickSetting.HEAD_TRACKING, true))
+        popup.dismiss()
+        assertFalse(popup.writeQuickSetting(QuickSetting.SPATIAL_AUDIO, true))
     }
 
     @Test fun aFailedQuickSettingDoesNotMarkTheListeningModeRailAsFailed() {
@@ -585,6 +617,8 @@ class ListeningModeDialogTest {
         val popup = openDongle()
         assertTrue(dongle.writes.isEmpty())
         assertTrue(dongle.gameWrites.isEmpty())
+        assertFalse("Native spatial controls are unavailable on this dongle", popup.writeQuickSetting(QuickSetting.SPATIAL_AUDIO, true))
+        assertFalse(popup.writeQuickSetting(QuickSetting.HEAD_TRACKING, true))
         assertTrue(popup.writeQuickSetting(QuickSetting.EAR_DETECTION, false))
         assertTrue(popup.writeQuickSetting(QuickSetting.CONVERSATION_AWARENESS, true))
         assertTrue(popup.writeQuickSetting(QuickSetting.PERSONALIZED_VOLUME, true))

@@ -170,7 +170,8 @@ internal class RootHeadTrackerSink(
                         partial += count
                         if (partial == frame.size) {
                             now = SystemClock.elapsedRealtimeNanos()
-                            if (gate.accept(HeadTrackerUhidProtocol.decodePose(frame, now), now)) metrics.accepted()
+                            val pose = HeadTrackerUhidProtocol.decodePose(frame, now)
+                            if (gate.accept(pose, now)) metrics.accepted(pose.timestampNanos, now)
                             partial = 0; ++received
                         }
                     }
@@ -182,18 +183,19 @@ internal class RootHeadTrackerSink(
                     }
                     now = SystemClock.elapsedRealtimeNanos()
                     gate.checkFresh(now)
-                    if (protocol.reporting && now >= pacer.deadline) {
-                        gate.pose(now)?.let { pose ->
-                            val emitted = HeadTrackerUhidProtocol.poseAtHostTime(pose, now)
-                            if (emitted == null) metrics.skipped()
-                            else {
-                                HeadTrackerUhidProtocol.input(emitted, inputEvent)
-                                val submittedAt = SystemClock.elapsedRealtimeNanos()
-                                send(descriptor, inputEvent)
-                                metrics.input(pose.timestampNanos, submittedAt, emitted !== pose)
-                            }
-                            pacer.advance(SystemClock.elapsedRealtimeNanos())
+                    if (protocol.reporting && gate.hasPose && now >= pacer.deadline) {
+                        val pose = gate.pose(now)
+                        val emitted = pose?.let { HeadTrackerUhidProtocol.poseAtHostTime(it, now) }
+                        if (pose == null || emitted == null) {
+                            metrics.skipped(pacer.deadline, now, reporting.intervalNanos)
+                        } else {
+                            HeadTrackerUhidProtocol.input(emitted, inputEvent)
+                            val submittedAt = SystemClock.elapsedRealtimeNanos()
+                            send(descriptor, inputEvent)
+                            metrics.input(pose.timestampNanos, submittedAt, emitted !== pose,
+                                pacer.deadline, reporting.intervalNanos)
                         }
+                        pacer.advance(SystemClock.elapsedRealtimeNanos())
                     }
                 }
             } catch (error: Exception) {
@@ -215,7 +217,7 @@ internal class RootHeadTrackerSink(
     @Synchronized override fun close() { closed = true; active?.close() }
 
     /** Exact selected native A2DP route only; no context attribution or mutating APIs. */
-    private class NativeA2dpRoute {
+    internal class NativeA2dpRoute {
         private val api = Class.forName("android.media.IAudioService")
         private val attributes = Class.forName("android.media.AudioDeviceAttributes")
         private val service = Class.forName("android.media.IAudioService\$Stub")

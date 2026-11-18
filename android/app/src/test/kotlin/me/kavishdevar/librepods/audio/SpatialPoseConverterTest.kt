@@ -171,7 +171,7 @@ class SpatialPoseConverterTest {
 
     @Test fun fasterReportsKeepTheSamePhysicalAngularRateAndSavedCalibration() {
         val profile = checkNotNull(calibrate())
-        for (interval in listOf(5_000_000L, 10_000_000L, 20_000_000L)) {
+        for (interval in listOf(5_000_000L, 10_000_000L, 20_000_000L, 33_333_333L)) {
             val converter = SpatialPoseConverter(profile, 7)
             var head = neutral
             var time = 1_000_000_000L
@@ -312,6 +312,109 @@ class SpatialPoseConverterTest {
         assertNull(fresh.accept(first)); assertNotNull(fresh.accept(next))
     }
 
+    @Test fun capturedRestartTailAndFourZeroPlaceholdersRequireAFreshNonzeroPair() {
+        val profile = checkNotNull(calibrate()); val savedBasis = profile.headFromRaw.map { it.toList() }
+        val converter = SpatialPoseConverter(profile, 29, fenceStartupZeros = true)
+        val captured = capturedRestart()
+        captured.forEach { assertNull(converter.accept(it)); assertFalse(converter.invalidated) }
+        val last = captured.last(); val interval = 33_333_333L
+        val pose = checkNotNull(converter.accept(last.copy(timestampNs = last.timestampNs!! + interval,
+            counter = last.counter!! + 6)))
+        assertEquals(last.timestampNs!! + interval, pose.timestampNs)
+        assertEquals(interval, pose.intervalNs); assertEquals(29, pose.discontinuity)
+        vector(listOf(0.0, 0.0, 0.0), pose.rotationVector.map(Float::toDouble), 0.0001)
+        vector(listOf(0.0, 0.0, 0.0), pose.angularVelocity.map(Float::toDouble), 0.0001)
+        assertEquals(savedBasis, profile.headFromRaw)
+    }
+
+    @Test fun strictProbeKeepsTheCapturedIdentityOutputsAndOriginalFatalReferenceGuard() {
+        val converter = SpatialPoseConverter(checkNotNull(calibrate()), 0)
+        val captured = capturedRestart()
+        assertNull(converter.accept(captured.first()))
+        captured.drop(1).dropLast(1).forEach { assertNotNull(converter.accept(it)) }
+        assertNull(converter.accept(captured.last()))
+        assertEquals("reference_discontinuity", converter.invalidReason)
+    }
+
+    @Test fun startupZeroFencePreservesEveryPlaceholderClockCounterAndRawGuard() {
+        val captured = capturedRestart(); val zero = captured[2]
+        val cases = listOf(
+            zero.copy(timestampNs = null) to "sensor_time_unavailable",
+            zero.copy(timestampNs = 0) to "sensor_time_unavailable",
+            zero.copy(timestampNs = captured[1].timestampNs) to "sensor_time_changed",
+            zero.copy(timestampNs = captured[1].timestampNs!! - 1) to "sensor_time_changed",
+            zero.copy(counter = captured[1].counter) to "sensor_counter_changed",
+            zero.copy(counter = 0) to "sensor_counter_changed",
+            zero.copy(counter = null) to "sensor_counter_changed",
+            zero.copy(attitudeQ15 = listOf(32767, 32767, 0)) to "unsupported_attitude",
+            zero.copy(timestampNs = captured[1].timestampNs!! + 250_000_000) to "sensor_gap")
+        for ((bad, reason) in cases) {
+            val converter = SpatialPoseConverter(checkNotNull(calibrate()), 0, fenceStartupZeros = true)
+            assertNull(converter.accept(captured[0])); assertNull(converter.accept(captured[1]))
+            assertNull(converter.accept(bad)); assertEquals(reason, converter.invalidReason)
+            assertNull(converter.accept(zero))
+        }
+    }
+
+    @Test fun startupZeroFenceAlsoValidatesLeadingZerosAndExistingShortGapCounterRequirements() {
+        val profile = checkNotNull(SpatialPoseProfile.fromBasis(checkNotNull(calibrate()).headFromRaw))
+        val zero = capturedRestart()[1]
+        for ((bad, reason) in listOf(
+            zero.copy(timestampNs = null) to "sensor_time_unavailable",
+            zero.copy(timestampNs = 0) to "sensor_time_unavailable")) {
+            val converter = SpatialPoseConverter(profile, 0, fenceStartupZeros = true)
+            assertNull(converter.accept(bad)); assertEquals(reason, converter.invalidReason)
+        }
+        val missingCounter = SpatialPoseConverter(profile, 0, fenceStartupZeros = true)
+        assertNull(missingCounter.accept(zero.copy(counter = null)))
+        assertNull(missingCounter.accept(zero.copy(timestampNs = zero.timestampNs!! + 120_000_000, counter = null)))
+        assertEquals("sensor_gap", missingCounter.invalidReason)
+        val shortGap = SpatialPoseConverter(profile, 0, fenceStartupZeros = true)
+        assertNull(shortGap.accept(zero))
+        assertNull(shortGap.accept(zero.copy(timestampNs = zero.timestampNs!! + 249_999_999, counter = zero.counter!! + 50)))
+        assertFalse(shortGap.invalidated)
+    }
+
+    @Test fun startupZeroFenceNeverQuarantinesAnImpossibleNonzeroPair() {
+        val profile = checkNotNull(calibrate()); val firstTime = 1_000_000_000L
+        fun at(degrees: Double, time: Long) = report((neutral * axis(1.0, 0.0, 0.0, degrees)) * mount.inverse(), time)
+        for (settled in listOf(false, true)) {
+            val converter = SpatialPoseConverter(profile, 0, fenceStartupZeros = true)
+            assertNull(converter.accept(at(0.0, firstTime)))
+            val jumpTime = if (settled) {
+                assertNotNull(converter.accept(at(0.0, firstTime + tick))); firstTime + 2 * tick
+            } else firstTime + tick
+            assertNull(converter.accept(at(80.0, jumpTime)))
+            assertEquals("reference_discontinuity", converter.invalidReason)
+            assertNull(converter.accept(at(0.0, jumpTime + tick)))
+        }
+    }
+
+    @Test fun theFirstProducedPoseEndsZeroFencingAndPreservesSettledIdentitySemantics() {
+        val profile = checkNotNull(SpatialPoseProfile.fromBasis(listOf(
+            listOf(1.0, 0.0, 0.0), listOf(0.0, 1.0, 0.0), listOf(0.0, 0.0, 1.0))))
+        val converter = SpatialPoseConverter(profile, 0, fenceStartupZeros = true)
+        val firstTime = 1_000_000_000L
+        fun at(degrees: Double, time: Long) = report(axis(1.0, 0.0, 0.0, degrees), time)
+        assertNull(converter.accept(at(1.0, firstTime)))
+        assertNotNull(converter.accept(at(1.0, firstTime + tick)))
+        assertNotNull(converter.accept(at(0.0, firstTime + 2 * tick)))
+        assertNotNull(converter.accept(at(0.0, firstTime + 3 * tick)))
+        assertFalse(converter.invalidated)
+        assertNull(converter.accept(at(80.0, firstTime + 4 * tick)))
+        assertEquals("reference_discontinuity", converter.invalidReason)
+    }
+
+    private fun capturedRestart() = listOf(
+        Triple(9921037129000L, listOf(-18261, 22093, 169), 24909L),
+        Triple(9921106420000L, listOf(0, 0, 0), 24916L),
+        Triple(9921128720000L, listOf(0, 0, 0), 24921L),
+        Triple(9921158646000L, listOf(0, 0, 0), 24927L),
+        Triple(9921193681000L, listOf(0, 0, 0), 24934L),
+        Triple(9921235013000L, listOf(-13479, 22145, 129), 24942L)
+    ).map { (time, attitude, counter) -> MotionReport(time, attitude, listOf(0, 0, 0),
+        listOf(0, 0, 0), listOf(0, 0, -1000), counter) }
+
     @Test fun forwardShortGapsReprimeRateWithoutChangingSessionReferenceOrDiscontinuity() {
         val first = report(neutral * mount.inverse(), 1_000_000_000)
         val raised = neutral * axis(1.0, 0.0, 0.0, 20.0)
@@ -349,6 +452,33 @@ class SpatialPoseConverterTest {
         assertNull(withoutCounters.accept(first.copy(counter = null)))
         assertNull(withoutCounters.accept(gap.copy(counter = null)))
         assertEquals("sensor_gap", withoutCounters.invalidReason)
+    }
+
+    @Test fun onlySettledFiniteClockCorroboratedSensorGapsCanRequestANewLease() {
+        val profile = checkNotNull(SpatialPoseProfile.fromBasis(checkNotNull(calibrate()).headFromRaw))
+        val first = report(neutral * mount.inverse(), 1_000_000_000)
+        val second = first.copy(timestampNs = first.timestampNs!! + tick, counter = first.counter!! + 4)
+        for (gapNs in listOf(250_000_000L, 288_887_000L, 500_000_000L)) {
+            val converter = SpatialPoseConverter(profile, 0, fenceStartupZeros = true)
+            assertNull(converter.accept(first)); assertNotNull(converter.accept(second))
+            val gap = second.copy(timestampNs = second.timestampNs!! + gapNs,
+                counter = second.counter!! + (gapNs + 2_500_000) / 5_000_000)
+            assertNull(converter.accept(gap)); assertEquals("sensor_gap", converter.invalidReason)
+            assertTrue(converter.verifiedSensorGap)
+            assertNull(converter.accept(gap.copy(timestampNs = gap.timestampNs!! + tick, counter = gap.counter!! + 4)))
+        }
+        val gap = second.copy(timestampNs = second.timestampNs!! + 288_887_000, counter = second.counter!! + 58)
+        for (bad in listOf(gap.copy(counter = null), gap.copy(counter = second.counter),
+            gap.copy(counter = second.counter!! + 4), gap.copy(timestampNs = second.timestampNs),
+            gap.copy(attitudeQ15 = listOf(32767, 32767, 0)))) {
+            val converter = SpatialPoseConverter(profile, 0, fenceStartupZeros = true)
+            assertNull(converter.accept(first)); assertNotNull(converter.accept(second))
+            assertNull(converter.accept(bad)); assertTrue(converter.invalidated)
+            assertFalse(converter.verifiedSensorGap)
+        }
+        val startup = SpatialPoseConverter(profile, 0, fenceStartupZeros = true)
+        assertNull(startup.accept(second)); assertNull(startup.accept(gap))
+        assertEquals("sensor_gap", startup.invalidReason); assertFalse(startup.verifiedSensorGap)
     }
 
     @Test fun clockCorroboratedSixteenBitWrapWorksInLiveCalibrationAndReferenceHandoff() {

@@ -152,4 +152,65 @@ class SpatialAudioBridgeTest {
             verify(remote).retireOwner(owner)
         } finally { client.close(); ShadowBinder.setCallingUid(previousCaller); shadowOf(Looper.getMainLooper()).idle() }
     }
+
+    @Test fun combinedMasterKeepsItsEpochOwnerWhenNativeControlsAndInspectionRun() = runBlocking<Unit> {
+        val previousCaller = Binder.getCallingUid()
+        val client = ShizukuAudioClient(ApplicationProvider.getApplicationContext<Application>())
+        val binder = mock(IBinder::class.java); val remote = mock(IAudioBridge::class.java)
+        `when`(remote.asBinder()).thenReturn(binder)
+        `when`(binder.queryLocalInterface("me.kavishdevar.librepods.shizuku.IAudioBridge")).thenReturn(remote)
+        ShizukuAudioClient::class.java.getDeclaredMethod("acceptBridge", IBinder::class.java,
+            Int::class.javaPrimitiveType, Boolean::class.javaPrimitiveType).apply { isAccessible = true }
+            .invoke(client, binder, 0, true)
+        var master: IPlaybackRecoveryOwner? = null; var native: IPlaybackRecoveryOwner? = null
+        `when`(remote.setAtmosSpatial(eq(address), any(), eq(true), eq(false), eq(1L))).thenAnswer {
+            master = it.getArgument(1); SpatialBackendSnapshot.unavailable("unsupported")
+        }
+        `when`(remote.inspectAtmosSpatial(eq(address), any())).thenAnswer {
+            native = it.getArgument(1); SpatialBackendSnapshot.unavailable("unsupported")
+        }
+        var epoch = 1L
+        try {
+            client.setAtmosSpatial(address, true, false, 1) { epoch == 1L }
+            client.inspectAtmosSpatial(address) { true }
+            assertNotSame(master, native)
+            ShadowBinder.setCallingUid(0)
+            assertTrue(checkNotNull(master).isCurrent); assertTrue(checkNotNull(native).isCurrent)
+            epoch = 2
+            assertFalse(checkNotNull(master).isCurrent); assertTrue(checkNotNull(native).isCurrent)
+            client.close()
+            assertFalse(checkNotNull(native).isCurrent)
+            verify(remote).retireOwner(master); verify(remote).retireOwner(native)
+        } finally { client.close(); ShadowBinder.setCallingUid(previousCaller); shadowOf(Looper.getMainLooper()).idle() }
+    }
+
+    @Test fun combinedMasterChecksCallerRootAndPermissionBeforeItsManager() {
+        val previousUid = Process.myUid(); val previousCaller = Binder.getCallingUid()
+        try {
+            ShadowProcess.setUid(10123)
+            val context = mock(Context::class.java); val pm = mock(PackageManager::class.java)
+            `when`(context.packageManager).thenReturn(pm)
+            `when`(pm.getApplicationInfo(BuildConfig.APPLICATION_ID, 0)).thenReturn(ApplicationInfo().apply { uid = 10123 })
+            val service = ShizukuAudioService(context, false)
+            val manager = mock(RootSpatialControl::class.java)
+            ShizukuAudioService::class.java.getDeclaredField("atmosSpatial").apply { isAccessible = true }.set(service, manager)
+            val owner = mock(IPlaybackRecoveryOwner::class.java)
+            ShadowBinder.setCallingUid(10124)
+            assertThrows(IllegalArgumentException::class.java) { service.inspectAtmosSpatial(address, owner) }
+            assertThrows(IllegalArgumentException::class.java) { service.setAtmosSpatial(address, owner, true, false, 1) }
+            ShadowBinder.setCallingUid(10123); ShadowProcess.setUid(2000)
+            assertEquals("root_required", service.setAtmosSpatial(address, owner, true, false, 1).getString("reason"))
+            ShadowProcess.setUid(0)
+            `when`(pm.checkPermission(Manifest.permission.BLUETOOTH_CONNECT, BuildConfig.APPLICATION_ID))
+                .thenReturn(PackageManager.PERMISSION_DENIED)
+            assertEquals("permission_denied", service.inspectAtmosSpatial(address, owner).getString("reason"))
+            verifyNoInteractions(manager)
+            `when`(pm.checkPermission(Manifest.permission.BLUETOOTH_CONNECT, BuildConfig.APPLICATION_ID))
+                .thenReturn(PackageManager.PERMISSION_GRANTED)
+            `when`(manager.inspect(address, owner)).thenReturn(SpatialBackendSnapshot.unavailable("unsupported"))
+            assertEquals("unsupported", service.inspectAtmosSpatial(address, owner).getString("reason"))
+            verify(manager).inspect(address, owner)
+            assertEquals(10123, Binder.getCallingUid())
+        } finally { ShadowProcess.setUid(previousUid); ShadowBinder.setCallingUid(previousCaller) }
+    }
 }

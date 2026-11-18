@@ -95,14 +95,28 @@ class HeadTrackingTimingTest {
     }
 
     @Test fun cachedDumpSerializesScalarsAndNestedCountersWithoutPoseOrIdentityData() {
+        val nativeStatus = LongArray(20) { it.toLong() }.apply {
+            this[0] = 1; this[1] = 4; this[15] = 9_007_199_254_740_993L; this[16] = -1
+        }
         val value = HeadTrackingTiming().snapshot().apply {
             putBundle("sink", Bundle().apply { putLong("hid_inputs", 100); putDouble("host_source_age_mean_nanos", 123.5) })
+            putBundle("atmos", Bundle().apply {
+                putLongArray("native_status", nativeStatus)
+                putByteArray("nonce", ByteArray(16) { 1 })
+                putDoubleArray("pose", doubleArrayOf(1.0, 0.0, 0.0))
+            })
+            putByteArray("mac", byteArrayOf(1, 2, 3, 4, 5, 6))
             putString("reason", "off")
         }
         val json = headTrackingTimingJson(value)
         assertEquals(100L, json.getJSONObject("sink").getLong("hid_inputs"))
         assertEquals(123.5, json.getJSONObject("sink").getDouble("host_source_age_mean_nanos"), 0.0)
         assertEquals("off", json.getString("reason"))
+        val atmos = json.getJSONObject("atmos")
+        val actual = atmos.getJSONArray("native_status")
+        assertEquals(20, actual.length())
+        nativeStatus.forEachIndexed { index, expected -> assertEquals(expected, actual.getLong(index)) }
+        assertFalse(atmos.has("nonce")); assertFalse(atmos.has("pose"))
         assertFalse(json.toString().contains("attitude_q15")); assertFalse(json.toString().contains("mac"))
     }
 

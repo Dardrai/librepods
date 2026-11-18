@@ -15,6 +15,7 @@ internal class EldFailurePolicy(private val read: () -> EldEncoderHealth?) {
     private var lastAttemptedGeneration = 0L
     private var retired: Candidate? = null
     private var retiredGeneration = 0L
+    private var latestHealthGeneration = 0L
     var owner: Owner? = null
         private set
 
@@ -44,9 +45,19 @@ internal class EldFailurePolicy(private val read: () -> EldEncoderHealth?) {
     }
     @Synchronized fun clear() { selection = null; codecs.clear(); connected.clear(); epoch++; owner = null }
 
+    @Synchronized fun protectsHealthyEld(peer: List<Int>, target: Any): Boolean {
+        if (selection != (peer to target) || peer !in connected ||
+            codecs[peer] != EldCodecIdentity.MODULE_CODEC_ID) return false
+        val health = runCatching(read).getOrNull() ?: return false
+        if (health.generation < latestHealthGeneration) return false
+        latestHealthGeneration = maxOf(latestHealthGeneration, health.generation)
+        return validPeer(peer) && health.peer == peer && health.generation > lastAttemptedGeneration && !health.failed
+    }
+
     private fun refresh() {
         val selected = selection
         val health = runCatching(read).getOrNull()
+        if (health != null) latestHealthGeneration = maxOf(latestHealthGeneration, health.generation)
         if (health != null && health.generation > retiredGeneration && health.peer == selected?.first) retired = null
         owner = if (selected != null && selected.first in connected && codecs[selected.first] == EldCodecIdentity.MODULE_CODEC_ID &&
             health != null && health.peer == selected.first && validPeer(health.peer) &&

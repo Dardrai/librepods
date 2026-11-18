@@ -67,13 +67,17 @@ class QuickSettingsConfigurationTest {
         val ear = compose.onNodeWithTag("quick-setting-choice-EAR_DETECTION")
         ear.performScrollTo().assertIsOn().performClick().assertIsOff()
         compose.onNodeWithTag("quick-setting-choice-GAME_MODE").performScrollTo().performClick().assertIsOff()
-        assertEquals(setOf("EAR_DETECTION", "GAME_MODE"), QuickSettingsPreferences.hidden(context))
+        compose.onNodeWithTag("quick-setting-choice-SPATIAL_AUDIO").performScrollTo().assertIsOn().performClick().assertIsOff()
+        compose.onNodeWithTag("quick-setting-choice-HEAD_TRACKING").performScrollTo().assertIsOn().performClick().assertIsOff()
+        assertEquals(setOf("EAR_DETECTION", "GAME_MODE", "SPATIAL_AUDIO", "HEAD_TRACKING"), QuickSettingsPreferences.hidden(context))
         compose.onNodeWithText("Done").performScrollTo().performClick()
         compose.onNodeWithTag("quick-setting-choice-EAR_DETECTION").assertDoesNotExist()
         compose.onNodeWithText("Quick Settings").performScrollTo().performClick()
         ear.performScrollTo().assertIsOff()
+        compose.onNodeWithTag("quick-setting-choice-SPATIAL_AUDIO").performScrollTo().assertIsOff()
+        compose.onNodeWithTag("quick-setting-choice-HEAD_TRACKING").performScrollTo().assertIsOff()
         compose.runOnIdle { QuickSettingsPreferences.setHidden(context, "EAR_DETECTION", false) }
-        ear.assertIsOn()
+        ear.performScrollTo().assertIsOn()
         assertTrue("Visibility configuration must not call a device or identity writer",
             mockingDetails(viewModel).invocations.all { it.method.name == "getUiState" })
     }

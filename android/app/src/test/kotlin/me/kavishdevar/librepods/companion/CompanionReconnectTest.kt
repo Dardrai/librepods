@@ -196,7 +196,43 @@ class CompanionReconnectTest {
         } finally { finish.countDown(); fixture.close() }
     }
 
-    private inner class Fixture(private val wires: List<Wire>) {
+    @Test fun unlinkWaitsForSavedCredentialRemovalAndCanRetryAFailedDelete() = runBlocking {
+        val entered = CountDownLatch(1)
+        val finish = CountDownLatch(1)
+        val saved = AtomicBoolean(true)
+        val deletes = AtomicInteger()
+        val storage = object : CompanionLinkStorage {
+            override fun load(): CompanionLink? = null
+            override fun save(link: CompanionLink) = error("Unexpected save")
+            override fun clear() {
+                if (deletes.incrementAndGet() == 1) {
+                    entered.countDown()
+                    check(finish.await(5, TimeUnit.SECONDS))
+                    throw IOException("Delete failed")
+                }
+                saved.set(false)
+            }
+        }
+        val fixture = Fixture(emptyList(), storage)
+        try {
+            fixture.controller.unlink()
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            assertTrue(fixture.controller.state.value.unlinkPending)
+            assertTrue(fixture.controller.state.value.busy)
+            assertNull(fixture.controller.linkedDevice())
+            assertTrue(saved.get())
+            finish.countDown()
+            withTimeout(2000) { while (fixture.controller.state.value.busy) delay(10) }
+            assertTrue(fixture.controller.state.value.unlinkPending)
+            assertTrue(saved.get())
+            fixture.controller.unlink()
+            withTimeout(2000) { while (fixture.controller.state.value.unlinkPending) delay(10) }
+            assertFalse(saved.get())
+            assertEquals(0, fixture.attempts.get())
+        } finally { finish.countDown(); fixture.close() }
+    }
+
+    private inner class Fixture(private val wires: List<Wire>, store: CompanionLinkStorage? = null) {
         val attempts = AtomicInteger()
         val audioOperations = AtomicInteger()
         val permission = AtomicBoolean(true)
@@ -231,7 +267,8 @@ class CompanionReconnectTest {
                 callAllowed = { true }, callReceipt = { _, _ -> 8 },
                 media = { CompanionMediaSample(known = true, playing = playing, available = true,
                     player = if (playing) "test-player" else "") },
-                retryWait = { ms -> CompletableDeferred<Unit>().also { waits.add(ms to it) }.await() })
+                retryWait = { ms -> CompletableDeferred<Unit>().also { waits.add(ms to it) }.await() },
+                store = store ?: CompanionLinkStore(context))
             CompanionHandoffController::class.java.getDeclaredField("link").apply { isAccessible = true }
                 .set(controller, CompanionLink(peerAddress, device, key.copyOf()))
         }

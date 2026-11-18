@@ -7,6 +7,7 @@ import me.kavishdevar.librepods.core.bluetooth.att.types.hearingAidSettingsWrita
 import me.kavishdevar.librepods.core.bluetooth.att.types.parseTransparencySettingsResponse
 import me.kavishdevar.librepods.core.devices.*
 import me.kavishdevar.librepods.data.LiveValueState
+import me.kavishdevar.librepods.audio.NativeHeadTrackingState
 import me.kavishdevar.librepods.dongle.DongleState
 import me.kavishdevar.librepods.dongle.appleUiState
 import me.kavishdevar.librepods.dongle.appleControlBytes
@@ -17,7 +18,7 @@ import me.kavishdevar.librepods.presentation.screens.apple.nativeGameModeDescrip
 
 internal enum class QuickSetting {
     CONVERSATION_AWARENESS, EAR_DETECTION, GAME_MODE, PERSONALIZED_VOLUME,
-    LOUD_SOUND_REDUCTION, EN352_PROTECTION, HEARING_AID, MEDIA_ASSIST;
+    LOUD_SOUND_REDUCTION, EN352_PROTECTION, HEARING_AID, MEDIA_ASSIST, SPATIAL_AUDIO, HEAD_TRACKING;
 
     val control: ControlCommandIdentifier? get() = when (this) {
         CONVERSATION_AWARENESS -> ControlCommandIdentifier.CONVERSATION_DETECT_CONFIG
@@ -36,7 +37,7 @@ internal fun nativeQuickSettings(metadata: AppleMetadata, state: AppleState, set
     game: NativeGameModeController.State?, loudSoundWritable: Boolean, profileAvailable: Boolean,
     pending: Set<QuickSetting> = emptySet(), connected: Boolean = true,
     canWrite: (ControlCommandIdentifier) -> Boolean = { true }, ordinaryBusy: Boolean = false,
-    protectedSettingsSupported: Boolean = false): List<QuickSettingState> {
+    protectedSettingsSupported: Boolean = false, spatial: NativeHeadTrackingState? = null): List<QuickSettingState> {
     // Host/model support is stable; transport readiness only controls whether a visible tile can write.
     val idle = connected && !state.microphoneState.isActive && !state.recordingState.isRecording && state.audioSource.type != AudioSourceType.CALL
     val gameSupported = metadata.model == AirPodsModel.AIRPODS_PRO_3 && (metadata.firmwareMajor ?: 0) >= 8 &&
@@ -45,8 +46,8 @@ internal fun nativeQuickSettings(metadata: AppleMetadata, state: AppleState, set
         gameSupported, gameSupported && idle && pending.isEmpty() && (game?.available == true || settings.nativeGameModeEnabled), game?.restoring == true || game?.let { it.desiredOn && !it.active && it.issue in setOf(
                 NativeGameModeController.Issue.WAITING_FOR_AUDIO, NativeGameModeController.Issue.WAITING_FOR_TIMING) } == true,
         descriptionRes = game?.let { nativeGameModeDescription(it, settings.nativeGameModeEnabled) }?.takeIf {
-            it in setOf(R.string.native_game_mode_start_failed, R.string.native_game_mode_restore_failed,
-                R.string.native_game_mode_stopping)
+            it == R.string.native_game_mode_start_failed || it == R.string.native_game_mode_restore_failed ||
+                it == R.string.native_game_mode_stopping
         })
     val loudSupported = metadata.model != AirPodsModel.UNKNOWN && BaseCapability.LOUD_SOUND_REDUCTION in AirPodsSpecs.getSpec(metadata.model).baseCapabilities &&
         (protectedSettingsSupported || state.loudSoundReductionEnabled)
@@ -57,6 +58,13 @@ internal fun nativeQuickSettings(metadata: AppleMetadata, state: AppleState, set
     val earId = ControlCommandIdentifier.EAR_DETECTION_CONFIG
     val earChoice = state.effectiveEarDetection(settings)
     val reportedEar = earId.decodeBoolean(state.controlStates[earId]?.takeIf { earId in state.liveControlReports })
+    val spatialSupported = metadata.model != AirPodsModel.UNKNOWN && spatial?.spatialSupported == true
+    val trackingSupported = metadata.model != AirPodsModel.UNKNOWN &&
+        spatial?.let { it.calibrated || it.enabled == true } == true
+    val audioBusy = spatial?.let { it.busy || it.spatialBusy } == true
+    val spatialRecovery = spatialSupported && spatial?.spatialEnabled == null &&
+        (spatial?.spatialAvailable == true || spatial?.desiredSpatialEnabled != null)
+    val trackingRecovery = trackingSupported && spatial?.enabled == null && spatial?.desiredTrackingEnabled != null
     return quickSettings(metadata, state, canWrite, gameToggle, loud, profileAvailable, protectedSettingsSupported, idle, pending).map { toggle ->
         val id = toggle.setting.control
         when {
@@ -71,7 +79,13 @@ internal fun nativeQuickSettings(metadata: AppleMetadata, state: AppleState, set
             toggle.setting == QuickSetting.GAME_MODE -> toggle
             else -> toggle.copy(enabled = toggle.enabled && !ordinaryBusy)
         }
-    }
+    } + listOf(
+        QuickSettingState(QuickSetting.SPATIAL_AUDIO, spatial?.spatialEnabled.takeIf { spatialSupported }, spatialSupported,
+            spatialSupported && connected && pending.isEmpty() && !audioBusy && (spatialRecovery || spatial?.spatialEnabled != null &&
+                (spatial.spatialAvailable || spatial.spatialEnabled == true)), pending = audioBusy, recoveryOff = spatialRecovery),
+        QuickSettingState(QuickSetting.HEAD_TRACKING, spatial?.enabled.takeIf { trackingSupported }, trackingSupported,
+            trackingSupported && connected && pending.isEmpty() && !audioBusy && (trackingRecovery || spatial?.enabled != null &&
+                (spatial.enabled == true || spatial.available)), pending = audioBusy, recoveryOff = trackingRecovery))
 }
 
 /** Keep an owned clinical reconnect readable without turning remembered presentation into live proof. */

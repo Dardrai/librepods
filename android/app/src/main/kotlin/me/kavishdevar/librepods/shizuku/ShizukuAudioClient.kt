@@ -72,7 +72,9 @@ class ShizukuAudioClient @JvmOverloads constructor(context: Context,
     private var microphoneProbeRequest: PlaybackRequest? = null
     private var communicationRequest: PlaybackRequest? = null
     private var spatialRequest: PlaybackRequest? = null
+    private var atmosSpatialRequest: PlaybackRequest? = null
     private var headTrackerRequest: PlaybackRequest? = null
+    private val atmosRequests = mutableSetOf<PlaybackRequest>()
     private val usbHidConnections = mutableSetOf<IUsbHidConnection>()
     @Volatile private var bridge: IAudioBridge? = null
     @Volatile private var backendUid: Int? = null
@@ -671,6 +673,32 @@ class ShizukuAudioClient @JvmOverloads constructor(context: Context,
         suspend fun finish(): Bundle = finishOwned()
     }
 
+    internal suspend fun openAtmosHeadTracking(address: String, socket: IBinder, source: Bundle,
+        permit: Bundle, poses: ParcelFileDescriptor, stillCurrent: () -> Boolean): AtmosClientLease {
+        var request: PlaybackRequest? = null
+        try {
+            check(BuildConfig.DEBUG && hasRootPrivileges) { "atmos_unavailable" }
+            val remote = checkNotNull(bridge)
+            val selected = A2dpRecoveryGuard(address).address
+            val owned = PlaybackRequest(remote, selected,
+                { !closed && bridge === remote && backendUid == 0 && stillCurrent() }, null, 0).also { request = it }
+            synchronized(lock) { check(owned.current()); atmosRequests += owned }
+            val lease = withContext(Dispatchers.IO) { remote.openAtmosHeadTracking(selected, owned.owner, socket, source, permit, poses) }
+            check(owned.current()) { "owner_changed" }
+            return AtmosClientLease(lease) {
+                owned.active.set(false)
+                synchronized(lock) { atmosRequests.remove(owned) }
+            }
+        } catch (error: Exception) {
+            request?.let {
+                it.active.set(false)
+                synchronized(lock) { atmosRequests.remove(it) }
+                runCatching { it.remote.retireOwner(it.owner) }
+            }
+            throw error
+        } finally { runCatching { poses.close() } }
+    }
+
     /** DEBUG only. Consumes the read end of an HTP1 pose pipe; never requests privileged access. */
     internal suspend fun startHeadTrackerProbe(address: String, poses: ParcelFileDescriptor, seconds: Int,
         stillCurrent: () -> Boolean, onReportingChanged: (Boolean, Long) -> Unit,
@@ -766,7 +794,16 @@ class ShizukuAudioClient @JvmOverloads constructor(context: Context,
     internal suspend fun restoreSpatialAudio(address: String, stillCurrent: () -> Boolean): Bundle =
         spatialAudioCall(address, stillCurrent) { remote, owner -> remote.restoreSpatialAudio(address, owner) }
 
+    internal suspend fun inspectAtmosSpatial(address: String, stillCurrent: () -> Boolean): Bundle =
+        spatialAudioCall(address, stillCurrent) { remote, owner -> remote.inspectAtmosSpatial(address, owner) }
+
+    internal suspend fun setAtmosSpatial(address: String, spatialEnabled: Boolean, headTrackingEnabled: Boolean,
+        choiceEpoch: Long, stillCurrent: () -> Boolean): Bundle = spatialAudioCall(address, stillCurrent, master = true) { remote, owner ->
+        remote.setAtmosSpatial(address, owner, spatialEnabled, headTrackingEnabled, choiceEpoch)
+    }
+
     private suspend fun spatialAudioCall(address: String, stillCurrent: () -> Boolean,
+        master: Boolean = false,
         action: (IAudioBridge, IPlaybackRecoveryOwner) -> Bundle): Bundle = withContext(Dispatchers.IO) {
         val selected = runCatching { A2dpRecoveryGuard(address).address }.getOrNull()
             ?: return@withContext SpatialAudioAccess.failure("invalid_address")
@@ -775,14 +812,17 @@ class ShizukuAudioClient @JvmOverloads constructor(context: Context,
             if (closed || remote == null || backendUid != 0)
                 return@withLock SpatialAudioAccess.failure("root_required")
             if (!stillCurrent()) return@withLock SpatialAudioAccess.failure("owner_changed")
-            val previous = synchronized(lock) { spatialRequest }
+            val previous = synchronized(lock) { if (master) atmosSpatialRequest else spatialRequest }
             val reusable = previous?.takeIf { it.remote === remote && it.address == selected && it.current() }
             val live = { !closed && bridge === remote && backendUid == 0 && stillCurrent() }
             val job = currentCoroutineContext()[Job]
             val request = synchronized(lock) {
-                reusable?.takeIf { spatialRequest === it } ?: run {
-                    spatialRequest?.let { old -> old.active.set(false); runCatching { old.remote.retireOwner(old.owner) } }
-                    PlaybackRequest(remote, selected, live, null, 0).also { spatialRequest = it }
+                val existing = if (master) atmosSpatialRequest else spatialRequest
+                reusable?.takeIf { existing === it } ?: run {
+                    existing?.let { old -> old.active.set(false); runCatching { old.remote.retireOwner(old.owner) } }
+                    PlaybackRequest(remote, selected, live, null, 0).also {
+                        if (master) atmosSpatialRequest = it else spatialRequest = it
+                    }
                 }
             }
             request.updateCurrent { job?.isActive != false && live() }
@@ -851,8 +891,11 @@ class ShizukuAudioClient @JvmOverloads constructor(context: Context,
             communicationRequest = null
             spatialRequest?.active?.set(false)
             spatialRequest = null
+            atmosSpatialRequest?.active?.set(false)
+            atmosSpatialRequest = null
             headTrackerRequest?.active?.set(false)
             headTrackerRequest = null
+            atmosRequests.forEach { it.active.set(false) }; atmosRequests.clear()
             usbHidConnections.toList().forEach { runCatching { it.close() } }
             usbHidConnections.clear()
             bridgeDeath?.let { death -> bridge?.asBinder()?.let { runCatching { it.unlinkToDeath(death, 0) } } }
@@ -884,8 +927,11 @@ class ShizukuAudioClient @JvmOverloads constructor(context: Context,
             communicationRequest = null
             spatialRequest?.also { it.active.set(false); retiring += it }
             spatialRequest = null
+            atmosSpatialRequest?.also { it.active.set(false); retiring += it }
+            atmosSpatialRequest = null
             headTrackerRequest?.also { it.active.set(false); retiring += it }
             headTrackerRequest = null
+            atmosRequests.forEach { it.active.set(false); retiring += it }; atmosRequests.clear()
             usbHidConnections.toList().forEach { runCatching { it.close() } }
             usbHidConnections.clear()
             bridgeDeath?.let { death -> bridge?.asBinder()?.let { runCatching { it.unlinkToDeath(death, 0) } } }

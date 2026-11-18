@@ -3,5 +3,8 @@
 <resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="MissingTranslation">
     <string name="quick_settings_title">Quick Settings</string>
     <string name="quick_settings_done">Done</string>
+    <string name="quick_settings_spatial_audio">Spatial Audio</string>
+    <string name="spatial_audio_recovery_off">Turn off Spatial Audio</string>
+    <string name="head_tracking_recovery_off">Turn off Head Tracking</string>
     <string name="quick_settings_visibility_description">Choose which controls appear in Quick Settings. Only supported controls appear for each connection.</string>
 </resources>

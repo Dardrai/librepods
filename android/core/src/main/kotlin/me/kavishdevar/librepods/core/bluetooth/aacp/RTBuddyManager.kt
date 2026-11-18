@@ -20,6 +20,7 @@ import me.kavishdevar.librepods.core.bluetooth.aacp.types.RemoteHidBuddyPayload
 import me.kavishdevar.librepods.core.data.apple.BuddyState
 import me.kavishdevar.librepods.core.data.apple.MotionReport
 import me.kavishdevar.librepods.core.devices.PacketDestination
+import java.util.function.LongSupplier
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.microseconds
 
@@ -29,7 +30,7 @@ internal class RTBuddyManager(
     private val sendRaw: (ByteArray) -> Boolean,
     private val isCurrent: () -> Boolean,
     private val firmwareMajor: () -> Int?,
-    private val onMotion: (SensorReports.Motion) -> Unit,
+    private val onMotion: (motion: SensorReports.Motion, receivedAtNanos: Long) -> Unit,
     private val onHeartRate: (SensorReports.HeartRate) -> Unit,
     private val onMotionState: (BuddyState) -> Unit,
     private val onHeartRateState: (BuddyState) -> Unit,
@@ -37,7 +38,7 @@ internal class RTBuddyManager(
     private var motionIntervalUs: Int? = null,
     private val sharedMotionOwners: MotionOwners? = null,
     private val sourceTiming: MotionSourceTiming? = null,
-    private val sourceClockNanos: () -> Long = System::nanoTime,
+    private val sourceClockNanos: LongSupplier = LongSupplier(System::nanoTime),
 ) : AutoCloseable {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val frames = SensorFrames()
@@ -95,21 +96,22 @@ internal class RTBuddyManager(
 
     fun feed(chunk: ByteArray, readAtNanos: Long = 0) {
         val timing = sourceTiming?.takeIf { readAtNanos > 0 }
-        val attemptedAt = if (timing != null) sourceClockNanos() else 0
+        val attemptedAt = if (timing != null) sourceClockNanos.asLong else 0
         timing?.dispatch(readAtNanos, attemptedAt)
         synchronized(this) {
-            val enteredAt = if (timing != null) sourceClockNanos() else 0
+            val enteredAt = if (timing != null) sourceClockNanos.asLong else 0
             timing?.feedEntered(attemptedAt, enteredAt)
             try { feedLocked(chunk, readAtNanos) }
-            finally { timing?.feedFinished(enteredAt, sourceClockNanos()) }
+            finally { timing?.feedFinished(enteredAt, sourceClockNanos.asLong) }
         }
     }
 
     private fun feedLocked(chunk: ByteArray, readAtNanos: Long) {
         if (closed || !isCurrent()) return
-        reconcileHeadTracking(updateInterval = false)
-        for (frame in frames.feed(chunk)) {
-            val packet = try { RTBuddyPacket.parse(frame) } catch (_: Exception) { continue }
+        timed(MotionSourceTiming.Stage.RECONCILE) { reconcileHeadTracking(updateInterval = false) }
+        for (frame in timed(MotionSourceTiming.Stage.PARSE) { frames.feed(chunk) }) {
+            val packet = try { timed(MotionSourceTiming.Stage.PARSE) { RTBuddyPacket.parse(frame) } }
+                catch (_: Exception) { continue }
             val remote = packet.rtBuddyPayload as? RemoteHidBuddyPayload
             if (remote != null) {
                 if (remoteAllowed()) receiveRemote(remote.data, readAtNanos)
@@ -117,11 +119,11 @@ internal class RTBuddyManager(
             }
             if (remoteAllowed()) continue
             val data = (packet.rtBuddyPayload as? SensorDataWxBuddyPayload)?.data ?: continue
-            val batch = reports.receive(data, legacyMotion())
+            val batch = timed(MotionSourceTiming.Stage.PARSE) { reports.receive(data, legacyMotion()) }
             if (data.hasStartAck() || data.hasCommandAck() || data.hasServiceSettings())
                 sourceTiming?.motionControlReceived(data, reports.motionService, readAtNanos)
             if (batch.mappingChanged) sourceTiming?.mappingChanged(
-                batch.motionMappingChanged, batch.heartRateMappingChanged, sourceClockNanos())
+                batch.motionMappingChanged, batch.heartRateMappingChanged, sourceClockNanos.asLong)
             if (batch.motionMappingChanged) {
                 sourceTiming?.motionStopped()
                 // The previous address can now name another sensor; never send it a delayed Stop.
@@ -141,9 +143,9 @@ internal class RTBuddyManager(
             if (suspended) continue
             if (motionWanted && !motionStopping && batch.motion != null) {
                 lastMotion = now()
-                onMotionState(BuddyState.ACTIVE)
-                onMotion(batch.motion)
-                sourceTiming?.motionPublished(batch.motion.report, readAtNanos, sourceClockNanos())
+                timed(MotionSourceTiming.Stage.ACTIVE_CALLBACK) { onMotionState(BuddyState.ACTIVE) }
+                timed(MotionSourceTiming.Stage.MOTION_CALLBACK) { onMotion(batch.motion, readAtNanos) }
+                sourceTiming?.motionPublished(batch.motion.report, readAtNanos, sourceClockNanos.asLong)
             }
             if (heartWanted && batch.heartRate != null) {
                 lastHeart = now()
@@ -154,7 +156,7 @@ internal class RTBuddyManager(
     }
 
     private fun receiveRemote(body: ByteArray, readAtNanos: Long) {
-        val packets = RemoteHid.packets(body) ?: return
+        val packets = timed(MotionSourceTiming.Stage.PARSE) { RemoteHid.packets(body) } ?: return
         for (packet in packets) {
             if (packet.device == 0 || packet.response || packet.status) continue
             val connects = packet.kind == 0 && RemoteHid.motionDescriptor(packet.payload)
@@ -177,13 +179,22 @@ internal class RTBuddyManager(
             }
             if (packet.kind == 2 && packet.device == remoteService && motionLive == packet.device &&
                 packet.payload.size == 58 && motionWanted && !suspended && !motionStopping) {
-                val report = MotionReport.parse(packet.payload, packet.timestampNs) ?: continue
+                val report = timed(MotionSourceTiming.Stage.PARSE) {
+                    MotionReport.parse(packet.payload, packet.timestampNs)
+                } ?: continue
                 lastMotion = now()
-                onMotionState(BuddyState.ACTIVE)
-                onMotion(SensorReports.Motion(report.gyroRaw[1], report.gyroRaw[2]).also { it.report = report })
-                sourceTiming?.motionPublished(report, readAtNanos, sourceClockNanos())
+                timed(MotionSourceTiming.Stage.ACTIVE_CALLBACK) { onMotionState(BuddyState.ACTIVE) }
+                timed(MotionSourceTiming.Stage.MOTION_CALLBACK) {
+                    onMotion(SensorReports.Motion(report.gyroRaw[1], report.gyroRaw[2]).also { it.report = report }, readAtNanos)
+                }
+                sourceTiming?.motionPublished(report, readAtNanos, sourceClockNanos.asLong)
             }
         }
+    }
+
+    private inline fun <T> timed(stage: MotionSourceTiming.Stage, block: () -> T): T {
+        val timing = sourceTiming ?: return block()
+        return timing.measure(stage, sourceClockNanos, block)
     }
 
     @Synchronized
@@ -287,7 +298,7 @@ internal class RTBuddyManager(
                 return
             }
             motionAppliedIntervalUs = period
-            sourceTiming?.motionStarted(period, sourceClockNanos())
+            sourceTiming?.motionStarted(period, sourceClockNanos.asLong)
             motionSince = now()
             return
         }
@@ -304,7 +315,7 @@ internal class RTBuddyManager(
             return
         }
         motionAppliedIntervalUs = period
-        sourceTiming?.motionStarted(period, sourceClockNanos())
+        sourceTiming?.motionStarted(period, sourceClockNanos.asLong)
         motionSince = now()
     }
 
@@ -347,7 +358,7 @@ internal class RTBuddyManager(
             else command(service, period)
         if (sent) {
             motionAppliedIntervalUs = period
-            sourceTiming?.motionIntervalChanged(period, sourceClockNanos())
+            sourceTiming?.motionIntervalChanged(period, sourceClockNanos.asLong)
         }
         // Releases remain authoritative on failure; reconciliation retries restoration.
         return sent

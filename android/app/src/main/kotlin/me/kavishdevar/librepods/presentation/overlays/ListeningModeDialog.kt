@@ -62,6 +62,7 @@ import kotlinx.coroutines.withContext
 import java.util.function.Consumer
 import me.kavishdevar.librepods.LibrePodsApplication
 import me.kavishdevar.librepods.R
+import me.kavishdevar.librepods.audio.NativeHeadTrackingState
 import me.kavishdevar.librepods.core.bluetooth.att.ATTHandle
 import me.kavishdevar.librepods.utils.NativeGameModeController
 import me.kavishdevar.librepods.utils.BluetoothIdentitySettings
@@ -217,19 +218,24 @@ class ListeningModeDialog(context: Context, private val address: MacAddress) :
                             combine(device.connectionState, device.connectionNumber) { _, _ -> Unit }.flatMapLatest {
                                 (context.applicationContext as LibrePodsApplication).nativeGameModeControllers[address]?.state ?: flowOf(null)
                             }
+                        @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+                        val spatial: Flow<NativeHeadTrackingState?> =
+                            combine(device.connectionState, device.connectionNumber) { _, _ -> Unit }.flatMapLatest {
+                                (context.applicationContext as LibrePodsApplication).nativeHeadTrackingControllers[address]?.state ?: flowOf(null)
+                            }
                         val protectedAccess = combine(BluetoothIdentitySettings.state, XposedState.state) { identity, hook ->
                             supportsProtectedQuickSettings(identity, BluetoothIdentitySettings.usesNativeProperties,
                                 hook.available, hook.bluetoothScopeEnabled)
                         }
-                        val gameAndIdentity = combine(game, protectedAccess) { gameState, supported ->
-                            gameState to supported
+                        val gameAndIdentity = combine(game, spatial, protectedAccess) { gameState, spatialState, supported ->
+                            Triple(gameState, supported, spatialState)
                         }
                         val extra = combine(gameAndIdentity, connected.dongleControls.state, quickPending, controls.changes, gameChoices.state) { gameState, dongle, pending, _, _ ->
                             Triple(gameState, dongle.usesDongleListeningControls, pending)
                         }
                         combine(device.connectionState, device.state, device.settings, device.metadata,
                             extra) { connection, state, settings, metadata, (gameAndAccess, dongle, pending) ->
-                            val (gameState, protectedAccess) = gameAndAccess
+                            val (gameState, protectedAccess, spatialState) = gameAndAccess
                             if (dongle || connection != ConnectionState.CONNECTED || !supportsListening(metadata)) null
                             else {
                                 controls.observe()
@@ -239,7 +245,7 @@ class ListeningModeDialog(context: Context, private val address: MacAddress) :
                                 ListeningModeSnapshot(metadata, displayed, displayedSettings, nativeQuickSettings(metadata, displayed, displayedSettings,
                                 gameState, device.loudSoundReductionWritable, device.transparencyTransportAvailable, pending,
                                 connected = connection == ConnectionState.CONNECTED, canWrite = controls::canWrite,
-                                ordinaryBusy = controls.busy, protectedSettingsSupported = protectedAccess))
+                                ordinaryBusy = controls.busy, protectedSettingsSupported = protectedAccess, spatial = spatialState))
                             }
                         }.collect { current ->
                             if (current == null) freezePresentation()
@@ -300,19 +306,27 @@ class ListeningModeDialog(context: Context, private val address: MacAddress) :
         }
         val device = currentNativeDevice() ?: return false
         val controls = nativeControls ?: return false
-        val game = (context.applicationContext as LibrePodsApplication).nativeGameModeControllers[address]
+        val application = context.applicationContext as LibrePodsApplication
+        val game = application.nativeGameModeControllers[address]
+        val spatial = application.nativeHeadTrackingControllers[address]
         val control = nativeQuickSettings(device.metadata.value, controls.displayState(device.state.value),
             nativeGameChoices?.displaySettings(device.settings.value) ?: device.settings.value,
             game?.state?.value, device.loudSoundReductionWritable, device.transparencyTransportAvailable, quickPending.value,
             canWrite = controls::canWrite, ordinaryBusy = controls.busy,
             protectedSettingsSupported = supportsProtectedQuickSettings(BluetoothIdentitySettings.state.value,
-                BluetoothIdentitySettings.usesNativeProperties, XposedState.isAvailable, XposedState.bluetoothScopeEnabled))
-            .first { it.setting == setting }
+                BluetoothIdentitySettings.usesNativeProperties, XposedState.isAvailable, XposedState.bluetoothScopeEnabled),
+            spatial = spatial?.state?.value)
+            .firstOrNull { it.setting == setting } ?: return false
         if (!control.enabled || (control.checked == null && !control.recoveryOff) ||
             (control.recoveryOff && enabled) || control.checked == enabled) return false
         setting.control?.let { id -> return reportQuickWrite(controls.edit(id, id.encodeBoolean(enabled).toInt() and 255)) }
         if (setting == QuickSetting.GAME_MODE) {
             return reportQuickWrite(nativeGameChoices?.edit(enabled) == true)
+        }
+        if (setting == QuickSetting.SPATIAL_AUDIO || setting == QuickSetting.HEAD_TRACKING) {
+            if (spatial == null) return false
+            if (setting == QuickSetting.SPATIAL_AUDIO) spatial.setSpatialEnabled(enabled) else spatial.setEnabled(enabled)
+            return reportQuickWrite(true)
         }
         if (quickPending.value.isNotEmpty()) return false
         val transport = device.aacp.captureAudioSocket() ?: return false

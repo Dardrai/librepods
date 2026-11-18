@@ -54,11 +54,11 @@ class ListeningModePanelTest {
     private data class Profile(val width: Int = 384, val height: Int = 640,
         val fontScale: Float = 1f, val dark: Boolean = false)
 
-    @Test fun allEightSwitchesUseConfirmedStateAndDispatchOneNamedAction() {
+    @Test fun allTenSwitchesUseConfirmedStateAndDispatchOneNamedAction() {
         val current = mutableStateOf(snapshot())
         val changes = mutableListOf<Pair<QuickSetting, Boolean>>()
         compose.setContent { fixture(Profile(), current.value) { setting, value -> changes += setting to value } }
-        assertEquals(8, QuickSetting.entries.size)
+        assertEquals(10, QuickSetting.entries.size)
         assertTrue("Opening and rendering the panel must not send settings", changes.isEmpty())
         for (setting in QuickSetting.entries) {
             val control = control(setting).performScrollTo().assertIsDisplayed().assertIsEnabled()
@@ -134,9 +134,9 @@ class ListeningModePanelTest {
         val protection = control(QuickSetting.EN352_PROTECTION).fetchSemanticsNode().boundsInRoot
         assertEquals(loud.top, protection.top, 0.5f)
         assertEquals(14f, loud.top - ear.bottom, 0.5f)
-        val media = control(QuickSetting.MEDIA_ASSIST).performScrollTo().fetchSemanticsNode().boundsInRoot
-        assertEquals("An odd final control uses the available row", ear.left, media.left, 0.5f)
-        assertEquals(game.right, media.right, 0.5f)
+        val tracking = control(QuickSetting.HEAD_TRACKING).performScrollTo().fetchSemanticsNode().boundsInRoot
+        assertEquals("An odd final control uses the available row", ear.left, tracking.left, 0.5f)
+        assertEquals(game.right, tracking.right, 0.5f)
         compose.runOnIdle { hidden.value = emptySet() }
         control(QuickSetting.PERSONALIZED_VOLUME).performScrollTo().assertIsDisplayed()
         control(QuickSetting.HEARING_AID).performScrollTo().assertIsDisplayed()
@@ -158,6 +158,31 @@ class ListeningModePanelTest {
         assertTrue("A reflowed tile must cancel the old gesture instead of changing another setting", changes.isEmpty())
         control(QuickSetting.LOUD_SOUND_REDUCTION).performClick()
         assertEquals(listOf(QuickSetting.LOUD_SOUND_REDUCTION to true), changes)
+    }
+
+    @Test fun spatialControlsKeepSimpleCaptionsAndLeaveThePanelOpenAfterToggling() {
+        val spatial = setOf(QuickSetting.SPATIAL_AUDIO, QuickSetting.HEAD_TRACKING)
+        val current = mutableStateOf(snapshot(spatial.map { QuickSettingState(it, true, true, true) }))
+        val changes = mutableListOf<Pair<QuickSetting, Boolean>>()
+        var dismissals = 0
+        compose.setContent {
+            fixture(Profile(), current.value, onDismiss = { dismissals++ }) { setting, value ->
+                changes += setting to value
+                current.value = current.value.copy(quickSettings = current.value.quickSettings.map {
+                    if (it.setting == setting) it.copy(checked = value, pending = true, enabled = false) else it
+                })
+            }
+        }
+        for (setting in spatial) {
+            control(setting).performScrollTo().assertIsOn().performClick()
+                .assertIsOff().assertIsNotEnabled()
+                .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Off"))
+            compose.onNodeWithTag("listening-mode-panel").assertIsDisplayed()
+        }
+        assertEquals(spatial.map { it to false }, changes)
+        assertEquals("Changing spatial settings never dismisses the panel", 0, dismissals)
+        for (text in listOf("Preferred", "Updating", "Reading", "Requested"))
+            compose.onAllNodesWithText(text, substring = true).assertCountEquals(0)
     }
 
     @Test fun allHiddenOrMissingControlsLeaveOnlyTheUnchangedListeningRailAndCloseButton() {
@@ -409,7 +434,7 @@ class ListeningModePanelTest {
                 requested = setting == QuickSetting.EAR_DETECTION)
         })
         compose.setContent { fixture(profile.value, current) { _, _ -> changes++ } }
-        for ((name, value) in listOf("light" to Profile(), "dark-large" to Profile(width = 320, height = 720, fontScale = 1.3f, dark = true))) {
+        for ((name, value) in listOf("light" to Profile(height = 760), "dark-large" to Profile(width = 320, height = 720, fontScale = 1.3f, dark = true))) {
             compose.runOnIdle { profile.value = value }
             compose.mainClock.advanceTimeBy(1500)
             compose.waitForIdle()
@@ -417,6 +442,12 @@ class ListeningModePanelTest {
             output.parentFile.mkdirs()
             val bitmap = compose.onNodeWithTag("quick-panel-fixture").captureToImage().asAndroidBitmap()
             output.outputStream().use { assertTrue(bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)) }
+            if (name == "dark-large") {
+                control(QuickSetting.HEAD_TRACKING).performScrollTo().assertIsDisplayed()
+                val bottom = File("build/outputs/quick-settings-previews/quick-settings-dark-large-bottom.png")
+                val bottomBitmap = compose.onNodeWithTag("quick-panel-fixture").captureToImage().asAndroidBitmap()
+                bottom.outputStream().use { assertTrue(bottomBitmap.compress(Bitmap.CompressFormat.PNG, 100, it)) }
+            }
         }
         assertEquals(0, changes)
     }
@@ -432,6 +463,7 @@ class ListeningModePanelTest {
     @Composable
     private fun fixture(profile: Profile, snapshot: ListeningModeSnapshot, hiddenSettings: Set<QuickSetting> = emptySet(),
         onMode: (Int) -> Unit = {},
+        onDismiss: () -> Unit = {},
         onToggle: (QuickSetting, Boolean) -> Unit) {
         CompositionLocalProvider(LocalDensity provides Density(1f, profile.fontScale)) {
             LibrePodsTheme(designSystem = DesignSystem.Apple, darkTheme = profile.dark) {
@@ -439,7 +471,7 @@ class ListeningModePanelTest {
                     .background(if (profile.dark) Color(0xFF161C29) else Color(0xFFE7E5F4))
                     .testTag("quick-panel-fixture")) {
                     ListeningModePanel(snapshot, onMode = onMode, onStrength = {}, onToggle = onToggle,
-                        modifier = Modifier.fillMaxWidth(), hiddenSettings = hiddenSettings)
+                        modifier = Modifier.fillMaxWidth(), hiddenSettings = hiddenSettings, onDismiss = onDismiss)
                 }
             }
         }
