@@ -492,7 +492,7 @@ private slots:
         // Attempt to activate A2DP profile after a delay to ensure connection is established
         QTimer::singleShot(2000, this, [this, address]()
         {
-            if (!address.isEmpty())
+            if (!address.isEmpty() && QBluetoothAddress(address) == m_socketAddress)
             {
                 QString formattedAddress = address;
                 formattedAddress = formattedAddress.replace(":", "_");
@@ -506,11 +506,14 @@ private slots:
     void onDeviceDisconnected(const QBluetoothAddress &address)
     {
         LOG_INFO("Device disconnected: " << address.toString());
+        if (!m_socketAddress.isNull() && address != m_socketAddress) return;
         if (socket)
         {
             LOG_WARN("Socket is still open, closing it");
-            socket->close();
+            auto *previous = socket;
             socket = nullptr;
+            previous->close();
+            previous->deleteLater();
         }
         if (phoneSocket && phoneSocket->isOpen())
         {
@@ -598,7 +601,7 @@ private slots:
                                                             : "In case";
     }
 
-    void connectToDevice(const QBluetoothDeviceInfo &device)
+    void connectToDevice(const QBluetoothDeviceInfo &device, int retryCount = 0)
     {
         if (socket && socket->isOpen() && socket->peerAddress() == device.address())
         {
@@ -607,13 +610,17 @@ private slots:
         }
 
         LOG_INFO("Connecting to device: " << device.name());
+        const auto attempt = ++m_connectionAttempt;
+        m_connectionRetries = retryCount;
+        m_socketAddress = device.address();
 
         // Clean up any existing socket
         if (socket)
         {
-            socket->close();
-            socket->deleteLater();
+            auto *previous = socket;
             socket = nullptr;
+            previous->close();
+            previous->deleteLater();
         }
 
         QBluetoothSocket *localSocket = new QBluetoothSocket(QBluetoothServiceInfo::L2capProtocol);
@@ -622,6 +629,8 @@ private slots:
         // Connection handler
         auto handleConnection = [this, localSocket]()
         {
+            if (socket != localSocket) return;
+            m_connectionRetries = 0;
             connect(localSocket, &QBluetoothSocket::readyRead, this, [this, localSocket]()
                     {
             QByteArray data = localSocket->readAll();
@@ -631,22 +640,24 @@ private slots:
         };
 
         // Error handler with retry
-        auto handleError = [this, device, localSocket](QBluetoothSocket::SocketError error)
+        auto handleError = [this, device, localSocket, attempt](QBluetoothSocket::SocketError error)
         {
+            if (socket != localSocket) return;
             LOG_ERROR("Socket error: " << error << ", " << localSocket->errorString());
 
-            static int retryCount = 0;
+            const int retryCount = m_connectionRetries;
             if (retryCount < m_retryAttempts)
             {
-                retryCount++;
-                LOG_INFO("Retrying connection (attempt " << retryCount << ")");
-                QTimer::singleShot(1500, this, [this, device]()
-                                   { connectToDevice(device); });
+                LOG_INFO("Retrying connection (attempt " << retryCount + 1 << ")");
+                QTimer::singleShot(1500, this, [this, device, attempt, retryCount]()
+                {
+                    if (m_connectionAttempt == attempt && !areAirpodsConnected())
+                        connectToDevice(device, retryCount + 1);
+                });
             }
             else
             {
-                LOG_ERROR("Failed to connect after 3 attempts");
-                retryCount = 0;
+                LOG_ERROR("Failed to connect after " << retryCount << " retries");
             }
         };
 
@@ -845,6 +856,7 @@ private slots:
         else if (packet.startsWith(AirPodsPackets::Phone::DISCONNECT_REQUEST))
         {
             LOG_INFO("Disconnect request received");
+            ++m_connectionAttempt;
             if (socket && socket->isOpen()) {
                 socket->close();
                 LOG_INFO("Disconnected from AirPods");
@@ -972,6 +984,9 @@ signals:
 
 private:
     QBluetoothSocket *socket = nullptr;
+    QBluetoothAddress m_socketAddress;
+    quint64 m_connectionAttempt = 0;
+    int m_connectionRetries = 0;
     QBluetoothSocket *phoneSocket = nullptr;
     QByteArray lastBatteryStatus;
     QByteArray lastEarDetectionStatus;
