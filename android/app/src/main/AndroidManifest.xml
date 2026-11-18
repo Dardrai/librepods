@@ -6,6 +6,9 @@
         android:name="me.kavishdevar.librepods.permission.NATIVE_GAME_CONTROL"
         android:protectionLevel="signature" />
     <uses-permission android:name="me.kavishdevar.librepods.permission.NATIVE_GAME_CONTROL" />
+    <permission
+        android:name="me.kavishdevar.librepods.permission.SPATIAL_MOTION"
+        android:protectionLevel="signature" />
 
     <uses-feature android:name="android.hardware.usb.host" android:required="false" />
 
@@ -73,6 +76,11 @@
         android:theme="@style/Theme.LibrePods"
         android:description="@string/app_description"
         tools:ignore="UnusedAttribute" >
+        <service
+            android:name=".audio.SpatialMotionService"
+            android:exported="true"
+            android:permission="me.kavishdevar.librepods.permission.SPATIAL_MOTION" />
+
         <provider
             android:name="rikka.shizuku.ShizukuProvider"
             android:authorities="${applicationId}.shizuku"
