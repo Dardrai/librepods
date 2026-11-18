@@ -23,6 +23,9 @@ MARKER_PREFIX = b"LIBREPODS_AAC_ELD_BUILD_V1;"
 FDK_REVISION = "cac04476081a23c870fed05c36228cd02c5e7c3d"
 MARKER = MARKER_PREFIX + b"backend=owned-fdk;pcm_bits=32;fdk=" + FDK_REVISION.encode() + b"\0"
 NATIVE_ENTRY = "lib/arm64-v8a/libfluoride_hooks.so"
+SPATIAL_ENTRY = "lib/arm64-v8a/libpixel_spatial_control.so"
+SPATIAL_JNI = tuple(b"Java_me_kavishdevar_librepods_shizuku_SpatialNativeClient_" + method + b"\0"
+                    for method in (b"nativeRequest", b"nativeRelease", b"nativeSnapshot"))
 NATIVE_OPTIONS = {"CMAKE_BUILD_TYPE": "Release", "ANDROID_ABI": "arm64-v8a",
                   "LIBREPODS_PRIVATE_OWNED_FDK": "ON", "LIBREPODS_PRIVATE_WIDE_PCM": "ON",
                   "LIBREPODS_NATIVE_TRACE": "OFF", "ELD_KEEP_GAME_FLUSH_BASELINE": "ON",
@@ -95,6 +98,11 @@ def payload(archive, expected_notices):
     require(archive.getinfo(NATIVE_ENTRY).file_size <= 64 * 1024 * 1024, "Native library exceeds verification bound")
     native = archive.read(NATIVE_ENTRY)
     native_contract(native)
+    require(SPATIAL_ENTRY in names, "APK has no ARM64 spatial-control client")
+    require(archive.getinfo(SPATIAL_ENTRY).file_size <= 4 * 1024 * 1024, "Spatial client exceeds verification bound")
+    spatial = archive.read(SPATIAL_ENTRY)
+    elf_sections(spatial)
+    require(all(symbol in spatial for symbol in SPATIAL_JNI), "Spatial client is missing JNI bindings")
     notices = {}
     for name in NOTICE_NAMES:
         entry = "assets/aac-eld/" + name
@@ -104,6 +112,7 @@ def payload(archive, expected_notices):
         require(data and data == expected_notices[name], "APK notice differs from its source-built copy: " + name)
         notices[name] = hashlib.sha256(data).hexdigest()
     return {"arm64_native_sha256": hashlib.sha256(native).hexdigest(),
+            "arm64_spatial_client_sha256": hashlib.sha256(spatial).hexdigest(),
             "arm64_build_id": build_id(native), "notice_sha256": notices}
 
 
@@ -312,7 +321,8 @@ def self_test():
         else:
             raise AssertionError("Malformed, stub or mismatched native payload accepted")
     notices = {name: (name + "\n").encode() for name in NOTICE_NAMES}
-    entries = {NATIVE_ENTRY: elf(), **{"assets/aac-eld/" + name: data for name, data in notices.items()}}
+    entries = {NATIVE_ENTRY: elf(), SPATIAL_ENTRY: elf(marker=b"".join(SPATIAL_JNI)),
+               **{"assets/aac-eld/" + name: data for name, data in notices.items()}}
 
     def check(entries):
         data = io.BytesIO()
@@ -323,7 +333,7 @@ def self_test():
             return payload(archive, notices)
 
     assert check(entries)["arm64_native_sha256"] == hashlib.sha256(elf()).hexdigest()
-    for removed in (NATIVE_ENTRY, *("assets/aac-eld/" + name for name in NOTICE_NAMES)):
+    for removed in (NATIVE_ENTRY, SPATIAL_ENTRY, *("assets/aac-eld/" + name for name in NOTICE_NAMES)):
         try:
             check({key: value for key, value in entries.items() if key != removed})
         except ValueError:

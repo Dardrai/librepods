@@ -1,10 +1,9 @@
 import java.util.Properties
-import java.security.MessageDigest
 import org.gradle.api.file.DirectoryProperty
 import org.gradle.api.tasks.OutputDirectory
 
-val appVersionName = (rootProject.extra["appVersionName"] as String) + "-pixel165"
-val appVersionCode = 200000250
+val appVersionName = (rootProject.extra["appVersionName"] as String) + "-pixel166"
+val appVersionCode = 200000251
 
 plugins {
     alias(libs.plugins.android.application)
@@ -36,31 +35,6 @@ val releaseSigningAvailable = listOf(
     "RELEASE_KEY_ALIAS",
     "RELEASE_KEY_PASSWORD"
 ).all { props[it]?.toString()?.isNotBlank() == true }
-
-val pixelSpatialControl = providers.gradleProperty("pixelSpatialControl").orNull?.let(::file)
-val verifiedSpatialControl = layout.buildDirectory.dir("pixel-spatial-control").get().asFile
-val preparePixelSpatialControl = tasks.register("preparePixelSpatialControl") {
-    val input = pixelSpatialControl
-    val directory = verifiedSpatialControl
-    if (input != null) inputs.file(input)
-    outputs.dir(directory)
-    doLast {
-        val output = directory.resolve("arm64-v8a/libpixel_spatial_control.so")
-        if (input == null) {
-            output.delete()
-        } else {
-            val hash = MessageDigest.getInstance("SHA-256").digest(input.readBytes())
-                .joinToString("") { "%02x".format(it) }
-            check(hash == "148bb04704f36d1d7ec6c0091ffa2d2b3801b265bfa730f3634523819ae47771") {
-                "Pixel spatial-control client hash mismatch"
-            }
-            input.copyTo(output, overwrite = true)
-        }
-    }
-}
-tasks.configureEach {
-    if (name == "mergeReleaseJniLibFolders") dependsOn(preparePixelSpatialControl)
-}
 
 room3 {
     schemaDirectory("$projectDir/schemas")
@@ -164,7 +138,6 @@ android {
         viewBinding = true
         buildConfig = true
     }
-    sourceSets["release"].jniLibs.directories.add(verifiedSpatialControl.absolutePath)
     androidResources {
         generateLocaleConfig = true
     }

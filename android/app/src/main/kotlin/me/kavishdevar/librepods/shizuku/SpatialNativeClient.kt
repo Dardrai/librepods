@@ -2,6 +2,7 @@
 package me.kavishdevar.librepods.shizuku
 
 import android.os.Bundle
+import android.os.Build
 import android.os.Process
 import androidx.annotation.Keep
 
@@ -9,7 +10,7 @@ import androidx.annotation.Keep
 internal object SpatialNativeClient {
     private var loaded = false
     @Synchronized fun load(): Boolean {
-        if (Process.myUid() != 0) return false
+        if (Process.myUid() != 0 || Build.VERSION.SDK_INT < 37) return false
         if (!loaded) loaded = runCatching { System.loadLibrary("pixel_spatial_control"); true }.getOrDefault(false)
         return loaded
     }

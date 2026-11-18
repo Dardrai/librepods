@@ -11,6 +11,10 @@ option(ELD_KEEP_GAME_FLUSH_BASELINE "Preserve the captured controller flush time
 option(ELD_KEEP_GAME_PACKET_BASELINE "Preserve captured controller packet permissions in Game Mode" ON)
 option(LIBREPODS_NATIVE_TRACE "Verbose native hook diagnostics" OFF)
 
+if(ANDROID_ABI STREQUAL "arm64-v8a")
+    add_subdirectory(spatial)
+endif()
+
 add_library(dongle_hid SHARED dongle_hid.cpp)
 target_compile_options(dongle_hid PRIVATE -O2 -fvisibility=hidden -Wall -Wextra -Werror)
 target_link_options(dongle_hid PRIVATE -Wl,--strip-all -Wl,--gc-sections -Wl,-z,max-page-size=16384)

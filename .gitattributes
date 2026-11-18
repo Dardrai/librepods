@@ -1,1 +1,2 @@
 android/gradlew text eol=lf
+android/app/src/main/cpp/spatial/idl/** text eol=lf

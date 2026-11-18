@@ -163,7 +163,7 @@ jobs:
       - name: Test, lint and build Android APKs
         working-directory: android
         run: ./gradlew --no-daemon :core:lintDebug :app:verifyPixel
-      - name: Verify complete AAC-ELD PCM32 APK payloads
+      - name: Verify AAC-ELD PCM32 and spatial-control APK payloads
         run: python3 .github/scripts/verify_android_codec.py --build-tools "$ANDROID_HOME/build-tools/36.0.0"
       - name: Verify trusted APK signatures
         if: steps.metadata.outputs.sign_artifacts == 'true'
