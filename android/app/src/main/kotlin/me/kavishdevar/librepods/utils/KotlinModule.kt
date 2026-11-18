@@ -138,12 +138,6 @@ class KotlinModule: XposedModule() {
 
     @SuppressLint("UnsafeDynamicallyLoadedCode")
     override fun onPackageLoaded(param: PackageLoadedParam) {
-        if (me.kavishdevar.librepods.BuildConfig.DEBUG && param.isFirstPackage &&
-            param.packageName == TidalBufferProbePolicy.PACKAGE && moduleProcess == TidalBufferProbePolicy.PACKAGE) {
-            runCatching { TidalBufferProbeHooks.install(this, param.defaultClassLoader) }
-                .onFailure { log(Log.WARN, TidalBufferProbeHooks.TAG, "hook unavailable: ${it.javaClass.simpleName}") }
-            return
-        }
         if (param.packageName == "com.google.android.bluetooth" || param.packageName == "com.android.bluetooth") {
             log(Log.INFO, TAG, "Bluetooth app detected, hooking l2c_fcr_chk_chan_modes")
             try {

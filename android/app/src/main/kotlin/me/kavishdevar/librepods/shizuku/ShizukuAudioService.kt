@@ -41,7 +41,6 @@ class ShizukuAudioService @JvmOverloads constructor(context: Context,
     private var spatialAudio: SpatialAudioAccess? = null
     @Volatile private var headTrackerProbe: RootHeadTrackerProbe? = null
     @Volatile private var headTrackerSink: RootHeadTrackerSink? = null
-    @Volatile private var atmosHeadTracking: RootAtmosHeadTracking? = null
     @Volatile private var atmosSpatial: RootSpatialControl? = null
     private val volumeSync by lazy {
         BluetoothVolumeSync(shellContext, audio = volumeRepairAudio(ShizukuVolumeSyncAudio(shellContext,
@@ -55,7 +54,6 @@ class ShizukuAudioService @JvmOverloads constructor(context: Context,
             if (!volumeRepairing) {
                 volumeRepairing = true
                 // Retire locally before even a sub-poll-period repair; never stop for observation alone.
-                atmosHeadTracking?.retireForVolumeRepair()
             }
         }
         override fun setVolume(index: Int) { beforeWrite(); audio.setVolume(index) }
@@ -150,7 +148,6 @@ class ShizukuAudioService @JvmOverloads constructor(context: Context,
 
     override fun retireOwner(owner: IPlaybackRecoveryOwner) {
         enforceCaller()
-        atmosHeadTracking?.retire(owner)
         atmosSpatial?.retire(owner)
         headTrackerProbe?.finish(owner)
         spatialAudio?.retire(owner)
@@ -201,35 +198,6 @@ class ShizukuAudioService @JvmOverloads constructor(context: Context,
     override fun openHeadTracking(address: String, owner: IPlaybackRecoveryOwner,
         poses: ParcelFileDescriptor, events: IHeadTrackerEvents, enablePreference: Boolean): Bundle =
         openHeadTracker(address, owner, poses, events, null, enablePreference)
-
-    override fun openAtmosHeadTracking(address: String, owner: IPlaybackRecoveryOwner, socket: IBinder,
-        source: Bundle, permit: Bundle, poses: ParcelFileDescriptor): AtmosTrackingLease {
-        try {
-            enforceCaller()
-            check(BuildConfig.DEBUG && Process.myUid() == 0 && headTrackerPermission()) { "atmos_unavailable" }
-            return synchronized(lock) {
-                check(atmosAdmissionRejection() == null) { "atmos_busy" }
-                val manager = atmosHeadTracking ?: RootAtmosHeadTracking(shellContext, ::enforceCaller,
-                    ::atmosAdmissionRejection, { peer, epoch -> atmosSpatial?.authorizes(peer, epoch) == true })
-                    .also { atmosHeadTracking = it }
-                // Reserve before releasing the same lock used by Android sensor registration.
-                manager.open(address, owner, socket, source, permit, poses)
-            }
-        } catch (error: Exception) { poses.close(); throw error }
-    }
-
-    private fun atmosAdmissionRejection(): String? = synchronized(lock) {
-        when {
-            cleanupFailed.get() -> "cleanup_failed"
-            volumeRepairing -> "volume_repairing"
-            spatialMutating -> "spatial_mutating"
-            playbackRecovery != null -> "playback_recovery"
-            playbackRelease != null -> "playback_release"
-            callConnection != null -> "call_connection"
-            !probeIsQuiet() -> "probe_not_quiet"
-            else -> null
-        }
-    }
 
     private fun headTrackerAccess(): RootHeadTrackerProbe = synchronized(lock) {
         check(!cleanupFailed.get()) { "helper_unavailable" }
@@ -292,8 +260,7 @@ class ShizukuAudioService @JvmOverloads constructor(context: Context,
         while (true) {
             val reserved = synchronized(lock) {
                 if (!cleanup) check(!cleanupFailed.get() && !volumeChecking && playbackRecovery == null &&
-                    playbackRelease == null && callConnection == null && probeIsQuiet() &&
-                    atmosHeadTracking?.hasLiveLease() != true) { "busy" }
+                    playbackRelease == null && callConnection == null && probeIsQuiet()) { "busy" }
                 if (spatialMutating) false else { spatialMutating = true; true }
             }
             if (reserved) break
@@ -648,7 +615,6 @@ class ShizukuAudioService @JvmOverloads constructor(context: Context,
         if (!cleanupFailed.compareAndSet(false, true)) return
         synchronized(lock) { headTrackerProbe }?.close()
         headTrackerSink?.close()
-        atmosHeadTracking?.close()
         atmosSpatial?.close()
         val routes = synchronized(lock) {
             playbackRecovery?.cancel(); playbackRelease?.cancel(); callConnection?.binderDied()

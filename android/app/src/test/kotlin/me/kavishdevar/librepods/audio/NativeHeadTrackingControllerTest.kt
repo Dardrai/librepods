@@ -62,7 +62,7 @@ class NativeHeadTrackingControllerTest {
         spatialInitiallyOn: Boolean = true, nativeAtmos: Boolean = false, atmosSupported: Boolean = false,
         headInitiallyOn: Boolean? = false, clearSavedChoices: Boolean = true, atmosKnown: Boolean = true,
         rootInitiallyReady: Boolean = true, source: Flow<MotionSample?> = MutableStateFlow(null),
-        atmosAbsent: Boolean = false) : AutoCloseable {
+        atmosAbsent: Boolean = false, sourceTiming: Map<String, Long> = emptyMap()) : AutoCloseable {
         val parent = CoroutineScope(SupervisorJob())
         val started = CopyOnWriteArrayList<Any>()
         val released = CopyOnWriteArrayList<Any>()
@@ -144,6 +144,7 @@ class NativeHeadTrackingControllerTest {
             `when`(device.settings).thenReturn(MutableStateFlow(AppleSettings()))
             `when`(aacp.captureAudioSocket()).thenReturn(socket)
             `when`(aacp.ownsAudioSocket(socket)).thenReturn(true)
+            `when`(aacp.motionSourceTimingSnapshot()).thenReturn(sourceTiming)
             `when`(bridge.hasRootPrivileges).thenAnswer { rootReady.get() }
             `when`(profiles.load(any<SpatialPoseProfileKey>() ?: key())).thenReturn(if (calibrated) identity else null)
             doAnswer { released += it.getArgument<Any>(0); true }.`when`(device).stopHeadTracking(any<Any>() ?: Any())
@@ -159,8 +160,7 @@ class NativeHeadTrackingControllerTest {
     }
 
     @Test fun cachedSourceTimingIsIncludedWithoutStartingMotion() {
-        Target().use { f ->
-            `when`(f.aacp.motionSourceTimingSnapshot()).thenReturn(mapOf("reads" to 12L, "feed_wait_max_nanos" to 30L))
+        Target(sourceTiming = mapOf("reads" to 12L, "feed_wait_max_nanos" to 30L)).use { f ->
             val source = requireNotNull(f.controller.timingSnapshot().getBundle("source"))
             assertEquals(12L, source.getLong("reads"))
             assertEquals(30L, source.getLong("feed_wait_max_nanos"))
@@ -173,7 +173,7 @@ class NativeHeadTrackingControllerTest {
             ReflectionHelpers.getField<kotlinx.coroutines.Job>(f.controller, "runner").cancelAndJoin()
             val idle = ReflectionHelpers.getField<AtomicBoolean>(f.controller, "hostIdle")
             val checked = ReflectionHelpers.getField<AtomicLong>(f.controller, "hostCheckedAt")
-            fun rejection() = ReflectionHelpers.callInstanceMethod<AtmosSourceRejection?>(f.controller, "sourceRejection",
+            fun rejection() = ReflectionHelpers.callInstanceMethod<HeadTrackingSourceRejection?>(f.controller, "sourceRejection",
                 ReflectionHelpers.ClassParameter.from(BluetoothSocket::class.java, f.socket),
                 ReflectionHelpers.ClassParameter.from(SpatialPoseProfileKey::class.java, checkNotNull(spatialPoseProfileKey(f.device))))
             idle.set(true)
@@ -447,30 +447,6 @@ class NativeHeadTrackingControllerTest {
             assertFalse(ReflectionHelpers.callInstanceMethod<Boolean>(f.controller, "atmosPolicyCurrent"))
             assertEquals(false, f.controller.state.value.desiredSpatialEnabled)
             assertEquals(false, f.controller.state.value.desiredTrackingEnabled)
-        }
-    }
-
-    @Test fun atmosWaitsForNativeRegistrationAndRetiresBeforeNativeCleanup() = runBlocking {
-        Target(nativeAtmos = true, atmosSupported = true).use { f ->
-            waitUntil { f.atmosphere.getLong("accepted_generation") > 0 && f.controller.state.value.spatialAvailable }
-            val entered = CountDownLatch(1); val registered = CountDownLatch(1)
-            val cleanup = AtomicBoolean(false)
-            f.openNative = { current ->
-                entered.countDown(); check(registered.await(2, TimeUnit.SECONDS)); check(current())
-                synchronized(f.snapshot) { f.snapshot.putBoolean("head_tracker_enabled", true) }
-                ShizukuAudioClient.HeadTrackerLease(Bundle(), { Bundle() }, {
-                    assertFalse(f.controller.timingSnapshot().getBundle("atmos")!!.getBoolean("android_provider_ready"))
-                    cleanup.set(true); Bundle()
-                })
-            }
-            f.controller.setEnabled(true)
-            assertTrue(entered.await(2, TimeUnit.SECONDS))
-            assertFalse(f.controller.timingSnapshot().getBundle("atmos")!!.getBoolean("production_ready"))
-            registered.countDown()
-            waitUntil { f.controller.timingSnapshot().getBundle("atmos")!!.getBoolean("production_ready") }
-            f.controller.setEnabled(false)
-            assertFalse(f.controller.timingSnapshot().getBundle("atmos")!!.getBoolean("production_ready"))
-            waitUntil { cleanup.get() }
         }
     }
 

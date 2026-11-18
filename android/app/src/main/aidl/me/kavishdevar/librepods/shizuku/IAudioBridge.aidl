@@ -1,5 +1,4 @@
 package me.kavishdevar.librepods.shizuku;
-import me.kavishdevar.librepods.shizuku.AtmosTrackingLease;
 
 import me.kavishdevar.librepods.shizuku.IPlaybackRecoveryOwner;
 import me.kavishdevar.librepods.shizuku.IHfpCallControl;
@@ -56,8 +55,6 @@ interface IAudioBridge {
     Bundle openHeadTracking(String address, IPlaybackRecoveryOwner owner,
         in ParcelFileDescriptor poses, IHeadTrackerEvents events, boolean enablePreference) = 38;
     Bundle disableHeadTracking(String address, IPlaybackRecoveryOwner owner) = 39;
-    AtmosTrackingLease openAtmosHeadTracking(String address, IPlaybackRecoveryOwner owner,
-        IBinder socket, in Bundle source, in Bundle permit, in ParcelFileDescriptor poses) = 40;
     Bundle inspectAtmosSpatial(String address, IPlaybackRecoveryOwner owner) = 41;
     Bundle setAtmosSpatial(String address, IPlaybackRecoveryOwner owner,
         boolean spatialEnabled, boolean headTrackingEnabled, long choiceEpoch) = 42;

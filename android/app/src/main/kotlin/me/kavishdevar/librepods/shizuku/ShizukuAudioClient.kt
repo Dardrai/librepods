@@ -74,7 +74,6 @@ class ShizukuAudioClient @JvmOverloads constructor(context: Context,
     private var spatialRequest: PlaybackRequest? = null
     private var atmosSpatialRequest: PlaybackRequest? = null
     private var headTrackerRequest: PlaybackRequest? = null
-    private val atmosRequests = mutableSetOf<PlaybackRequest>()
     private val usbHidConnections = mutableSetOf<IUsbHidConnection>()
     @Volatile private var bridge: IAudioBridge? = null
     @Volatile private var backendUid: Int? = null
@@ -673,32 +672,6 @@ class ShizukuAudioClient @JvmOverloads constructor(context: Context,
         suspend fun finish(): Bundle = finishOwned()
     }
 
-    internal suspend fun openAtmosHeadTracking(address: String, socket: IBinder, source: Bundle,
-        permit: Bundle, poses: ParcelFileDescriptor, stillCurrent: () -> Boolean): AtmosClientLease {
-        var request: PlaybackRequest? = null
-        try {
-            check(BuildConfig.DEBUG && hasRootPrivileges) { "atmos_unavailable" }
-            val remote = checkNotNull(bridge)
-            val selected = A2dpRecoveryGuard(address).address
-            val owned = PlaybackRequest(remote, selected,
-                { !closed && bridge === remote && backendUid == 0 && stillCurrent() }, null, 0).also { request = it }
-            synchronized(lock) { check(owned.current()); atmosRequests += owned }
-            val lease = withContext(Dispatchers.IO) { remote.openAtmosHeadTracking(selected, owned.owner, socket, source, permit, poses) }
-            check(owned.current()) { "owner_changed" }
-            return AtmosClientLease(lease) {
-                owned.active.set(false)
-                synchronized(lock) { atmosRequests.remove(owned) }
-            }
-        } catch (error: Exception) {
-            request?.let {
-                it.active.set(false)
-                synchronized(lock) { atmosRequests.remove(it) }
-                runCatching { it.remote.retireOwner(it.owner) }
-            }
-            throw error
-        } finally { runCatching { poses.close() } }
-    }
-
     /** DEBUG only. Consumes the read end of an HTP1 pose pipe; never requests privileged access. */
     internal suspend fun startHeadTrackerProbe(address: String, poses: ParcelFileDescriptor, seconds: Int,
         stillCurrent: () -> Boolean, onReportingChanged: (Boolean, Long) -> Unit,
@@ -895,7 +868,6 @@ class ShizukuAudioClient @JvmOverloads constructor(context: Context,
             atmosSpatialRequest = null
             headTrackerRequest?.active?.set(false)
             headTrackerRequest = null
-            atmosRequests.forEach { it.active.set(false) }; atmosRequests.clear()
             usbHidConnections.toList().forEach { runCatching { it.close() } }
             usbHidConnections.clear()
             bridgeDeath?.let { death -> bridge?.asBinder()?.let { runCatching { it.unlinkToDeath(death, 0) } } }
@@ -931,7 +903,6 @@ class ShizukuAudioClient @JvmOverloads constructor(context: Context,
             atmosSpatialRequest = null
             headTrackerRequest?.also { it.active.set(false); retiring += it }
             headTrackerRequest = null
-            atmosRequests.forEach { it.active.set(false); retiring += it }; atmosRequests.clear()
             usbHidConnections.toList().forEach { runCatching { it.close() } }
             usbHidConnections.clear()
             bridgeDeath?.let { death -> bridge?.asBinder()?.let { runCatching { it.unlinkToDeath(death, 0) } } }

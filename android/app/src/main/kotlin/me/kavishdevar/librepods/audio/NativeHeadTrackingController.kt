@@ -62,7 +62,7 @@ class NativeHeadTrackingController internal constructor(
     private val profiles: SpatialPoseProfileStore,
     private val motion: Flow<MotionSample?>,
     dispatcher: CoroutineDispatcher,
-    enableAtmos: Boolean = false,
+    private val enableAtmos: Boolean = false,
 ) : AutoCloseable {
     constructor(device: AppleDevice, parentScope: CoroutineScope, hostBlocked: () -> Boolean,
         deviceCurrent: () -> Boolean) : this(device, parentScope, hostBlocked, deviceCurrent,
@@ -105,13 +105,6 @@ class NativeHeadTrackingController internal constructor(
     private val retryAfter = AtomicLong()
     private val gapRecoveries = HeadMotionGapRecovery.Scopes()
     @Volatile private var fallbackSocket: BluetoothSocket? = null
-    private val atmos = if (enableAtmos) AtmosHeadTrackingCoordinator(device, scope, access,
-        { fallbackSocket !== it }, { fallbackSocket = it }, { socket ->
-            val profileKey = key()
-            if (profileKey == null) sourceRejection("profile_key_missing")
-            else sourceRejection(socket, profileKey) ?: if (headTrackingRequested()) null
-                else sourceRejection("head_tracking_disabled")
-        }) else null
     @Volatile private var timing = HeadTrackingTiming()
     @Volatile private var previousSessionTiming: Bundle? = null
     @Volatile private var activeLease: ShizukuAudioClient.HeadTrackerLease? = null
@@ -138,7 +131,6 @@ class NativeHeadTrackingController internal constructor(
         sinkTiming?.let { putBundle("sink", Bundle(it)) }
         putLong("sink_snapshot_age_ms", if (sinkTimingAt == 0L) -1 else SystemClock.elapsedRealtime() - sinkTimingAt)
         previousSessionTiming?.let { putBundle("previous_session", Bundle(it)) }
-        atmos?.let { putBundle("atmos", it.snapshot()) }
     }
 
     private fun replaceSessionTiming(): HeadTrackingTiming {
@@ -200,7 +192,7 @@ class NativeHeadTrackingController internal constructor(
     }
 
     private fun needsAtmos(backend: Bundle? = atmosControls) =
-        atmos != null && !(backend?.getInt("version") == 1 &&
+        enableAtmos && !(backend?.getInt("version") == 1 &&
             backend.getString("reason") == SpatialBackendSnapshot.ABSENT)
 
     private fun atmosPolicyCurrent(): Boolean = !needsAtmos() || atmosControls?.let {
@@ -221,12 +213,10 @@ class NativeHeadTrackingController internal constructor(
         mutableState.update { it.copy(desiredSpatialEnabled = spatial, desiredTrackingEnabled = tracking) }
         preferences.edit().putBoolean(preferencePrefix + "spatial", spatial)
             .putBoolean(preferencePrefix + "tracking", tracking).putLong(preferencePrefix + "epoch", epoch).apply()
-        atmos?.androidProviderReady(false)
-        atmos?.setControls(spatial, tracking, epoch)
     }
 
     private suspend fun applyAtmosChoice(choice: Choice, owns: () -> Boolean): Boolean {
-        if (atmos == null) return true
+        if (!enableAtmos) return true
         val pair = synchronized(choiceLock) { (desiredSpatial == true) to (desiredTracking == true) }
         val ownerCurrent = { current() && choiceEpoch.get() == choice.epoch }
         if (acceptedAtmosEpoch.get() == choice.epoch && atmosControls?.let {
@@ -242,7 +232,6 @@ class NativeHeadTrackingController internal constructor(
         val accepted = result.getBoolean("applied") && acceptedAtmosSpatial(result, pair.first, pair.second, choice.epoch)
         if (accepted) {
             acceptedAtmosEpoch.set(choice.epoch)
-            atmos.setControls(pair.first, pair.second, choice.epoch, accepted = true)
             inspectedSpatial?.let { snapshot -> withChoice(choice.epoch) { publishSpatial(snapshot) } }
         }
         return accepted
@@ -256,12 +245,11 @@ class NativeHeadTrackingController internal constructor(
 
     fun setCalibrationActive(owner: Any, active: Boolean) {
         synchronized(calibrationOwners) { if (active) calibrationOwners += owner else calibrationOwners -= owner }
-        if (active) { sessionLive?.set(false); atmos?.retireCurrent() }
+        if (active) sessionLive?.set(false)
         else { failedSocket = null; failedKey = null; poseFaultReason = null }
     }
 
     fun setEnabled(enabled: Boolean) {
-        if (!enabled) atmos?.retireCurrent()
         synchronized(choiceLock) {
             if (closed.get()) return
             val choice = Choice(choiceEpoch.incrementAndGet(), enabled, SystemClock.elapsedRealtime())
@@ -271,7 +259,7 @@ class NativeHeadTrackingController internal constructor(
             sessionLive?.set(false)
             mutableState.update { it.copy(enabled = enabled, active = false, busy = true,
                 spatialEnabled = nativeSpatialOn, spatialBusy = false) }
-            if (!enabled || atmos != null) offRequests.trySend(choice)
+            if (!enabled || enableAtmos) offRequests.trySend(choice)
         }
     }
 
@@ -284,7 +272,6 @@ class NativeHeadTrackingController internal constructor(
             saveChoice(enabled, false, choice.epoch)
             pending.set(choice)
             sessionLive?.set(false)
-            if (!enabled) atmos?.retireCurrent()
             mutableState.update { it.copy(spatialEnabled = enabled, spatialBusy = true,
                 enabled = false, busy = false, active = false) }
             offRequests.trySend(choice)
@@ -318,7 +305,7 @@ class NativeHeadTrackingController internal constructor(
 
     private suspend fun migrateNativeChoice(snapshot: Bundle, eligible: Boolean): Boolean {
         val backend = atmosControls ?: return false
-        if (atmos == null || !eligible || backend.getInt("version") != 1 || backend.flag("supported") != true ||
+        if (!enableAtmos || !eligible || backend.getInt("version") != 1 || backend.flag("supported") != true ||
             backend.flag("available") != true || backend.flag("route_verified") != true ||
             snapshot.flag("route_selected") != true || snapshot.flag("fixed_supported") != true)
             return false
@@ -356,7 +343,6 @@ class NativeHeadTrackingController internal constructor(
         pending.set(choice)
         mutableState.update { it.copy(enabled = tracking, busy = tracking, spatialBusy = !tracking) }
         sessionLive?.set(false)
-        atmos?.setControls(desiredSpatial == true, tracking, choice.epoch)
         offRequests.trySend(choice)
     }
 
@@ -367,12 +353,10 @@ class NativeHeadTrackingController internal constructor(
         val epoch = choiceEpoch.get()
         if (!current() || !acceptedAtmosSpatial(backend, spatial, tracking, epoch)) return@synchronized
         acceptedAtmosEpoch.set(epoch)
-        atmos?.setControls(spatial, tracking, epoch, accepted = true)
         if (acceptedNativeEpoch.get() == epoch || pending.get() != null || !savedRearmed || tracking && !eligible) return@synchronized
         val choice = Choice(epoch, if (tracking) true else spatial, SystemClock.elapsedRealtime(), spatial = !tracking)
         pending.set(choice)
         mutableState.update { it.copy(enabled = tracking, busy = tracking, spatialBusy = !tracking) }
-        atmos?.androidProviderReady(false)
         offRequests.trySend(choice)
     }
 
@@ -382,9 +366,9 @@ class NativeHeadTrackingController internal constructor(
 
     private fun sourceRejection(reason: String, checkedAt: Long = hostCheckedAt.get(),
         now: Long = SystemClock.elapsedRealtime(), idle: Boolean = hostIdle.get()) =
-        AtmosSourceRejection(reason, now, checkedAt, idle)
+        HeadTrackingSourceRejection(reason, now, checkedAt, idle)
 
-    private fun sourceRejection(socket: BluetoothSocket, key: SpatialPoseProfileKey): AtmosSourceRejection? {
+    private fun sourceRejection(socket: BluetoothSocket, key: SpatialPoseProfileKey): HeadTrackingSourceRejection? {
         if (!current()) return sourceRejection("device_not_current")
         if (!access.hasRootPrivileges) return sourceRejection("root_unavailable")
         val idle = hostIdle.get()
@@ -402,7 +386,6 @@ class NativeHeadTrackingController internal constructor(
     }
 
     private suspend fun stopSession() {
-        atmos?.androidProviderReady(false)
         sessionLive?.set(false)
         session?.cancelAndJoin()
         session = null; sessionLive = null; sessionSocket = null; sessionKey = null
@@ -429,7 +412,6 @@ class NativeHeadTrackingController internal constructor(
                     val socket = device.aacp.captureAudioSocket()
                     val eligible = BuildConfig.DEBUG && profile != null && socket != null &&
                         sourceCurrent(socket, checkNotNull(key))
-                    atmos?.update(eligible && headTrackingRequested(), profile, socket)
                     mutableState.update { it.copy(calibrated = profile != null) }
                     if (session != null && (!eligible || !headTrackingRequested() || sessionSocket !== socket || sessionKey != key ||
                             sessionLive?.get() != true || session?.isActive != true)) stopSession()
@@ -457,7 +439,7 @@ class NativeHeadTrackingController internal constructor(
                             if (forceInspect.getAndSet(false) || inspectedAt == Long.MIN_VALUE || now - inspectedAt >= 1_000) {
                                 val snapshot = access.inspectSpatialAudio(device.macAddress.value, ::current)
                                 inspectedSpatial = Bundle(snapshot)
-                                if (atmos != null) atmosControls = access.inspectAtmosSpatial(device.macAddress.value, ::current)
+                                if (enableAtmos) atmosControls = access.inspectAtmosSpatial(device.macAddress.value, ::current)
                                 activeLease?.let { lease ->
                                     lease.state().getBundle("sink_stats")?.let { stats ->
                                         if (activeLease === lease) { sinkTiming = stats; sinkTimingAt = SystemClock.elapsedRealtime() }
@@ -540,7 +522,6 @@ class NativeHeadTrackingController internal constructor(
                 delay(100)
             }
         } finally {
-            atmos?.close()
             hostIdle.set(false); guard.cancel()
             withContext(NonCancellable) { stopSession(); access.close() }
             mutableState.update { it.copy(active = false, available = false, busy = false, spatialAvailable = false, spatialBusy = false) }
@@ -573,7 +554,6 @@ class NativeHeadTrackingController internal constructor(
                 if (choice == null || pending.compareAndSet(choice, null))
                     mutableState.update { it.copy(enabled = pending.get()?.enabled ?: true, busy = pending.get() != null) }
             }
-            if (owns() && nativeOn == true) atmos?.androidProviderReady(true)
             kotlinx.coroutines.coroutineScope {
                 val sender = launch(Dispatchers.IO) {
                     reporting.collectLatest { enabled ->
@@ -622,7 +602,6 @@ class NativeHeadTrackingController internal constructor(
             }
         } finally {
             recovery.withheld()
-            atmos?.androidProviderReady(false)
             live.set(false)
             forceInspect.set(true)
             withContext(NonCancellable + Dispatchers.IO) {
@@ -639,7 +618,6 @@ class NativeHeadTrackingController internal constructor(
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
         sessionLive?.set(false)
-        atmos?.close()
         offRequests.close(); offWriter.cancel()
         parentCompletion?.dispose()
         runner.cancel()
@@ -651,6 +629,16 @@ private fun Bundle.flag(name: String) = get(name) as? Boolean
 
 private fun Bundle.spatialEnabled(): Boolean? = if (getInt("version", 0) == 1 && flag("known") == true &&
     flag("enabled") != null && flag("device_enabled") != null) flag("enabled") == true && flag("device_enabled") == true else null
+
+internal data class HeadTrackingSourceRejection(val reason: String, val atMs: Long,
+    val hostCheckedAtMs: Long? = null, val hostIdle: Boolean? = null) {
+    fun snapshot() = Bundle().apply {
+        putString("reason", reason); putLong("at_ms", atMs)
+        hostCheckedAtMs?.let { putLong("host_checked_at_ms", it)
+            putLong("host_age_ms", if (it == Long.MIN_VALUE) -1 else atMs - it) }
+        hostIdle?.let { putBoolean("host_idle", it) }
+    }
+}
 
 internal fun acceptedAtmosSpatial(result: Bundle, spatial: Boolean, tracking: Boolean, epoch: Long): Boolean =
     epoch > 0 && (!tracking || spatial) && result.getInt("version", 0) == 1 &&

@@ -12,10 +12,7 @@ available in the app settings.
 For upgrade history and known limitations, see
 [Pixel fork on the Android rewrite](PIXEL-REWRITE.md).
 
-The separate spatial-audio preview uses a signed debug build. On the supported
-Pixel and Tidal versions, it defaults to a 100 ms output buffer for compatible
-Atmos playback and paces decoder input while head tracking is active. The
-regular GitHub APK does not include these experimental Tidal hooks.
+LibrePods can control the Pixel Dolby decoder through its local spatial-audio interface.
 
 ## Root Requirement
 
@@ -56,7 +53,7 @@ phone Bluetooth, continue below.
 1. Install the signed APK and open LibrePods. Grant Nearby devices and allow
    notifications when requested. Allow display over other apps if you
    want nearby pairing cards and the Dynamic Island.
-2. Open Settings → **Bluetooth access** and grant LibrePods access through your
+2. Open Settings â†’ **Bluetooth access** and grant LibrePods access through your
    root manager. Rooted phones do not need Shizuku. Without root, start Shizuku
    using wireless debugging and authorize LibrePods there. Shizuku may need to
    be started again after a phone restart.
@@ -144,8 +141,8 @@ APK as a system app or grant global permissions.
   Conversation Awareness, nearby pairing, the Dynamic Island, Quick Settings and
   widgets use the rewrite's per-device state. Features vary by model and firmware.
 - Tap the AirPods tile in Android's Quick Settings for the Control Center-style
-  listening rail and your chosen live toggles. Choose them in LibrePods →
-  **Settings → Quick Settings**. Unsupported controls are hidden automatically;
+  listening rail and your chosen live toggles. Choose them in LibrePods â†’
+  **Settings â†’ Quick Settings**. Unsupported controls are hidden automatically;
   supported controls remain visible during temporary loading or busy states.
   Native Bluetooth and the USB dongle use their existing setting paths. The panel
   adapts to larger text and scrolls on smaller screens.
