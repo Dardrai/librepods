@@ -1,6 +1,5 @@
 package me.kavishdevar.librepods.services
 
-import me.kavishdevar.librepods.BuildConfig
 
 import me.kavishdevar.librepods.core.data.recording.Recording
 import me.kavishdevar.librepods.core.utils.redactMac
@@ -90,6 +89,7 @@ import me.kavishdevar.librepods.R
 import me.kavishdevar.librepods.audio.ExperimentalAudioController
 import me.kavishdevar.librepods.audio.LivePcmConsumer
 import me.kavishdevar.librepods.audio.MicrophonePhase
+import me.kavishdevar.librepods.audio.nativeSpatialVersion
 import me.kavishdevar.librepods.core.bluetooth.MacAddress
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.ControlCommandIdentifier
 import me.kavishdevar.librepods.core.bluetooth.aacp.types.AppleEvent
@@ -1376,7 +1376,7 @@ class LibrePodsService: Service() {
         }
         audioDevices[address] = device
         audioControllers[address] = controller
-        if (BuildConfig.DEBUG && Build.VERSION.SDK_INT >= 33) {
+        if (nativeSpatialVersion) {
             headTrackingControllers[address] = me.kavishdevar.librepods.audio.NativeHeadTrackingController(
                 device, serviceScope,
                 hostBlocked = {

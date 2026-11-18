@@ -54,7 +54,7 @@ internal data class SpatialCalibrationProgress(val stage: SpatialCalibrationStag
 internal data class SpatialHeadTrackingProbeResult(val reason: String, val poses: Int, val cleanup: Bundle?,
     val calibrated: Boolean = false, val calibrationFailure: SpatialCalibrationFailure? = null, val captureFile: File? = null)
 
-/** Explicit foreground DEBUG proof. Validated bases and bounded diagnostic reports remain private. */
+/** Foreground calibration. The debug build can also verify and capture the sensor session. */
 internal class SpatialHeadTrackingProbe(
     private val context: Context,
     private val motion: Flow<MotionReport?> = HeadTracking.motion,
@@ -80,7 +80,7 @@ internal class SpatialHeadTrackingProbe(
         val samples = Array(3) { mutableListOf<Pair<MotionReport, Long>>() }
         try {
             withTimeout(55_000) {
-                check(BuildConfig.DEBUG) { "Debug build required." }
+                check(nativeSpatialVersion) { "Head tracking calibration is unavailable on this Android version." }
                 check(device.macAddress.value.equals(request.expectedMac, true) && isCurrent()) { "The expected AirPods are not connected." }
                 val metadata = device.metadata.value
                 check(metadata.model == AirPodsModel.AIRPODS_PRO_3) { "This measured motion format is for AirPods Pro 3." }
@@ -104,7 +104,7 @@ internal class SpatialHeadTrackingProbe(
                 check(initial.getBoolean("device_enabled") && initial.getBoolean("enabled")) { "spatial_disabled" }
                 check(device.startHeadTracking(owner)) { "Motion capture is unavailable." }
                 var previousArrival = SystemClock.elapsedRealtimeNanos()
-                captureHeader = JSONObject().apply {
+                if (BuildConfig.DEBUG) captureHeader = JSONObject().apply {
                     put("type", "capture"); put("expected_mac", request.expectedMac.uppercase(Locale.ROOT))
                     put("phase", "head_tracking_calibration"); put("duration_seconds", 13)
                     put("model_number", metadata.modelNumber); put("firmware", metadata.version1)
@@ -166,13 +166,17 @@ internal class SpatialHeadTrackingProbe(
                             val profile = result.profile
                             check(profile != null) { "calibration_rejected" }
                             converter = SpatialPoseConverter(profile, 0)
-                            calibrated = true
                             phase = 3
                             profile
                         }
                         val saved = runCatching { SpatialPoseProfileStore(context).save(SpatialPoseProfileKey(request.expectedMac,
                             roleRaw, metadata.modelNumber, metadata.version1), calibratedProfile) }.getOrDefault(false)
                         check(saved) { "profile_save_failed" }
+                        calibrated = true
+                        if (!BuildConfig.DEBUG) {
+                            reason = "Calibration complete."
+                            return@coroutineScope
+                        }
                         onStatus("Calibration accepted. Preparing Android's head-tracking sensor…")
                         onProgress(SpatialCalibrationProgress(SpatialCalibrationStage.PREPARING, 0))
                         // Keep this one motion owner across calibration and proof; restarting may reset its reference.

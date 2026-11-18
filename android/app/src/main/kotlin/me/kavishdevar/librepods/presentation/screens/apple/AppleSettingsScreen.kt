@@ -46,9 +46,9 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.kyant.backdrop.backdrops.rememberLayerBackdrop
 import me.kavishdevar.librepods.R
-import me.kavishdevar.librepods.BuildConfig
 import me.kavishdevar.librepods.bluetooth.DeviceSettingsRefreshResult
 import me.kavishdevar.librepods.audio.NativeHeadTrackingState
+import me.kavishdevar.librepods.audio.nativeSpatialVersion
 import me.kavishdevar.librepods.core.devices.AppleDevice
 import me.kavishdevar.librepods.core.devices.AirPodsModel
 import me.kavishdevar.librepods.core.devices.ConnectionState
@@ -113,7 +113,7 @@ fun AppleSettingsRoute(
     val gameMode by (viewModel.gameModeController?.state ?:
         remember { MutableStateFlow(NativeGameModeController.State()) }).collectAsState()
     val spatialSupported = supportsNativeSpatialAudio()
-    val calibrationSupported = BuildConfig.DEBUG && uiState.metadata.model == AirPodsModel.AIRPODS_PRO_3
+    val calibrationSupported = nativeSpatialVersion && uiState.metadata.model == AirPodsModel.AIRPODS_PRO_3
     val headTrackingController = viewModel.headTrackingController
     val headTracking by (headTrackingController?.state ?:
         remember { MutableStateFlow(NativeHeadTrackingState()) }).collectAsState()

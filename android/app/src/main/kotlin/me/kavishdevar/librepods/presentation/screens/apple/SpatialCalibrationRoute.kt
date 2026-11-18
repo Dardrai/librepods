@@ -23,7 +23,6 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import me.kavishdevar.librepods.BuildConfig
 import me.kavishdevar.librepods.LibrePodsApplication
 import me.kavishdevar.librepods.audio.MicrophonePhase
 import me.kavishdevar.librepods.audio.NativeHeadTrackingController
@@ -31,6 +30,7 @@ import me.kavishdevar.librepods.audio.SpatialCalibrationProgress
 import me.kavishdevar.librepods.audio.SpatialHeadTrackingProbe
 import me.kavishdevar.librepods.audio.SpatialHeadTrackingProbeRequest
 import me.kavishdevar.librepods.audio.SpatialHeadTrackingProbeResult
+import me.kavishdevar.librepods.audio.nativeSpatialVersion
 import me.kavishdevar.librepods.core.devices.AppleDevice
 import me.kavishdevar.librepods.core.devices.ComponentStatus
 import me.kavishdevar.librepods.core.devices.ConnectionState
@@ -85,7 +85,7 @@ internal fun SpatialCalibrationRoute(device: AppleDevice, navigateBack: () -> Un
     val back = { cancel(); navigateBack() }
     BackHandler(enabled = running, onBack = back)
     SpatialCalibrationScreen(progress, running, result, onStart = {
-        if (!running && BuildConfig.DEBUG && screenLive.get() && foreground.get()) {
+        if (!running && nativeSpatialVersion && screenLive.get() && foreground.get()) {
             val socket = device.aacp.captureAudioSocket()
             if (socket == null || device.connectionState.value != ConnectionState.CONNECTED) {
                 result = SpatialHeadTrackingProbeResult("disconnected", 0, null)

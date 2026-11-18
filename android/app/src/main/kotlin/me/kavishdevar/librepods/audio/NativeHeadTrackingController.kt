@@ -101,6 +101,7 @@ class NativeHeadTrackingController internal constructor(
     @Volatile private var nativeOn: Boolean? = null
     @Volatile private var nativeSpatialOn: Boolean? = null
     private val discontinuity = AtomicInteger()
+    private val externalMotion = AtomicBoolean()
     private val forceInspect = AtomicBoolean(true)
     private val retryAfter = AtomicLong()
     private val gapRecoveries = HeadMotionGapRecovery.Scopes()
@@ -362,6 +363,45 @@ class NativeHeadTrackingController internal constructor(
 
     private fun key() = spatialPoseProfileKey(device)
 
+    internal fun offersSpatialMotion(): Boolean =
+        nativeSpatialVersion && current() && desiredSpatial == true && desiredTracking == true && atmosPolicyCurrent()
+
+    internal fun openSpatialMotion(scope: CoroutineScope, owner: android.os.IBinder, uid: Int): ISpatialMotionLease? {
+        if (!offersSpatialMotion()) return null
+        val key = key() ?: return null
+        val profile = profiles.load(key) ?: return null
+        val socket = device.aacp.captureAudioSocket() ?: return null
+        val choice = choiceEpoch.get()
+        val epoch = SystemClock.elapsedRealtimeNanos()
+        val reset = (epoch and 255).toInt()
+        val allowed = { offersSpatialMotion() && choiceEpoch.get() == choice && sourceCurrent(socket, key) }
+        if (!allowed() || !externalMotion.compareAndSet(false, true)) return null
+        return try {
+            val basis = java.nio.ByteBuffer.allocate(9 * 8).apply { profile.headFromRaw.flatten().forEach(::putDouble) }.array()
+            val identity = Bundle().apply {
+                putInt("version", 1)
+                putString("peer", device.macAddress.value)
+                putLong("choice_epoch", choice)
+                putByteArray("full_role", key.rawRole.map(Int::toByte).toByteArray())
+                putString("model", key.modelNumber)
+                putString("firmware", key.firmware)
+                putInt("profile_schema", key.formatVersion)
+                putByteArray("profile_digest", java.security.MessageDigest.getInstance("SHA-256").digest(basis))
+                putLong("source_epoch", epoch)
+                putLong("reference_epoch", epoch)
+                putInt("discontinuity", reset)
+            }
+            ExternalSpatialMotion(scope, owner, uid, identity, allowed, produce = { submit ->
+                streamCalibratedHeadMotion(device, motion, profile, reset, allowed,
+                    tryFast = fallbackSocket !== socket,
+                    onFallback = { fallbackSocket = socket }, submit = submit)
+            }, release = { externalMotion.set(false) }).takeIf { it.watch() }
+        } catch (failure: Exception) {
+            externalMotion.set(false)
+            throw failure
+        }
+    }
+
     private fun sourceCurrent(socket: BluetoothSocket, key: SpatialPoseProfileKey) = sourceRejection(socket, key) == null
 
     private fun sourceRejection(reason: String, checkedAt: Long = hostCheckedAt.get(),
@@ -410,7 +450,7 @@ class NativeHeadTrackingController internal constructor(
                     val key = if (current()) key() else null
                     val profile = key?.let(profiles::load)
                     val socket = device.aacp.captureAudioSocket()
-                    val eligible = BuildConfig.DEBUG && profile != null && socket != null &&
+                    val eligible = nativeSpatialVersion && profile != null && socket != null &&
                         sourceCurrent(socket, checkNotNull(key))
                     mutableState.update { it.copy(calibrated = profile != null) }
                     if (session != null && (!eligible || !headTrackingRequested() || sessionSocket !== socket || sessionKey != key ||
@@ -431,7 +471,8 @@ class NativeHeadTrackingController internal constructor(
                     }
                     if (choice?.spatial == true) { delay(100); continue }
                     if (choice?.enabled == true && needsAtmos() && acceptedAtmosEpoch.get() != epoch) { delay(100); continue }
-                    if (choice?.enabled != false && !isCalibrationActive() && current() && BuildConfig.DEBUG &&
+                    if (choice?.enabled != false && !isCalibrationActive() && current() &&
+                        nativeSpatialVersion &&
                         device.metadata.value.model == AirPodsModel.AIRPODS_PRO_3) {
                         access.connect() // Reconnects existing authorization; it never requests a root grant.
                         if (access.hasRootPrivileges) {
@@ -625,6 +666,8 @@ class NativeHeadTrackingController internal constructor(
 }
 
 @Suppress("DEPRECATION")
+internal val nativeSpatialVersion get() = BuildConfig.DEBUG || android.os.Build.VERSION.SDK_INT == 37
+
 private fun Bundle.flag(name: String) = get(name) as? Boolean
 
 private fun Bundle.spatialEnabled(): Boolean? = if (getInt("version", 0) == 1 && flag("known") == true &&

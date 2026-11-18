@@ -13,6 +13,14 @@ For upgrade history and known limitations, see
 [Pixel fork on the Android rewrite](PIXEL-REWRITE.md).
 
 LibrePods can control the Pixel Dolby decoder through its local spatial-audio interface.
+On a supported Android 17 build, root access allows LibrePods to calibrate the
+AirPods Pro 3 and use Android's native spatial audio and head tracking. A
+separate app signed with the same key can bind to the calibrated motion service
+while Spatial Audio and Head Tracking are enabled.
+
+When building a release for the Pixel Dolby decoder, pass
+`-PpixelSpatialControl=/path/to/libpixel_spatial_control.so` to Gradle with the
+matching ARM64 client. The build checks its SHA-256 before packaging it.
 
 ## Root Requirement
 
