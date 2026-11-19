@@ -34,36 +34,39 @@ internal class SpatialPoseProfileStore(private val preferences: SharedPreference
         editor.commit()
     }.getOrDefault(false)
 
-    fun load(key: SpatialPoseProfileKey): SpatialPoseProfile? = runCatching {
-        val identity = identity(key) ?: return null
-        val slot = storageKey(identity)
-        // A canonical entry is authoritative even if damaged; never resurrect an older alias.
-        if (preferences.contains(slot)) return decode(preferences.getString(slot, null), identity)
-        val legacy = legacyIdentities(key).mapNotNull { old ->
-            runCatching { decode(preferences.getString(storageKey(old), null), old) }.getOrNull()
-        }
-        val first = legacy.firstOrNull() ?: return null
-        if (legacy.any { candidate -> first.headFromRaw.indices.any { row ->
-                first.headFromRaw[row].indices.any { column ->
-                    first.headFromRaw[row][column] != candidate.headFromRaw[row][column]
-                }
-            } }) return null
-        first
-    }.getOrNull()
+    private class Slot(val identity: JSONObject, val name: String) {
+        var text: String? = null
+        var decoded: SpatialPoseProfile? = null
 
-    private fun decode(text: String?, identity: JSONObject): SpatialPoseProfile? {
-        if (text == null) return null
-        val value = JSONObject(text)
-        if (value.opt("version") != 1 || value.optJSONObject("key")?.toString() != identity.toString()) return null
-        val rows = value.getJSONArray("head_from_raw")
-        if (rows.length() != 3) return null
-        val basis = (0..2).map { row ->
-            val entries = rows.getJSONArray(row)
-            if (entries.length() != 3) return null
-            (0..2).map { column -> (entries.get(column) as? Number)?.toDouble() ?: return null }
+        fun read(preferences: SharedPreferences): SpatialPoseProfile? {
+            val current = preferences.getString(name, null)
+            if (current != text) {
+                decoded = runCatching { decode(current, identity) }.getOrNull()
+                text = current
+            }
+            return decoded
         }
-        return SpatialPoseProfile.fromBasis(basis)
     }
+
+    private var cachedKey: SpatialPoseProfileKey? = null
+    private var slots = emptyList<Slot>()
+
+    @Synchronized fun load(key: SpatialPoseProfileKey): SpatialPoseProfile? = runCatching {
+        if (key != cachedKey) {
+            val identity = identity(key) ?: return null
+            slots = (listOf(identity) + legacyIdentities(key)).map { Slot(it, storageKey(it)) }
+            cachedKey = key
+        }
+        val canonical = slots.first()
+        if (preferences.contains(canonical.name)) return canonical.read(preferences)
+        var profile: SpatialPoseProfile? = null
+        for (i in 1 until slots.size) {
+            val candidate = runCatching { slots[i].read(preferences) }.getOrNull() ?: continue
+            if (profile != null && profile.headFromRaw != candidate.headFromRaw) return null
+            profile = candidate
+        }
+        profile
+    }.getOrNull()
 
     private fun legacyIdentities(key: SpatialPoseProfileKey): List<JSONObject> =
         if (spatialPoseModelIdentity(key.modelNumber) == AirPodsModel.AIRPODS_PRO_3.name)
@@ -82,4 +85,18 @@ internal class SpatialPoseProfileStore(private val preferences: SharedPreference
 
     private fun storageKey(identity: JSONObject): String = MessageDigest.getInstance("SHA-256")
         .digest(identity.toString().toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it.toInt() and 255) }
+}
+
+private fun decode(text: String?, identity: JSONObject): SpatialPoseProfile? {
+    if (text == null) return null
+    val value = JSONObject(text)
+    if (value.opt("version") != 1 || value.optJSONObject("key")?.toString() != identity.toString()) return null
+    val rows = value.getJSONArray("head_from_raw")
+    if (rows.length() != 3) return null
+    val basis = (0..2).map { row ->
+        val entries = rows.getJSONArray(row)
+        if (entries.length() != 3) return null
+        (0..2).map { column -> (entries.get(column) as? Number)?.toDouble() ?: return null }
+    }
+    return SpatialPoseProfile.fromBasis(basis)
 }

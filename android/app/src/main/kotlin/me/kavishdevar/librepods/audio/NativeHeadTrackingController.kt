@@ -95,6 +95,8 @@ class NativeHeadTrackingController internal constructor(
     @Volatile private var sessionLive: AtomicBoolean? = null
     private var sessionSocket: BluetoothSocket? = null
     private var sessionKey: SpatialPoseProfileKey? = null
+    @Volatile private var currentBasis: SpatialPoseProfile? = null
+    private var sessionBasis: SpatialPoseProfile? = null
     @Volatile private var failedSocket: BluetoothSocket? = null
     @Volatile private var failedKey: SpatialPoseProfileKey? = null
     @Volatile private var poseFaultReason: String? = null
@@ -374,7 +376,8 @@ class NativeHeadTrackingController internal constructor(
         val choice = choiceEpoch.get()
         val epoch = SystemClock.elapsedRealtimeNanos()
         val reset = (epoch and 255).toInt()
-        val allowed = { offersSpatialMotion() && choiceEpoch.get() == choice && sourceCurrent(socket, key) }
+        val allowed = { offersSpatialMotion() && choiceEpoch.get() == choice &&
+            currentBasis?.headFromRaw == profile.headFromRaw && sourceCurrent(socket, key) }
         if (!allowed() || !externalMotion.compareAndSet(false, true)) return null
         return try {
             val basis = java.nio.ByteBuffer.allocate(9 * 8).apply { profile.headFromRaw.flatten().forEach(::putDouble) }.array()
@@ -428,7 +431,7 @@ class NativeHeadTrackingController internal constructor(
     private suspend fun stopSession() {
         sessionLive?.set(false)
         session?.cancelAndJoin()
-        session = null; sessionLive = null; sessionSocket = null; sessionKey = null
+        session = null; sessionLive = null; sessionSocket = null; sessionKey = null; sessionBasis = null
         mutableState.update { it.copy(active = false) }
     }
 
@@ -449,11 +452,12 @@ class NativeHeadTrackingController internal constructor(
                 try {
                     val key = if (current()) key() else null
                     val profile = key?.let(profiles::load)
+                    currentBasis = profile
                     val socket = device.aacp.captureAudioSocket()
                     val eligible = nativeSpatialVersion && profile != null && socket != null &&
                         sourceCurrent(socket, checkNotNull(key))
                     mutableState.update { it.copy(calibrated = profile != null) }
-                    if (session != null && (!eligible || !headTrackingRequested() || sessionSocket !== socket || sessionKey != key ||
+                    if (session != null && (!eligible || !headTrackingRequested() || sessionSocket !== socket || sessionKey != key || sessionBasis?.headFromRaw != profile?.headFromRaw ||
                             sessionLive?.get() != true || session?.isActive != true)) stopSession()
                     if (failedSocket !== socket || failedKey != key) { failedSocket = null; failedKey = null; poseFaultReason = null }
                     val epoch = choiceEpoch.get()
@@ -546,7 +550,7 @@ class NativeHeadTrackingController internal constructor(
                                 val live = AtomicBoolean(true)
                                 val recovery = gapRecoveries.forSource(checkNotNull(socket), checkNotNull(key),
                                     checkNotNull(profile), epoch)
-                                sessionLive = live; sessionSocket = socket; sessionKey = key
+                                sessionLive = live; sessionSocket = socket; sessionKey = key; sessionBasis = profile
                                 session = launch { runSensor(checkNotNull(socket), checkNotNull(key),
                                     checkNotNull(profile), live, choice.takeIf { explicitOn }, epoch, recovery) }
                             } else if (explicitOn && (!eligible || !mutableState.value.available)) {

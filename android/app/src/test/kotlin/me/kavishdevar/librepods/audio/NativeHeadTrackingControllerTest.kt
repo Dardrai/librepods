@@ -1192,6 +1192,71 @@ class NativeHeadTrackingControllerTest {
         }
     }
 
+    @Test fun oneReadSubmitsTheNewestCalibratedPoseWithItsOriginalReceipt() = runBlocking {
+        Target().use { f ->
+            val clock = AtomicLong(HOST_START)
+            val poses = mutableListOf<Pair<SpatialPose, Long>>()
+            val source = kotlinx.coroutines.flow.flow {
+                val receipt = clock.addAndGet(60_000_000)
+                emit(MotionSample(report(3), receipt,
+                    listOf(MotionSample(report(1), receipt), MotionSample(report(2), receipt))))
+                awaitCancellation()
+            }
+            val job = async { streamCalibratedHeadMotion(f.device, source, identity, 0,
+                { true }, now = clock::get, tryFast = false) { pose, receipt -> poses += pose to receipt } }
+            try {
+                waitUntil { poses.isNotEmpty() }
+                assertEquals(60_000_000L, poses.single().first.timestampNs)
+                assertEquals(clock.get(), poses.single().second)
+            } finally { job.cancelAndJoin() }
+        }
+    }
+
+    @Test fun fullPipeDropsOnlyTheBlockedFrame() = runBlocking {
+        Target().use { f ->
+            val clock = AtomicLong(HOST_START)
+            val poses = mutableListOf<Long>()
+            val timing = HeadTrackingTiming()
+            val source = kotlinx.coroutines.flow.flow {
+                for (tick in 1..4) emit(MotionSample(report(tick), clock.addAndGet(20_000_000L)))
+                awaitCancellation()
+            }
+            val job = async { streamCalibratedHeadMotion(f.device, source, identity, 0,
+                { true }, timing, now = clock::get, tryFast = false) { pose, _ ->
+                if (pose.timestampNs == 60_000_000L)
+                    throw android.system.ErrnoException("write", android.system.OsConstants.EAGAIN)
+                poses += pose.timestampNs
+            } }
+            try {
+                waitUntil { poses.size == 2 }
+                assertEquals(listOf(40_000_000L, 80_000_000L), poses)
+                assertEquals(1, f.started.size)
+            } finally { job.cancelAndJoin() }
+        }
+    }
+
+    @Test fun persistentlyBlockedOrClosedPipeEndsTracking() = runBlocking {
+        for (errno in listOf(android.system.OsConstants.EAGAIN, android.system.OsConstants.EPIPE)) {
+            Target().use { f ->
+                val clock = AtomicLong(HOST_START)
+                var writes = 0
+                val source = kotlinx.coroutines.flow.flow {
+                    for (tick in 1..32) emit(MotionSample(report(tick), clock.addAndGet(20_000_000L)))
+                }
+                val failure = runCatching {
+                    streamCalibratedHeadMotion(f.device, source, identity, 0,
+                        { true }, now = clock::get, tryFast = false) { _, _ ->
+                        writes++
+                        throw android.system.ErrnoException("write", errno)
+                    }
+                }.exceptionOrNull()
+                assertEquals(errno, (failure as android.system.ErrnoException).errno)
+                if (errno == android.system.OsConstants.EPIPE) assertEquals(1, writes) else assertTrue(writes > 1)
+                assertEquals(f.started.toList(), f.released.toList())
+            }
+        }
+    }
+
     @Test fun bufferedDeliveryKeepsSensorVelocityAndHostFreshnessSeparate() = runBlocking {
         HeadTracking.reset()
         Target().use { f ->

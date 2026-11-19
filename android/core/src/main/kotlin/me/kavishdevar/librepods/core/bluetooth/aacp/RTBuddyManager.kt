@@ -38,6 +38,7 @@ internal class RTBuddyManager(
     private var motionIntervalUs: Int? = null,
     private val sharedMotionOwners: MotionOwners? = null,
     private val sourceTiming: MotionSourceTiming? = null,
+    private val onReadFinished: (Boolean) -> Unit = {},
     private val sourceClockNanos: LongSupplier = LongSupplier(System::nanoTime),
 ) : AutoCloseable {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -101,8 +102,14 @@ internal class RTBuddyManager(
         synchronized(this) {
             val enteredAt = if (timing != null) sourceClockNanos.asLong else 0
             timing?.feedEntered(attemptedAt, enteredAt)
-            try { feedLocked(chunk, readAtNanos) }
-            finally { timing?.feedFinished(enteredAt, sourceClockNanos.asLong) }
+            var completed = false
+            try {
+                feedLocked(chunk, readAtNanos)
+                completed = true
+            } finally {
+                onReadFinished(completed)
+                timing?.feedFinished(enteredAt, sourceClockNanos.asLong)
+            }
         }
     }
 

@@ -43,6 +43,19 @@ class SpatialPoseProfileStoreTest {
         assertEquals(3, next.discontinuity)
     }
 
+    @Test fun reusesBasisUntilAnotherStoreWritesOrClearsTheSameCalibration() {
+        val reader = SpatialPoseProfileStore(preferences)
+        val writer = SpatialPoseProfileStore(preferences)
+        assertNull(reader.load(key))
+        assertTrue(writer.save(key, profile))
+        val first = checkNotNull(reader.load(key))
+        assertSame(first, reader.load(key))
+        assertTrue(writer.save(key, checkNotNull(SpatialPoseProfile.fromBasis(identityRows))))
+        assertEquals(identityRows, reader.load(key)?.headFromRaw)
+        preferences.edit().clear().commit()
+        assertNull(reader.load(key))
+    }
+
     @Test fun everySourceIdentityFieldMustMatchAndRoleTwoIsNotInferred() {
         val store = SpatialPoseProfileStore(preferences)
         assertTrue(store.save(key, profile))

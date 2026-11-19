@@ -148,6 +148,26 @@ class MotionSourceTimingTest {
         } finally { manager.close() }
     }
 
+    @Test fun motionReadPublishesOneBurstAndDiscardsItIfTheSocketWasRetired() {
+        val read = me.kavishdevar.librepods.core.utils.HeadTracking.Read()
+        val tracking = me.kavishdevar.librepods.core.utils.HeadTracking
+        tracking.reset()
+        try {
+            val first = report(10, 1)
+            val last = report(20, 2)
+            tracking.addMotion(first, 0f, 0f, 100, read)
+            tracking.addMotion(last, 0f, 0f, 100, read)
+            read.finish(true)
+            val published = checkNotNull(tracking.motionSamples.replayCache.single())
+            assertEquals(first, published.earlierInRead.single().report)
+            assertEquals(last, published.report)
+            assertEquals(100L, published.arrivalNs)
+            tracking.addMotion(report(30, 3), 0f, 0f, 200, read)
+            read.finish(false)
+            assertSame(published, tracking.motionSamples.replayCache.single())
+        } finally { tracking.reset() }
+    }
+
     @Test fun onlyClockCorroboratedSixteenBitCrossingsIncrementTheWrapDiagnostic() {
         val timing = MotionSourceTiming()
         timing.motionPublished(report(1_000_000_000, 65534), 100, 110)

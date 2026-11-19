@@ -28,7 +28,8 @@ import me.kavishdevar.librepods.core.data.apple.MotionReport
 data class Acceleration(val vertical: Float = 0f, val horizontal: Float = 0f)
 
 /** Arrival is when the Bluetooth read completed, on Android's elapsedRealtimeNanos clock. */
-data class MotionSample(val report: MotionReport, val arrivalNs: Long) {
+data class MotionSample(val report: MotionReport, val arrivalNs: Long,
+    val earlierInRead: List<MotionSample> = emptyList()) {
     init { require(arrivalNs > 0) }
 }
 
@@ -46,12 +47,39 @@ object HeadTracking {
         extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
     val motionSamples = _motionSamples.asSharedFlow()
 
-    fun addMotion(report: MotionReport?, vert: Float, horiz: Float, arrivalNs: Long = 0) {
+    // One socket read has one receipt time. Keep its samples together through calibration.
+    internal class Read {
+        private var last: MotionSample? = null
+        private var earlier: MutableList<MotionSample>? = null
+        val pending get() = last != null
+
+        fun add(sample: MotionSample) {
+            last?.let { previous ->
+                (earlier ?: ArrayList<MotionSample>().also { earlier = it }).add(previous)
+            }
+            last = sample
+        }
+
+        fun finish(publish: Boolean) {
+            val latest = last
+            val preceding = earlier
+            last = null
+            earlier = null
+            if (publish && latest != null)
+                _motionSamples.tryEmit(if (preceding == null) latest else latest.copy(earlierInRead = preceding))
+        }
+    }
+
+    fun addMotion(report: MotionReport?, vert: Float, horiz: Float, arrivalNs: Long = 0) =
+        addMotion(report, vert, horiz, arrivalNs, null)
+
+    internal fun addMotion(report: MotionReport?, vert: Float, horiz: Float, arrivalNs: Long, read: Read?) {
         _motion.value = report
         // Legacy publishers have no source timestamp and cannot claim a fresh timed sample.
         val sample = report?.takeIf { arrivalNs > 0 }?.let { MotionSample(it, arrivalNs) }
         _motionSample.value = sample
-        _motionSamples.tryEmit(sample)
+        if (read == null) _motionSamples.tryEmit(sample)
+        else if (sample != null) read.add(sample)
         addAccel(vert, horiz)
     }
 

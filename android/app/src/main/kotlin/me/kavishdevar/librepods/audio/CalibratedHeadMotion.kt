@@ -50,6 +50,7 @@ internal suspend fun streamCalibratedHeadMotion(device: AppleDevice, motion: Flo
         val converter = SpatialPoseConverter(profile, discontinuity, fenceStartupZeros = true)
         var previousCounter: Long? = null
         var lastSubmittedReceipt = 0L
+        var blockedSince: Long? = null
         val firstPose = kotlinx.coroutines.CompletableDeferred<Unit>()
         val lastAttitudeAt = AtomicLong()
         kotlinx.coroutines.coroutineScope {
@@ -87,18 +88,38 @@ internal suspend fun streamCalibratedHeadMotion(device: AppleDevice, motion: Flo
                         if (collectedAt - sample.arrivalNs > HeadTrackerUhidProtocol.FRESH_NANOS) {
                             timing.stale(); return@collect
                         }
-                        val report = sample.report
-                        if (report.counter != null && report.counter == previousCounter) return@collect
-                        previousCounter = report.counter
-                        timing.sample(sample, collectedAt)
-                        val pose = converter.accept(report)
-                        val savedReference = profile.referenceTimestampNs != null &&
-                            report.timestampNs == profile.referenceTimestampNs && report.counter == profile.referenceCounter
-                        if (!converter.invalidated && !savedReference && report.attitudeQ15.any { it != 0 })
-                            timing.validAttitude(collectedAt)
+                        var latest: SpatialPose? = null
+                        for (index in 0..sample.earlierInRead.size) {
+                            val item = sample.earlierInRead.getOrNull(index) ?: sample
+                            val report = item.report
+                            if (report.counter != null && report.counter == previousCounter) continue
+                            previousCounter = report.counter
+                            timing.sample(item, collectedAt)
+                            val pose = converter.accept(report)
+                            val savedReference = profile.referenceTimestampNs != null &&
+                                report.timestampNs == profile.referenceTimestampNs && report.counter == profile.referenceCounter
+                            if (!converter.invalidated && !savedReference && report.attitudeQ15.any { it != 0 })
+                                timing.validAttitude(collectedAt)
+                            if (converter.invalidated) throw CalibratedHeadMotionFault(converter.invalidReason ?: "motion_changed",
+                                converter.verifiedSensorGap)
+                            if (pose != null || report.attitudeQ15.any { it != 0 }) {
+                                lastAttitudeAt.set(sample.arrivalNs)
+                                if (pose != null) firstPose.complete(Unit)
+                            }
+                            if (pose != null) latest = pose
+                        }
+                        val pose = latest
                         // Both sinks require increasing timestamps, even when one read contains multiple reports.
                         if (pose != null && sample.arrivalNs > lastSubmittedReceipt) {
-                            submit(pose, sample.arrivalNs)
+                            try {
+                                submit(pose, sample.arrivalNs)
+                                blockedSince = null
+                            } catch (e: android.system.ErrnoException) {
+                                if (e.errno != android.system.OsConstants.EAGAIN) throw e
+                                val since = blockedSince ?: collectedAt.also { blockedSince = it }
+                                if (collectedAt - since >= HeadTrackerUhidProtocol.FRESH_NANOS) throw e
+                                return@collect
+                            }
                             lastSubmittedReceipt = sample.arrivalNs
                             val submittedAt = now()
                             timing.poseSubmitted(submittedAt)
@@ -106,12 +127,6 @@ internal suspend fun streamCalibratedHeadMotion(device: AppleDevice, motion: Flo
                                 if (recoveryActive()) budget.submitted(sample.arrivalNs, submittedAt)
                                 else budget.withheld()
                             }
-                        }
-                        if (converter.invalidated) throw CalibratedHeadMotionFault(converter.invalidReason ?: "motion_changed",
-                            converter.verifiedSensorGap)
-                        if (pose != null || report.attitudeQ15.any { it != 0 }) {
-                            lastAttitudeAt.set(sample.arrivalNs)
-                            if (pose != null) firstPose.complete(Unit)
                         }
                     } finally { timing.collectorFinished(callbackStartedAt, now()) }
                 }

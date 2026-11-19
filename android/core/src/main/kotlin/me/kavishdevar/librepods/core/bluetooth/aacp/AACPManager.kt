@@ -177,48 +177,54 @@ class AACPManager(private val device: AppleDevice,
     /** Per-connection, constant-space counters before the latest-value motion flow. */
     fun motionSourceTimingSnapshot(): Map<String, Long> = motionSourceTiming.snapshot()
 
-    private fun createSensorSession(expected: BluetoothSocket, timing: MotionSourceTiming) = RTBuddyManager(
-        sendPacket = { packet -> timing.measure(MotionSourceTiming.Stage.SENSOR_SEND, sourceClockNanos) {
-            sendPacket(packet, expected)
-        } },
-        sendRaw = { bytes -> timing.measure(MotionSourceTiming.Stage.SENSOR_SEND, sourceClockNanos) {
-            sendAudioPacket(expected, bytes)
-        } },
-        isCurrent = { ownsAudioSocket(expected) },
-        firmwareMajor = { device.metadata.value.firmwareMajor },
-        onMotion = { report, readAtNanos ->
-            timing.publication(this, sourceClockNanos) {
-                publishForTransport(this, expected, ::captureAudioSocket) {
-                    HeadTracking.addMotion(report.report, report.vertical.toFloat(), report.horizontal.toFloat(), readAtNanos)
+    private fun createSensorSession(expected: BluetoothSocket, timing: MotionSourceTiming): RTBuddyManager {
+        val read = HeadTracking.Read()
+        return RTBuddyManager(
+            sendPacket = { packet -> timing.measure(MotionSourceTiming.Stage.SENSOR_SEND, sourceClockNanos) {
+                sendPacket(packet, expected)
+            } },
+            sendRaw = { bytes -> timing.measure(MotionSourceTiming.Stage.SENSOR_SEND, sourceClockNanos) {
+                sendAudioPacket(expected, bytes)
+            } },
+            isCurrent = { ownsAudioSocket(expected) },
+            firmwareMajor = { device.metadata.value.firmwareMajor },
+            onMotion = { report, readAtNanos ->
+                timing.publication(this, sourceClockNanos) {
+                    publishForTransport(this, expected, ::captureAudioSocket) {
+                        HeadTracking.addMotion(report.report, report.vertical.toFloat(), report.horizontal.toFloat(), readAtNanos, read)
+                    }
                 }
-            }
-        },
-        onHeartRate = { report ->
-            publishForTransport(this, expected, ::captureAudioSocket) {
-                device.updateState { it.copy(currentHeartRate = HeartRateSample(report.bpm, Clock.System.now())) }
-            }
-        },
-        onMotionState = { state ->
-            timing.publication(this, sourceClockNanos) {
+            },
+            onHeartRate = { report ->
                 publishForTransport(this, expected, ::captureAudioSocket) {
-                    if (state != BuddyState.ACTIVE) HeadTracking.reset()
-                    if (needsMotionStateUpdate(device.state.value.headTrackingState, state))
-                        device.updateState { it.copy(headTrackingState = state) }
+                    device.updateState { it.copy(currentHeartRate = HeartRateSample(report.bpm, Clock.System.now())) }
                 }
-            }
-        },
-        onHeartRateState = { state ->
-            publishForTransport(this, expected, ::captureAudioSocket) {
-                device.updateState { it.copy(hrmState = state, currentHeartRate = if (state == BuddyState.ACTIVE) it.currentHeartRate else null) }
-            }
-        },
-        remoteAllowed = { device.metadata.value.model == AirPodsModel.AIRPODS_3 },
-        motionIntervalUs = device.settings.value.takeIf { it.headTrackingIntervalConfigured }
-            ?.headTrackingInterval?.inWholeMicroseconds?.takeIf { it in 20_000..1_000_000 && it % 1000 == 0L }?.toInt(),
-        sharedMotionOwners = motionOwners,
-        sourceTiming = timing,
-        sourceClockNanos = sourceClockNanos,
-    )
+            },
+            onMotionState = { state ->
+                timing.publication(this, sourceClockNanos) {
+                    publishForTransport(this, expected, ::captureAudioSocket) {
+                        if (state != BuddyState.ACTIVE) { read.finish(false); HeadTracking.reset() }
+                        if (needsMotionStateUpdate(device.state.value.headTrackingState, state))
+                            device.updateState { it.copy(headTrackingState = state) }
+                    }
+                }
+            },
+            onHeartRateState = { state ->
+                publishForTransport(this, expected, ::captureAudioSocket) {
+                    device.updateState { it.copy(hrmState = state, currentHeartRate = if (state == BuddyState.ACTIVE) it.currentHeartRate else null) }
+                }
+            },
+            remoteAllowed = { device.metadata.value.model == AirPodsModel.AIRPODS_3 },
+            motionIntervalUs = device.settings.value.takeIf { it.headTrackingIntervalConfigured }
+                ?.headTrackingInterval?.inWholeMicroseconds?.takeIf { it in 20_000..1_000_000 && it % 1000 == 0L }?.toInt(),
+            sharedMotionOwners = motionOwners,
+            onReadFinished = { completed ->
+                if (read.pending) synchronized(this) { read.finish(completed && ownsAudioSocket(expected)) }
+            },
+            sourceTiming = timing,
+            sourceClockNanos = sourceClockNanos,
+        )
+    }
 
     private suspend fun sendDelayedInitPackets(expected: BluetoothSocket, settings: me.kavishdevar.librepods.core.devices.AppleSettings): Boolean {
         if (ownsAudioSocket(expected)) {
