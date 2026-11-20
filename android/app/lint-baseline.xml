@@ -136,6 +136,28 @@
     <issue
         id="PrivateApi"
         message="Accessing internal APIs via reflection is not supported and may not work on all devices or in the future"
+        errorLine1="                Class.forName(&quot;com.android.bluetooth.a2dp.A2dpServiceBinder&quot;, false, loader),"
+        errorLine2="                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/kotlin/me/kavishdevar/librepods/utils/EldCodecOverrideGuard.kt"
+            line="24"
+            column="17"/>
+    </issue>
+
+    <issue
+        id="PrivateApi"
+        message="Accessing internal APIs via reflection is not supported and may not work on all devices or in the future"
+        errorLine1="                Class.forName(&quot;android.bluetooth.IBluetoothA2dp\$Stub&quot;, false, loader),"
+        errorLine2="                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/kotlin/me/kavishdevar/librepods/utils/EldCodecOverrideGuard.kt"
+            line="25"
+            column="17"/>
+    </issue>
+
+    <issue
+        id="PrivateApi"
+        message="Accessing internal APIs via reflection is not supported and may not work on all devices or in the future"
         errorLine1="                Class&lt;?> type = Class.forName(&quot;android.bluetooth.IBluetoothHeadset&quot;);"
         errorLine2="                                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
         <location
@@ -437,7 +459,7 @@
         errorLine2="                ~~~~~~~">
         <location
             file="src/test/kotlin/me/kavishdevar/librepods/presentation/overlays/ListeningModePanelTest.kt"
-            line="433"
+            line="464"
             column="17"/>
     </issue>
 
@@ -569,7 +591,7 @@
         errorLine2="                                                   ^">
         <location
             file="src/main/kotlin/me/kavishdevar/librepods/utils/KotlinModule.kt"
-            line="512"
+            line="548"
             column="52"/>
     </issue>
 
@@ -1000,17 +1022,6 @@
             file="src/main/kotlin/me/kavishdevar/librepods/dongle/DongleHidNative.kt"
             line="23"
             column="19"/>
-    </issue>
-
-    <issue
-        id="ObsoleteSdkInt"
-        message="Unnecessary; `SDK_INT` is always >= 33"
-        errorLine1="        if (BuildConfig.DEBUG &amp;&amp; Build.VERSION.SDK_INT >= 33) {"
-        errorLine2="                                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/kotlin/me/kavishdevar/librepods/services/LibrePodsService.kt"
-            line="793"
-            column="34"/>
     </issue>
 
     <issue
@@ -3482,7 +3493,7 @@
         errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~~~~~~">
         <location
             file="src/main/res/values/strings.xml"
-            line="430"
+            line="432"
             column="13"/>
     </issue>
 
@@ -3493,7 +3504,7 @@
         errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
         <location
             file="src/main/res/values/strings.xml"
-            line="475"
+            line="477"
             column="13"/>
     </issue>
 
@@ -3504,7 +3515,7 @@
         errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~~~~~~">
         <location
             file="src/main/res/values/strings.xml"
-            line="479"
+            line="481"
             column="13"/>
     </issue>
 
@@ -3515,7 +3526,7 @@
         errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~~~~~">
         <location
             file="src/main/res/values/strings.xml"
-            line="480"
+            line="482"
             column="13"/>
     </issue>
 
@@ -3526,7 +3537,7 @@
         errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
         <location
             file="src/main/res/values/strings.xml"
-            line="481"
+            line="483"
             column="13"/>
     </issue>
 
@@ -3795,6 +3806,17 @@
 
     <issue
         id="UseKtx"
+        message="Use the KTX extension function `SharedPreferences.edit` instead?"
+        errorLine1="        preferences.edit().putBoolean(preferencePrefix + &quot;spatial&quot;, spatial)"
+        errorLine2="        ~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/kotlin/me/kavishdevar/librepods/audio/NativeHeadTrackingController.kt"
+            line="217"
+            column="9"/>
+    </issue>
+
+    <issue
+        id="UseKtx"
         message="Use the KTX extension function `String.toUri` instead?"
         errorLine1="                data = Uri.parse(&quot;librepods://noise-control-widget/$appWidgetId&quot;)"
         errorLine2="                       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
@@ -3877,7 +3899,7 @@
         errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~">
         <location
             file="src/main/kotlin/me/kavishdevar/librepods/shizuku/ShizukuAudioClient.kt"
-            line="93"
+            line="94"
             column="13"/>
     </issue>
 

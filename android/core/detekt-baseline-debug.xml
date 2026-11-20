@@ -7,7 +7,7 @@
     <ID>ComplexCondition:AACPManager.kt:AACPManager$request.cancelled || !stillCurrent() || !ownsAudioSocket(request.original) || !refreshAllowed(request.confirmationOwner, request.hearingMode)</ID>
     <ID>ComplexCondition:AACPManager.kt:AACPManager$selfMacAddress.length != 17 || !selfMacAddress.matches(Regex("([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}")) || targetMacAddress.length != 17 || !targetMacAddress.matches( Regex("([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}") )</ID>
     <ID>ComplexCondition:AACPManager.kt:AACPManager$settingsStartup !== startup || captureSettingsSocket() !== startup.socket || startup.readStarted || !scope.isActive</ID>
-    <ID>ComplexCondition:AACPManager.kt:AACPManager$this.socket !== socket || pendingConnect !== pending || pending.cancelled || requestEpoch != connectionEpoch.get() || !stillCurrent()</ID>
+    <ID>ComplexCondition:AACPManager.kt:AACPManager$this.socket !== socket || pendingConnect !== pending || pending.cancelled || requestEpoch != connectionEpoch.get() || !allowed || !stillCurrent()</ID>
     <ID>ComplexCondition:ATTManager.kt:ATTManager$proof == null || !proof.contentEquals(baseline) || !validWrite(handle, requested) || !validWrite(handle, baseline) || requested.size + 3 &gt; active.mtu || !canSend()</ID>
     <ID>ComplexCondition:ATTManager.kt:ATTManager$session !== active || !active.completedReadsAllowed.get() || !active.owner.same(captureOwner()) || !canRead()</ID>
     <ID>ComplexCondition:ATTProtocol.kt:ATTBearer$!isCurrent || pdu.size &lt; 3 || pdu[0] != 0x52.toByte() || pdu.u16(1) == 0 || pdu.size &gt; mtu || !canSend()</ID>
@@ -96,6 +96,7 @@
     <ID>CyclomaticComplexMethod:SensorReports.kt:SensorReports$private fun motion: Motion?</ID>
     <ID>CyclomaticComplexMethod:Transparency.kt:TransparencySettings$override fun equals: Boolean</ID>
     <ID>CyclomaticComplexMethod:Transparency.kt:fun parseTransparencySettingsResponse: TransparencySettings?</ID>
+    <ID>DoubleMutabilityForCollection:HeadOrientation.kt:HeadTracking.Read$private var earlier: MutableList&lt;MotionSample&gt;? = null</ID>
     <ID>EmptyElseBlock:SensorReports.kt:SensorReports$if (heart == service) return 0</ID>
     <ID>EmptyElseBlock:SensorReports.kt:SensorReports$if (motion == service) return 0</ID>
     <ID>ImplicitDefaultLocale:AACPManager.kt:AACPManager$"Unknown capability 0x%02X".format(capabilityId.toInt() and 0xFF)</ID>
