@@ -102,12 +102,18 @@ internal class RootSpatialControl(private val context: Context) : AutoCloseable 
         while (SystemClock.elapsedRealtime() < deadline) {
             if (selected !== captured || !runCatching { owner.isCurrent }.getOrDefault(false)) return null
             val result = snapshot()
-            if (result != null && result.completed >= serial && result.known && result.choiceEpoch == captured.choiceEpoch &&
-                result.routeId == captured.routeId && result.routeEpoch == captured.routeEpoch && result.choices == captured.choices)
-                return result
+            if (result != null && reportsApplied(result, captured, serial)) return result
             Thread.sleep(APPLY_POLL_MILLISECONDS)
         }
         return null
+    }
+
+    /** The native side finished this request and now holds exactly the captured choice on the captured route. */
+    private fun reportsApplied(result: SpatialBackendSnapshot, captured: Selection, serial: Long): Boolean {
+        if (result.completed < serial || !result.known) return false
+        val sameChoice = result.choiceEpoch == captured.choiceEpoch && result.choices == captured.choices
+        val sameRoute = result.routeId == captured.routeId && result.routeEpoch == captured.routeEpoch
+        return sameChoice && sameRoute
     }
     private fun submit(value: Selection): Long {
         check(selected === value && route(value.address, value.owner) == value.routeId && selected === value)

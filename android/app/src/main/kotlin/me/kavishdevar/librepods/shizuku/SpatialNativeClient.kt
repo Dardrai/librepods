@@ -121,10 +121,11 @@ internal class SpatialBackendSnapshot private constructor(private val v: LongArr
         private const val MAXIMUM_AGE_NANOS = 2_000_000_000L
 
         fun read(value: LongArray?, nowNs: Long, pid: Int): SpatialBackendSnapshot? {
-            if (value == null || value.size != Slot.COUNT || nowNs <= 0 || pid <= 0) return null
-            val valid = isFreshFromThisHelper(value, nowNs, pid) && fieldsInRange(value) &&
-                ownershipConsistent(value, pid) && outputCommitConsistent(value) && desiredMatchConsistent(value)
-            return if (valid) SpatialBackendSnapshot(value.copyOf()) else null
+            if (value == null || value.size != Slot.COUNT) return null
+            if (nowNs <= 0 || pid <= 0) return null
+            if (!isFreshFromThisHelper(value, nowNs, pid) || !fieldsInRange(value)) return null
+            val consistent = ownershipConsistent(value, pid) && outputCommitConsistent(value) && desiredMatchConsistent(value)
+            return if (consistent) SpatialBackendSnapshot(value.copyOf()) else null
         }
 
         private fun isFreshFromThisHelper(value: LongArray, nowNs: Long, pid: Int) =

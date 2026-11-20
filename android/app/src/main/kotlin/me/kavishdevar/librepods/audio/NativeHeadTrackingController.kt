@@ -159,29 +159,37 @@ class NativeHeadTrackingController internal constructor(
             }
             val atmosApplied = applyAtmosChoice(choice, owns)
             if (choice.enabled && !choice.spatial) {
-                if (!atmosApplied) withChoice(choice.epoch) {
-                    if (pending.compareAndSet(choice, null)) mutableState.update {
-                        it.copy(enabled = displayedTracking(), busy = false, reason = "request_failed")
-                    }
-                }
+                if (!atmosApplied) failTrackingRequest(choice)
                 return // The existing native runner owns preparation and the head-tracker lease.
             }
-            val result = if (choice.spatial) {
-                if (!choice.enabled) access.disableHeadTracking(device.macAddress.value, owns)
-                access.setFixedSpatialEnabled(device.macAddress.value, choice.enabled, owns)
-            } else access.disableHeadTracking(device.macAddress.value, owns)
+            val result = writeNativeChoice(choice, owns)
             withChoice(choice.epoch) {
                 if (pending.compareAndSet(choice, null)) publishNativeChoiceResult(choice, result, atmosApplied)
             }
         } catch (cancelled: CancellationException) { throw cancelled }
         catch (_: Exception) {
-            withChoice(choice.epoch) {
-                if (pending.compareAndSet(choice, null)) mutableState.update {
-                    it.copy(enabled = nativeOn, busy = false, spatialEnabled = nativeSpatialOn,
-                        spatialBusy = false, reason = "request_failed")
-                }
-            }
+            failChoice(choice)
         } finally { forceInspect.set(true) }
+    }
+
+    /** Spatial choices set fixed spatial audio (turning head tracking off first when disabling); others turn tracking off. */
+    private suspend fun writeNativeChoice(choice: Choice, owns: () -> Boolean): Bundle {
+        if (!choice.spatial) return access.disableHeadTracking(device.macAddress.value, owns)
+        if (!choice.enabled) access.disableHeadTracking(device.macAddress.value, owns)
+        return access.setFixedSpatialEnabled(device.macAddress.value, choice.enabled, owns)
+    }
+
+    private fun failTrackingRequest(choice: Choice) = withChoice(choice.epoch) {
+        if (pending.compareAndSet(choice, null)) mutableState.update {
+            it.copy(enabled = displayedTracking(), busy = false, reason = "request_failed")
+        }
+    }
+
+    private fun failChoice(choice: Choice) = withChoice(choice.epoch) {
+        if (pending.compareAndSet(choice, null)) mutableState.update {
+            it.copy(enabled = nativeOn, busy = false, spatialEnabled = nativeSpatialOn,
+                spatialBusy = false, reason = "request_failed")
+        }
     }
 
     private fun choiceStillPendingWithinTimeout(choice: Choice) = current() && pending.get() === choice &&
