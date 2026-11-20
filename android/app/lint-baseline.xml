@@ -591,7 +591,7 @@
         errorLine2="                                                   ^">
         <location
             file="src/main/kotlin/me/kavishdevar/librepods/utils/KotlinModule.kt"
-            line="548"
+            line="549"
             column="52"/>
     </issue>
 
@@ -3811,7 +3811,7 @@
         errorLine2="        ~~~~~~~~~~~~~~~~~~">
         <location
             file="src/main/kotlin/me/kavishdevar/librepods/audio/NativeHeadTrackingController.kt"
-            line="217"
+            line="242"
             column="9"/>
     </issue>
 

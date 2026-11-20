@@ -42,12 +42,10 @@
     <ID>ComplexCondition:DongleUsbVolume.kt:DongleUsbVolume$requested.nativeEpoch != nativeEpoch.get() || fresh.observationRevision != revision || fresh.confirmed == null || fresh.confirmed != baseline.confirmed || fresh.pending || fresh.inflight</ID>
     <ID>ComplexCondition:DongleUsbVolume.kt:DongleUsbVolume$wanted || now() - probedAt &lt; 10_000 &amp;&amp; probedTarget == selected || !probing.compareAndSet(false, true)</ID>
     <ID>ComplexCondition:DongleUsbVolume.kt:DongleUsbVolume.&lt;no name provided&gt;$Binder.getCallingUid() == 1000 &amp;&amp; connection == selected.controlSession &amp;&amp; policyOwner === owner &amp;&amp; current() &amp;&amp; level in 0..127</ID>
-    <ID>ComplexCondition:EldCodecOverrideGuard.kt:EldCodecOverrideGuard.Companion$!forcedAac(fields) || attribution.uid != callingUid || attribution.packageName != ACTOR || attribution.next != null</ID>
     <ID>ComplexCondition:EldCodecOverrideGuard.kt:EldCodecOverrideGuard.Companion$Character.isISOControl(it) || Character.getType(it) == Character.FORMAT.toInt() || it == '\u2028' || it == '\u2029'</ID>
     <ID>ComplexCondition:EldCodecOverrideGuard.kt:EldCodecOverrideGuard.Companion$context == null || attribution == null || device == null || codec == null</ID>
     <ID>ComplexCondition:EldFailurePolicy.kt:EldFailurePolicy$selected != null &amp;&amp; selected.first in connected &amp;&amp; codecs[selected.first] == EldCodecIdentity.MODULE_CODEC_ID &amp;&amp; health != null &amp;&amp; health.peer == selected.first &amp;&amp; validPeer(health.peer) &amp;&amp; health.generation &gt; lastAttemptedGeneration</ID>
     <ID>ComplexCondition:EldFailureWatchdog.kt:EldFailureWatchdog.&lt;no name provided&gt;$policy.candidate() == owner &amp;&amp; (tick.keepPolling &amp;&amp; streaming.contains(owner.peer) || SystemClock.elapsedRealtime() &lt; pendingDeadline)</ID>
-    <ID>ComplexCondition:HeadMotionGapRecovery.kt:HeadMotionGapRecovery$arrivalNs &lt;= 0 || nowNs &lt;= 0 || arrivalNs &gt; nowNs || nowNs - arrivalNs &gt; FRESH_NS || (lastArrival != 0L &amp;&amp; (arrivalNs &lt;= lastArrival || nowNs &lt;= lastSubmit))</ID>
     <ID>ComplexCondition:HfpBatteryNegotiation.kt:HfpBatteryNegotiation$arguments?.size != 2 || arguments[1] !is Int || (arguments[1] as Int) &lt; 0 || (arguments[1] as Int) and 2 == 0</ID>
     <ID>ComplexCondition:HfpCallSuppression.kt:HfpCallSuppression$!rootOwner.isBinderAlive || !appOwner.isBinderAlive || currentService() !== service || closed.get()</ID>
     <ID>ComplexCondition:HfpCallSuppression.kt:HfpSuppressionState$it.root == lease.root &amp;&amp; it.app == lease.app &amp;&amp; it.peer == lease.peer &amp;&amp; it.service === lease.service</ID>
@@ -105,17 +103,6 @@
     <ID>ComplexCondition:NativeGameSnapshot.kt:NativeGameSnapshot.Companion$input.size == 86 &amp;&amp; (listOf(79, 82, 83, 84).any { input[it] !in 0L..1L } || input[80] !in 0L..65535L || input[81] !in 0L..65535L || input[85] !in 0L..7L)</ID>
     <ID>ComplexCondition:NativeGameSnapshot.kt:NativeGameSnapshot.Companion$listOf(1, 2, 9, 11, 13, 14, 56, 57).any { input[it] !in 0L..1L } || input[3] !in 0L..11L || input[4] !in 1L..3L || input[7] !in 0L..7L || input[10] !in 0L..2047L || input[12] !in 0L..2047L || input[17] !in 0L..65535L || input[31] !in 0L..65535L || input[30] !in 0L..65535L || input[32] !in 0L..65535L || input[33] !in 0L..255L || input[34] !in 0L..255L || input[35] !in 0L..63L || input[43] !in 0L..6L || input[45] !in 9L..11L || input[46] !in 0L..500L || input[53] !in 0L..65535L || input[54] !in 0L..255L || input[55] !in 0L..65535L || input[62] !in 0L..6L || input[71] !in 9L..11L || input[72] !in 9L..11L || input[73] !in 0L..500L || ((18..23) + (36..41) + (65..70)).any { input[it] !in 0L..255L }</ID>
     <ID>ComplexCondition:NativeGameTransportClient.kt:NativeGameTransportClient$serial &lt;= 0 || closed || serverNonce == null || requestId == Long.MAX_VALUE</ID>
-    <ID>ComplexCondition:NativeHeadTrackingController.kt:NativeHeadTrackingController$!access.hasRootPrivileges &amp;&amp; current() &amp;&amp; pending.get() === choice &amp;&amp; SystemClock.elapsedRealtime() - choice.started &lt; 5_000</ID>
-    <ID>ComplexCondition:NativeHeadTrackingController.kt:NativeHeadTrackingController$!current() || !access.hasRootPrivileges || !mutableState.value.spatialAvailable || !hostIdle.get()</ID>
-    <ID>ComplexCondition:NativeHeadTrackingController.kt:NativeHeadTrackingController$!current() || !currentState.spatialSupported || enabled &amp;&amp; (!currentState.spatialAvailable || currentState.spatialEnabled == null) || currentState.spatialEnabled == enabled</ID>
-    <ID>ComplexCondition:NativeHeadTrackingController.kt:NativeHeadTrackingController$!enableAtmos || !eligible || backend.getInt("version") != 1 || backend.flag("supported") != true || backend.flag("available") != true || backend.flag("route_verified") != true || snapshot.flag("route_selected") != true || snapshot.flag("fixed_supported") != true</ID>
-    <ID>ComplexCondition:NativeHeadTrackingController.kt:NativeHeadTrackingController$acceptedNativeEpoch.get() == epoch || pending.get() != null || !savedRearmed || tracking &amp;&amp; !eligible</ID>
-    <ID>ComplexCondition:NativeHeadTrackingController.kt:NativeHeadTrackingController$choice?.enabled != false &amp;&amp; !isCalibrationActive() &amp;&amp; current() &amp;&amp; nativeSpatialVersion &amp;&amp; device.metadata.value.model == AirPodsModel.AIRPODS_PRO_3</ID>
-    <ID>ComplexCondition:NativeHeadTrackingController.kt:NativeHeadTrackingController$desiredSpatial != null || desiredTracking != null || pending.get() != null || !current()</ID>
-    <ID>ComplexCondition:NativeHeadTrackingController.kt:NativeHeadTrackingController$explicitOn &amp;&amp; eligible &amp;&amp; spatialReady &amp;&amp; !spatialEligible</ID>
-    <ID>ComplexCondition:NativeHeadTrackingController.kt:NativeHeadTrackingController$session != null &amp;&amp; (!eligible || !headTrackingRequested() || sessionSocket !== socket || sessionKey != key || sessionBasis?.headFromRaw != profile?.headFromRaw || sessionLive?.get() != true || session?.isActive != true)</ID>
-    <ID>ComplexCondition:NativeHeadTrackingController.kt:NativeHeadTrackingController$session == null &amp;&amp; eligible &amp;&amp; combinedReady &amp;&amp; headTrackingRequested() &amp;&amp; mutableState.value.available &amp;&amp; spatialEligible &amp;&amp; (explicitOn || nativeOn == true &amp;&amp; SystemClock.elapsedRealtime() &gt;= retryAfter.get() &amp;&amp; !(failedSocket === socket &amp;&amp; failedKey == key))</ID>
-    <ID>ComplexCondition:NativeHeadTrackingController.kt:getInt("version", 0) == 1 &amp;&amp; flag("known") == true &amp;&amp; flag("enabled") != null &amp;&amp; flag("device_enabled") != null</ID>
     <ID>ComplexCondition:NativeSpatialAudioSetting.kt:!headTracking.busy &amp;&amp; !headTracking.spatialBusy &amp;&amp; snapshot?.writable == true &amp;&amp; current() &amp;&amp; (headTracking.spatialEnabled != null || !enabled)</ID>
     <ID>ComplexCondition:NearbyPairingController.kt:NearbyPairingController$!consentReady() || candidates.ambiguous || receivedAt &gt; now || now &gt;= pending.deadline || device.bondState != BluetoothDevice.BOND_BONDING || device.type !in setOf(BluetoothDevice.DEVICE_TYPE_CLASSIC, BluetoothDevice.DEVICE_TYPE_DUAL) || !NearbyAirPods.matchesName(model, device.name) || selected?.device?.address?.let { it != device.address } == true</ID>
     <ID>ComplexCondition:NearbyPairingController.kt:NearbyPairingController$(bondState !in setOf(BluetoothDevice.BOND_NONE, BluetoothDevice.BOND_BONDING) &amp;&amp; !(bondState == BluetoothDevice.BOND_BONDED &amp;&amp; device.address in bondingSeen)) || device.name?.let { !NearbyAirPods.matchesName(session.modelId ?: 0, it) } == true</ID>
@@ -140,17 +127,12 @@
     <ID>ComplexCondition:QuickSettingsState.kt:!value.supported || value.recoveryOff || value.checked != null || known?.checked == null</ID>
     <ID>ComplexCondition:RichText.kt:(icons is MaterialIcons &amp;&amp; !icons.isAppleIcon(name) || icons is AppleIcons &amp;&amp; icons.isMaterialIcon(name))</ID>
     <ID>ComplexCondition:RootDongleHid.kt:RootDongleHid.AndroidAccess$!DongleUsb.candidate(device) || device.productId != target.product || (0 until device.interfaceCount).none { val intf = device.getInterface(it) intf.id == target.interfaceId &amp;&amp; intf.interfaceClass == UsbConstants.USB_CLASS_HID &amp;&amp; intf.interfaceSubclass == 0 &amp;&amp; intf.interfaceProtocol == 0 }</ID>
-    <ID>ComplexCondition:RootSpatialControl.kt:RootSpatialControl$result != null &amp;&amp; result.completed &gt;= serial &amp;&amp; result.known &amp;&amp; result.choiceEpoch == epoch &amp;&amp; result.routeId == captured.routeId &amp;&amp; result.routeEpoch == captured.routeEpoch &amp;&amp; result.choices == captured.choices</ID>
     <ID>ComplexCondition:SettingsRefresher.kt:SettingsRefresher$captureBusy() || device.state.value.recordingState.isRecording || device.state.value.microphoneState.isActive || !controller.canRefreshSettings()</ID>
     <ID>ComplexCondition:ShizukuAudioClient.kt:ShizukuAudioClient$!closed &amp;&amp; bridge === remote &amp;&amp; request.active.get() &amp;&amp; stillCurrent()</ID>
     <ID>ComplexCondition:ShizukuAudioClient.kt:ShizukuAudioClient$closed || bridge != null || bound || connecting</ID>
     <ID>ComplexCondition:ShizukuAudioClient.kt:ShizukuAudioClient$closed || bridge == null || settingsRefresh || playbackRequest != null || communicationRequest != null</ID>
     <ID>ComplexCondition:ShizukuAudioClient.kt:ShizukuAudioClient$closed || requireRoot || bridge != null || connecting</ID>
     <ID>ComplexCondition:ShizukuAudioService.kt:ShizukuAudioService$mutation &amp;&amp; (spatialMutating || volumeChecking || playbackRecovery != null || playbackRelease != null || callConnection != null || !probeIsQuiet())</ID>
-    <ID>ComplexCondition:SpatialNativeClient.kt:SpatialBackendSnapshot.Companion$value == null || value.size != 36 || value[0] != 1L || value[1] &lt;= 0 || nowNs &lt;= 0 || pid &lt;= 0 || nowNs - value[1] !in 0..2_000_000_000L || value[26] != pid.toLong() || value[2] !in 0..1 || value[3] !in 0..3 || value[4] and 255L != value[4] || value[5] and 31L != value[5] || value[6] !in setOf(0L, 1L, 3L) || value[14] !in setOf(0L, 1L, 3L) || value[35] !in 0..1 || value[9] !in 0..Int.MAX_VALUE.toLong() || value[15] !in 0..2 || listOf(7, 10, 11, 12, 13, 16, 17, 18, 22, 23).any { value[it] &lt; 0 }</ID>
-    <ID>ComplexCondition:SpatialNativeClient.kt:SpatialBackendSnapshot.Companion$value[4] and 16L != 0L &amp;&amp; (value[4] and 40L != 40L || value[15] !in 1..2 || value[13] &lt;= 0 || value[16] &lt;= 0 || value[17] &lt;= 0 || value[18] &lt; value[17])</ID>
-    <ID>ComplexCondition:SpatialNativeClient.kt:SpatialBackendSnapshot.Companion$value[4] and 64L != 0L &amp;&amp; (value[4] and 32L == 0L || value[13] != value[7] || value[14] != value[6])</ID>
-    <ID>ComplexCondition:SpatialNativeClient.kt:SpatialBackendSnapshot.Companion$value[4] and 6L == 6L &amp;&amp; (value[8] != pid.toLong() || value[7] &lt;= 0 || value[9] &lt;= 0 || value[10] &lt;= 0)</ID>
     <ID>ComplexCondition:SpatialPoseConverter.kt:SpatialPoseConverter$fenceStartupZeros &amp;&amp; !producedPose &amp;&amp; (attitudeWasZero || initialHeadInverse == null)</ID>
     <ID>ComplexCondition:SpatialPoseProfileStore.kt:SpatialPoseProfileStore$key.formatVersion != 1 || key.rawRole.size !in 1..64 || key.rawRole.first() !in 1..2 || key.rawRole.any { it !in 0..255 } || key.modelNumber.isBlank() || key.firmware.isBlank() || key.modelNumber.length &gt; 256 || key.firmware.length &gt; 256</ID>
     <ID>ComplexCondition:StyledSlider.kt:currentEnabled &amp;&amp; !dragCanceled &amp;&amp; userChangeStarted &amp;&amp; (currentValue == lastUserValue || currentValue == dragObservedValue)</ID>
@@ -240,9 +222,6 @@
     <ID>CyclomaticComplexMethod:NativeGameProbeReceiver.kt:NativeGameProbeReceiver$override fun onReceive</ID>
     <ID>CyclomaticComplexMethod:NativeGameSnapshot.kt:NativeGameSnapshot.Companion$fun parse: NativeGameSnapshot?</ID>
     <ID>CyclomaticComplexMethod:NativeGameTransportClient.kt:NativeGameTransportClient$private fun accept</ID>
-    <ID>CyclomaticComplexMethod:NativeHeadTrackingController.kt:NativeHeadTrackingController$private fun publishSpatial</ID>
-    <ID>CyclomaticComplexMethod:NativeHeadTrackingController.kt:NativeHeadTrackingController$private fun rearmSavedChoice</ID>
-    <ID>CyclomaticComplexMethod:NativeHeadTrackingController.kt:NativeHeadTrackingController$private suspend fun migrateNativeChoice: Boolean</ID>
     <ID>CyclomaticComplexMethod:NativeHeadTrackingController.kt:NativeHeadTrackingController$private suspend fun runSensor</ID>
     <ID>CyclomaticComplexMethod:NativePlaybackRelease.kt:NativePlaybackRelease$@SuppressLint("MissingPermission", "SoonBlockedPrivateApi") fun run: Boolean</ID>
     <ID>CyclomaticComplexMethod:NativePlaybackRelease.kt:NativePlaybackRelease.Companion$internal fun releaseProfiles: Boolean</ID>
@@ -261,7 +240,6 @@
     <ID>CyclomaticComplexMethod:RootHeadTrackerProbe.kt:RootHeadTrackerProbe$fun disable: Bundle</ID>
     <ID>CyclomaticComplexMethod:RootHeadTrackerProbe.kt:RootHeadTrackerProbe.Lease$fun state: Bundle</ID>
     <ID>CyclomaticComplexMethod:RootHeadTrackerProbe.kt:RootHeadTrackerProbe.Lease$private fun run</ID>
-    <ID>CyclomaticComplexMethod:RootSpatialControl.kt:RootSpatialControl$fun set: Bundle</ID>
     <ID>CyclomaticComplexMethod:RootUsbAbsoluteVolume.kt:RootUsbAbsoluteVolume$private fun proof: Proof</ID>
     <ID>CyclomaticComplexMethod:SettingsRefresher.kt:SettingsRefresher$suspend fun refresh: DeviceSettingsRefreshResult</ID>
     <ID>CyclomaticComplexMethod:ShizukuAudioClient.kt:ShizukuAudioClient$@androidx.annotation.WorkerThread fun checkVolumeSync: Boolean</ID>
@@ -277,7 +255,6 @@
     <ID>CyclomaticComplexMethod:ShizukuAudioService.kt:ShizukuAudioService$private fun spatialAudioCall: Bundle</ID>
     <ID>CyclomaticComplexMethod:SpatialAudioAccess.kt:SpatialAudioAccess$@Synchronized fun setFixedEnabled: Bundle</ID>
     <ID>CyclomaticComplexMethod:SpatialHeadTrackingProbe.kt:SpatialHeadTrackingProbe$suspend fun run: SpatialHeadTrackingProbeResult</ID>
-    <ID>CyclomaticComplexMethod:SpatialNativeClient.kt:SpatialBackendSnapshot.Companion$fun read: SpatialBackendSnapshot?</ID>
     <ID>CyclomaticComplexMethod:SpatialPoseConverter.kt:SpatialPoseConverter$private fun advance: SpatialPose?</ID>
     <ID>CyclomaticComplexMethod:UsbAbsoluteVolumeBroker.kt:UsbAbsoluteVolumeBroker$@Synchronized fun renew: Result</ID>
     <ID>CyclomaticComplexMethod:UsbAbsoluteVolumeSystemPolicy.kt:UsbAbsoluteVolumeSystemPolicy$override fun acquire: Bundle</ID>
@@ -308,6 +285,7 @@
     <ID>LargeClass:DongleController.kt:DongleController : Closeable</ID>
     <ID>LargeClass:LibrePodsService.kt:LibrePodsService : Service</ID>
     <ID>LargeClass:MaterialIcons.kt:MaterialIcons : IconSet</ID>
+    <ID>LargeClass:NativeHeadTrackingController.kt:NativeHeadTrackingController : AutoCloseable</ID>
     <ID>LargeClass:ShizukuAudioClient.kt:ShizukuAudioClient : Closeable</ID>
     <ID>LongMethod:AirPodsMicrophone.kt:AirPodsMicrophone$private fun capture</ID>
     <ID>LongMethod:BluetoothVolumeSync.kt:BluetoothVolumeSync$fun check: Boolean</ID>
@@ -361,8 +339,6 @@
     <ID>LongParameterList:DongleHearingRecords.kt:DongleHearingRecords$suspend fun writeAccommodations</ID>
     <ID>LongParameterList:DongleUsbVolume.kt:DongleUsbVolume</ID>
     <ID>LongParameterList:DongleUsbVolume.kt:DongleUsbVolume$private suspend fun awaitPhysical: Observation</ID>
-    <ID>LongParameterList:EldCodecOverrideGuard.kt:EldCodecOverrideGuard.Companion$@SuppressLint("NewApi", "MissingPermission") fun capture: Request?</ID>
-    <ID>LongParameterList:EldCodecOverrideGuard.kt:EldCodecOverrideGuard.Companion$fun trustedCaller: Boolean</ID>
     <ID>LongParameterList:ExternalSpatialMotion.kt:ExternalSpatialMotion</ID>
     <ID>LongParameterList:IslandStatusBarCoverage.kt:internal fun islandCoversStatusBar: Boolean</ID>
     <ID>LongParameterList:KotlinModule.kt:NativeBridge$external fun beginNativeGameClock: LongArray</ID>
@@ -395,7 +371,6 @@
     <ID>LoopWithTooManyJumpStatements:LivePcmConsumer.kt:BoundedPcmDelivery$while</ID>
     <ID>LoopWithTooManyJumpStatements:LiveRecordEditor.kt:LiveRecordEditor$while</ID>
     <ID>LoopWithTooManyJumpStatements:LiveValueEditor.kt:LiveValueEditor$while</ID>
-    <ID>LoopWithTooManyJumpStatements:NativeHeadTrackingController.kt:NativeHeadTrackingController$for</ID>
     <ID>LoopWithTooManyJumpStatements:NativeHeadTrackingController.kt:NativeHeadTrackingController$while</ID>
     <ID>LoopWithTooManyJumpStatements:RichText.kt:while</ID>
     <ID>LoopWithTooManyJumpStatements:SwipeBack.kt:while</ID>
@@ -493,7 +468,6 @@
     <ID>SwallowedException:DongleProtocol.kt:DongleSession$_: Exception</ID>
     <ID>SwallowedException:DongleUsbVolume.kt:DongleUsbVolume$_: Exception</ID>
     <ID>SwallowedException:DongleUsbVolume.kt:DongleUsbVolume$_: SupersededHostRequest</ID>
-    <ID>SwallowedException:ExternalSpatialMotion.kt:ExternalSpatialMotion$_: Exception</ID>
     <ID>SwallowedException:HfpCallSuppression.kt:HfpCallSuppression$_: android.os.RemoteException</ID>
     <ID>SwallowedException:HfpCallTransport.kt:HfpCallTransport$_: RuntimeException</ID>
     <ID>SwallowedException:IslandWindow.kt:IslandWindow$_: TimeoutCancellationException</ID>
@@ -591,7 +565,6 @@
     <ID>TooGenericExceptionCaught:DongleUsbVolume.kt:DongleUsbVolume$failure: Exception</ID>
     <ID>TooGenericExceptionCaught:EldDecoder.kt:EldDecoder$e: Exception</ID>
     <ID>TooGenericExceptionCaught:ExperimentalAudioController.kt:ExperimentalAudioController$error: Exception</ID>
-    <ID>TooGenericExceptionCaught:ExternalSpatialMotion.kt:ExternalSpatialMotion$_: Exception</ID>
     <ID>TooGenericExceptionCaught:ExternalSpatialMotion.kt:ExternalSpatialMotion$failure: Exception</ID>
     <ID>TooGenericExceptionCaught:HfpCallTransport.kt:HfpCallTransport$_: RuntimeException</ID>
     <ID>TooGenericExceptionCaught:IslandStatusBarAppearance.kt:IslandStatusBarAppearance$error: Exception</ID>
@@ -672,9 +645,6 @@
     <ID>UnnecessarySafeCall:DongleUsbVolume.kt:DongleUsbVolume$pending?.request</ID>
     <ID>UnnecessarySafeCall:IslandContent.kt:onConnect?.invoke()</ID>
     <ID>UnnecessarySafeCall:ListeningModeDialog.kt:snapshot?.pending</ID>
-    <ID>UnnecessarySafeCall:NativeHeadTrackingController.kt:NativeHeadTrackingController$backend?.flag("actual_spatial")</ID>
-    <ID>UnnecessarySafeCall:NativeHeadTrackingController.kt:NativeHeadTrackingController$backend?.flag("actual_tracking")</ID>
-    <ID>UnnecessarySafeCall:NativeHeadTrackingController.kt:NativeHeadTrackingController$profile?.headFromRaw</ID>
     <ID>UnnecessarySafeCall:OwnedMediaPause.kt:OwnedMediaPause.Companion$player.playbackInfo?.playbackType</ID>
     <ID>UnnecessarySafeCall:QuickSettingsState.kt:game?.available</ID>
     <ID>UnnecessarySafeCall:QuickSettingsState.kt:spatial?.desiredSpatialEnabled</ID>
